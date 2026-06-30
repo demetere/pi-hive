@@ -1,6 +1,7 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView, Snapshot, Topology } from "./types";
+import { deleteProjectRemote, deleteSessionRemote, fetchInitialData, openEventStream } from "./api";
 import { projectName, sessionSlug } from "./lib/format";
 
 // ── raw reactive state ─────────────────────────────────────────────────────
@@ -83,24 +84,18 @@ function purgeLocal(ids: string[]) {
 
 // ── delete actions ─────────────────────────────────────────────────────────
 export async function deleteSession(sessionId: string): Promise<boolean> {
-  try {
-    const res = await fetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-    if (!res.ok) return false;
-    purgeLocal([sessionId]);
-    reconcileScopeAfterDelete([sessionId]);
-    return true;
-  } catch { return false; }
+  if (!await deleteSessionRemote(sessionId)) return false;
+  purgeLocal([sessionId]);
+  reconcileScopeAfterDelete([sessionId]);
+  return true;
 }
 
 export async function deleteProject(project: string): Promise<boolean> {
   const ids = sessions().filter((s) => s.project === project).map((s) => s.session_id);
-  try {
-    const res = await fetch(`/projects/${encodeURIComponent(project)}`, { method: "DELETE" });
-    if (!res.ok) return false;
-    purgeLocal(ids);
-    reconcileScopeAfterDelete(ids);
-    return true;
-  } catch { return false; }
+  if (!await deleteProjectRemote(project)) return false;
+  purgeLocal(ids);
+  reconcileScopeAfterDelete(ids);
+  return true;
 }
 
 // If the current scope pointed at something that no longer exists, fall back.
@@ -122,19 +117,16 @@ function reconcileScopeAfterDelete(removed: string[]) {
 
 // ── live wiring ────────────────────────────────────────────────────────────
 export function connect() {
-  Promise.all([
-    fetch("/events").then((r) => r.json()).catch(() => ({ events: [] })),
-    fetch("/states").then((r) => r.json()).catch(() => ({ states: [] })),
-  ]).then(([ev, st]) => {
-    ingestEvents(ev.events || []);
-    for (const snap of st.states || []) ingestSnapshot(snap);
+  fetchInitialData().then(({ events, states }) => {
+    ingestEvents(events);
+    for (const snap of states) ingestSnapshot(snap);
     if (!selectedSession()) {
       const first = sessions()[0];
       if (first) setSelectedSession(first.session_id);
     }
   });
 
-  const es = new EventSource("/stream");
+  const es = openEventStream();
   // Debounce the "reconnecting" state: EventSource fires `error` on any blip and
   // auto-reconnects within a couple seconds. Only surface "reconnecting" if the
   // connection stays down past the grace window, so a momentary drop (or the

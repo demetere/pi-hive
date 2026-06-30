@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 
-// The dashboard is served by observability/server.ts from this dist/ folder.
+// The dashboard is served by src/observability/server.ts from this dist/ folder.
 // `base: "./"` makes all asset URLs relative so it works regardless of the
 // path the server mounts it at. During UI development, `vite` dev server
 // proxies the API endpoints to the running Bun telemetry server.

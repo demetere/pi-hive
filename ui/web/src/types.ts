@@ -1,5 +1,5 @@
-// Shapes mirror what observability/server.ts serves and what
-// engine/observability.ts emits. Kept loose where the server is loose.
+// Shapes mirror what src/observability/server.ts serves and what
+// src/engine/observability.ts emits. Kept loose where the server is loose.
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 
