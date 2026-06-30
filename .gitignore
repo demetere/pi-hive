@@ -17,9 +17,9 @@ ui/web/node_modules/
 *.db-shm
 *.db-wal
 
-# npm pack output
+# Package tarball output
 *.tgz
 
 # NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
 # extension needs no build step at install time. Rebuild it after editing
-# ui/web/src/ with: npm run build:dashboard
+# ui/web/src/ with: just build-dashboard

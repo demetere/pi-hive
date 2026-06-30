@@ -11,8 +11,8 @@ The extension must stay safe to install globally: it should do nothing unless th
 - Package entrypoint is `index.ts` and must remain declared in `package.json` under `pi.extensions`.
 - Runtime Pi imports belong in `peerDependencies` with `"*"` ranges: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox`.
 - Do not require users to build the dashboard at install time. Keep `ui/web/dist/` committed and included in the package.
-- After editing `ui/web/src/**`, run `npm run build:dashboard` before packaging.
-- Before publishing or tagging, run `npm run verify:dashboard` and `npm pack --dry-run`.
+- After editing `ui/web/src/**`, run `just build-dashboard` before packaging.
+- Before publishing or tagging, run `just ci`.
 
 ## Extension behavior
 
@@ -38,8 +38,8 @@ The extension must stay safe to install globally: it should do nothing unless th
 ## Useful commands
 
 ```sh
-npm run build:dashboard
-npm run verify:dashboard
-npm pack --dry-run
-pi -e /Users/demetere/Projects/pi-hive
+just build-dashboard
+just verify
+just pack-dry-run
+just dev
 ```

@@ -140,6 +140,8 @@ export interface HiveState {
   skillRegistry: SkillRegistryEntry[];
   sddStatus: SddStatus | null;
   obsSeq: number;
+  onRuntimeUpdate?: (state: HiveState) => void;
+  onRuntimeFinish?: (runtime: AgentRuntime, ctx: ExtensionContext) => void;
   obsServer?: {
     proc: any;
     url: string;

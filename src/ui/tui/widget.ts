@@ -25,18 +25,18 @@ export function applyTeamMode(state: HiveState, ctx: ExtensionContext, mode: Tea
   state.teamMode = mode;
   installHeader(state, ctx);
   installFooter(state, ctx);
-  ctx.ui.setStatus("hive", modeStatusText(state, mode));
+  if (ctx.hasUI) ctx.ui.setStatus("hive", modeStatusText(state, mode));
 
   if (mode === "team") {
     state.pi.setActiveTools(["route_agent", "delegate_agent", "team_status", "team_conversation", "load_skill", "hive_sdd_status"]);
     updateWidget(state);
-    if (shouldNotify) ctx.ui.notify("Hive orchestrator mode enabled", "success");
+    if (shouldNotify && ctx.hasUI) ctx.ui.notify("Hive orchestrator mode enabled", "success");
     return;
   }
 
   state.pi.setActiveTools(state.normalToolNames);
-  ctx.ui.setWidget("hive-tree", undefined);
-  if (shouldNotify) ctx.ui.notify("Normal Pi chat mode enabled", "info");
+  if (ctx.mode === "tui") ctx.ui.setWidget("hive-tree", undefined);
+  if (shouldNotify && ctx.hasUI) ctx.ui.notify("Normal Pi chat mode enabled", "info");
 }
 
 export function shortPath(path: string): string {
@@ -100,6 +100,7 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
 }
 
 export function installFooter(state: HiveState, ctx: ExtensionContext) {
+  if (ctx.mode !== "tui") return;
   ctx.ui.setFooter((tui, theme, footerData) => {
     const unsub = footerData.onBranchChange(() => tui.requestRender());
     queueMicrotask(() => tui.requestRender());
@@ -174,7 +175,7 @@ export function renderTeamLines(state: HiveState, width: number, theme: any): st
 
 export function updateWidget(state: HiveState) {
   // Keep team mode active without rendering the full team tree near the footer.
-  if (!state.widgetCtx) return;
+  if (!state.widgetCtx || state.widgetCtx.mode !== "tui") return;
   state.widgetCtx.ui.setWidget("hive-tree", undefined);
   installHeader(state, state.widgetCtx);
 }

@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
+import { spawnManaged } from "./process";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { HIVE_AGENTS_DIR } from "../core/constants";
@@ -19,9 +19,12 @@ import {
 import { logRecord } from "./state";
 import { currentAgentName } from "./session";
 import { canDelegateTo } from "./domain";
-import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "../agents/prompts";
-import { updateWidget } from "../ui/tui/widget";
+import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
+
+function publishRuntimeUpdate(state: HiveState) {
+  state.onRuntimeUpdate?.(state);
+}
 
 // Move an agent's current session log aside to a numbered archive so a fresh run
 // can start clean without losing the prior run's transcript. "<slug>.jsonl"
@@ -90,7 +93,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     thinking,
     runtime: runtimeSummary(runtime),
   }, caller);
-  updateWidget(state);
+  publishRuntimeUpdate(state);
   writeHiveStateSnapshot(state);
 
   // Emit compact progress to the shared conversation log every ~2s. Child processes
@@ -100,7 +103,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   let progressTick = 0;
   runtime.timer = setInterval(() => {
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-    updateWidget(state);
+    publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
     // every ~2s, not every second, to keep logs light
     if (++progressTick % 2 === 0) {
@@ -133,7 +136,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   const stderrChunks: string[] = [];
 
   return new Promise((resolve) => {
-    const proc = spawn("pi", args, {
+    const { proc } = spawnManaged("pi", args, {
       cwd: ctx.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
@@ -183,7 +186,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
           runtime.costUsd += u.cost;
         }
       }
-      updateWidget(state);
+      publishRuntimeUpdate(state);
       writeHiveStateSnapshot(state);
     };
 
@@ -228,9 +231,9 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
       };
       logRecord(state, completion);
       emitHiveEvent(state, "delegation_end", { ...completion, exitCode: code ?? 1, runtime: runtimeSummary(runtime) }, runtime.config.name);
-      updateWidget(state);
+      publishRuntimeUpdate(state);
       writeHiveStateSnapshot(state);
-      ctx.ui.notify(`${runtime.config.name} ${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s`, runtime.status === "done" ? "success" : "error");
+      state.onRuntimeFinish?.(runtime, ctx);
       resolve({ output, exitCode: code ?? 1, elapsed: runtime.elapsedMs });
     };
 
@@ -256,7 +259,7 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
     // dir. It runs with no team tools, so it does no team work — it only needs to
     // be recognized as an in-session child (PI_HIVE_CHILD) pointed at the
     // live session, not a fresh one.
-    const proc = spawn("pi", args, {
+    const { proc } = spawnManaged("pi", args, {
       cwd: ctx.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: {

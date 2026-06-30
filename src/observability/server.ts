@@ -2,6 +2,9 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
+import { agentRuns, parseAgentLog } from "./agent-log";
+import { isSameOriginWrite } from "./security";
+import { dashboardFile, dashboardHtml } from "./static";
 
 const PORT = Number(process.env.HIVE_TELEMETRY_PORT || 43191);
 const HOST = process.env.HIVE_TELEMETRY_HOST || "127.0.0.1";
@@ -256,55 +259,6 @@ function json(data: unknown, status = 200) {
   });
 }
 
-// The dashboard is a prebuilt Solid SPA under ui/web/dist. We serve its
-// index.html at "/" and its hashed assets from "/assets/*". If the build is
-// missing (developer hasn't run `npm run build`), we fall back to a short
-// instructional page rather than a blank screen.
-const DASHBOARD_DIR = path.resolve(import.meta.dir, "..", "ui", "web", "dist");
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".png": "image/png",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-};
-
-function dashboardFile(relPath: string): Response | null {
-  // Resolve safely inside DASHBOARD_DIR (no path traversal).
-  const target = path.resolve(DASHBOARD_DIR, "." + (relPath.startsWith("/") ? relPath : "/" + relPath));
-  if (!target.startsWith(DASHBOARD_DIR)) return null;
-  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return null;
-  const body = fs.readFileSync(target);
-  const ext = path.extname(target).toLowerCase();
-  const cacheable = relPath.startsWith("/assets/");
-  return new Response(body, {
-    headers: {
-      "content-type": MIME[ext] || "application/octet-stream",
-      "cache-control": cacheable ? "public, max-age=31536000, immutable" : "no-cache",
-    },
-  });
-}
-
-function html() {
-  const index = dashboardFile("/index.html");
-  if (index) return index;
-  return new Response(
-    `<!doctype html><meta charset="utf-8"><body style="font:14px ui-monospace,monospace;background:#0a0b10;color:#dbe4ef;padding:40px">
-     <h2 style="color:#7c6cff">pi-hive dashboard not built</h2>
-     <p>The dashboard bundle is missing at <code>${DASHBOARD_DIR}</code>.</p>
-     <p>Build it once:</p>
-     <pre style="background:#12141c;padding:12px;border-radius:8px">cd ${path.resolve(import.meta.dir, "..", "ui", "web")}\nnpm install\nnpm run build</pre>
-     <p>Then reload this page.</p></body>`,
-    { status: 503, headers: { "content-type": "text/html; charset=utf-8" } },
-  );
-}
-
 function rowToEvent(row: any) {
   let payload = {};
   try { payload = JSON.parse(row.payload_json || "{}"); } catch { /* ignore */ }
@@ -480,96 +434,6 @@ function agentLogPath(sessionId: string, agentName: string): { file?: string; st
   return { file: a.sessionFile, status: a.status };
 }
 
-// All run logs for an agent: the current session file (the latest run) plus any
-// archived "<slug>.run-N.jsonl" files. Returned newest-first as
-// [{ id, label, file }], id "current" for the live file and "run-N" for archives.
-function agentRuns(sessionFile: string): { id: string; label: string; file: string }[] {
-  const dir = path.dirname(sessionFile);
-  const base = path.basename(sessionFile, ".jsonl");
-  const runs: { id: string; label: string; file: string; n: number }[] = [];
-  let files: string[] = [];
-  try { files = fs.readdirSync(dir); } catch { /* */ }
-  const re = new RegExp(`^${base}\\.run-(\\d+)\\.jsonl$`);
-  for (const f of files) {
-    const m = f.match(re);
-    if (m) runs.push({ id: "run-" + m[1], label: "Run " + m[1], file: path.join(dir, f), n: Number(m[1]) });
-  }
-  runs.sort((a, b) => a.n - b.n);
-  // current run is the highest-numbered run (archives are the earlier ones)
-  const currentN = runs.length ? runs[runs.length - 1].n + 1 : 1;
-  const out = runs.map((r) => ({ id: r.id, label: r.label, file: r.file }));
-  if (fs.existsSync(sessionFile)) out.push({ id: "current", label: "Run " + currentN + " (current)", file: sessionFile });
-  return out.reverse(); // newest first
-}
-
-// Parse pi session JSONL into UI-friendly entries. Each pi "message" record has
-// a role and a content array of {text|thinking|toolCall|toolResult}. We flatten
-// into a sequence the viewer renders as bubbles + collapsible tool calls.
-function parseAgentLog(file: string, fromOffset = 0): { entries: any[]; offset: number; size: number } {
-  let stat: fs.Stats;
-  try { stat = fs.statSync(file); } catch { return { entries: [], offset: 0, size: 0 }; }
-  // If the file shrank/rotated, restart from the top.
-  const start = fromOffset > stat.size ? 0 : fromOffset;
-  const fd = fs.openSync(file, "r");
-  const entries: any[] = [];
-  // Maps a toolCallId -> its toolCall part, so a later toolResult message can be
-  // merged onto the call it answers (within this parse pass).
-  const toolCallIndex = new Map<string, any>();
-  try {
-    const len = stat.size - start;
-    if (len <= 0) return { entries, offset: stat.size, size: stat.size };
-    const buf = Buffer.alloc(len);
-    fs.readSync(fd, buf, 0, len, start);
-    for (const line of buf.toString("utf8").split("\n")) {
-      if (!line.trim()) continue;
-      let o: any;
-      try { o = JSON.parse(line); } catch { continue; }
-      if (o.type === "model_change") {
-        const model = o.modelId || o.model || "";
-        if (model) entries.push({ kind: "meta", text: `model → ${o.provider ? o.provider + "/" : ""}${model}`, ts: o.timestamp });
-        continue;
-      }
-      if (o.type === "thinking_level_change") {
-        const level = o.thinkingLevel || o.level || "";
-        if (level) entries.push({ kind: "meta", text: `thinking → ${level}`, ts: o.timestamp });
-        continue;
-      }
-      if (o.type !== "message") continue;
-      const m = o.message || o;
-      const role = m.role || "assistant";
-
-      // A toolResult arrives as its own message (role:"toolResult") carrying the
-      // toolCallId of the call it answers. Attach it to the matching toolCall
-      // part so the UI can render call+result as one collapsible card.
-      if (role === "toolResult") {
-        const text = typeof m.content === "string" ? m.content
-          : Array.isArray(m.content) ? m.content.map((x: any) => x.text ?? (typeof x === "string" ? x : "")).join("\n")
-          : "";
-        const part = m.toolCallId && toolCallIndex.get(m.toolCallId);
-        if (part) { part.result = text; part.resultError = !!m.isError; }
-        else entries.push({ kind: "message", role: "toolResult", parts: [{ type: "toolResult", name: m.toolName, result: text, resultError: !!m.isError }], ts: o.timestamp });
-        continue;
-      }
-
-      const content = Array.isArray(m.content) ? m.content : [{ type: "text", text: String(m.content ?? "") }];
-      const parts: any[] = [];
-      for (const c of content) {
-        if (c.type === "text" && c.text) parts.push({ type: "text", text: c.text });
-        else if (c.type === "thinking" && c.thinking) parts.push({ type: "thinking", text: c.thinking });
-        else if (c.type === "toolCall") {
-          const part: any = { type: "toolCall", id: c.id, name: c.name, args: c.arguments ?? c.input ?? {}, result: null, resultError: false };
-          if (c.id) toolCallIndex.set(c.id, part);
-          parts.push(part);
-        }
-      }
-      if (parts.length) entries.push({ kind: "message", role, parts, ts: o.timestamp });
-    }
-  } finally {
-    fs.closeSync(fd);
-  }
-  return { entries, offset: stat.size, size: stat.size };
-}
-
 loadDbIntoMemory();
 readRegistry();
 if (SINGLE_LOG_PATH) addSource(SINGLE_LOG_PATH, { cwd: PROJECT_CWD, conversation_log: CONVERSATION_LOG, session_id: BOOT_SESSION_ID });
@@ -604,6 +468,7 @@ Bun.serve({
     const url = new URL(req.url);
 
     if (req.method === "DELETE") {
+      if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
       // DELETE /sessions/:id  — purge one session's telemetry.
       const sessionMatch = url.pathname.match(/^\/sessions\/(.+)$/);
       if (sessionMatch) {
@@ -621,7 +486,7 @@ Bun.serve({
       return json({ error: "not found" }, 404);
     }
 
-    if (url.pathname === "/") return html();
+    if (url.pathname === "/") return dashboardHtml();
     if (url.pathname.startsWith("/assets/") || url.pathname === "/favicon.ico") {
       const asset = dashboardFile(url.pathname);
       if (asset) return asset;

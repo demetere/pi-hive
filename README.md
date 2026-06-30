@@ -10,7 +10,7 @@ For local development from this checkout:
 pi -e /Users/demetere/Projects/pi-hive
 ```
 
-For package installation after this repository is pushed/tagged, use `pi install` with the final GitHub or npm package spec. For local path installation, use:
+For package installation after this repository is pushed/tagged, use `pi install` with the final GitHub/package spec. For local path installation, use:
 
 ```sh
 pi install /Users/demetere/Projects/pi-hive
@@ -18,7 +18,7 @@ pi install /Users/demetere/Projects/pi-hive
 
 When installed globally, Pi auto-discovers the package for **every** project.
 
-For repository-first development without publishing a package, use the included `Justfile`:
+For repository-first development, use `just` as the command source of truth:
 
 ```sh
 just dev            # run this checkout temporarily with pi -e .
@@ -32,26 +32,26 @@ After `just reload`, run `/reload` in Pi.
 
 ## Requirements
 
-- **Bun ≥ 1.1** — the telemetry dashboard server (`observability/server.ts`) runs under Bun and uses `bun:sqlite`. The `/hive-observe` command notifies you if Bun is missing.
+- **Bun ≥ 1.1** — the telemetry dashboard server (`src/observability/server.ts`) runs under Bun and uses `bun:sqlite`. The `/hive-observe` command notifies you if Bun is missing.
 - The Pi host provides `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` at load time (declared as peer deps).
 
 ## Packaging & distribution
 
 This extension is self-contained and ships in two ways:
 
-- **Git** — clone or submodule into `~/.pi/agent/extensions/`. The prebuilt dashboard (`ui/web/dist/`) is committed, so there is **no build step at install time**. `node_modules` is gitignored.
-- **npm / tarball** — `npm pack` (or `npm publish`) produces a ~100 kB package. The root `package.json` `files` allowlist ships only runtime code + the prebuilt `dist/`; `node_modules` never ships. A `prepack` hook rebuilds and re-stamps the dashboard automatically, so a published package can never contain stale UI.
+- **Git** — clone or submodule into `~/.pi/agent/extensions/`. The prebuilt dashboard (`ui/web/dist/`) is committed, so there is **no build step at install time**. Dependency folders are gitignored.
+- **Tarball/package** — `just pack-dry-run` previews the published package contents. The root `package.json` `files` allowlist ships only runtime code + the prebuilt `dist/`; dependency folders never ship. The package prepack hook delegates to `just prepack`, so a published package can never contain stale UI.
 
 After editing anything under `ui/web/src/`, rebuild the committed bundle:
 
 ```sh
-npm run build:dashboard   # vite build + stamp dist/.build-hash
+just build-dashboard   # Vite build + stamp dist/.build-hash
 ```
 
 Guard against shipping stale UI (wire into a pre-commit hook or CI):
 
 ```sh
-npm run verify:dashboard  # fails if dist/ is out of date with src/
+just verify-dashboard  # fails if dist/ is out of date with src/
 ```
 
 ## Build a hive in a new project
@@ -66,6 +66,7 @@ Point an agent at the build guide and let it interview you:
 
 - `/hive-toggle` or `Ctrl+Alt+T` — toggle between normal chat and hive orchestrator mode.
 - `/hive-status` — open the live hierarchy view (per-agent status, tokens, cost).
+- `/hive-doctor` — run read-only diagnostics for opt-in config, loaded agents, dashboard assets, Bun availability, SDD state, and telemetry paths.
 - `/hive-observe` — restart/open the local browser dashboard for global hive telemetry (`http://127.0.0.1:43191` by default).
 - `/hive-observe-stop` — stop the telemetry dashboard on the configured port.
 
@@ -92,17 +93,22 @@ See SETUP.md §4 for the full directory contract.
 `/hive-observe` starts a local Bun/SSE dashboard with hive-specific views for project/session cards, topology, delegation lifecycle, worker state, tool activity, tokens, and cost. The dashboard also indexes events/state into local SQLite at `~/.pi/agent/hive/telemetry.db` for fast reloads and historical browsing. Telemetry persists even when the dashboard is not running; serve it only when you want to watch or inspect.
 
 The dashboard UI is a prebuilt Solid + Vite single-page app under `ui/web/`. The
-server (`observability/server.ts`) serves the built bundle from `ui/web/dist/`,
+server (`src/observability/server.ts`) serves the built bundle from `ui/web/dist/`,
 which is committed so end users need no build step. If you change anything under
 `ui/web/src/`, rebuild it:
 
 ```sh
-cd ui/web
-npm install   # first time only
-npm run build # rebuild dist/ — the server picks it up on next page load
+just install-dashboard # first time only
+just build-dashboard   # rebuild dist/ — the server picks it up on next page load
 ```
 
-During UI development you can run `npm run dev` (Vite HMR on port 43192) with a
+Before publishing or opening a release PR, run the same gates as CI:
+
+```sh
+just ci
+```
+
+During UI development you can run `just dev-dashboard` (Vite HMR on port 43192) with a
 telemetry server running on `HIVE_TELEMETRY_PORT`; the dev server proxies the
 `/events`, `/states`, `/stream`, and `/health` endpoints to it.
 

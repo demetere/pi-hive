@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -8,8 +8,10 @@ import type { HiveState } from "../core/types";
 import { toggleTeamMode } from "../ui/tui/widget";
 import { openStatusModal } from "../ui/tui/status-modal";
 import { hiveTelemetryRegistryPath } from "../engine/observability";
+import { renderHiveDoctor } from "../engine/doctor";
+import { killProcess, spawnManaged } from "../engine/process";
 
-const EXTENSION_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -17,10 +19,8 @@ async function stopDashboardOnPort(state: HiveState, port: number): Promise<numb
   const killed = new Set<number>();
 
   if (state.obsServer?.proc && !state.obsServer.proc.killed) {
-    try {
-      state.obsServer.proc.kill();
-      if (typeof state.obsServer.proc.pid === "number") killed.add(state.obsServer.proc.pid);
-    } catch { /* noop */ }
+    const pid = killProcess(state.obsServer.proc);
+    if (typeof pid === "number") killed.add(pid);
   }
   state.obsServer = undefined;
 
@@ -59,23 +59,31 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
     },
   });
 
+  pi.registerCommand("hive-doctor", {
+    description: "Run read-only pi-hive diagnostics for this workspace",
+    handler: async (_args, ctx) => {
+      const result = renderHiveDoctor(state, ctx.cwd, EXTENSION_ROOT);
+      if (ctx.hasUI) ctx.ui.notify(result.text, result.severity);
+    },
+  });
+
   pi.registerCommand("hive-observe", {
     description: "Restart/open the pi-hive telemetry dashboard",
     handler: async (_args, ctx) => {
       if (!state.session) {
-        ctx.ui.notify("Hive session is not initialized yet.", "error");
+        if (ctx.hasUI) ctx.ui.notify("Hive session is not initialized yet.", "error");
         return;
       }
       const port = Number(process.env.HIVE_TELEMETRY_PORT || 43191);
       const host = process.env.HIVE_TELEMETRY_HOST || "127.0.0.1";
       const url = `http://${host}:${port}`;
       const killed = await stopDashboardOnPort(state, port);
-      const serverPath = resolve(EXTENSION_DIR, "observability", "server.ts");
+      const serverPath = resolve(EXTENSION_ROOT, "src", "observability", "server.ts");
       if (!existsSync(serverPath)) {
-        ctx.ui.notify(`Missing hive observability server: ${serverPath}`, "error");
+        if (ctx.hasUI) ctx.ui.notify(`Missing hive observability server: ${serverPath}`, "error");
         return;
       }
-      const proc = spawn("bun", [serverPath], {
+      const { proc } = spawnManaged("bun", [serverPath], {
         cwd: ctx.cwd,
         detached: true,
         stdio: "ignore",
@@ -91,14 +99,13 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         },
       });
       proc.on("error", (error) => {
-        ctx.ui.notify(`Failed to start hive observability (is Bun installed?): ${error.message}`, "error");
+        if (ctx.hasUI) ctx.ui.notify(`Failed to start hive observability (is Bun installed?): ${error.message}`, "error");
       });
-      proc.unref();
       state.obsServer = { proc, url, port };
       if (process.env.HIVE_TELEMETRY_NO_OPEN !== "1" && process.platform === "darwin") {
-        try { spawn("open", [url], { detached: true, stdio: "ignore" }).unref(); } catch { /* noop */ }
+        spawnManaged("open", [url], { detached: true, stdio: "ignore" });
       }
-      ctx.ui.notify(`pi-hive telemetry restarted: ${url}${killed.length ? ` (stopped ${killed.length} old process${killed.length === 1 ? "" : "es"})` : ""}`, "info");
+      if (ctx.hasUI) ctx.ui.notify(`pi-hive telemetry restarted: ${url}${killed.length ? ` (stopped ${killed.length} old process${killed.length === 1 ? "" : "es"})` : ""}`, "info");
     },
   });
 
@@ -107,7 +114,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
     handler: async (_args, ctx) => {
       const port = Number(process.env.HIVE_TELEMETRY_PORT || 43191);
       const killed = await stopDashboardOnPort(state, port);
-      ctx.ui.notify(killed.length ? `Stopped pi-hive telemetry dashboard (${killed.join(", ")})` : `No pi-hive telemetry dashboard found on port ${port}`, "info");
+      if (ctx.hasUI) ctx.ui.notify(killed.length ? `Stopped pi-hive telemetry dashboard (${killed.join(", ")})` : `No pi-hive telemetry dashboard found on port ${port}`, "info");
     },
   });
 }

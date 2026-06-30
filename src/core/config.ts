@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import type { AgentConfig, HiveConfig } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { configuredChildAgents, flatAgentConfig, safeRead } from "./utils";
+import { validateHiveConfigShape } from "./schema";
 
 // Read an agent's .md frontmatter and copy model/thinking onto the config node
 // when the config itself does not set them. The config tree (from hive-config.
@@ -28,6 +29,7 @@ export function loadConfig(cwd: string): HiveConfig {
   const raw = safeRead(configPath);
   if (!raw) throw new Error(`Missing config: ${configPath}`);
   const parsed = parseYamlLite(raw) as HiveConfig;
+  validateHiveConfigShape(parsed);
 
   const settings = parsed.settings || ({} as HiveConfig["settings"]);
   const distiller = (settings as any).distiller || {};

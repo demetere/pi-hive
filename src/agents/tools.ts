@@ -13,7 +13,7 @@ import {
 } from "../core/utils";
 import { currentAgentName } from "../engine/session";
 import { routeAgents } from "../engine/routing";
-import { skillName } from "./prompts";
+import { skillName } from "../core/prompting";
 import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { findRegisteredSkill } from "../engine/skill-registry";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
@@ -96,7 +96,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       const output = truncateMiddle(finalAnswer || result.output, limit);
       return {
         content: [{ type: "text", text: `[${agent}] ${result.exitCode === 0 ? "done" : "error"} in ${Math.round(result.elapsed / 1000)}s${finalAnswer ? " — final_answer extracted" : ""}\n\n${output}` }],
-        details: { agent, task, status: result.exitCode === 0 ? "done" : "error", elapsed: result.elapsed, exitCode: result.exitCode, finalAnswer, fullOutput: result.output },
+        details: { agent, task, status: result.exitCode === 0 ? "done" : "error", elapsed: result.elapsed, exitCode: result.exitCode, finalAnswer, outputPreview: output },
       };
     },
     renderCall(args, theme) {
@@ -110,7 +110,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       if (options.isPartial || details?.status === "running") return new Text(theme.fg("accent", "● ") + agentColored(agent, theme) + theme.fg("accent", " working..."), 0, 0);
       const ok = details?.status === "done";
       const header = theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} `) + agentColored(agent, theme) + theme.fg("dim", ` ${Math.round((details?.elapsed || 0) / 1000)}s`);
-      if (options.expanded && details?.fullOutput) return new Text(`${header}\n${theme.fg("muted", truncateMiddle(details.fullOutput, 4000))}`, 0, 0);
+      if (options.expanded && details?.outputPreview) return new Text(`${header}\n${theme.fg("muted", truncateMiddle(details.outputPreview, 4000))}`, 0, 0);
       return new Text(header, 0, 0);
     },
   });

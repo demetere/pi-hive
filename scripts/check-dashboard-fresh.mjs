@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dashboardSourceHash, STAMP_PATH } from "./dashboard-hash.mjs";
 
 if (!existsSync(STAMP_PATH)) {
-  console.error("✗ dashboard dist/ has no build stamp. Run: npm run build:dashboard");
+  console.error("✗ dashboard dist/ has no build stamp. Run: just build-dashboard");
   process.exit(1);
 }
 
@@ -14,7 +14,7 @@ const current = dashboardSourceHash();
 
 if (stamped !== current) {
   console.error("✗ dashboard dist/ is STALE — ui/web/src changed since the last build.");
-  console.error("  Rebuild before committing/packing: npm run build:dashboard");
+  console.error("  Rebuild before committing/packing: just build-dashboard");
   process.exit(1);
 }
 

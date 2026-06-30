@@ -12,12 +12,7 @@
   },
   "files": [
     "index.ts",
-    "agents/",
-    "core/",
-    "engine/",
-    "integration/",
-    "observability/",
-    "ui/tui/",
+    "src/",
     "ui/web/src/",
     "ui/web/dist/",
     "ui/web/index.html",
@@ -28,10 +23,15 @@
     "SETUP.md"
   ],
   "scripts": {
-    "build:dashboard": "cd ui/web && npm install && npm run build",
-    "typecheck:dashboard": "cd ui/web && npm run typecheck",
-    "verify:dashboard": "node scripts/check-dashboard-fresh.mjs",
-    "prepack": "npm run build:dashboard"
+    "build:dashboard": "just build-dashboard",
+    "typecheck:core": "just typecheck-core",
+    "typecheck:dashboard": "just typecheck-dashboard",
+    "test": "just test",
+    "verify:dashboard": "just verify-dashboard",
+    "verify:package": "just verify-package",
+    "ci": "just ci",
+    "prepack": "just prepack",
+    "prepublishOnly": "just prepublish"
   },
   "engines": {
     "bun": ">=1.1.0"

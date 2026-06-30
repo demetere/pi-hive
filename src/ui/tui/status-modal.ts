@@ -293,7 +293,11 @@ function colorize(theme: any, cell: Cell, frame: number): string {
 // ── The component ────────────────────────────────────────────────────────────
 export function openStatusModal(state: HiveState, ctx: ExtensionContext) {
   if (!state.config) {
-    ctx.ui.notify("hive is not loaded", "error");
+    if (ctx.hasUI) ctx.ui.notify("hive is not loaded", "error");
+    return;
+  }
+  if (ctx.mode !== "tui") {
+    if (ctx.hasUI) ctx.ui.notify("Hive status canvas is only available in TUI mode.", "warning");
     return;
   }
 

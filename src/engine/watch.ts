@@ -2,7 +2,6 @@ import { existsSync, statSync, watch, type FSWatcher } from "node:fs";
 import { open } from "node:fs/promises";
 import type { HiveState } from "../core/types";
 import { usageNumber } from "../core/utils";
-import { updateWidget } from "../ui/tui/widget";
 import { writeHiveStateSnapshot } from "./observability";
 
 // ── Nested-activity watcher ────────────────────────────────────────────────
@@ -117,7 +116,7 @@ async function drain(state: HiveState, ws: WatchState) {
       try { if (applyRecord(state, JSON.parse(line))) changed = true; } catch { /* ignore non-json */ }
     }
     if (changed) {
-      updateWidget(state);
+      state.onRuntimeUpdate?.(state);
       writeHiveStateSnapshot(state);
     }
   } finally {

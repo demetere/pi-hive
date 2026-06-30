@@ -6,7 +6,7 @@ import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
 import { startConversationWatch, stopConversationWatch } from "../engine/watch";
 import { buildOrchestratorPrompt } from "../agents/prompts";
-import { applyTeamMode, captureNormalTools } from "../ui/tui/widget";
+import { applyTeamMode, captureNormalTools, updateWidget } from "../ui/tui/widget";
 import { refreshSkillRegistry } from "../engine/skill-registry";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveStateSnapshot } from "../engine/observability";
@@ -83,6 +83,10 @@ ${catalog}`,
 
   pi.on("session_start", async (_event, ctx) => {
     state.widgetCtx = ctx;
+    state.onRuntimeUpdate = () => updateWidget(state);
+    state.onRuntimeFinish = (runtime, finishCtx) => {
+      if (finishCtx.hasUI) finishCtx.ui.notify(`${runtime.config.name} ${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s`, runtime.status === "done" ? "success" : "error");
+    };
     try {
       reloadTeam(state, ctx);
       const registry = refreshSkillRegistry(state, ctx);
@@ -107,9 +111,9 @@ ${catalog}`,
       captureNormalTools(state);
       applyTeamMode(state, ctx, "normal", { notify: false });
       const missing = registry.missingConfigured.length ? `\nMissing configured skills: ${registry.missingConfigured.slice(0, 5).join(", ")}${registry.missingConfigured.length > 5 ? "..." : ""}` : "";
-      ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nSkill registry: ${registry.entries.length} skill(s) → ${registry.path}\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, registry.missingConfigured.length ? "warning" : "info");
+      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nSkill registry: ${registry.entries.length} skill(s) → ${registry.path}\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, registry.missingConfigured.length ? "warning" : "info");
     } catch (error: any) {
-      ctx.ui.notify(`Hive failed to load: ${error?.message || error}`, "error");
+      if (ctx.hasUI) ctx.ui.notify(`Hive failed to load: ${error?.message || error}`, "error");
     }
   });
 
@@ -120,9 +124,13 @@ ${catalog}`,
       try { state.obsServer.proc.kill(); } catch { /* noop */ }
       state.obsServer = undefined;
     }
-    ctx.ui.setHeader(undefined);
-    ctx.ui.setFooter(undefined);
-    ctx.ui.setStatus("hive", undefined);
-    ctx.ui.setWidget("hive-tree", undefined);
+    state.onRuntimeUpdate = undefined;
+    state.onRuntimeFinish = undefined;
+    if (ctx.mode === "tui") {
+      ctx.ui.setHeader(undefined);
+      ctx.ui.setFooter(undefined);
+      ctx.ui.setWidget("hive-tree", undefined);
+    }
+    if (ctx.hasUI) ctx.ui.setStatus("hive", undefined);
   });
 }

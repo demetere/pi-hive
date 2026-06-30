@@ -16,11 +16,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { HIVE_ROOT } from "./core/constants";
-import { createState } from "./engine/state";
-import { registerTools } from "./agents/tools";
-import { registerCommands } from "./integration/commands";
-import { registerHooks } from "./integration/hooks";
+import { HIVE_ROOT } from "./src/core/constants";
+import { createState } from "./src/engine/state";
+import { registerTools } from "./src/agents/tools";
+import { registerCommands } from "./src/integration/commands";
+import { registerHooks } from "./src/integration/hooks";
 
 // The project opts in by configuring a hive. We check at load time (the
 // extension module runs in the project's cwd) so projects without a hive get
