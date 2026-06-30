@@ -1,0 +1,59 @@
+{
+  "name": "pi-hive",
+  "version": "0.1.0",
+  "description": "Hierarchical multi-agent orchestration extension for the Pi coding agent, with a live Solid + Vite telemetry dashboard.",
+  "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "files": [
+    "index.ts",
+    "agents/",
+    "core/",
+    "engine/",
+    "integration/",
+    "observability/",
+    "ui/tui/",
+    "ui/web/src/",
+    "ui/web/dist/",
+    "ui/web/index.html",
+    "ui/web/package.json",
+    "ui/web/tsconfig.json",
+    "ui/web/vite.config.ts",
+    "README.md",
+    "SETUP.md"
+  ],
+  "scripts": {
+    "build:dashboard": "cd ui/web && npm install && npm run build",
+    "typecheck:dashboard": "cd ui/web && npm run typecheck",
+    "verify:dashboard": "node scripts/check-dashboard-fresh.mjs",
+    "prepack": "npm run build:dashboard"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": false },
+    "@earendil-works/pi-tui": { "optional": false },
+    "typebox": { "optional": false }
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "agents",
+    "orchestration",
+    "telemetry",
+    "observability"
+  ],
+  "license": "MIT"
+}

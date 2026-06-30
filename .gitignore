@@ -1,0 +1,25 @@
+# Dependencies — never committed or packed. The dashboard's dist/ IS committed
+# (it is the prebuilt UI the server serves), but its node_modules is not.
+node_modules/
+ui/web/node_modules/
+
+# Build caches / logs
+*.log
+.DS_Store
+.vite/
+.env
+.env.*
+
+# Runtime hive state / local telemetry
+.pi/
+.atl/
+*.db
+*.db-shm
+*.db-wal
+
+# npm pack output
+*.tgz
+
+# NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
+# extension needs no build step at install time. Rebuild it after editing
+# ui/web/src/ with: npm run build:dashboard

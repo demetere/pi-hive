@@ -1,0 +1,12 @@
+node_modules/
+ui/web/node_modules/
+*.log
+.DS_Store
+.vite/
+*.tgz
+
+# Runtime/project-local hive state; should never ship in the package.
+.pi/
+.atl/
+
+# Dashboard dist is intentionally shipped via package.json files allowlist.
