@@ -146,12 +146,12 @@ verify-package:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck-core test verify-dashboard verify-package
+verify: typecheck-core typecheck-dashboard test verify-dashboard verify-package
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck-core test verify-dashboard verify-package pack-dry-run
+ci: typecheck-core typecheck-dashboard test verify-dashboard verify-package pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================
