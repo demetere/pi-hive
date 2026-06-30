@@ -1,0 +1,22 @@
+{
+  "name": "pi-hive-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node ../../scripts/stamp-dashboard.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "d3-hierarchy": "^3.1.2",
+    "solid-js": "^1.9.3"
+  },
+  "devDependencies": {
+    "@types/d3-hierarchy": "^3.1.7",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vite-plugin-solid": "^2.11.0"
+  }
+}

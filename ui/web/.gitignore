@@ -1,0 +1,5 @@
+node_modules/
+*.log
+# dist/ is intentionally committed — it is the prebuilt dashboard the
+# telemetry server ships and serves. Rebuild with `npm run build` after
+# changing anything under src/.

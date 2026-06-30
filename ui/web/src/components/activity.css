@@ -1,0 +1,14 @@
+.tl-scroll { overflow: auto; padding: 12px 14px; flex: 1; }
+.tl { display: flex; gap: 10px; padding: 8px 2px; position: relative; animation: slidein .35s var(--ease); }
+.tl::before { content: ""; position: absolute; left: 6px; top: 20px; bottom: -8px; width: 1px; background: var(--border); }
+.tl:last-child::before { display: none; }
+.tl-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; flex: 0 0 auto; background: var(--muted); border: 2px solid var(--panel); }
+.tl.accent .tl-dot { background: var(--accent); box-shadow: 0 0 7px var(--accent-glow); }
+.tl.ok .tl-dot { background: var(--ok); }
+.tl.err .tl-dot { background: var(--err); box-shadow: 0 0 7px var(--err); }
+.tl-body { flex: 1; min-width: 0; }
+.tl-top { display: flex; align-items: baseline; gap: 8px; }
+.tl-type { font-size: 9.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); font-weight: 700; }
+.tl-time { margin-left: auto; color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+.tl-title { font-weight: 600; font-size: 12.5px; margin-top: 2px; }
+.tl-text { color: var(--fg2); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
