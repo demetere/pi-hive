@@ -1,127 +1,33 @@
-import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { homedir } from "node:os";
 import { agentRuns, parseAgentLog } from "./agent-log";
 import { isSameOriginWrite } from "./security";
 import { dashboardFile, dashboardHtml } from "./static";
+import {
+  BOOT_SESSION_ID,
+  CONVERSATION_LOG,
+  DB_PATH,
+  HOST,
+  MAX_EVENTS,
+  PORT,
+  PROJECT_CWD,
+  REGISTRY_PATH,
+  SINGLE_LOG_PATH,
+} from "./server/config";
+import {
+  dbEventRow,
+  dbSessionRowFromEvent,
+  deleteSessionRows,
+  insertEvent,
+  loadPersistedEvents,
+  loadPersistedStates,
+  upsertSession,
+  upsertState,
+} from "./server/db";
+import { projectName } from "../shared/project";
+import { broadcastEvent, broadcastFrame, broadcastPing, encoder, eventFrame, subscribers } from "./server/sse";
+import type { Source, Subscriber } from "./server/types";
 
-const PORT = Number(process.env.HIVE_TELEMETRY_PORT || 43191);
-const HOST = process.env.HIVE_TELEMETRY_HOST || "127.0.0.1";
-const SINGLE_LOG_PATH = process.env.HIVE_TELEMETRY_LOG || "";
-const HIVE_GLOBAL_DIR = path.join(process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent"), "hive");
-const REGISTRY_PATH = process.env.HIVE_TELEMETRY_REGISTRY || path.join(HIVE_GLOBAL_DIR, "telemetry-sessions.jsonl");
-const DB_PATH = process.env.HIVE_TELEMETRY_DB || path.join(HIVE_GLOBAL_DIR, "telemetry.db");
-const CONVERSATION_LOG = process.env.HIVE_CONVERSATION_LOG || "";
-const BOOT_SESSION_ID = process.env.HIVE_SESSION_ID || "global";
-const PROJECT_CWD = process.env.HIVE_PROJECT_CWD || process.cwd();
-const MAX_EVENTS = 20_000;
-
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.run("PRAGMA journal_mode = WAL");
-db.run("PRAGMA busy_timeout = 5000");
-db.run(`
-CREATE TABLE IF NOT EXISTS sessions (
-  session_id TEXT PRIMARY KEY,
-  cwd TEXT,
-  session_dir TEXT,
-  telemetry_log TEXT,
-  conversation_log TEXT,
-  state_file TEXT,
-  first_ts TEXT,
-  last_ts TEXT,
-  event_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS events (
-  event_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  seq INTEGER,
-  ts TEXT NOT NULL,
-  type TEXT NOT NULL,
-  actor TEXT,
-  pid INTEGER,
-  cwd TEXT,
-  telemetry_log TEXT,
-  payload_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_hive_events_session_seq ON events(session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_hive_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_hive_events_type ON events(type);
-CREATE TABLE IF NOT EXISTS states (
-  session_id TEXT PRIMARY KEY,
-  updated_at TEXT NOT NULL,
-  cwd TEXT,
-  session_dir TEXT,
-  telemetry_log TEXT,
-  state_json TEXT NOT NULL
-);
-`);
-
-const insertEvent = db.query(`
-  INSERT OR IGNORE INTO events
-    (event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json)
-  VALUES
-    ($event_id, $session_id, $seq, $ts, $type, $actor, $pid, $cwd, $telemetry_log, $payload_json)
-`);
-const upsertSession = db.query(`
-  INSERT INTO sessions
-    (session_id, cwd, session_dir, telemetry_log, conversation_log, state_file, first_ts, last_ts, event_count)
-  VALUES
-    ($session_id, $cwd, $session_dir, $telemetry_log, $conversation_log, $state_file, $ts, $ts, 1)
-  ON CONFLICT(session_id) DO UPDATE SET
-    cwd = COALESCE(excluded.cwd, sessions.cwd),
-    session_dir = COALESCE(excluded.session_dir, sessions.session_dir),
-    telemetry_log = COALESCE(excluded.telemetry_log, sessions.telemetry_log),
-    conversation_log = COALESCE(excluded.conversation_log, sessions.conversation_log),
-    state_file = COALESCE(excluded.state_file, sessions.state_file),
-    first_ts = CASE WHEN sessions.first_ts IS NULL OR excluded.first_ts < sessions.first_ts THEN excluded.first_ts ELSE sessions.first_ts END,
-    last_ts = CASE WHEN sessions.last_ts IS NULL OR excluded.last_ts > sessions.last_ts THEN excluded.last_ts ELSE sessions.last_ts END,
-    event_count = (SELECT COUNT(*) FROM events WHERE session_id = excluded.session_id)
-`);
-const upsertState = db.query(`
-  INSERT INTO states (session_id, updated_at, cwd, session_dir, telemetry_log, state_json)
-  VALUES ($session_id, $updated_at, $cwd, $session_dir, $telemetry_log, $state_json)
-  ON CONFLICT(session_id) DO UPDATE SET
-    updated_at = excluded.updated_at,
-    cwd = COALESCE(excluded.cwd, states.cwd),
-    session_dir = COALESCE(excluded.session_dir, states.session_dir),
-    telemetry_log = COALESCE(excluded.telemetry_log, states.telemetry_log),
-    state_json = excluded.state_json
-`);
-
-function dbEventRow(event: any) {
-  return {
-    $event_id: event.event_id,
-    $session_id: event.session_id || "unknown",
-    $seq: Number(event.seq || 0),
-    $ts: event.ts || new Date().toISOString(),
-    $type: event.type || "unknown",
-    $actor: event.actor || null,
-    $pid: Number(event.pid || 0),
-    $cwd: event.cwd || null,
-    $telemetry_log: event.telemetry_log || null,
-    $payload_json: JSON.stringify(event.payload || {}),
-  };
-}
-
-function dbSessionRowFromEvent(event: any) {
-  return {
-    $session_id: event.session_id || "unknown",
-    $cwd: event.cwd || null,
-    $session_dir: event.session_dir || null,
-    $telemetry_log: event.telemetry_log || null,
-    $conversation_log: event.conversation_log || null,
-    $state_file: event.state_file || (event.telemetry_log ? path.join(path.dirname(event.telemetry_log), "hive-state.json") : null),
-    $ts: event.ts || new Date().toISOString(),
-  };
-}
-
-type Subscriber = ReadableStreamDefaultController<Uint8Array>;
-type Source = { logPath: string; offset: number; meta: Record<string, any>; statePath: string; stateMtimeMs: number };
-
-const encoder = new TextEncoder();
-const subscribers = new Set<Subscriber>();
 const sources = new Map<string, Source>();
 const snapshots = new Map<string, any>();
 let events: any[] = [];
@@ -220,10 +126,7 @@ function addSnapshot(snapshot: any) {
     $state_file: snapshot.session_dir ? path.join(snapshot.session_dir, "hive-state.json") : null,
     $ts: snapshot.updated_at,
   });
-  const frame = `event: hive_state\ndata: ${JSON.stringify(snapshot)}\n\n`;
-  for (const sub of Array.from(subscribers)) {
-    try { sub.enqueue(encoder.encode(frame)); } catch { subscribers.delete(sub); }
-  }
+  broadcastEvent("hive_state", snapshot);
 }
 
 function enrichEvent(event: any, source: Source) {
@@ -246,10 +149,7 @@ function addEvent(event: any) {
   events.push(event);
   events.sort((a, b) => String(a.ts).localeCompare(String(b.ts)) || String(a.session_id).localeCompare(String(b.session_id)) || Number(a.seq || 0) - Number(b.seq || 0));
   if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
-  const frame = `event: hive\ndata: ${JSON.stringify(event)}\n\n`;
-  for (const sub of Array.from(subscribers)) {
-    try { sub.enqueue(encoder.encode(frame)); } catch { subscribers.delete(sub); }
-  }
+  broadcastEvent("hive", event);
 }
 
 function json(data: unknown, status = 200) {
@@ -259,39 +159,9 @@ function json(data: unknown, status = 200) {
   });
 }
 
-function rowToEvent(row: any) {
-  let payload = {};
-  try { payload = JSON.parse(row.payload_json || "{}"); } catch { /* ignore */ }
-  return {
-    event_id: row.event_id,
-    session_id: row.session_id,
-    seq: row.seq,
-    ts: row.ts,
-    type: row.type,
-    actor: row.actor,
-    pid: row.pid,
-    cwd: row.cwd,
-    telemetry_log: row.telemetry_log,
-    payload,
-  };
-}
-
 function loadDbIntoMemory() {
-  const eventRows = db.query(`
-    SELECT event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json
-    FROM events
-    ORDER BY ts DESC
-    LIMIT $limit
-  `).all({ $limit: MAX_EVENTS }) as any[];
-  events = eventRows.map(rowToEvent).reverse();
-
-  const stateRows = db.query(`SELECT state_json FROM states`).all() as any[];
-  for (const row of stateRows) {
-    try {
-      const snapshot = JSON.parse(row.state_json || "{}");
-      if (snapshot.session_id) snapshots.set(snapshot.session_id, snapshot);
-    } catch { /* ignore */ }
-  }
+  events = loadPersistedEvents(MAX_EVENTS);
+  for (const snapshot of loadPersistedStates()) snapshots.set(snapshot.session_id, snapshot);
 }
 
 function sessionSummaries() {
@@ -353,22 +223,6 @@ function sessionSummaries() {
   return Array.from(byId.values()).sort((a, b) => String(b.last_ts).localeCompare(String(a.last_ts)));
 }
 
-const deleteEventsStmt = db.query(`DELETE FROM events WHERE session_id = $id`);
-const deleteStateStmt = db.query(`DELETE FROM states WHERE session_id = $id`);
-const deleteSessionStmt = db.query(`DELETE FROM sessions WHERE session_id = $id`);
-
-// Derive the human project label from a cwd the same way the UI does, so a
-// project-level delete matches exactly what the user sees grouped together.
-function projectNameOf(cwd?: string): string {
-  if (!cwd) return "unknown";
-  const parts = String(cwd).split("/").filter(Boolean);
-  if (!parts.length) return cwd;
-  const last = parts[parts.length - 1], parent = parts[parts.length - 2];
-  const generic = new Set(["backend", "frontend", "web", "app", "src", "api", "server", "packages"]);
-  if (parts.length >= 2 && (generic.has(last) || last === parent)) return parent + " / " + last;
-  return last;
-}
-
 // Rewrite the global registry file, dropping any rows for the given session ids.
 function pruneRegistry(removed: Set<string>) {
   if (!fs.existsSync(REGISTRY_PATH)) return;
@@ -390,10 +244,7 @@ function pruneRegistry(removed: Set<string>) {
 function deleteSessions(ids: string[]): number {
   const idSet = new Set(ids.filter(Boolean));
   if (!idSet.size) return 0;
-  const tx = db.transaction((list: string[]) => {
-    for (const id of list) { deleteEventsStmt.run({ $id: id }); deleteStateStmt.run({ $id: id }); deleteSessionStmt.run({ $id: id }); }
-  });
-  tx(Array.from(idSet));
+  deleteSessionRows(Array.from(idSet));
 
   // in-memory event list + snapshots
   events = events.filter((e) => !idSet.has(e.session_id));
@@ -411,18 +262,14 @@ function deleteSessions(ids: string[]): number {
   pruneRegistry(idSet);
 
   // tell live clients to drop these sessions
-  const frame = `event: hive_delete\ndata: ${JSON.stringify({ session_ids: Array.from(idSet) })}\n\n`;
-  for (const sub of Array.from(subscribers)) {
-    try { sub.enqueue(encoder.encode(frame)); } catch { subscribers.delete(sub); }
-  }
+  broadcastEvent("hive_delete", { session_ids: Array.from(idSet) });
   return idSet.size;
 }
 
 function deleteProject(name: string): number {
-  const ids = sessionSummaries().filter((s) => projectNameOf(s.cwd) === name).map((s) => s.session_id);
+  const ids = sessionSummaries().filter((s) => projectName(s.cwd) === name).map((s) => s.session_id);
   return deleteSessions(ids);
 }
-
 
 // Resolve an agent's own conversation-log file from the latest snapshot. The
 // snapshot's agents[] carry the sessionFile each pi subprocess writes to.
@@ -447,13 +294,7 @@ setInterval(() => { readRegistry(); for (const source of sources.values()) { rea
 // browser/proxy, the client's EventSource fires `error`, and the dashboard
 // flickers to "reconnecting". A comment (": ping") keeps the socket alive and
 // is ignored by EventSource.
-setInterval(() => {
-  if (!subscribers.size) return;
-  const ping = encoder.encode(": ping\n\n");
-  for (const sub of Array.from(subscribers)) {
-    try { sub.enqueue(ping); } catch { subscribers.delete(sub); }
-  }
-}, 15_000);
+setInterval(broadcastPing, 15_000);
 
 Bun.serve({
   hostname: HOST,
@@ -501,7 +342,7 @@ Bun.serve({
         start(controller) {
           sub = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: hello\ndata: ${JSON.stringify({ mode: "global", registry: REGISTRY_PATH })}\n\n`));
+          controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH })));
         },
         cancel() { if (sub) subscribers.delete(sub); },
       }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive", "access-control-allow-origin": "*" } });
