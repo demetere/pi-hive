@@ -20,20 +20,7 @@ export function relTime(ts: string | number, now = Date.now()): string {
   return Math.round(s / 86400) + "d ago";
 }
 
-// Parse a cwd into a human project label. Keeps the parent segment when the
-// last one is generic (backend/frontend/...) or repeats the parent (iMed/iMed).
-export function projectName(cwd?: string): string {
-  if (!cwd) return "unknown";
-  const parts = String(cwd).split("/").filter(Boolean);
-  if (!parts.length) return cwd;
-  const last = parts[parts.length - 1];
-  const parent = parts[parts.length - 2];
-  const generic = new Set(["backend", "frontend", "web", "app", "src", "api", "server", "packages"]);
-  if (parts.length >= 2 && (generic.has(last) || last === parent)) {
-    return parent + " / " + last;
-  }
-  return last;
-}
+export { projectName } from "../../../../src/shared/project";
 
 // The short, human part of a session id (drops the date prefix, keeps time+slug).
 export function shortSessionId(id: string): string {

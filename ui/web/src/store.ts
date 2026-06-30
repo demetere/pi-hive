@@ -1,8 +1,11 @@
 import { createMemo, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView, Snapshot, Topology } from "./types";
+import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView, Snapshot } from "./types";
 import { deleteProjectRemote, deleteSessionRemote, fetchInitialData, openEventStream } from "./api";
 import { projectName, sessionSlug } from "./lib/format";
+import { buildHistoryBySession, historyTotals as totalsFromHistory } from "./store/history";
+import { buildEventStatus } from "./store/status";
+import { buildAgents, flattenTopology } from "./store/topology";
 
 // ── raw reactive state ─────────────────────────────────────────────────────
 // events keyed by id (dedup); snapshots keyed by session.
@@ -160,128 +163,9 @@ const allEvents = createMemo(() => {
 });
 export { allEvents };
 
-function buildAgents(snap: Snapshot | undefined): Map<string, AgentRuntime> {
-  const m = new Map<string, AgentRuntime>();
-  for (const a of snap?.agents || []) m.set(a.name, a);
-  return m;
-}
+const historyBySession = createMemo(() => buildHistoryBySession(allEvents()));
 
-// Historical peak per agent, per session, reconstructed from delegation_end
-// events (each carries the agent's cumulative runtime at that moment). This is
-// the durable record that survives a pi reload, so it backstops a live snapshot
-// whose in-memory counters reset to 0 on reload.
-interface HistPeak { input: number; output: number; cost: number; }
-const historyBySession = createMemo<Map<string, Map<string, HistPeak>>>(() => {
-  const bySession = new Map<string, Map<string, HistPeak>>();
-  for (const e of allEvents()) {
-    if (e.type !== "delegation_end") continue;
-    const rt = e.payload?.runtime;
-    const name = rt?.name || e.payload?.from;
-    if (!rt || !name) continue;
-    let agents = bySession.get(e.session_id);
-    if (!agents) { agents = new Map(); bySession.set(e.session_id, agents); }
-    const cur = agents.get(name) || { input: 0, output: 0, cost: 0 };
-    cur.input = Math.max(cur.input, Number(rt.inputTokens || 0));
-    cur.output = Math.max(cur.output, Number(rt.outputTokens || 0));
-    cur.cost = Math.max(cur.cost, Number(rt.costUsd || 0));
-    agents.set(name, cur);
-  }
-  return bySession;
-});
-
-function historyTotals(sessionId: string): { tokens: number; cost: number } {
-  const agents = historyBySession().get(sessionId);
-  if (!agents) return { tokens: 0, cost: 0 };
-  let tokens = 0, cost = 0;
-  for (const p of agents.values()) { tokens += p.input + p.output; cost += p.cost; }
-  return { tokens, cost };
-}
-
-// Event-driven agent status overlay. The topology must reflect activity the
-// instant an event arrives (same channel as the activity feed) — snapshots
-// arrive later (file-poll) and can coalesce, so they alone make the graph lag.
-//
-// We replay events chronologically and track, per session:
-//   • each agent's last status
-//   • outstanding delegations per parent (delegation_start without a matching
-//     delegation_end from that child yet)
-//
-// Status meaning:
-//   running  — actively executing (issued tool calls, or just delegated-to)
-//   waiting  — has ≥1 outstanding delegation to a child; it's blocked waiting
-//              on that child rather than doing work itself
-//   done/error — finished
-//   idle     — never ran / reset by session_start
-//
-// Transitions:
-//   delegation_start {from, to} → `to` runs; `from` becomes waiting (it just
-//                                  handed work off and is blocked on the child)
-//   worker_tool_start {agent}   → `agent` runs (it's doing its own work, so it
-//                                  is not waiting at this moment)
-//   delegation_end {from}       → `from` finishes (done/error). Its PARENT, if
-//                                  it has no other outstanding delegations,
-//                                  resumes running.
-// Snapshots still own tokens/cost; this overlay only overrides status.
-export const eventStatus = createMemo<Map<string, Map<string, string>>>(() => {
-  const bySession = new Map<string, Map<string, string>>();
-  // per session: child -> parent (who delegated to it), and parent -> set of
-  // outstanding child delegations.
-  const parentOf = new Map<string, Map<string, string>>();
-  const outstanding = new Map<string, Map<string, Set<string>>>();
-
-  const ses = (map: Map<string, Map<string, any>>, sid: string) => {
-    let m = map.get(sid); if (!m) { m = new Map(); map.set(sid, m); } return m;
-  };
-  const setStatus = (sid: string, name: string | undefined, status: string) => {
-    if (!name) return; ses(bySession, sid).set(name, status);
-  };
-
-  for (const e of allEvents()) {
-    const sid = e.session_id, p = e.payload || {};
-    switch (e.type) {
-      case "session_start":
-        bySession.set(sid, new Map()); parentOf.set(sid, new Map()); outstanding.set(sid, new Map());
-        break;
-      case "delegation_start": {
-        if (!p.to) break;
-        setStatus(sid, p.to, "running");
-        if (p.from) {
-          ses(parentOf, sid).set(p.to, p.from);
-          const out = ses(outstanding, sid);
-          const set = out.get(p.from) || new Set<string>(); set.add(p.to); out.set(p.from, set);
-          setStatus(sid, p.from, "waiting"); // blocked on the child it just spawned
-        }
-        break;
-      }
-      case "worker_tool_start": {
-        // An agent that has handed work to a child is WAITING even though pi
-        // emits tool calls for it — the delegation itself (delegate_agent /
-        // team_conversation) is a tool call, and a parent mid-delegation isn't
-        // doing real work. So only flip to running when it has NO outstanding
-        // delegations. (Delegation tools never count as "work".)
-        const out = ses(outstanding, sid).get(p.agent);
-        if (out && out.size) break; // still waiting on a child
-        setStatus(sid, p.agent, "running");
-        break;
-      }
-      case "delegation_end": {
-        const child = p.from;
-        if (!child) break;
-        setStatus(sid, child, p.type === "error" ? "error" : "done");
-        // clear this child from its parent's outstanding set; if the parent has
-        // none left, it resumes running.
-        const parent = ses(parentOf, sid).get(child);
-        if (parent) {
-          const out = ses(outstanding, sid);
-          const set = out.get(parent); if (set) { set.delete(child); if (!set.size) { out.delete(parent); setStatus(sid, parent, "running"); } }
-          ses(parentOf, sid).delete(child);
-        }
-        break;
-      }
-    }
-  }
-  return bySession;
-});
+export const eventStatus = createMemo(() => buildEventStatus(allEvents()));
 
 function eventStatusFor(sessionId: string): Map<string, string> {
   return eventStatus().get(sessionId) || new Map();
@@ -358,7 +242,7 @@ export const sessions = createMemo<SessionView[]>(() => {
   // history backstop (never under-report vs the persisted log)
   for (const id of present) {
     const v = sessionStore.get(id)!;
-    const h = historyTotals(id);
+    const h = totalsFromHistory(historyBySession(), id);
     v.tokens = Math.max(v.tokens, h.tokens);
     v.cost = Math.max(v.cost, h.cost);
   }
@@ -530,11 +414,4 @@ export const scopeTitle = createMemo(() => {
   return { title: s.project, crumbs: ["Overview", s.project, sessionSlug(s.sessionId)], live: scopedStats().live, session: sess };
 });
 
-// Flatten a topology into ordered nodes (for leaderboards / model mix).
-export function flattenTopology(topo?: Topology): Topology["agents"] {
-  const out: NonNullable<Topology["agents"]> = [];
-  const walk = (n?: any) => { if (!n) return; out.push(n); (n.children || []).forEach(walk); };
-  walk(topo?.orchestrator);
-  (topo?.agents || []).forEach(walk);
-  return out;
-}
+export { flattenTopology };
