@@ -33,9 +33,6 @@
     "prepack": "just prepack",
     "prepublishOnly": "just prepublish"
   },
-  "engines": {
-    "bun": ">=1.1.0"
-  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
