@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DB_PATH } from "./config";
+import type { HiveStateSnapshot, HiveTelemetryEvent } from "../../shared/telemetry";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 export const db = new Database(DB_PATH);
@@ -82,7 +83,7 @@ const deleteEventsStmt = db.query(`DELETE FROM events WHERE session_id = $id`);
 const deleteStateStmt = db.query(`DELETE FROM states WHERE session_id = $id`);
 const deleteSessionStmt = db.query(`DELETE FROM sessions WHERE session_id = $id`);
 
-export function dbEventRow(event: any) {
+export function dbEventRow(event: HiveTelemetryEvent) {
   return {
     $event_id: event.event_id,
     $session_id: event.session_id || "unknown",
@@ -97,7 +98,7 @@ export function dbEventRow(event: any) {
   };
 }
 
-export function dbSessionRowFromEvent(event: any) {
+export function dbSessionRowFromEvent(event: HiveTelemetryEvent) {
   return {
     $session_id: event.session_id || "unknown",
     $cwd: event.cwd || null,
@@ -109,7 +110,7 @@ export function dbSessionRowFromEvent(event: any) {
   };
 }
 
-export function rowToEvent(row: any) {
+export function rowToEvent(row: any): HiveTelemetryEvent {
   let payload = {};
   try { payload = JSON.parse(row.payload_json || "{}"); } catch { /* ignore */ }
   return {
@@ -126,7 +127,7 @@ export function rowToEvent(row: any) {
   };
 }
 
-export function loadPersistedEvents(limit: number): any[] {
+export function loadPersistedEvents(limit: number): HiveTelemetryEvent[] {
   const eventRows = db.query(`
     SELECT event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json
     FROM events
@@ -136,12 +137,12 @@ export function loadPersistedEvents(limit: number): any[] {
   return eventRows.map(rowToEvent).reverse();
 }
 
-export function loadPersistedStates(): any[] {
+export function loadPersistedStates(): HiveStateSnapshot[] {
   const stateRows = db.query(`SELECT state_json FROM states`).all() as any[];
-  const states: any[] = [];
+  const states: HiveStateSnapshot[] = [];
   for (const row of stateRows) {
     try {
-      const snapshot = JSON.parse(row.state_json || "{}");
+      const snapshot = JSON.parse(row.state_json || "{}") as HiveStateSnapshot;
       if (snapshot.session_id) states.push(snapshot);
     } catch { /* ignore */ }
   }

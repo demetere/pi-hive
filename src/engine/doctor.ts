@@ -29,7 +29,7 @@ export function renderHiveDoctor(state: HiveState, cwd: string, extensionDir: st
   const configPath = join(cwd, HIVE_ROOT, "hive-config.yaml");
   const dashboardIndex = join(extensionDir, "ui", "web", "dist", "index.html");
   const dashboardStamp = join(extensionDir, "ui", "web", "dist", ".build-hash");
-  const observabilityServer = join(extensionDir, "src", "observability", "server.ts");
+  const observabilityServer = join(extensionDir, "src", "observability", "server", "index.ts");
   const registryPath = hiveTelemetryRegistryPath();
   const bunVersion = commandVersion("bun", ["--version"]);
 

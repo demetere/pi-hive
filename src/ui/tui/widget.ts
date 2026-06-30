@@ -6,14 +6,14 @@ import type { AgentConfig, AgentRuntime, HiveState, TeamMode } from "../../core/
 import { configuredChildAgents, extractUsage } from "../../core/utils";
 
 export function captureNormalTools(state: HiveState) {
-  const active = state.pi.getActiveTools().filter((name) => !HIVE_TOOL_NAMES.has(name));
+  const active = state.pi.getActiveTools().filter((name: string) => !HIVE_TOOL_NAMES.has(name));
   if (active.length > 0) {
     state.normalToolNames = active;
     return;
   }
   state.normalToolNames = state.pi.getAllTools()
-    .map((tool) => tool.name)
-    .filter((name) => !HIVE_TOOL_NAMES.has(name));
+    .map((tool: { name: string }) => tool.name)
+    .filter((name: string) => !HIVE_TOOL_NAMES.has(name));
 }
 
 export function modeStatusText(state: HiveState, mode: TeamMode = state.teamMode): string {
@@ -56,7 +56,7 @@ export function gitStatusLabel(cwd: string): string {
     const raw = execSync("git status --porcelain", { cwd, encoding: "utf-8", timeout: 500 }).trim();
     if (!raw) return "clean";
     const lines = raw.split("\n").filter(Boolean);
-    const untracked = lines.filter((line) => line.startsWith("??")).length;
+    const untracked = lines.filter((line: string) => line.startsWith("??")).length;
     if (untracked === lines.length) return `${untracked} untracked`;
     return `${lines.length} changes`;
   } catch {
@@ -82,7 +82,7 @@ export function aggregateUsage(ctx: ExtensionContext): { input: number; output: 
 
 export function installHeader(state: HiveState, ctx: ExtensionContext) {
   if (ctx.mode !== "tui") return;
-  ctx.ui.setHeader((_tui, theme) => ({
+  ctx.ui.setHeader((_tui: any, theme: any) => ({
     dispose() {},
     invalidate() {},
     render(width: number): string[] {
@@ -101,7 +101,7 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
 
 export function installFooter(state: HiveState, ctx: ExtensionContext) {
   if (ctx.mode !== "tui") return;
-  ctx.ui.setFooter((tui, theme, footerData) => {
+  ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
     const unsub = footerData.onBranchChange(() => tui.requestRender());
     queueMicrotask(() => tui.requestRender());
     return {

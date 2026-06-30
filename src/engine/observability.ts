@@ -2,40 +2,20 @@ import { appendFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentConfig, AgentRuntime, HiveState, JsonRecord } from "../core/types";
+import type { AgentConfig, AgentRuntime, HiveState } from "../core/types";
+import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TopologyNode } from "../shared/telemetry";
 import { ensureDir, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
 
-export type HiveObsEventType =
-  | "session_start"
-  | "agent_session_start"
-  | "user_message"
-  | "assistant_message"
-  | "delegation_start"
-  | "delegation_end"
-  | "worker_tool_start"
-  | "worker_tool_end"
-  | "distill_start"
-  | "distill_end"
-  | "error";
-
-export interface HiveObsEvent<P = JsonRecord> {
-  event_id: string;
-  ts: string;
-  type: HiveObsEventType;
-  session_id: string;
-  cwd?: string;
-  session_dir?: string;
-  telemetry_log?: string;
-  actor: string;
-  pid: number;
-  seq: number;
-  payload: P;
-}
-
+export type HiveObsEventType = HiveTelemetryEventType;
+export type HiveObsEvent<P = JsonRecord> = HiveTelemetryEvent<P>;
 export function hiveTelemetryRegistryPath(): string {
   const base = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
   return join(base, "hive", "telemetry-sessions.jsonl");
+}
+
+export function hiveTelemetryServerPidPath(): string {
+  return join(dirname(hiveTelemetryRegistryPath()), "telemetry-server.json");
 }
 
 export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
@@ -54,7 +34,7 @@ export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
   })}\n`);
 }
 
-function agentSummary(agent: AgentConfig): JsonRecord {
+function agentSummary(agent: AgentConfig): TopologyNode {
   return {
     name: agent.name,
     role: agent.role,
@@ -69,7 +49,7 @@ function agentSummary(agent: AgentConfig): JsonRecord {
   };
 }
 
-export function hiveTopology(state: HiveState): JsonRecord {
+export function hiveTopology(state: HiveState): HiveStateSnapshot["topology"] {
   const roots = state.config?.agents || [];
   return {
     orchestrator: state.config?.orchestrator ? agentSummary(state.config.orchestrator) : undefined,
@@ -77,7 +57,7 @@ export function hiveTopology(state: HiveState): JsonRecord {
   };
 }
 
-export function runtimeSummary(runtime: AgentRuntime): JsonRecord {
+export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnapshot["agents"]>[number] {
   return {
     name: runtime.config.name,
     group: runtime.config.groupName || "Orchestration",
@@ -101,7 +81,7 @@ export function writeHiveStateSnapshot(state: HiveState) {
   if (!state.session || process.env.PI_HIVE_CHILD === "1") return;
   const path = join(state.session.sessionDir, "hive-state.json");
   ensureDir(dirname(path));
-  const snapshot = {
+  const snapshot: HiveStateSnapshot = {
     updated_at: new Date().toISOString(),
     session_id: state.session.sessionId,
     cwd: state.widgetCtx?.cwd,

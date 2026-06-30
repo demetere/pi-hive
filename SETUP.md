@@ -180,6 +180,13 @@ Rules:
 - `path` is repo-relative and must point at an existing `.md` you create in §6–§7.
 - `color` is `#rrggbb` (used in the tree widget and inline labels). Give each agent a distinct color.
 
+YAML subset supported by pi-hive:
+- Use two-space indentation, nested maps, and `- ` list items.
+- Use scalar strings, booleans, numbers, and simple inline arrays such as `[read, grep, find]`.
+- Kebab-case keys are converted to camelCase internally (`subagent-output-limit` → `subagentOutputLimit`).
+- Quote strings containing `#` or leading/trailing whitespace.
+- Do not rely on anchors, aliases, block scalars (`|` / `>`), tags, flow objects, or other advanced YAML features.
+
 ---
 
 ## 6. Agent `.md` files — frontmatter contract

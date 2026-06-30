@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { resolve } from "node:path";
@@ -18,6 +18,9 @@ import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { findRegisteredSkill } from "../engine/skill-registry";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 
+type ToolUpdate = (result: any) => void;
+type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
+
 export function registerTools(pi: ExtensionAPI, state: HiveState) {
   // Render an agent's name in ITS OWN configured color (matching the status
   // modal), falling back to the theme accent if no/invalid hex is configured.
@@ -34,7 +37,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       task: Type.String({ description: "The user's task or subtask to route." }),
       limit: Type.Optional(Type.Number({ description: "Maximum number of recommended agents to return." })),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId: string, params: unknown) {
       const { task, limit } = params as { task: string; limit?: number };
       const recommendations = routeAgents(state, task, Math.max(1, Math.min(10, Number(limit || 5))));
       const text = recommendations.length
@@ -80,7 +83,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       task: Type.String({ description: "Focused task for that agent. Include the exact question and expected output." }),
       fresh: Type.Optional(Type.Boolean({ description: "Start the agent from a clean session, discarding its prior memory. Default false (resume). Use when the previous session is irrelevant or should not influence this task." })),
     }),
-    async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+    async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
       const { agent, task, fresh } = params as { agent: string; task: string; fresh?: boolean };
       onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${fresh ? " (fresh session)" : ""}...` }], details: { agent, task, status: "running" } });
       const result = await dispatchAgent(state, agent, task, ctx, Boolean(fresh));
@@ -99,12 +102,12 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
         details: { agent, task, status: result.exitCode === 0 ? "done" : "error", elapsed: result.elapsed, exitCode: result.exitCode, finalAnswer, outputPreview: output },
       };
     },
-    renderCall(args, theme) {
+    renderCall(args: unknown, theme: any) {
       const agent = (args as any).agent || "?";
       const task = String((args as any).task || "");
       return new Text(theme.fg("toolTitle", theme.bold("delegate_agent ")) + agentColored(agent, theme) + theme.fg("dim", ` — ${task.slice(0, 80)}`), 0, 0);
     },
-    renderResult(result, options, theme) {
+    renderResult(result: any, options: ToolRenderOptions, theme: any) {
       const details = result.details as any;
       const agent = details?.agent || "agent";
       if (options.isPartial || details?.status === "running") return new Text(theme.fg("accent", "● ") + agentColored(agent, theme) + theme.fg("accent", " working..."), 0, 0);
@@ -123,7 +126,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       agent: Type.String({ description: "REQUIRED. Agent name (e.g. 'Security Reviewer'). Reads that agent's own session transcript." }),
       lines: Type.Optional(Type.Number({ description: "Number of JSONL lines from the tail to read (default 80, max 1000)." })),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId: string, params: unknown) {
       if (!state.session) return { content: [{ type: "text", text: "hive session not initialized" }], details: { ok: false } };
       const lines = Math.max(1, Math.min(1000, Number((params as any).lines || 80)));
       const agentName = String((params as any).agent || "").trim();
@@ -151,7 +154,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
     label: "Hive SDD Status",
     description: "Inspect OpenSpec/SDD status for this project and show the recommended hive phase routing.",
     parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId: string, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
       const status = resolveHiveSddStatus(state, ctx.cwd);
       state.sddStatus = status;
       return { content: [{ type: "text", text: renderHiveSddStatus(status) }], details: status };
@@ -165,7 +168,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
     parameters: Type.Object({
       name: Type.String({ description: "Skill name as shown in your skill menu, e.g. backend-change-review." }),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
       const name = String((params as any).name || "").trim();
       const runtime = state.runtimes.get(currentAgentName().toLowerCase());
       const skills = runtime?.config.skills || [];
@@ -182,7 +185,7 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       if (!content) return { content: [{ type: "text", text: `Skill "${name}" is not readable (${skillPath}).` }], details: { ok: false } };
       return { content: [{ type: "text", text: content }], details: { ok: true, skill: name, path: skillPath, source: match ? "configured" : "registry" } };
     },
-    renderCall(args, theme) {
+    renderCall(args: unknown, theme: any) {
       return new Text(theme.fg("toolTitle", theme.bold("load_skill ")) + theme.fg("accent", String((args as any).name || "?")), 0, 0);
     },
   });

@@ -238,7 +238,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     };
 
     proc.on("close", finish);
-    proc.on("error", (error) => {
+    proc.on("error", (error: Error) => {
       stderrChunks.push(error.message);
       finish(1);
     });

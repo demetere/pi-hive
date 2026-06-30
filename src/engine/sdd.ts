@@ -1,4 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
+
+type FsDirent = { name: string; isDirectory(): boolean };
 import { join, relative } from "node:path";
 import type { HiveState, SddChangeStatus, SddStatus } from "../core/types";
 import { readIfSmall } from "../core/utils";
@@ -41,11 +43,11 @@ function changeSummary(changeDir: string): string {
 
 function activeChanges(cwd: string): SddChangeStatus[] {
   const root = join(cwd, "openspec", "changes");
-  let entries: ReturnType<typeof readdirSync> = [];
+  let entries: FsDirent[] = [];
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return []; }
   return entries
-    .filter((entry) => entry.isDirectory() && entry.name !== "archive")
-    .map((entry) => {
+    .filter((entry: FsDirent) => entry.isDirectory() && entry.name !== "archive")
+    .map((entry: FsDirent) => {
       const dir = join(root, entry.name);
       const files = PHASE_FILES.filter((phase) => phasePresent(dir, phase.file)).map((phase) => phase.phase);
       return {
@@ -56,7 +58,7 @@ function activeChanges(cwd: string): SddChangeStatus[] {
         summary: changeSummary(dir),
       };
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a: SddChangeStatus, b: SddChangeStatus) => a.name.localeCompare(b.name));
 }
 
 function findAgent(state: HiveState, patterns: RegExp[]): string | undefined {

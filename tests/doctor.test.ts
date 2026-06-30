@@ -30,10 +30,10 @@ test("renderHiveDoctor reports package assets and workspace state", () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-doctor-cwd-"));
   const extensionDir = mkdtempSync(join(tmpdir(), "pi-hive-doctor-ext-"));
   mkdirSync(join(cwd, ".pi", "hive"), { recursive: true });
-  mkdirSync(join(extensionDir, "src", "observability"), { recursive: true });
+  mkdirSync(join(extensionDir, "src", "observability", "server"), { recursive: true });
   mkdirSync(join(extensionDir, "ui", "web", "dist"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), "orchestrator:\n  name: Orchestrator\n");
-  writeFileSync(join(extensionDir, "src", "observability", "server.ts"), "export {};\n");
+  writeFileSync(join(extensionDir, "src", "observability", "server", "index.ts"), "export {};\n");
   writeFileSync(join(extensionDir, "ui", "web", "dist", "index.html"), "<div></div>\n");
   writeFileSync(join(extensionDir, "ui", "web", "dist", ".build-hash"), "hash\n");
 

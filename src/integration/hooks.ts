@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig, HiveState } from "../core/types";
 import { configuredChildAgents, textFromMessage } from "../core/utils";
 import { logRecord } from "../engine/state";
@@ -12,12 +12,12 @@ import { resolveHiveSddStatus } from "../engine/sdd";
 import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveStateSnapshot } from "../engine/observability";
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
-  pi.on("tool_call", async (event, ctx) => {
+  pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
     if (state.teamMode === "normal" && process.env.PI_HIVE_CHILD !== "1") return;
     return enforceDomainForTool(state, event, ctx);
   });
 
-  pi.on("before_agent_start", async (event, _ctx) => {
+  pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
     if (!state.config || process.env.PI_HIVE_CHILD === "1" || state.teamMode === "normal") return;
     const catalog = state.config.agents.map((root) => {
       const lines: string[] = [];
@@ -48,7 +48,7 @@ ${catalog}`,
     };
   });
 
-  pi.on("message_update", async (event) => {
+  pi.on("message_update", async (event: any) => {
     if (process.env.PI_HIVE_CHILD === "1") return;
     const delta = (event as any).assistantMessageEvent;
     if (delta?.type === "text_delta" && typeof delta.delta === "string") {
@@ -59,7 +59,7 @@ ${catalog}`,
     }
   });
 
-  pi.on("message_end", async (event) => {
+  pi.on("message_end", async (event: any) => {
     if ((event as any).message?.role === "assistant") {
       state.streamStartMs = 0;
       state.streamedChars = 0;
@@ -81,7 +81,7 @@ ${catalog}`,
     emitHiveEvent(state, role === "user" ? "user_message" : "assistant_message", { text: text.slice(0, 8000) }, from);
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
     state.widgetCtx = ctx;
     state.onRuntimeUpdate = () => updateWidget(state);
     state.onRuntimeFinish = (runtime, finishCtx) => {
@@ -117,7 +117,7 @@ ${catalog}`,
     }
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
     stopConversationWatch(state);
     for (const runtime of state.runtimes.values()) if (runtime.timer) clearInterval(runtime.timer);
     if (state.obsServer?.proc) {

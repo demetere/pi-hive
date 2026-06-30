@@ -17,7 +17,7 @@ const requiredPaths = [
   "src/engine/session.ts",
   "src/integration/commands.ts",
   "src/integration/hooks.ts",
-  "src/observability/server.ts",
+  "src/observability/server/index.ts",
   "src/ui/tui/widget.ts",
   "src/ui/tui/status-modal.ts",
   "ui/web/dist/index.html",

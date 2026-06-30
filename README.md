@@ -32,7 +32,7 @@ After `just reload`, run `/reload` in Pi.
 
 ## Requirements
 
-- **Bun ≥ 1.1** — the telemetry dashboard server (`src/observability/server.ts`) runs under Bun and uses `bun:sqlite`. The `/hive-observe` command notifies you if Bun is missing.
+- **Bun ≥ 1.1** — the telemetry dashboard server (`src/observability/server/index.ts`) runs under Bun and uses `bun:sqlite`. The `/hive-observe` command notifies you if Bun is missing.
 - The Pi host provides `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` at load time (declared as peer deps).
 
 ## Packaging & distribution
@@ -93,7 +93,7 @@ See SETUP.md §4 for the full directory contract.
 `/hive-observe` starts a local Bun/SSE dashboard with hive-specific views for project/session cards, topology, delegation lifecycle, worker state, tool activity, tokens, and cost. The dashboard also indexes events/state into local SQLite at `~/.pi/agent/hive/telemetry.db` for fast reloads and historical browsing. Telemetry persists even when the dashboard is not running; serve it only when you want to watch or inspect.
 
 The dashboard UI is a prebuilt Solid + Vite single-page app under `ui/web/`. The
-server (`src/observability/server.ts`) serves the built bundle from `ui/web/dist/`,
+server (`src/observability/server/index.ts`) serves the built bundle from `ui/web/dist/`,
 which is committed so end users need no build step. If you change anything under
 `ui/web/src/`, rebuild it:
 
