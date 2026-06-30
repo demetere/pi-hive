@@ -8,6 +8,7 @@ import {
   hexAnsi,
   readIfSmall,
   safeRead,
+  slug,
   tailLines,
   truncateMiddle,
 } from "../core/utils";
@@ -170,15 +171,16 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
     }),
     async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
       const name = String((params as any).name || "").trim();
+      const wanted = slug(name);
       const runtime = state.runtimes.get(currentAgentName().toLowerCase());
       const skills = runtime?.config.skills || [];
-      const match = skills.find((ref) => skillName(ref).toLowerCase() === name.toLowerCase());
-      const registryMatch = match ? undefined : findRegisteredSkill(state, name);
+      const match = skills.find((ref) => slug(skillName(ref)) === wanted || (ref.useWhen ? slug(ref.useWhen) === wanted : false));
+      const registryMatch = match ? undefined : (findRegisteredSkill(state, name) || state.skillRegistry.find((entry) => slug(entry.description) === wanted));
       if (!match && !registryMatch) {
         const configured = skills.map(skillName);
         const discovered = state.skillRegistry.map((entry) => entry.name).slice(0, 30);
         const available = [...configured, ...discovered].join(", ") || "none";
-        return { content: [{ type: "text", text: `No skill named "${name}". Available: ${available}.` }], details: { ok: false } };
+        return { content: [{ type: "text", text: `No skill named "${name}". Pass exactly one skill key/name, not a natural-language query. Available: ${available}.` }], details: { ok: false } };
       }
       const skillPath = match?.path || registryMatch!.path;
       const content = readIfSmall(resolve(ctx.cwd, skillPath), 96_000);

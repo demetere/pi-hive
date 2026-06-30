@@ -34,13 +34,25 @@ export function renderKnowledgeRefs(ctx: ExtensionContext, title: string, refs: 
 // Skills = on-demand procedures. Only a menu (name + use-when) is injected; the
 // agent pulls full content with the load_skill tool when a skill applies.
 export function skillName(ref: KnowledgeRef): string {
-  return ref.path.replace(/^.*\//, "").replace(/\.[^.]+$/, "");
+  const normalized = ref.path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const parts = normalized.split("/").filter(Boolean);
+  const file = parts[parts.length - 1] || "skill";
+  const stem = file.replace(/\.[^.]+$/, "");
+  // Agent Skills convention stores every skill body in SKILL.md. Using the file
+  // stem would make every configured skill appear as "SKILL", causing models to
+  // pass the descriptive use-when text as a pseudo-query. Use the parent folder
+  // as the callable key for */SKILL.md instead.
+  if (stem.toLowerCase() === "skill" && parts.length >= 2) return parts[parts.length - 2];
+  return stem;
 }
 
 export function renderSkillMenu(refs: KnowledgeRef[] | undefined): string {
   if (!refs?.length) return "## Skills\nNo skills configured.";
-  const rows = refs.map((ref) => `- ${skillName(ref)}: ${ref.useWhen || "use when relevant to the task"}`);
-  return `## Skills (call load_skill with the skill name to read the full instructions)\nLoad a skill before doing work it applies to. Read any "always" skills first.\n${rows.join("\n")}`;
+  const rows = refs.map((ref) => {
+    const key = skillName(ref);
+    return `- ${key}: call load_skill with name \"${key}\" — ${ref.useWhen || "use when relevant to the task"}`;
+  });
+  return `## Skills (call load_skill with the exact skill key to read the full instructions)\nLoad a skill before doing work it applies to. Read any "always" skills first. Do not pass a natural-language query; pass exactly one listed skill key.\n${rows.join("\n")}`;
 }
 
 export function renderDomainScopes(scopes: DomainScope[] | undefined): string {

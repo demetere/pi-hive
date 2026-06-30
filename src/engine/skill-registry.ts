@@ -140,5 +140,5 @@ export function renderSkillRegistryMenu(state: HiveState, limit = 40): string {
     return `- ${entry.name} (${entry.scope}): ${entry.description.slice(0, 160)} — ${display}`;
   });
   const more = state.skillRegistry.length > limit ? `\n- ... ${state.skillRegistry.length - limit} more in .atl/hive-skill-registry.md` : "";
-  return `## Discovered project/user skills\nThese are available via load_skill by name when relevant. Prefer explicitly configured skills first.\n${rows.join("\n")}${more}`;
+  return `## Discovered project/user skills\nThese are available via load_skill by exact name when relevant. Prefer explicitly configured skills first. Do not pass a natural-language query; pass exactly one listed skill name.\n${rows.join("\n")}${more}`;
 }
