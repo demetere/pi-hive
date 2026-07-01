@@ -1,4 +1,4 @@
-import { isSameOriginWrite } from "../security";
+import { isSameOriginRequest, isSameOriginWrite } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
 import { BOOT_SESSION_ID, CONVERSATION_LOG, DB_PATH, HOST, PORT, REGISTRY_PATH } from "./config";
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
@@ -18,7 +18,7 @@ import { addApproval, addComment, listPlans, planDetail, planFile, resolveProjec
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+    headers: { "content-type": "application/json" },
   });
 }
 
@@ -84,6 +84,9 @@ Bun.serve({
       const asset = dashboardFile(url.pathname);
       if (asset) return asset;
     }
+
+    if (!isSameOriginRequest(req, url)) return json({ error: "cross-origin read blocked" }, 403);
+
     if (url.pathname === "/health") return json({
       ok: true,
       mode: "global",
@@ -128,7 +131,7 @@ Bun.serve({
           controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH })));
         },
         cancel() { if (sub) subscribers.delete(sub); },
-      }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive", "access-control-allow-origin": "*" } });
+      }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" } });
     }
     if (url.pathname === "/conversation") return json({ path: CONVERSATION_LOG });
     if (url.pathname === "/agent-log") {
