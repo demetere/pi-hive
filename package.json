@@ -43,6 +43,9 @@
     "@earendil-works/pi-tui": { "optional": false },
     "typebox": { "optional": false }
   },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.3"
+  },
   "keywords": [
     "pi-package",
     "pi",

@@ -75,6 +75,7 @@ export interface TelemetryAgentRuntime {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  contextPct?: number;
   sessionFile?: string;
   model?: string;
   thinking?: string;

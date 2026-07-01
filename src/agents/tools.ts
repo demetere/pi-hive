@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { HiveState } from "../core/types";
@@ -16,7 +17,14 @@ import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
 
-export function registerTools(pi: ExtensionAPI, state: HiveState) {
+// Builds pi-hive's five custom tools as plain, reusable ToolDefinition objects
+// (defineTool() does no registration — it's a pure identity/typing wrapper).
+// The SAME definitions are used for the orchestrator's own pi.registerTool()
+// call and for every worker AgentSession's customTools, so tool behavior never
+// diverges between "the orchestrator's delegate_agent" and "a worker's own
+// delegate_agent" (nested delegation intentionally grants workers this tool
+// too — see normalizeWorkerTools's comment in core/normalize.ts).
+export function buildHiveTools(state: HiveState, callerName: string): ToolDefinition[] {
   // Render an agent's name in ITS OWN configured color (matching the status
   // modal), falling back to the theme accent if no/invalid hex is configured.
   const agentColored = (name: string, theme: any): string => {
@@ -24,7 +32,8 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
     return hexAnsi(color, name) || theme.fg("accent", name);
   };
 
-  pi.registerTool({
+  return [
+    defineTool({
     name: "route_agent",
     label: "Route Agent",
     description: "Score the configured hive agents for a task and recommend who should handle it before delegation.",
@@ -40,9 +49,9 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
         : "No strong route found. Use Planning Lead for clarification or Engineering Lead for codebase mapping.";
       return { content: [{ type: "text", text }], details: { task, recommendations } };
     },
-  });
+  }),
 
-  pi.registerTool({
+  defineTool({
     name: "team_status",
     label: "Team Status",
     description: "Return the current hive session, log path, active workers, and per-agent state.",
@@ -67,9 +76,9 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       ].join("\n");
       return { content: [{ type: "text", text }], details: { session: state.session, activeRuns: state.activeRuns, agents: rows } };
     },
-  });
+  }),
 
-  pi.registerTool({
+  defineTool({
     name: "delegate_agent",
     label: "Delegate Agent",
     description: "Delegate a focused task to one configured hive agent and receive its answer. Use this for all substantive work. By default the agent RESUMES its prior session (it remembers earlier work — ideal for a review→fix loop); pass fresh=true to start it from a clean slate.",
@@ -111,9 +120,9 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       if (options.expanded && details?.outputPreview) return new Text(`${header}\n${theme.fg("muted", truncateMiddle(details.outputPreview, 4000))}`, 0, 0);
       return new Text(header, 0, 0);
     },
-  });
+  }),
 
-  pi.registerTool({
+  defineTool({
     name: "team_conversation",
     label: "Team Conversation",
     description: "Read one agent's own session transcript (clean — just that agent's work, e.g. to inspect what a reviewer found). You MUST name the agent: this tool is intentionally scoped per-agent. The shared interleaved team log is not readable this way because it is unbounded and would flood your context.",
@@ -142,9 +151,9 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       const text = truncateMiddle(tailLines(safeRead(runtime.sessionFile), lines), limit);
       return { content: [{ type: "text", text: text || `${runtime.config.name} has no session transcript yet.` }], details: { ok: true, agent: runtime.config.name, lines } };
     },
-  });
+  }),
 
-  pi.registerTool({
+  defineTool({
     name: "hive_sdd_status",
     label: "Hive SDD Status",
     description: "Inspect OpenSpec/SDD status for this project and show the recommended hive phase routing.",
@@ -154,5 +163,10 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       state.sddStatus = status;
       return { content: [{ type: "text", text: renderHiveSddStatus(status) }], details: status };
     },
-  });
+  }),
+  ];
+}
+
+export function registerTools(pi: ExtensionAPI, state: HiveState) {
+  for (const tool of buildHiveTools(state, "Orchestrator")) pi.registerTool(tool);
 }

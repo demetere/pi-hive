@@ -19,7 +19,7 @@ export function hiveTelemetryServerPidPath(): string {
 }
 
 export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
-  if (!state.session || process.env.PI_HIVE_CHILD === "1") return;
+  if (!state.session) return;
   const registryPath = hiveTelemetryRegistryPath();
   ensureDir(dirname(registryPath));
   appendFileSync(registryPath, `${JSON.stringify({
@@ -71,6 +71,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     inputTokens: runtime.inputTokens,
     outputTokens: runtime.outputTokens,
     costUsd: runtime.costUsd,
+    contextPct: runtime.contextPct,
     sessionFile: runtime.sessionFile,
     model: runtime.config.model,
     thinking: runtime.config.thinking,
@@ -78,7 +79,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
 }
 
 export function writeHiveStateSnapshot(state: HiveState) {
-  if (!state.session || process.env.PI_HIVE_CHILD === "1") return;
+  if (!state.session) return;
   const path = join(state.session.sessionDir, "hive-state.json");
   ensureDir(dirname(path));
   const snapshot: HiveStateSnapshot = {

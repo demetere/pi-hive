@@ -26,7 +26,7 @@ export default function Agents(props: { search: string }) {
           <tr>
             <th>Agent</th><th>Role</th><th>Status</th><th>Model</th>
             <Show when={showSession()}><th>Session</th></Show>
-            <th class="num">Tokens</th><th class="num">Cost</th><th class="num">Runs</th><th class="num">Tools</th>
+            <th class="num">Tokens</th><th class="num">Cost</th><th class="num">Runs</th><th class="num">Tools</th><th class="num">Context</th>
           </tr>
         </thead>
         <tbody>
@@ -42,6 +42,7 @@ export default function Agents(props: { search: string }) {
                 <td class="num">{fmtCost(r.cost)}</td>
                 <td class="num">{r.runs}</td>
                 <td class="num">{r.tools}</td>
+                <td class="num">{r.contextPct != null ? `${Math.round(r.contextPct)}%` : "—"}</td>
               </tr>
             )}
           </For>

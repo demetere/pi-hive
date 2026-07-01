@@ -27,19 +27,18 @@ export interface SddStatus {
   suggestedRouting: string[];
 }
 
-// A filesystem scope. Each capability is tri-state:
-//   true      → this scope explicitly ALLOWS the capability under `path`.
-//   false     → this scope explicitly DENIES the capability under `path`.
-//   undefined → this scope has no opinion on the capability (defer to others).
-// Capabilities resolve per-path by most-specific-wins: among all scopes whose
-// `path` is a prefix of the target, the longest path with an explicit opinion
-// (true/false) decides. This lets a broad allow be carved out by a deeper
-// `upsert: false` (a deny), and resolves each capability independently.
+// A filesystem scope. Every capability must be explicit so the config is easy
+// to audit: true ALLOWS, false DENIES. Optional include/exclude globs narrow a
+// rule to matching files under `path` (matched relative to that path). Access is
+// resolved by most-specific-wins: deeper paths beat broader paths, and matching
+// include globs beat catch-all rules at the same path. Exact ties deny.
 export interface DomainScope {
   path: string;
-  read?: boolean;
-  upsert?: boolean;
-  delete?: boolean;
+  read: boolean;
+  upsert: boolean;
+  delete: boolean;
+  include?: string[];
+  exclude?: string[];
   description?: string;
 }
 
@@ -99,6 +98,7 @@ export interface AgentRuntime {
   sessionFile: string;
   startedAt?: number;
   timer?: ReturnType<typeof setInterval>;
+  session?: any;
 }
 
 export interface SessionState {

@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { HIVE_SESSIONS_DIR } from "../core/constants";
 import type { AgentConfig, AgentRuntime, HiveConfig, HiveState, SessionState } from "../core/types";
 import { parseFrontmatter } from "../core/yaml";
@@ -16,22 +17,6 @@ import {
 import { allConfiguredAgents, loadConfig } from "../core/config";
 
 export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, _cfg: HiveConfig): SessionState {
-  const envSessionId = process.env.PI_HIVE_SESSION_ID;
-  const envSessionDir = process.env.PI_HIVE_SESSION_DIR;
-  const envConversationLog = process.env.PI_HIVE_CONVERSATION_LOG;
-  const envObservabilityLog = process.env.PI_HIVE_OBSERVABILITY_LOG;
-  if (envSessionId && envSessionDir && envConversationLog) {
-    const inherited = {
-      sessionId: envSessionId,
-      sessionDir: envSessionDir,
-      conversationLog: envConversationLog,
-      observabilityLog: envObservabilityLog || join(envSessionDir, "hive-events.jsonl"),
-      activeTeam: "all",
-    };
-    state.pi.appendEntry("hive-session", inherited);
-    return inherited;
-  }
-
   const existing = ctx.sessionManager
     .getEntries()
     .filter((entry: any) => entry.type === "custom" && entry.customType === "hive-session")
@@ -41,21 +26,6 @@ export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, 
     return {
       ...existing.data,
       observabilityLog: existing.data.observabilityLog || join(existing.data.sessionDir, "hive-events.jsonl"),
-    };
-  }
-
-  // A child process (worker/distiller) must NEVER mint its own session — it
-  // belongs to its parent's session, inherited via env above. If the env was
-  // missing, fall back to a single shared `_child` dir instead of a fresh
-  // timestamped one, so a misconfigured spawn can't spam orphan sessions.
-  if (process.env.PI_HIVE_CHILD === "1") {
-    const childDir = join(resolve(ctx.cwd, HIVE_SESSIONS_DIR), "_child");
-    return {
-      sessionId: "_child",
-      sessionDir: childDir,
-      conversationLog: join(childDir, "conversation.jsonl"),
-      observabilityLog: join(childDir, "hive-events.jsonl"),
-      activeTeam: "all",
     };
   }
 
@@ -112,7 +82,7 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     allowedAgents: agent.allowedAgents,
     context,
     skills: normalizeKnowledgeRefs(attrs.skills || (agent as any).skills),
-    domain: normalizeDomainScopes(attrs.domain || (agent as any).domain),
+    domain: normalizeDomainScopes(attrs.domain || (agent as any).domain, `${agent.name || agentSlug}.domain`),
   };
 
   return {
@@ -191,6 +161,19 @@ function restoreRuntimeCounters(state: HiveState) {
   }
 }
 
+// Every subagent now runs in-process; concurrent workers can be mid-flight
+// simultaneously (state.config.settings.maxParallel), so "which agent is
+// calling right now" can no longer be read from process.env (that only ever
+// worked because each worker used to be its own OS process with its own
+// environment). AsyncLocalStorage scopes the current agent's name correctly
+// per concurrent async call chain — the direct in-process replacement for the
+// isolation that made the old env-var read safe by accident.
+const currentAgentStorage = new AsyncLocalStorage<string>();
+
 export function currentAgentName(): string {
-  return process.env.PI_HIVE_CURRENT_AGENT || "Orchestrator";
+  return currentAgentStorage.getStore() || "Orchestrator";
+}
+
+export function runAsAgent<T>(agentName: string, fn: () => T): T {
+  return currentAgentStorage.run(agentName, fn);
 }

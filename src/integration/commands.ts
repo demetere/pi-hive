@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { HiveState } from "../core/types";
 import { toggleTeamMode } from "../ui/tui/widget";
-import { openStatusModal } from "../ui/tui/status-modal";
 import { hiveTelemetryRegistryPath, hiveTelemetryServerPidPath } from "../engine/observability";
 import { renderHiveDoctor } from "../engine/doctor";
 import { killProcess, spawnManaged } from "../engine/process";
@@ -103,14 +102,6 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
   pi.registerShortcut(Key.ctrlAlt("t"), {
     description: "Toggle normal chat / hive orchestrator mode",
     handler: async (ctx: ExtensionContext) => toggleTeamMode(state, ctx),
-  });
-
-  pi.registerCommand("hive-status", {
-    description: "Open the hive status canvas (live hierarchy + per-agent stats)",
-    handler: async (_args: string, ctx: ExtensionContext) => {
-      state.widgetCtx = ctx;
-      openStatusModal(state, ctx);
-    },
   });
 
   pi.registerCommand("hive-doctor", {

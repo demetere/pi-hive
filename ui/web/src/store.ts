@@ -371,7 +371,7 @@ export const scopedStats = createMemo(() => {
 // Agent rows for the current scope. For a single session it's that session's
 // topology; for project/fleet it aggregates every session's agents (keyed by
 // session::name so same-named agents across sessions don't collide).
-export interface ScopeAgent { key: string; name: string; role?: string; model?: string; color?: string; status: string; tokens: number; cost: number; runs: number; tools: number; task?: string; session_id: string; depth: number; order: number; }
+export interface ScopeAgent { key: string; name: string; role?: string; model?: string; color?: string; status: string; tokens: number; cost: number; runs: number; tools: number; contextPct?: number; task?: string; session_id: string; depth: number; order: number; }
 export const scopedAgents = createMemo<ScopeAgent[]>(() => {
   const hist = historyBySession();
   const out: ScopeAgent[] = [];
@@ -390,7 +390,7 @@ export const scopedAgents = createMemo<ScopeAgent[]>(() => {
       out.push({
         key: sess.session_id + "::" + node.name, name: node.name, role: node.role, model: node.model, color: node.color,
         status: agentStatus(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
-        task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
+        contextPct: rt?.contextPct, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
       });
       for (const c of node.children || []) walk(c, depth + 1);
     };

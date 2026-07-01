@@ -55,6 +55,21 @@ declare module "bun:sqlite" { export class Database { constructor(path: string);
 declare module "@earendil-works/pi-coding-agent" {
   export type ExtensionContext = any;
   export type ExtensionAPI = any;
+  export type AgentSession = any;
+  export type AgentSessionEvent = any;
+  export type ToolDefinition = any;
+  export function createAgentSession(options?: any): Promise<{ session: any; extensionsResult?: any; modelFallbackMessage?: string }>;
+  export function defineTool(tool: any): any;
+  export class SessionManager {
+    static create(cwd: string, sessionDir?: string, options?: any): any;
+    static open(path: string, sessionDir?: string, cwdOverride?: string): any;
+    static inMemory(cwd?: string, options?: any): any;
+  }
+  export class DefaultResourceLoader {
+    constructor(options?: any);
+    reload(): Promise<void>;
+  }
+  export function getAgentDir(): string;
 }
 
 declare module "@earendil-works/pi-tui" {

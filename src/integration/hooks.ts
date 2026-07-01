@@ -6,7 +6,6 @@ import { configuredChildAgents, textFromMessage } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
-import { startConversationWatch, stopConversationWatch } from "../engine/watch";
 import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyTeamMode, captureNormalTools, updateWidget } from "../ui/tui/widget";
 import { resolveHiveSddStatus } from "../engine/sdd";
@@ -14,12 +13,12 @@ import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveSta
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
-    if (state.teamMode === "normal" && process.env.PI_HIVE_CHILD !== "1") return;
+    if (state.teamMode === "normal") return;
     return enforceDomainForTool(state, event, ctx);
   });
 
   pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
-    if (!state.config || process.env.PI_HIVE_CHILD === "1" || state.teamMode === "normal") return;
+    if (!state.config || state.teamMode === "normal") return;
     const catalog = state.config.agents.map((root) => {
       const lines: string[] = [];
       const renderCatalogAgent = (agent: AgentConfig, depth: number) => {
@@ -50,7 +49,6 @@ ${catalog}`,
   });
 
   pi.on("message_update", async (event: any) => {
-    if (process.env.PI_HIVE_CHILD === "1") return;
     const delta = (event as any).assistantMessageEvent;
     if (delta?.type === "text_delta" && typeof delta.delta === "string") {
       if (!state.streamStartMs) state.streamStartMs = Date.now();
@@ -65,13 +63,13 @@ ${catalog}`,
       state.streamStartMs = 0;
       state.streamedChars = 0;
     }
-    // Only the top-level orchestrator narrates into the SHARED log. Child
-    // processes (workers, distiller) would otherwise dump their full messages
-    // here — mislabeled as "Orchestrator" and unbounded (a worker answer or a
-    // mental-model YAML can be hundreds of KB), which is what bloated the shared
-    // log and blew up team_conversation. Each child already keeps its own full
-    // transcript in agents/<slug>.jsonl (read it via team_conversation(agent)).
-    if (process.env.PI_HIVE_CHILD === "1") return;
+    // This hook is registered once, on the orchestrator's own pi: ExtensionAPI
+    // — workers run as separate in-process AgentSessions (see dispatchAgent)
+    // that never load pi-hive's extension hooks, so this handler structurally
+    // never fires for worker output. It only ever sees the orchestrator's own
+    // messages. Each worker keeps its own full transcript in agents/<slug>.jsonl
+    // (read it via team_conversation(agent)) — unbounded worker output (a
+    // mental-model YAML can be hundreds of KB) never reaches the shared log.
     const message = (event as any).message;
     const role = message?.role;
     if (!role || role === "toolResult") return;
@@ -91,11 +89,7 @@ ${catalog}`,
     try {
       reloadTeam(state, ctx);
       state.sddStatus = resolveHiveSddStatus(state, ctx.cwd);
-      logRecord(state, { from: "System", type: "system", message: process.env.PI_HIVE_CHILD === "1" ? `Nested worker started: ${process.env.PI_HIVE_PARENT_AGENT || "unknown"}` : "Session started" });
-      if (process.env.PI_HIVE_CHILD === "1") {
-        emitHiveEvent(state, "agent_session_start", { parent: process.env.PI_HIVE_PARENT_AGENT || "unknown", agent: process.env.PI_HIVE_CURRENT_AGENT || "unknown" }, process.env.PI_HIVE_CURRENT_AGENT || "Worker");
-        return;
-      }
+      logRecord(state, { from: "System", type: "system", message: "Session started" });
       registerHiveTelemetrySession(state, ctx.cwd);
       emitHiveEvent(state, "session_start", {
         cwd: ctx.cwd,
@@ -105,9 +99,6 @@ ${catalog}`,
         topology: hiveTopology(state),
       }, "System");
       writeHiveStateSnapshot(state);
-      // Top-level process only: mirror nested (lead→member) activity from the
-      // shared log into our runtimes so the status modal shows the full tree.
-      startConversationWatch(state);
       captureNormalTools(state);
       applyTeamMode(state, ctx, "normal", { notify: false });
       const missingSkills = Array.from(state.runtimes.values()).flatMap((runtime) =>
@@ -116,15 +107,17 @@ ${catalog}`,
           .map((ref) => `${runtime.config.name}: ${ref.path}`),
       );
       const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";
-      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nConfigured agent skills are passed to worker pi processes explicitly with --no-skills/--skill.\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
+      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
     } catch (error: any) {
       if (ctx.hasUI) ctx.ui.notify(`Hive failed to load: ${error?.message || error}`, "error");
     }
   });
 
   pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
-    stopConversationWatch(state);
-    for (const runtime of state.runtimes.values()) if (runtime.timer) clearInterval(runtime.timer);
+    for (const runtime of state.runtimes.values()) {
+      if (runtime.timer) clearInterval(runtime.timer);
+      if (runtime.session) { try { runtime.session.dispose(); } catch { /* noop */ } runtime.session = undefined; }
+    }
     if (state.obsServer?.proc) {
       try { state.obsServer.proc.kill(); } catch { /* noop */ }
       state.obsServer = undefined;

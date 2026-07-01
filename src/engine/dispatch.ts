@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { spawnManaged } from "./process";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -17,10 +18,17 @@ import {
   extractUsage,
 } from "../core/utils";
 import { logRecord } from "./state";
-import { currentAgentName } from "./session";
+import { currentAgentName, runAsAgent } from "./session";
 import { canDelegateTo } from "./domain";
 import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
+import { buildHiveTools } from "../agents/tools";
+import { workerResourceLoader } from "./worker-extension";
+
+function resolveModel(ctx: ExtensionContext, modelString: string): any {
+  const [provider, ...idParts] = modelString.split("/");
+  return (ctx as any).modelRegistry?.find(provider, idParts.join("/"));
+}
 
 function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
@@ -72,7 +80,6 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   if (fresh && existsSync(runtime.sessionFile)) {
     try { archivePriorRun(runtime.sessionFile); } catch { /* noop */ }
   }
-  const hasExistingSession = existsSync(runtime.sessionFile);
 
   runtime.status = "running";
   runtime.task = task;
@@ -96,155 +103,143 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   publishRuntimeUpdate(state);
   writeHiveStateSnapshot(state);
 
-  // Emit compact progress to the shared conversation log every ~2s. Child processes
-  // also mirror progress into the shared conversation log so the top-level
-  // status modal can surface nested lead→member work.
-  const mirrorProgressToConversation = process.env.PI_HIVE_CHILD === "1";
-  let progressTick = 0;
+  // Every nesting level shares one process and one state.runtimes Map now, so
+  // a nested delegation already mutates the same AgentRuntime the top-level
+  // status modal reads directly — no cross-process mirroring needed. This
+  // timer keeps elapsedMs ticking and polls the live context-window fill via
+  // runtime.session (assigned once createAgentSession resolves below) — the
+  // same underlying data ctx.getContextUsage() exposes for the top-level
+  // session's own TUI footer, now readable per-worker since it's in-process.
   runtime.timer = setInterval(() => {
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
+    // percent is null right after compaction until a fresh assistant response
+    // provides usage data again — keep the last known value rather than
+    // flashing to 0 during that transient window.
+    const usage = runtime.session?.getContextUsage?.();
+    if (usage?.percent != null) runtime.contextPct = usage.percent;
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
-    // every ~2s, not every second, to keep logs light
-    if (++progressTick % 2 === 0) {
-      const progress = {
-        from: runtime.config.name,
-        type: "progress",
-        inputTokens: runtime.inputTokens,
-        outputTokens: runtime.outputTokens,
-        costUsd: runtime.costUsd,
-        elapsedMs: runtime.elapsedMs,
-      };
-      if (mirrorProgressToConversation) logRecord(state, progress);
-    }
   }, 1000);
   runtime.timer.unref?.();
 
-  const args = [
-    "--mode", "json",
-    "-p",
-    "--model", model,
-    "--tools", tools,
-    "--thinking", thinking,
-    "--append-system-prompt", prompt,
-    "--session", runtime.sessionFile,
-    "--no-skills",
-  ];
-  for (const skill of runtime.config.skills || []) args.push("--skill", resolve(ctx.cwd, skill.path));
-  if (hasExistingSession) args.push("-c");
-  args.push(task);
+  const resolvedModel = resolveModel(ctx, model);
+  if (!resolvedModel) {
+    if (runtime.timer) clearInterval(runtime.timer);
+    runtime.status = "error";
+    state.activeRuns = Math.max(0, state.activeRuns - 1);
+    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
+  }
+
+  const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
+  const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name));
+  const skillPaths = (runtime.config.skills || []).map((skill) => resolve(ctx.cwd, skill.path));
 
   const chunks: string[] = [];
-  const stderrChunks: string[] = [];
+  const sessionManager = SessionManager.open(runtime.sessionFile);
 
-  return new Promise((resolve) => {
-    const { proc } = spawnManaged("pi", args, {
-      cwd: ctx.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PI_HIVE_CHILD: "1",
-        PI_HIVE_PARENT_AGENT: currentAgentName(),
-        PI_HIVE_CURRENT_AGENT: runtime.config.name,
-        PI_HIVE_SESSION_ID: state.session!.sessionId,
-        PI_HIVE_SESSION_DIR: state.session!.sessionDir,
-        PI_HIVE_CONVERSATION_LOG: state.session!.conversationLog,
-        PI_HIVE_OBSERVABILITY_LOG: state.session!.observabilityLog,
-      },
-    });
-    let buffer = "";
-
-    const consumeEvent = (event: any) => {
-      if (event.type === "message_update") {
-        const delta = event.assistantMessageEvent;
-        const text = delta?.delta || delta?.text || "";
-        if (delta?.type === "text_delta" && text) {
-          chunks.push(text);
-          const last = chunks.join("").split("\n").filter((line) => line.trim()).pop();
-          if (last) runtime.lastWork = last;
-        }
-      } else if (event.type === "tool_execution_start") {
-        runtime.toolCount++;
-        runtime.lastWork = `tool: ${event.toolName || event.name || "unknown"}`;
-        emitHiveEvent(state, "worker_tool_start", { agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", toolCallId: event.toolCallId }, runtime.config.name);
-      } else if (event.type === "tool_execution_end") {
-        emitHiveEvent(state, "worker_tool_end", { agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", toolCallId: event.toolCallId, isError: event.isError === true }, runtime.config.name);
-      } else if (event.type === "message_end") {
-        const usage = event.message?.usage;
-        if (usage) {
-          const u = extractUsage(usage);
-          runtime.inputTokens += u.input;
-          runtime.outputTokens += u.output;
-          runtime.costUsd += u.cost;
-        }
-      } else if (event.type === "agent_end") {
-        const messages = event.messages || [];
-        const last = [...messages].reverse().find((message: any) => message.role === "assistant");
-        if (last && !chunks.length) chunks.push(textFromMessage(last));
-        if (last?.usage) {
-          const u = extractUsage(last.usage);
-          runtime.inputTokens += u.input;
-          runtime.outputTokens += u.output;
-          runtime.costUsd += u.cost;
-        }
-      }
-      publishRuntimeUpdate(state);
-      writeHiveStateSnapshot(state);
-    };
-
-    proc.stdout?.setEncoding("utf-8");
-    proc.stdout?.on("data", (chunk: string) => {
-      buffer += chunk;
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try { consumeEvent(JSON.parse(line)); } catch { /* ignore non-json */ }
-      }
-    });
-
-    proc.stderr?.setEncoding("utf-8");
-    proc.stderr?.on("data", (chunk: string) => stderrChunks.push(chunk));
-
-    const finish = (code: number | null) => {
-      if (buffer.trim()) {
-        try { consumeEvent(JSON.parse(buffer)); } catch { /* ignore */ }
-      }
-      if (runtime.timer) clearInterval(runtime.timer);
-      runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-      runtime.status = code === 0 ? "done" : "error";
-      state.activeRuns = Math.max(0, state.activeRuns - 1);
-
-      const output = chunks.join("").trim() || stderrChunks.join("").trim() || "[no output]";
-      runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
-      // The shared log keeps only a bounded summary of the result — the full
-      // output is returned to the caller and persisted in this agent's own
-      // transcript (agents/<slug>.jsonl). Logging the whole thing here is what
-      // turned the shared log into a multi-hundred-KB-per-line firehose.
-      const completion = {
-        from: runtime.config.name,
-        to: "Orchestrator",
-        type: runtime.status,
-        message: truncateMiddle(output, 2_000),
-        costUsd: runtime.costUsd,
-        inputTokens: runtime.inputTokens,
-        outputTokens: runtime.outputTokens,
-        elapsedMs: runtime.elapsedMs,
-      };
-      logRecord(state, completion);
-      emitHiveEvent(state, "delegation_end", { ...completion, exitCode: code ?? 1, runtime: runtimeSummary(runtime) }, runtime.config.name);
-      publishRuntimeUpdate(state);
-      writeHiveStateSnapshot(state);
-      state.onRuntimeFinish?.(runtime, ctx);
-      resolve({ output, exitCode: code ?? 1, elapsed: runtime.elapsedMs });
-    };
-
-    proc.on("close", finish);
-    proc.on("error", (error: Error) => {
-      stderrChunks.push(error.message);
-      finish(1);
-    });
+  const { session } = await createAgentSession({
+    cwd: ctx.cwd,
+    model: resolvedModel,
+    modelRegistry: (ctx as any).modelRegistry,
+    thinkingLevel: thinking as any,
+    tools: toolNames,
+    customTools: hiveTools,
+    sessionManager,
+    resourceLoader: workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths),
   });
+  runtime.session = session;
+
+  const unsubscribe = session.subscribe((event: any) => {
+    if (event.type === "message_update") {
+      const delta = event.assistantMessageEvent;
+      const text = delta?.delta || delta?.text || "";
+      if (delta?.type === "text_delta" && text) {
+        chunks.push(text);
+        const last = chunks.join("").split("\n").filter((line: string) => line.trim()).pop();
+        if (last) runtime.lastWork = last;
+      }
+    } else if (event.type === "tool_execution_start") {
+      runtime.toolCount++;
+      runtime.lastWork = `tool: ${event.toolName || event.name || "unknown"}`;
+      emitHiveEvent(state, "worker_tool_start", { agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", toolCallId: event.toolCallId }, runtime.config.name);
+    } else if (event.type === "tool_execution_end") {
+      emitHiveEvent(state, "worker_tool_end", { agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", toolCallId: event.toolCallId, isError: event.isError === true }, runtime.config.name);
+    } else if (event.type === "message_end") {
+      const usage = event.message?.usage;
+      if (usage) {
+        const u = extractUsage(usage);
+        runtime.inputTokens += u.input;
+        runtime.outputTokens += u.output;
+        runtime.costUsd += u.cost;
+      }
+    } else if (event.type === "agent_end") {
+      const messages = event.messages || [];
+      const last = [...messages].reverse().find((message: any) => message.role === "assistant");
+      if (last && !chunks.length) chunks.push(textFromMessage(last));
+      if (last?.usage) {
+        const u = extractUsage(last.usage);
+        runtime.inputTokens += u.input;
+        runtime.outputTokens += u.output;
+        runtime.costUsd += u.cost;
+      }
+    }
+    publishRuntimeUpdate(state);
+    writeHiveStateSnapshot(state);
+  });
+
+  let errorMessage: string | undefined;
+  try {
+    // Scoped so currentAgentName() resolves to this worker for everything
+    // causally downstream of prompt() — subscribed event handlers, tool
+    // execute() calls (including a nested delegate_agent recursing into
+    // dispatchAgent again), and enforceDomainForTool's lookup. Workers can run
+    // concurrently now that there's no process boundary between them, so this
+    // can no longer be a shared/global value (see currentAgentStorage in
+    // session.ts) — each concurrent call gets its own isolated context.
+    //
+    // prompt() throws synchronously for pre-acceptance failures (no model, no
+    // API key); a failure mid-run instead surfaces via session.state.errorMessage.
+    await runAsAgent(runtime.config.name, () => session.prompt(task));
+    errorMessage = session.state.errorMessage;
+    // The 1s timer polls this too, but relying on it alone can miss the final,
+    // most accurate reading if the last tick landed moments before completion.
+    const finalUsage = session.getContextUsage?.();
+    if (finalUsage?.percent != null) runtime.contextPct = finalUsage.percent;
+  } catch (error: any) {
+    errorMessage = error?.message || String(error);
+  }
+
+  unsubscribe();
+  if (runtime.timer) clearInterval(runtime.timer);
+  runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
+  runtime.status = errorMessage ? "error" : "done";
+  const exitCode = errorMessage ? 1 : 0;
+  state.activeRuns = Math.max(0, state.activeRuns - 1);
+  session.dispose();
+  runtime.session = undefined;
+
+  const output = chunks.join("").trim() || errorMessage || "[no output]";
+  runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
+  // The shared log keeps only a bounded summary of the result — the full
+  // output is returned to the caller and persisted in this agent's own
+  // transcript (agents/<slug>.jsonl). Logging the whole thing here is what
+  // turned the shared log into a multi-hundred-KB-per-line firehose.
+  const completion = {
+    from: runtime.config.name,
+    to: "Orchestrator",
+    type: runtime.status,
+    message: truncateMiddle(output, 2_000),
+    costUsd: runtime.costUsd,
+    inputTokens: runtime.inputTokens,
+    outputTokens: runtime.outputTokens,
+    elapsedMs: runtime.elapsedMs,
+  };
+  logRecord(state, completion);
+  emitHiveEvent(state, "delegation_end", { ...completion, exitCode, runtime: runtimeSummary(runtime) }, runtime.config.name);
+  publishRuntimeUpdate(state);
+  writeHiveStateSnapshot(state);
+  state.onRuntimeFinish?.(runtime, ctx);
+  return { output, exitCode, elapsed: runtime.elapsedMs };
 }
 
 // ── Mental-model distiller ────────────────────────────────────────────────
@@ -255,53 +250,40 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
 // consolidate (not just append), and never pollutes the worker's context.
 
 export async function runDistillerProcess(state: HiveState, ctx: ExtensionContext, prompt: string, model: string): Promise<string> {
-  const args = ["--mode", "json", "-p", "--model", model, "--tools", "", "--thinking", "off", prompt];
-  return new Promise((resolveProc) => {
-    // Inherit the parent's session so the distiller never mints its own session
-    // dir. It runs with no team tools, so it does no team work — it only needs to
-    // be recognized as an in-session child (PI_HIVE_CHILD) pointed at the
-    // live session, not a fresh one.
-    const { proc } = spawnManaged("pi", args, {
-      cwd: ctx.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PI_HIVE_CHILD: "1",
-        PI_HIVE_PARENT_AGENT: "Distiller",
-        PI_HIVE_CURRENT_AGENT: "Distiller",
-        ...(state.session
-          ? {
-              PI_HIVE_SESSION_ID: state.session.sessionId,
-              PI_HIVE_SESSION_DIR: state.session.sessionDir,
-              PI_HIVE_CONVERSATION_LOG: state.session.conversationLog,
-              PI_HIVE_OBSERVABILITY_LOG: state.session.observabilityLog,
-            }
-          : {}),
-      },
-    });
-    const chunks: string[] = [];
-    let buffer = "";
-    const consume = (event: any) => {
-      if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-        chunks.push(event.assistantMessageEvent.delta || event.assistantMessageEvent.text || "");
-      } else if (event.type === "agent_end") {
-        const last = [...(event.messages || [])].reverse().find((m: any) => m.role === "assistant");
-        if (last && !chunks.length) chunks.push(textFromMessage(last));
-      }
-    };
-    proc.stdout?.setEncoding("utf-8");
-    proc.stdout?.on("data", (chunk: string) => {
-      buffer += chunk;
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) { if (line.trim()) { try { consume(JSON.parse(line)); } catch { /* ignore */ } } }
-    });
-    proc.on("error", () => resolveProc(""));
-    proc.on("close", () => {
-      if (buffer.trim()) { try { consume(JSON.parse(buffer)); } catch { /* ignore */ } }
-      resolveProc(chunks.join("").trim());
-    });
+  const resolvedModel = resolveModel(ctx, model);
+  if (!resolvedModel) return "";
+
+  // In-process now: no separate session to inherit. The distiller's transcript
+  // is a scratch prompt/response pair, not durably meaningful on its own, so it
+  // never needs a session file — SessionManager.inMemory() is correct here.
+  const { session } = await createAgentSession({
+    cwd: ctx.cwd,
+    model: resolvedModel,
+    modelRegistry: (ctx as any).modelRegistry,
+    thinkingLevel: "off",
+    tools: [],
+    noTools: "all",
+    sessionManager: SessionManager.inMemory(ctx.cwd),
   });
+
+  const chunks: string[] = [];
+  session.subscribe((event: any) => {
+    if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+      chunks.push(event.assistantMessageEvent.delta || event.assistantMessageEvent.text || "");
+    } else if (event.type === "agent_end") {
+      const last = [...(event.messages || [])].reverse().find((m: any) => m.role === "assistant");
+      if (last && !chunks.length) chunks.push(textFromMessage(last));
+    }
+  });
+
+  try {
+    await session.prompt(prompt);
+  } catch {
+    return "";
+  } finally {
+    session.dispose();
+  }
+  return chunks.join("").trim();
 }
 
 export async function distillMentalModel(state: HiveState, ctx: ExtensionContext, runtime: AgentRuntime): Promise<void> {
