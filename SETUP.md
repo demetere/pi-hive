@@ -25,10 +25,20 @@ Orchestrator              ← the single visible session; routes, never edits
 ```
 
 Runtime behavior:
-- The **orchestrator** is the only user-facing voice. It delegates **only to top-level leads**, then synthesizes their answers.
+- The **main session** is the only user-facing voice — the visible top-level Pi session. It delegates **only to top-level leads**, then synthesizes their answers. (Internally this is the root "orchestrator" node; `main:` is the config-facing key, and `orchestrator:` is still accepted as an alias.)
 - Each **lead** receives a focused task and fans it out to **its own direct reports** via `delegate_agent`, then synthesizes.
-- Each agent runs as a **separate `pi` subprocess** with its own session transcript, its own tool allow-list, and **enforced filesystem domains**.
+- Each agent runs as a **separate `pi` subprocess** with its own session transcript, its own tool allow-list, and **enforced filesystem domains + agent-type policy**.
 - After a worker finishes, a cheap-model **distiller** consolidates that agent's durable `*-mental-model.yaml` out-of-band.
+
+### Session modes (normal / plan / hive)
+The session runs in one of three modes; the main Pi session changes identity with the mode:
+- **normal** — plain Pi chat. No hive tools, **no enforcement**. The hive is dormant.
+- **plan** — the **planning team** is active. The main session is a `planner`; it drives planners to produce a complete spec under `.pi/hive/plans/<change-id>/` (proposal → requirements → design → tasks). No code execution. Enforcement is on (planners cannot touch code).
+- **hive** — the **execution team** is active. The main session is a `lead`; it delegates to coders/testers/reviewers to build the approved spec. Enforcement is on.
+
+Switch modes with `/hive-normal`, `/hive-plan-mode`, `/hive`, or cycle normal → plan → hive → normal with **`/hive-toggle`** / **Ctrl+Alt+T**. `/hive-execute <change-id>` switches to hive mode and drives execution from an approved `tasks.md`.
+
+The two teams are configured as separate blocks in `hive-config.yaml` — a `planning:` block (optional) and a `hive:` block — each with its own `main:` (the main session's identity for that mode) and `agents:` (its reports). Legacy top-level `orchestrator:`/`agents:` still works and maps to the hive block; without a `planning:` block, plan mode falls back to the hive team's planners.
 
 ### The one rule that drives the whole structure
 **Roles are derived from structure, never declared.** A node is:
@@ -129,11 +139,12 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 # Hierarchy + global defaults only. Per-agent behavior lives in each agent's .md
 # frontmatter. A node is a lead if it is top-level or has `members`; a leaf is a
 # member. Delegation = a node to its direct reports only. Roles are derived, not declared.
-
-orchestrator:
-  name: Orchestrator
-  color: "#cba6f7"
-  path: .pi/hive/agents/orchestrator.md
+#
+# Two team blocks: `hive:` (execution, active in hive mode) and `planning:`
+# (optional, active in plan mode). Each has a `main:` (the main session's identity
+# for that mode) plus `agents:` (its reports). `main` IS the visible main
+# session — give the planning main agent-type: planner (or lead) and the hive main
+# agent-type: lead in their .md frontmatter.
 
 # Inlined into EVERY agent's prompt. Keep tiny (paid per delegation). Usually [].
 shared_context: []
@@ -147,37 +158,58 @@ settings:
     model: openai-codex/gpt-5.4-mini   # see: pi --list-models
     conversation-lines: 200
 
-# Orchestrator's direct reports. Nest `members:` arbitrarily deep.
-agents:
-  - name: <Lead A>
-    color: "#fede5d"
-    path: .pi/hive/agents/<lead-a>/<lead-a>.md
-    members:
-      - name: <Member>
-        color: "#f0c674"
-        path: .pi/hive/agents/<lead-a>/<member>/<member>.md
-      - name: <Member>
-        color: "#b893ce"
-        path: .pi/hive/agents/<lead-a>/<member>/<member>.md
+# PLAN mode team (optional). The main session drives planners to produce full specs.
+planning:
+  main:
+    name: Plan Lead
+    color: "#f9e2af"
+    path: .pi/hive/agents/plan-lead.md       # frontmatter: agent-type: planner (or lead)
+  agents:
+    - name: Requirements Planner
+      color: "#fab387"
+      path: .pi/hive/agents/planning/requirements/requirements.md   # agent-type: planner
+    - name: Design Planner
+      color: "#f9e2af"
+      path: .pi/hive/agents/planning/design/design.md               # agent-type: planner
 
-  - name: <Lead B>
-    color: "#8bd5ca"
-    path: .pi/hive/agents/<lead-b>/<lead-b>.md
-    members:
-      - name: <Member>
-        color: "#74c7ec"
-        path: .pi/hive/agents/<lead-b>/<member>/<member>.md
-      - name: <Sub-Lead>          # a member with its own members → becomes a sub-lead
-        color: "#f38ba8"
-        path: .pi/hive/agents/<lead-b>/<sub-lead>/<sub-lead>.md
-        members:
-          - name: <Member>
-            color: "#a6e3a1"
-            path: .pi/hive/agents/<lead-b>/<sub-lead>/<member>/<member>.md
+# HIVE mode team (execution). The main session delegates to leads who fan out to members.
+hive:
+  main:
+    name: Orchestrator
+    color: "#cba6f7"
+    path: .pi/hive/agents/orchestrator.md    # frontmatter: agent-type: lead
+  agents:
+    - name: <Lead A>
+      color: "#fede5d"
+      path: .pi/hive/agents/<lead-a>/<lead-a>.md
+      members:
+        - name: <Member>
+          color: "#f0c674"
+          path: .pi/hive/agents/<lead-a>/<member>/<member>.md
+        - name: <Member>
+          color: "#b893ce"
+          path: .pi/hive/agents/<lead-a>/<member>/<member>.md
+
+    - name: <Lead B>
+      color: "#8bd5ca"
+      path: .pi/hive/agents/<lead-b>/<lead-b>.md
+      members:
+        - name: <Member>
+          color: "#74c7ec"
+          path: .pi/hive/agents/<lead-b>/<member>/<member>.md
+        - name: <Sub-Lead>          # a member with its own members → becomes a sub-lead
+          color: "#f38ba8"
+          path: .pi/hive/agents/<lead-b>/<sub-lead>/<sub-lead>.md
+          members:
+            - name: <Member>
+              color: "#a6e3a1"
+              path: .pi/hive/agents/<lead-b>/<sub-lead>/<member>/<member>.md
 ```
 
+> **Legacy shape still works.** A config with top-level `orchestrator:` + `agents:` (no `hive:`/`planning:` blocks) loads as the hive team. Plan mode then falls back to any `planner`-typed agents in that tree. Add a `planning:` block only when you want a dedicated planning hierarchy.
+
 Rules:
-- Every `name` must be **unique** across the whole tree (case-insensitive). Duplicates are dropped.
+- Every `name` must be **unique** across the whole tree (case-insensitive). Duplicates are dropped. Names are shared across both blocks' namespace — do not reuse a name between `planning:` and `hive:` unless it is deliberately the same agent.
 - `path` is repo-relative and must point at an existing `.md` you create in §6–§7.
 - `color` is `#rrggbb` (used in the tree widget and inline labels). Give each agent a distinct color.
 
@@ -203,10 +235,13 @@ Every agent (orchestrator, leads, members) is a Markdown file: **YAML frontmatte
 | `name` | yes | string | Must match the name in `hive-config.yaml`. |
 | `model` | **yes** | string | `provider/id` (e.g. `openai-codex/gpt-5.5`) or `inherit` (use the live session model). No global default — every agent declares it. |
 | `thinking` | **yes** | string | One of `off, minimal, low, medium, high, xhigh`. |
+| `agent-type` | **yes** | string | One of `planner, coder, tester, reviewer, lead`. Enforced capability type (see §7.1). Config **hard-fails** if missing/invalid. The orchestrator and every lead/routing node is `lead`. |
+| `stages` | no | list | **Planner-only.** Which planning gates this planner may write: any of `proposal, requirements, design, tasks`. Omitted = all four. Error if set on a non-planner. |
+| `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for this agent (only leads carry it). The text is injected into the agent's prompt. |
 | `tools` | no | list | Allow-list of tool names for this agent. Falls back to `default-tools` if omitted. See §7. |
 | `context` | no | list of `{path, use-when}` | Files **always inlined** into the prompt (full content). The agent's always-on knowledge. |
 | `skills` | no | list of `{path, use-when}` | On-demand procedures using Pi's native skill system. Worker launches disable ambient discovery with `--no-skills` and pass these paths explicitly with `--skill`. |
-| `domain` | no | list of `{path, read, upsert, delete, description}` | **Enforced** filesystem scopes. See §8. |
+| `domain` | no | list of `{path, read, upsert, delete, include, exclude, description}` | **Enforced** filesystem scopes. See §8. |
 | `routing-tags` | no | list | Keywords that bias the orchestrator/leads to route matching tasks here. |
 | `consult-when` | no | string | One-line "use me when…" shown in the routing catalog. |
 | `responsibilities` | no | list | Bullets describing what this agent owns. |
@@ -229,7 +264,9 @@ These extension tools can be granted via an agent's `tools` list:
 | `route_agent` | leads / orchestrator | Score which agent should handle a task before delegating. |
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
-| `hive_sdd_status` | orchestrator / leads | Inspect OpenSpec/SDD active changes and recommended phase routing. |
+| `hive_sdd_status` | orchestrator / leads | Inspect the plan store (`.pi/hive/plans/`) active changes and recommended phase routing. |
+
+Type-scoped hive tools (granted automatically by `agent-type`, not listed in `tools`): `submit_review_verdict` (reviewers), `plan_new` / `plan_select` / `approve_plan` (leads). You do not add these to a `tools` list.
 
 Built-in `pi` tools you allow per role: `read`, `grep`, `find`, `ls` (read/search — safe default for everyone), `edit`, `write` (mutate files — only implementers), `bash` (shell — grant sparingly; mutating bash is gated by domains, see §8).
 
@@ -241,19 +278,46 @@ Guidance:
 
 ---
 
+## 7.1 Agent types — the enforced capability policy
+
+Every agent declares an **`agent-type`** in its frontmatter. This is **required** — the config **hard-fails to load** if any agent (including the orchestrator) is missing or has an invalid type. Run `/hive-doctor` to list offenders with a suggested type per agent.
+
+Agent type is **separate from the derived tree role** (orchestrator/lead/member). The tree role governs *delegation*; the agent type governs *what actions an agent may take on what kind of file*. The five types:
+
+| `agent-type` | May mutate | Verdicts | Commits | Typical use |
+|---|---|---|---|---|
+| `planner` | `spec` / `docs` / `tasks` artifacts only — **never `code`** | no | no | Writes `proposal.md` / `requirements.md` / `design.md` / `tasks.md` under `.pi/hive/plans/`. Scope further with `stages`. |
+| `coder` | `code` / `docs` / `tasks` — **never `spec`** | no | only if it has a `commit:` field | Implements production code and tests **within its domain**. |
+| `tester` | tests (drawn by its domain `include`/`exclude` globs) | no | only with `commit:` | Writes tests, not production code. |
+| `reviewer` | **nothing (read-only)** — may run inspection/test `bash` | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; submits a structured red/yellow/green verdict. |
+| `lead` | **nothing (read-only)** | no | only if it has a `commit:` field | Delegates and coordinates. Includes the orchestrator. |
+
+**Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file*?" So a `coder` whose domain allows `src/**` still cannot write a `.pi/hive/plans/**` spec file (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
+
+**File classes** are language-agnostic: `spec` (`.pi/hive/plans/**`, `.pi/hive/specs/**`, `openspec/**`), `tasks` (`**/tasks.md`, `**/todo.md`), `docs` (`**/*.md`, `docs/**`), and `code` (everything else). The test-vs-production split is **not** a class — express it per-agent with domain `include`/`exclude` globs (§8): give a `tester` an `include: ["**/*.test.ts"]` write scope and a `coder` an `exclude: ["**/*.test.ts"]` write scope.
+
+**Leads (including the orchestrator) cannot mutate files.** All mutation flows through typed `coder`/`tester` agents. Invariant: *if a file changed, a typed mutator did it.*
+
+**Commits are blocked at the tool layer** unless the agent's config has a non-empty **`commit:`** field (a static config fact — no review-state check). Local working-tree ops (`git merge`, `git rebase`, `git add`, `git status`, `git diff`) stay allowed; publish/history-creation (`git commit`, `git push`, `git tag`, `gh pr merge`, `gh release create`, `npm/pnpm/yarn/bun publish`, `just release`) is blocked without `commit:`. Only leads carry `commit:`; a lead commits the working tree that coders/testers produced. "Commit only when green" is prompt guidance in the `commit:` text, not a mechanical gate.
+
+**`stages` (planner scoping).** A `planner` may optionally list which gate artifacts it may write: `stages: [proposal, requirements]`. Omitted = all four gates. One planner can own all gates, or you can run N specialist planners one gate each — same type, config decides granularity.
+
+Denials return an explanatory tool error (naming the type, class, and reason); the agent reads it and adapts — it is not killed. This matches the domain-denial UX.
+
+---
+
 ## 8. Domains — the enforced filesystem boundary (security-critical)
 
 `domain` scopes are **enforced at the tool layer**: `read`/`grep`/`find`/`ls`/`edit`/`write` and path-bearing/mutating `bash` calls outside an agent's domains are **blocked**. This is the real boundary — frontmatter restrictions are cosmetic, domains are not.
 
-Each scope: `{ path, read, upsert, delete, description }`. Each capability is **tri-state**:
-- `true` — this scope explicitly **allows** the capability under `path`.
-- `false` — this scope explicitly **denies** the capability under `path` (a carve-out).
-- *omitted* — this scope has **no opinion**; another scope decides. (Exception: `read` defaults to `true` when omitted, for back-compat — a bare scope grants read.)
+Each scope: `{ path, read, upsert, delete, include, exclude, description }`.
 
-Capabilities are resolved **per-path by most-specific-wins**: among all scopes whose `path` is a prefix of the target, the one with the **longest path that has an explicit `true`/`false`** decides — independently for `read`, `upsert`, and `delete`. If no covering scope has an opinion, the default is **deny**. On an exact-path tie, **deny wins**.
-
+- `read`, `upsert`, and `delete` are **required on every scope**. They must be explicit `true` or `false`; omission is a config error.
 - `read: true` — may read under this path. `upsert: true` — may create/modify (`edit`, `write`, `mv/cp/touch/mkdir/…`). `delete: true` — may delete (`rm`, etc.).
+- Optional `include` / `exclude` globs narrow a scope to matching files under `path` (for example `**/*_test.go`).
 - An agent with **no `domain`** is blocked from all path tools (it must work through delegation or just reason).
+
+Capabilities are resolved by **most-specific-wins**: deeper `path` entries beat broader paths; at the same path, matching `include` globs beat catch-all entries; exact ties deny. If no matching scope allows an action, the default is **deny**.
 
 **Carve-outs (broad allow minus a hole).** Because deeper paths win, you grant broadly and subtract with an explicit `false`. This is the idiomatic way to fence a sub-area off from an otherwise-broad grant:
 
@@ -261,21 +325,46 @@ Capabilities are resolved **per-path by most-specific-wins**: among all scopes w
 domain:
   - path: .                                   # read the whole repo
     read: true
+    upsert: false
+    delete: false
   - path: backend/internal/                   # write broadly across the backend
     read: true
     upsert: true
+    delete: false
   - path: backend/internal/identity/authz/    # ...except this subtree
+    read: true
     upsert: false                             # explicit DENY — overrides the allow above
     delete: false
 ```
 
-Here the agent can read everything (from `.`), write under `backend/internal/`, but **cannot** write under `backend/internal/identity/authz/` — while still being able to *read* it (the `upsert: false` denies only writes; read still flows from the broader scope, because capabilities resolve independently). This is how you give one agent broad write while reserving a sub-area for another agent/team.
+Here the agent can read everything (from `.`), write under `backend/internal/`, but **cannot** write under `backend/internal/identity/authz/`. This is how you give one agent broad write while reserving a sub-area for another agent/team.
+
+**File-glob restrictions (test-only writers).** Use a broad read-only scope plus a narrower include-glob write scope:
+
+```yaml
+domain:
+  - path: backend/internal/patient
+    read: true
+    upsert: false
+    delete: false
+    description: "Read the patient area."
+  - path: backend/internal/patient
+    read: true
+    upsert: true
+    delete: false
+    include:
+      - "**/*_test.go"
+    description: "May create/modify Go tests only."
+```
+
+At the same `path`, the `include` rule is more specific than the catch-all deny, so `*_test.go` writes are allowed while production `.go` writes remain blocked.
 
 Patterns:
-- **Coder** → `read: true, upsert: true` over its code area (e.g. `backend/`), `read: true` over sibling areas it must reference, plus `upsert: false` carve-outs for any sub-area another agent owns.
-- **Lead** → `read: true` broadly over the repo, `upsert: true` over `docs/` or `tasks/` where it writes specs.
-- **Reviewer / QA** → `read: true` over what it reviews; usually no `upsert`.
-- Reserve `delete: true` for the rare agent that must remove files; default it off.
+- **Coder** → `read: true, upsert: true, delete: false` over its code area (e.g. `backend/`), plus explicit deny carve-outs for any sub-area another agent owns.
+- **Lead** → `read: true, upsert: false, delete: false` broadly over the repo, plus `upsert: true` over `docs/` or `tasks/` where it writes specs.
+- **Reviewer / QA** → `read: true, upsert: false, delete: false` over what it reviews.
+- **Test-only implementer** → broad read scope plus an `include` write scope for test globs such as `**/*_test.go`, `**/*.test.ts`, or `**/*.spec.ts`.
+- Reserve `delete: true` for the rare agent that must remove files; default it off explicitly.
 
 Note: `domain` paths are **filesystem scopes resolved by prefix-match at tool-call time**; they need not exist on disk when the hive loads (a path can point at a file the agent will create). This is unlike `context:`/`skills:` paths, which are read at load time and must exist.
 
@@ -292,6 +381,7 @@ Always pair UI/role restrictions with the matching backend/domain restriction �
 name: Orchestrator
 model: inherit
 thinking: off
+agent-type: lead
 tools:
   - route_agent
   - delegate_agent
@@ -344,6 +434,8 @@ Return: **Answer** (direct conclusion), **What I delegated** (when useful), **Ke
 name: <Lead Name>
 model: inherit          # or a strong reasoning model, e.g. openai-codex/gpt-5.5
 thinking: off           # bump to low/medium for harder coordination
+agent-type: lead
+# commit: "Only commit when the user explicitly asks after review is green."  # uncomment on the lead that commits
 tools:
   - read
   - grep
@@ -403,6 +495,7 @@ Return: <the lead's deliverable shape — goals/scope/decisions, or findings/ris
 name: <Member Name>
 model: inherit          # or a capable coding model
 thinking: off           # low/medium if it implements
+agent-type: coder       # coder | tester | reviewer | planner — pick the member's capability type
 tools:
   - read
   - grep
@@ -487,12 +580,13 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 5. Seed each `<stem>-mental-model.yaml` (§9d).
 6. Create the `knowledge/` and `skills/` files the agents reference (§10).
 7. Add `.pi/hive/sessions/` to `.gitignore` (or confirm `.pi/` is already ignored).
-8. Validate against the checklist below, then tell the user to **restart their `pi` session** and run `/hive-status` or `/hive-observe` (then `/hive-toggle` or `Ctrl+Alt+T` to enter orchestrator mode).
+8. Validate against the checklist below, then tell the user to **restart their `pi` session**. The global telemetry dashboard starts automatically (if Bun is installed) and the header shows its URL — `/hive-observe` force-restarts it and opens a browser tab. Enter a mode with `/hive-plan-mode` (spec-writing) or `/hive` (execution), or cycle with `/hive-toggle` / `Ctrl+Alt+T`.
 
 **Validation checklist (every item must hold):**
 - [ ] `.pi/hive/hive-config.yaml` exists (this is what activates the extension).
 - [ ] Every `path` in the config points to a file that **exists**.
-- [ ] Every agent `.md` has **`name`, `model`, `thinking`** in frontmatter (these are required — missing `model`/`thinking` throws at load).
+- [ ] Every agent `.md` has **`name`, `model`, `thinking`, `agent-type`** in frontmatter (these are required — missing `model`/`thinking`/`agent-type` throws at load). The orchestrator and every lead are `agent-type: lead`.
+- [ ] `stages` appears only on `agent-type: planner` agents; `commit:` appears only on the lead(s) that may commit.
 - [ ] Every `name` is **unique** across the tree and **matches** between config and the agent's frontmatter `name`.
 - [ ] Every agent has a sibling `<stem>-mental-model.yaml` with a valid spine and `owner` = the agent's name.
 - [ ] Every `context`/`skills`/`domain` path referenced in frontmatter **exists** (knowledge files created).
@@ -500,9 +594,9 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] Agents that edit files have `edit`/`write` in `tools` **and** an `upsert: true` domain over their area. (Tools without a matching domain = blocked at runtime.)
 - [ ] The orchestrator has **no** `edit`/`write`/`bash`.
 - [ ] `settings.distiller.model` is set (or `distiller.enabled: false`).
-- [ ] SDD/OpenSpec is treated as the default for non-trivial work: `openspec/config.yaml` exists, or the Planning lead is explicitly instructed to initialize OpenSpec on the first substantial change. Teams map naturally: Planning → proposal/spec/design/tasks, Engineering → apply-progress, Validation → verify-report.
+- [ ] Spec-driven planning is treated as the default for non-trivial work: plans live under `.pi/hive/plans/<change-id>/` with `proposal → requirements → design → tasks` gates. A lead creates a change with `plan_new`; planners write the gate artifacts; `/hive-execute <change-id>` drives execution from an approved `tasks.md`. Teams map naturally: Planning → proposal/requirements/design/tasks, Engineering (coders/testers) → apply-progress, Validation (reviewers) → verify-report + verdict.
 - [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
-- [ ] `/hive-observe` opens the global local telemetry dashboard when Bun is installed.
+- [ ] The global local telemetry dashboard auto-starts on session start (Bun required) and the header shows its URL; `/hive-observe` force-restarts + opens it, `/hive-observe-stop` stops it. It is a shared daemon across all hive sessions and survives an individual session shutdown.
 - [ ] All YAML keys are kebab-case; no tabs; consistent 2-space indentation.
 
 **Quick scaffold sanity check** (run after building):
@@ -513,7 +607,7 @@ grep -E "path:" .pi/hive/hive-config.yaml | sed 's/.*path: *//' | while read p; 
 done
 # every agent .md has the required frontmatter keys
 for f in $(grep -rl "^name:" .pi/hive/agents --include="*.md"); do
-  for k in name model thinking; do grep -q "^$k:" "$f" || echo "$f missing $k"; done
+  for k in name model thinking agent-type; do grep -q "^$k:" "$f" || echo "$f missing $k"; done
 done
 ```
 
@@ -521,7 +615,8 @@ done
 
 ## 12. Anti-patterns (do not do these)
 
-- **Declaring roles or permissions in frontmatter.** Roles/permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter.
+- **Declaring tree roles or delegation permissions in frontmatter.** The *tree role* (orchestrator/lead/member) and delegation permissions are derived from the `members` nesting in `hive-config.yaml`. Don't add `role:` or `allowed-agents:` to frontmatter. (The `agent-type` capability field **is** required in frontmatter — that's a different axis; see §7.1.)
+- **Giving a lead or the orchestrator a mutating agent-type.** Leads (incl. the orchestrator) are `agent-type: lead` and cannot mutate files. Route all edits to `coder`/`tester` members.
 - **Giving the orchestrator file tools.** It routes and synthesizes only.
 - **Granting `edit`/`write` without a matching `upsert` domain** (or vice versa) — the agent will be blocked or unable to act.
 - **Telling agents to read the whole shared conversation log.** `team_conversation` is scoped per-agent on purpose; bulk reads blow up context.

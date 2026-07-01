@@ -3,18 +3,22 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { HIVE_SESSIONS_DIR } from "../core/constants";
-import type { AgentConfig, AgentRuntime, HiveConfig, HiveState, SessionState } from "../core/types";
+import type { AgentConfig, AgentRuntime, HiveConfig, HiveMode, HiveState, SessionState } from "../core/types";
 import { parseFrontmatter } from "../core/yaml";
 import {
   ensureDir,
+  normalizeAgentType,
+  normalizeCommit,
   normalizeDomainScopes,
   normalizeKnowledgeRefs,
+  normalizePlanStages,
   normalizeStringList,
   normalizeTools,
   safeRead,
   slug,
 } from "../core/utils";
-import { allConfiguredAgents, loadConfig } from "../core/config";
+import { allConfiguredAgents, loadConfig, teamForMode } from "../core/config";
+import { canonicalMode } from "../core/types";
 
 export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, _cfg: HiveConfig): SessionState {
   const existing = ctx.sessionManager
@@ -83,6 +87,12 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     context,
     skills: normalizeKnowledgeRefs(attrs.skills || (agent as any).skills),
     domain: normalizeDomainScopes(attrs.domain || (agent as any).domain, `${agent.name || agentSlug}.domain`),
+    // Capability type + planner scoping + commit guidance. Frontmatter wins over
+    // the config node, matching model/thinking/tools above. Validation already
+    // ran in loadConfig, so these are well-formed here.
+    agentType: normalizeAgentType(attrs.agentType || (agent as any).agentType) as AgentConfig["agentType"],
+    stages: normalizePlanStages(attrs.stages || (agent as any).stages) as AgentConfig["stages"],
+    commit: normalizeCommit(attrs.commit || (agent as any).commit),
   };
 
   return {
@@ -102,24 +112,43 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
   };
 }
 
+// Point the active config (orchestrator/agents) at the team for `mode` and
+// rebuild state.runtimes for that team only. Returns silently if no config.
+// Used by reloadTeam and on every mode switch so "who I can delegate to now"
+// always reflects the active mode's team (plan → planning team, hive → hive team).
+export function activateTeamRuntimes(state: HiveState, ctx: ExtensionContext, mode: HiveMode) {
+  if (!state.config) return;
+  const team = teamForMode(state.config, mode);
+  state.config.orchestrator = team.main;
+  state.config.agents = team.agents;
+
+  // Rebuilding the map drops the previous team's runtimes; stop any live timers
+  // and dispose any open worker sessions first so a mode switch mid-run does not
+  // leak an interval or an AgentSession.
+  for (const runtime of state.runtimes.values()) {
+    if (runtime.timer) { clearInterval(runtime.timer); runtime.timer = undefined; }
+    if (runtime.session) { try { runtime.session.dispose(); } catch { /* noop */ } runtime.session = undefined; }
+  }
+  state.runtimes = new Map();
+  for (const agent of allConfiguredAgents(team)) {
+    const runtime = loadAgentRuntime(state, ctx, state.config, agent);
+    state.runtimes.set(runtime.config.name.toLowerCase(), runtime);
+  }
+  restoreRuntimeCounters(state);
+}
+
 export function reloadTeam(state: HiveState, ctx: ExtensionContext) {
   state.config = loadConfig(ctx.cwd);
   state.session = restoreOrCreateSession(state, ctx, state.config);
   ensureDir(state.session.sessionDir);
   ensureDir(join(state.session.sessionDir, "agents"));
 
-  state.runtimes = new Map();
-  for (const agent of allConfiguredAgents(state.config)) {
-    const runtime = loadAgentRuntime(state, ctx, state.config, agent);
-    state.runtimes.set(runtime.config.name.toLowerCase(), runtime);
-  }
-
-  // A reload reuses the same session and its on-disk event log, but the runtime
-  // counters above start at 0. Seed them from the persisted log so usage totals
-  // (tokens, cost, run/tool counts) continue from where they were rather than
-  // resetting on every reload. Only the live in-memory tally was ever lost; the
-  // history is fully recoverable from delegation_end events.
-  restoreRuntimeCounters(state);
+  // Build runtimes for the team active in the current mode (plan → planning
+  // team, otherwise the hive team). activateTeamRuntimes also reseeds usage
+  // counters from the persisted log so totals continue across a reload rather
+  // than resetting. Normal mode loads the hive team so the tree/status is ready
+  // the moment the user switches into plan/hive.
+  activateTeamRuntimes(state, ctx, canonicalMode(state.mode) === "plan" ? "plan" : "hive");
 }
 
 // Rebuild per-agent cumulative counters from the session's hive-events.jsonl.
@@ -176,4 +205,19 @@ export function currentAgentName(): string {
 
 export function runAsAgent<T>(agentName: string, fn: () => T): T {
   return currentAgentStorage.run(agentName, fn);
+}
+
+// The active change-id (a planning/execution change under .pi/hive/plans/<id>/)
+// flows the same way as the current agent name — through AsyncLocalStorage, not
+// an env var — so it is correctly scoped per concurrent async call chain. Absent
+// ⇒ "no active change"; verdict/approval/comment writes degrade gracefully
+// (recorded against the session only) rather than throwing.
+const currentChangeStorage = new AsyncLocalStorage<string | undefined>();
+
+export function currentChangeId(): string | undefined {
+  return currentChangeStorage.getStore();
+}
+
+export function runWithChange<T>(changeId: string | undefined, fn: () => T): T {
+  return currentChangeStorage.run(changeId, fn);
 }

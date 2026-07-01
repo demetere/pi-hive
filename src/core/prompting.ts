@@ -34,12 +34,12 @@ export function renderKnowledgeRefs(ctx: ExtensionContext, title: string, refs: 
 export function renderDomainScopes(scopes: DomainScope[] | undefined): string {
   if (!scopes?.length) return "## Domain boundaries\nNo domains are configured, so file tools (read/edit/write/bash on paths) are all blocked for you. Work through delegation or report what you would need access to.";
   const rows = scopes.map((scope) => {
-    const flags = [
-      scope.read ? "read" : undefined,
-      scope.upsert ? "upsert" : undefined,
-      scope.delete ? "delete" : undefined,
-    ].filter(Boolean).join("/") || "no access";
-    return `- ${scope.path} — ${flags}${scope.description ? ` — ${scope.description}` : ""}`;
+    const flags = `read=${scope.read ? "yes" : "no"}, upsert=${scope.upsert ? "yes" : "no"}, delete=${scope.delete ? "yes" : "no"}`;
+    const globs = [
+      scope.include?.length ? `include: ${scope.include.join(", ")}` : undefined,
+      scope.exclude?.length ? `exclude: ${scope.exclude.join(", ")}` : undefined,
+    ].filter(Boolean).join("; ");
+    return `- ${scope.path} — ${flags}${globs ? ` — ${globs}` : ""}${scope.description ? ` — ${scope.description}` : ""}`;
   });
-  return `## Domain boundaries\n${rows.join("\n")}\n\nThese scopes are ENFORCED at the tool layer: read/edit/write/bash calls on paths outside your domains are blocked. Treat them as hard limits — if a task needs access you do not have, say so in your answer instead of attempting it.`;
+  return `## Domain boundaries\n${rows.join("\n")}\n\nThese scopes are ENFORCED at the tool layer: read/edit/write/bash calls on paths outside your domains are blocked. Include/exclude globs, when present, narrow a scope to matching files under that path. Treat domains as hard limits — if a task needs access you do not have, say so in your answer instead of attempting it.`;
 }
