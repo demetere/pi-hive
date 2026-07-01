@@ -38,7 +38,7 @@ function stateWith(runtimes: AgentRuntime[]): HiveState {
     runtimes: new Map(runtimes.map((entry) => [entry.config.name.toLowerCase(), entry])),
     widgetCtx: null,
     activeRuns: 0,
-    teamMode: "team",
+    mode: "hive",
     normalToolNames: [],
     streamStartMs: 0,
     streamedChars: 0,

@@ -2,8 +2,16 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execSync } from "node:child_process";
 import { HIVE_TOOL_NAMES } from "../../core/constants";
-import type { AgentConfig, AgentRuntime, HiveState, TeamMode } from "../../core/types";
+import { canonicalMode } from "../../core/types";
+import type { AgentConfig, AgentRuntime, HiveMode, HiveState } from "../../core/types";
+import { hasPlanningTeam } from "../../core/config";
+import { activateTeamRuntimes } from "../../engine/session";
 import { configuredChildAgents, extractUsage } from "../../core/utils";
+
+// The hive toolset active in BOTH plan and hive mode (the type-scoped tools —
+// plan_new/submit_review_verdict/etc. — are added per agent-type by the tool
+// builder, not here).
+const HIVE_MODE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
 
 export function captureNormalTools(state: HiveState) {
   const active = state.pi.getActiveTools().filter((name: string) => !HIVE_TOOL_NAMES.has(name));
@@ -16,28 +24,60 @@ export function captureNormalTools(state: HiveState) {
     .filter((name: string) => !HIVE_TOOL_NAMES.has(name));
 }
 
-export function modeStatusText(state: HiveState, mode: TeamMode = state.teamMode): string {
-  return mode === "team" ? `TEAM (${state.runtimes.size})` : "NORMAL";
+// Short uppercase label for the status bar / header / footer.
+export function modeLabel(mode: HiveMode): string {
+  return mode === "plan" ? "PLAN" : mode === "hive" ? "HIVE" : "NORMAL";
 }
 
-export function applyTeamMode(state: HiveState, ctx: ExtensionContext, mode: TeamMode, options: { notify?: boolean } = {}) {
+export function modeStatusText(state: HiveState, mode: HiveMode = state.mode): string {
+  if (mode === "normal") return "NORMAL";
+  return `${modeLabel(mode)} (${state.runtimes.size})`;
+}
+
+// Apply a session mode. normal = plain Pi (no hive tools, no enforcement);
+// plan = planning team active (main session = planning main/planner); hive =
+// execution team active. Switching plan/hive rebuilds the active team's runtimes
+// so "who I can delegate to now" and the main session's own identity/permissions
+// match the mode.
+export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMode, options: { notify?: boolean } = {}) {
   const shouldNotify = options.notify ?? true;
-  state.teamMode = mode;
+
+  // Guard: plan mode without a configured planning team. Fall back to the hive
+  // team (planners in the hive tree still work) but tell the user.
+  if (mode === "plan" && !hasPlanningTeam(state.config)) {
+    if (shouldNotify && ctx.hasUI) ctx.ui.notify("No planning: block configured — plan mode uses the hive team's planners. Add a planning: block to hive-config.yaml for a dedicated planning hierarchy.", "warning");
+  }
+
+  const previous = state.mode;
+  state.mode = mode;
+
+  // Rebuild the active team's runtimes when entering plan/hive (or switching
+  // between them). Normal mode leaves the runtimes as-is (harmless; tools are off).
+  if (mode !== "normal" && state.config && canonicalMode(previous) !== mode) {
+    activateTeamRuntimes(state, ctx, mode);
+  }
+
   installHeader(state, ctx);
   installFooter(state, ctx);
   if (ctx.hasUI) ctx.ui.setStatus("hive", modeStatusText(state, mode));
 
-  if (mode === "team") {
-    state.pi.setActiveTools(["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"]);
-    updateWidget(state);
-    if (shouldNotify && ctx.hasUI) ctx.ui.notify("Hive orchestrator mode enabled", "success");
+  if (mode === "normal") {
+    state.pi.setActiveTools(state.normalToolNames);
+    if (ctx.mode === "tui") ctx.ui.setWidget("hive-tree", undefined);
+    if (shouldNotify && ctx.hasUI) ctx.ui.notify("Normal Pi chat mode enabled", "info");
     return;
   }
 
-  state.pi.setActiveTools(state.normalToolNames);
-  if (ctx.mode === "tui") ctx.ui.setWidget("hive-tree", undefined);
-  if (shouldNotify && ctx.hasUI) ctx.ui.notify("Normal Pi chat mode enabled", "info");
+  state.pi.setActiveTools(HIVE_MODE_TOOLS);
+  updateWidget(state);
+  if (shouldNotify && ctx.hasUI) {
+    const msg = mode === "plan"
+      ? "Plan mode enabled — drive planners to produce full specs, then switch to hive to execute."
+      : "Hive mode enabled — delegate execution to coders/testers/reviewers.";
+    ctx.ui.notify(msg, "success");
+  }
 }
+
 
 export function shortPath(path: string): string {
   const home = process.env.HOME || "";
@@ -86,14 +126,18 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
     dispose() {},
     invalidate() {},
     render(width: number): string[] {
-      const modeLabel = state.teamMode === "team" ? "HIVE" : "NORMAL";
-      const modeColor = state.teamMode === "team" ? "accent" : "muted";
-      const details = state.teamMode === "team"
-        ? `${state.runtimes.size} agents · ${state.activeRuns} running`
-        : `normal chat`;
+      const label = modeLabel(state.mode);
+      const modeColor = state.mode === "hive" ? "accent" : state.mode === "plan" ? "warning" : "muted";
+      const details = state.mode === "normal"
+        ? `normal chat`
+        : `${state.mode === "plan" ? "planning" : "execution"} · ${state.runtimes.size} agents · ${state.activeRuns} running`;
+      // Dashboard indicator: shown only while the shared daemon is up (its url is
+      // recorded on state.obsServer); nothing when it is off.
+      const dash = state.obsServer?.url ? theme.fg("success", ` · ◉ ${state.obsServer.url.replace(/^https?:\/\//, "")}`) : "";
       const line = theme.fg("dim", "pi mode ") +
-        theme.fg(modeColor, theme.bold(modeLabel)) +
-        theme.fg("dim", ` · ${details} · Ctrl+Alt+T toggle`);
+        theme.fg(modeColor, theme.bold(label)) +
+        theme.fg("dim", ` · ${details} · Ctrl+Alt+T cycle`) +
+        dash;
       return [truncateToWidth(line, width, theme.fg("dim", "..."))];
     },
   }));
@@ -119,8 +163,9 @@ export function installFooter(state: HiveState, ctx: ExtensionContext) {
         const thinking = state.pi.getThinkingLevel?.() || "off";
         const speed = state.lastTokPerSec > 0 ? `${Math.round(state.lastTokPerSec)} tok/s` : `${formatCount(totals.output)} tok`;
 
-        const modeLabel = state.teamMode === "team" ? "HIVE" : "NORMAL";
-        const modePart = theme.fg(state.teamMode === "team" ? "accent" : "muted", `[${modeLabel}] `);
+        const label = modeLabel(state.mode);
+        const modeColor = state.mode === "hive" ? "accent" : state.mode === "plan" ? "warning" : "muted";
+        const modePart = theme.fg(modeColor, `[${label}] `);
         const left = modePart + theme.fg("dim", `${shortPath(ctx.cwd)} `) +
           (branch ? theme.fg("accent", `↯ ${branch}`) : "") +
           (gitStatus ? theme.fg("dim", ` · ${gitStatus}`) : "");
@@ -180,6 +225,12 @@ export function updateWidget(state: HiveState) {
   installHeader(state, state.widgetCtx);
 }
 
-export function toggleTeamMode(state: HiveState, ctx: ExtensionContext) {
-  applyTeamMode(state, ctx, state.teamMode === "team" ? "normal" : "team");
+// Cycle normal → plan → hive → normal.
+const MODE_CYCLE: HiveMode[] = ["normal", "plan", "hive"];
+export function nextMode(mode: HiveMode): HiveMode {
+  return MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
+}
+
+export function cycleMode(state: HiveState, ctx: ExtensionContext) {
+  applyMode(state, ctx, nextMode(state.mode));
 }

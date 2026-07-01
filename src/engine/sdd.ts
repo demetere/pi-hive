@@ -4,36 +4,46 @@ type FsDirent = { name: string; isDirectory(): boolean };
 import { join, relative } from "node:path";
 import type { HiveState, SddChangeStatus, SddStatus } from "../core/types";
 import { readIfSmall } from "../core/utils";
+import { HIVE_PLANS_DIR } from "../core/constants";
 
+// The planning gates plus execution-evidence files, in order. The first missing
+// file is the "next phase". Only the four GATES are shown as the derived phase
+// list; apply-progress / verify-report are execution status detail, not gates.
 const PHASE_FILES: Array<{ file: string; phase: string }> = [
   { file: "proposal.md", phase: "proposal" },
-  { file: "specs", phase: "spec" },
+  { file: "requirements.md", phase: "requirements" },
   { file: "design.md", phase: "design" },
   { file: "tasks.md", phase: "tasks" },
   { file: "apply-progress.md", phase: "apply" },
   { file: "verify-report.md", phase: "verify" },
-  { file: "sync-report.md", phase: "sync" },
 ];
 
-function dirHasFiles(path: string): boolean {
-  try { return readdirSync(path).some(Boolean); } catch { return false; }
+// The four planning gates the dashboard renders as the workflow phase list.
+export const PLAN_GATES = ["proposal", "requirements", "design", "tasks"] as const;
+
+// Resolve the plan-store root: prefer .pi/hive/plans/, fall back to OpenSpec's
+// openspec/changes/ if the hive store is absent (nice-to-have back-compat).
+function planStoreRoot(cwd: string): { root: string; kind: "hive" | "openspec" } {
+  const hive = join(cwd, ".pi", "hive", "plans");
+  if (existsSync(hive)) return { root: hive, kind: "hive" };
+  const openspec = join(cwd, "openspec", "changes");
+  if (existsSync(openspec)) return { root: openspec, kind: "openspec" };
+  return { root: hive, kind: "hive" };
 }
 
 function phasePresent(changeDir: string, file: string): boolean {
-  const full = join(changeDir, file);
-  if (file === "specs") return existsSync(full) && dirHasFiles(full);
-  return existsSync(full);
+  return existsSync(join(changeDir, file));
 }
 
 function nextPhase(changeDir: string): string {
   for (const phase of PHASE_FILES) {
     if (!phasePresent(changeDir, phase.file)) return phase.phase;
   }
-  return "archive";
+  return "ready";
 }
 
 function changeSummary(changeDir: string): string {
-  for (const file of ["proposal.md", "design.md", "tasks.md", "apply-progress.md", "verify-report.md", "sync-report.md"]) {
+  for (const file of ["proposal.md", "requirements.md", "design.md", "tasks.md", "apply-progress.md", "verify-report.md"]) {
     const text = readIfSmall(join(changeDir, file), 32_000);
     const first = text.split("\n").map((line) => line.trim()).find((line) => line && !line.startsWith("#"));
     if (first) return first.slice(0, 240);
@@ -42,7 +52,7 @@ function changeSummary(changeDir: string): string {
 }
 
 function activeChanges(cwd: string): SddChangeStatus[] {
-  const root = join(cwd, "openspec", "changes");
+  const { root } = planStoreRoot(cwd);
   let entries: FsDirent[] = [];
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return []; }
   return entries
@@ -81,20 +91,20 @@ function findAgent(state: HiveState, patterns: RegExp[]): string | undefined {
 }
 
 export function resolveHiveSddStatus(state: HiveState, cwd: string): SddStatus {
-  const configPath = join(cwd, "openspec", "config.yaml");
-  const configured = existsSync(configPath) || existsSync(join(cwd, "openspec"));
-  const planning = findAgent(state, [/planning/i, /product/i, /requirement/i, /spec/i]);
-  const engineering = findAgent(state, [/engineering/i, /backend/i, /frontend/i, /implementation/i, /apply/i]);
-  const validation = findAgent(state, [/validation/i, /qa/i, /test/i, /security/i, /verify/i]);
+  const { root, kind } = planStoreRoot(cwd);
+  const configured = existsSync(root);
+  const planning = findAgent(state, [/planning/i, /product/i, /requirement/i, /spec/i, /plan/i]);
+  const engineering = findAgent(state, [/engineering/i, /backend/i, /frontend/i, /implementation/i, /apply/i, /coder/i]);
+  const validation = findAgent(state, [/validation/i, /qa/i, /test/i, /security/i, /verify/i, /review/i]);
   const suggestedRouting = [
-    planning ? `proposal/spec/design/tasks → ${planning}` : "proposal/spec/design/tasks → Planning lead not detected",
+    planning ? `proposal/requirements/design/tasks → ${planning}` : "proposal/requirements/design/tasks → Planning lead not detected",
     engineering ? `apply-progress/implementation → ${engineering}` : "apply-progress/implementation → Engineering lead not detected",
-    validation ? `verify-report/release confidence → ${validation}` : "verify-report/release confidence → Validation lead not detected",
-    "sync/archive → Orchestrator coordinates final synthesis and user confirmation",
+    validation ? `verify-report/review verdict → ${validation}` : "verify-report/review verdict → Validation lead not detected",
+    "final synthesis → Orchestrator coordinates confirmation and durable updates",
   ];
   return {
     configured,
-    configPath: configured ? relative(cwd, configPath) : undefined,
+    configPath: configured ? relative(cwd, root) : (kind === "hive" ? HIVE_PLANS_DIR : undefined),
     activeChanges: activeChanges(cwd),
     suggestedRouting,
   };
@@ -102,9 +112,9 @@ export function resolveHiveSddStatus(state: HiveState, cwd: string): SddStatus {
 
 export function renderHiveSddStatus(status: SddStatus): string {
   const lines = [
-    "# Hive SDD/OpenSpec status",
+    "# Hive plan store status",
     "",
-    `OpenSpec configured: ${status.configured ? "yes" : "no"}${status.configPath ? ` (${status.configPath})` : ""}`,
+    `Plan store present: ${status.configured ? "yes" : "no"}${status.configPath ? ` (${status.configPath})` : ""}`,
     "",
     "## Suggested hive routing",
     ...status.suggestedRouting.map((line) => `- ${line}`),
@@ -112,7 +122,7 @@ export function renderHiveSddStatus(status: SddStatus): string {
     "## Active changes",
   ];
   if (!status.activeChanges.length) {
-    lines.push(status.configured ? "No active changes found under openspec/changes/." : "No openspec/ directory found yet.");
+    lines.push(status.configured ? `No active changes found under ${status.configPath || HIVE_PLANS_DIR}/.` : `No plan store found yet (${HIVE_PLANS_DIR}/).`);
   } else {
     for (const change of status.activeChanges) {
       lines.push(`- ${change.name}: next=${change.nextPhase}; artifacts=${change.files.join(", ") || "none"}; path=${change.path}`);
@@ -127,17 +137,17 @@ export function renderSddPromptBlock(state: HiveState): string {
   const suggestedRouting = status?.suggestedRouting?.length
     ? status.suggestedRouting
     : [
-        "proposal/spec/design/tasks → Planning lead",
+        "proposal/requirements/design/tasks → Planning lead",
         "apply-progress/implementation → Engineering lead",
-        "verify-report/release confidence → Validation lead",
-        "sync/archive → Orchestrator coordinates final synthesis and user confirmation",
+        "verify-report/review verdict → Validation lead",
+        "final synthesis → Orchestrator coordinates confirmation and durable updates",
       ];
   const activeChanges = status?.activeChanges?.length
     ? status.activeChanges.map((change) => `- ${change.name}: next=${change.nextPhase}, path=${change.path}`).join("\n")
     : "- none";
   const bootstrap = status?.configured
-    ? "OpenSpec is present; keep using openspec/changes/<change>/ artifacts as the source of truth."
-    : "OpenSpec is not present yet; for the first non-trivial change, route Planning to create/initialize the openspec structure and a change folder before implementation.";
+    ? `A plan store is present; keep using ${HIVE_PLANS_DIR}/<change-id>/ artifacts as the source of truth.`
+    : `No plan store yet; for the first non-trivial change, route Planning to create a ${HIVE_PLANS_DIR}/<change-id>/ folder (proposal → requirements → design → tasks) before implementation.`;
 
-  return `## Default workflow: SDD/OpenSpec\nUse Spec-Driven Development as the default hive operating mode for non-trivial work. Do not let substantial work live only in chat. Keep requirements, design, tasks, implementation evidence, and verification evidence in file-backed OpenSpec-style artifacts.\n\n${bootstrap}\n\nSuggested phase ownership:\n${suggestedRouting.map((line) => `- ${line}`).join("\n")}\n\nActive changes:\n${activeChanges}\n\nDefault phase flow:\n- proposal/spec/design/tasks: Planning clarifies scope, requirements, non-goals, UX/product constraints, and the implementation plan.\n- apply-progress/implementation: Engineering makes the changes and records files touched plus evidence.\n- verify-report: Validation checks tests, regressions, security/QA concerns, and release confidence.\n- sync/archive: Orchestrator coordinates final synthesis, user confirmation when risk is high, and durable spec updates.\n\nUse hive_sdd_status when you need current artifact status. Tiny direct answers can stay inline, but code changes, cross-file investigations, ambiguous requests, or review-risky work should go through SDD by default.`;
+  return `## Default workflow: spec-driven planning\nUse spec-driven development as the default hive operating mode for non-trivial work. Do not let substantial work live only in chat. Keep requirements, design, tasks, implementation evidence, and verification evidence in file-backed artifacts under ${HIVE_PLANS_DIR}/<change-id>/.\n\n${bootstrap}\n\nSuggested phase ownership:\n${suggestedRouting.map((line) => `- ${line}`).join("\n")}\n\nActive changes:\n${activeChanges}\n\nDefault phase flow:\n- proposal → requirements → design → tasks: Planning clarifies scope, user requirements/acceptance criteria, technical design, and the ordered task plan (one approval gate at a time).\n- apply-progress/implementation: Engineering (coders/testers) makes the changes and records files touched plus evidence.\n- verify-report/review verdict: Validation (reviewers) checks tests, regressions, and submits a structured verdict.\n- final synthesis: Orchestrator coordinates confirmation when risk is high and durable updates.\n\nUse hive_sdd_status for current artifact status; run /hive-execute <change-id> to drive execution from an approved tasks.md. Tiny direct answers can stay inline, but code changes, cross-file investigations, ambiguous requests, or review-risky work should go through the plan store by default.`;
 }

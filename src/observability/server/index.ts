@@ -13,6 +13,7 @@ import {
   sourcePaths,
   startTelemetryRuntime,
 } from "./runtime";
+import { addApproval, addComment, listPlans, planDetail, planFile, resolveProjectCwd } from "./plans";
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -41,6 +42,23 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req: Request) {
     const url = new URL(req.url);
+
+    if (req.method === "POST") {
+      if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
+      // POST /plans/:changeId/comments  and  POST /plans/:changeId/approval
+      const commentMatch = url.pathname.match(/^\/plans\/([^/]+)\/comments$/);
+      const approvalMatch = url.pathname.match(/^\/plans\/([^/]+)\/approval$/);
+      if (commentMatch || approvalMatch) {
+        const changeId = decodeURIComponent((commentMatch || approvalMatch)![1]);
+        const cwd = resolveProjectCwd(url.searchParams.get("cwd"));
+        if (!cwd) return json({ error: "unknown project cwd" }, 400);
+        let body: any = {};
+        try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
+        const result = commentMatch ? addComment(cwd, changeId, body) : addApproval(cwd, changeId, body);
+        return json(result, result.ok ? 200 : 400);
+      }
+      return json({ error: "not found" }, 404);
+    }
 
     if (req.method === "DELETE") {
       if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
@@ -79,6 +97,28 @@ Bun.serve({
     if (url.pathname === "/events") return json({ events: allEvents() });
     if (url.pathname === "/states") return json({ states: allSnapshots() });
     if (url.pathname === "/sessions") return json({ sessions: sessionSummaries() });
+
+    // Plan store (read). All scoped to a known project cwd (?cwd=..., defaults
+    // to the boot project); an unknown cwd is rejected so a caller cannot read
+    // arbitrary filesystem paths.
+    if (url.pathname === "/plans" || url.pathname.startsWith("/plans/")) {
+      const cwd = resolveProjectCwd(url.searchParams.get("cwd"));
+      if (!cwd) return json({ error: "unknown project cwd", plans: [] }, url.pathname === "/plans" ? 200 : 400);
+      if (url.pathname === "/plans") return json({ cwd, plans: listPlans(cwd) });
+      const fileMatch = url.pathname.match(/^\/plans\/([^/]+)\/file$/);
+      if (fileMatch) {
+        const changeId = decodeURIComponent(fileMatch[1]);
+        const rel = url.searchParams.get("path") || "";
+        const file = planFile(cwd, changeId, rel);
+        return file ? json(file) : json({ error: "not found" }, 404);
+      }
+      const detailMatch = url.pathname.match(/^\/plans\/([^/]+)$/);
+      if (detailMatch) {
+        const changeId = decodeURIComponent(detailMatch[1]);
+        const detail = planDetail(cwd, changeId);
+        return detail ? json(detail) : json({ error: "not found" }, 404);
+      }
+    }
     if (url.pathname === "/stream") {
       let sub: Subscriber | undefined;
       return new Response(new ReadableStream({

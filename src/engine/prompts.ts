@@ -2,47 +2,77 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BODY_CATEGORIES } from "../core/mental-model";
 import type { AgentRuntime, HiveState, KnowledgeRef } from "../core/types";
 import { buildSharedContext, renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
-import { renderSddPromptBlock } from "./sdd";
+
+// The type-specific operating contract injected into a worker's prompt. States
+// the capability boundary the enforcer also mechanically applies, so the model
+// understands its role rather than only bouncing off tool denials. RED
+// discipline is light: it states the tester/coder division but never mandates
+// test-first ordering (ordering is the orchestrator's per-task choice).
+export function buildOperatingContract(runtime: AgentRuntime): string {
+  const type = runtime.config.agentType;
+  if (!type) return "";
+  const lines: string[] = ["## Operating contract (agent type)"];
+  switch (type) {
+    case "planner": {
+      lines.push("You are a **planner**. You write only spec/requirements/design/tasks artifacts (under `.pi/hive/plans/`, plus docs). You must not modify production or test code — those edits are blocked at the tool layer.");
+      if (runtime.config.stages?.length) lines.push(`You own these planning gates: ${runtime.config.stages.join(", ")}. You may write only those gate artifacts.`);
+      break;
+    }
+    case "coder":
+      lines.push("You are a **coder**. You implement production code and tests within your domain. You do not write spec files and you do not issue review verdicts. Tests are typically the tester's job.");
+      break;
+    case "tester":
+      lines.push("You are a **tester**. You write tests, not production code. You do not write spec files or issue verdicts.");
+      break;
+    case "reviewer":
+      lines.push("You are a **reviewer**. You are read-only: you may run inspection and test commands but must not modify files. Submit your final verdict with `submit_review_verdict` (red/yellow/green) — not as chat text.");
+      break;
+    case "lead": {
+      lines.push("You are a **lead**. You delegate and coordinate; you do not modify files (all edits go through your coder/tester reports).");
+      if (runtime.config.commit?.trim()) lines.push(`Commit guidance: ${runtime.config.commit.trim()} Never add AI attribution trailers to commit messages.`);
+      break;
+    }
+  }
+  return lines.join("\n");
+}
 
 export function buildWorkerPrompt(state: HiveState, ctx: ExtensionContext, runtime: AgentRuntime, task: string): string {
+  // A worker's prompt is deliberately scoped to identity + boundaries + task.
+  // Routing guidance (routing-tags / consult-when) is for the router, not the
+  // worker (route_agent reads those off config); the plan-store/SDD workflow
+  // lecture is the main session's concern; peer-transcript reading pollutes
+  // context — the lead is responsible for passing everything the worker needs.
   const group = runtime.config.groupName ? `Group: ${runtime.config.groupName}` : "Group: Orchestration";
   const sharedContext = buildSharedContext(state, ctx);
-  const routingTags = runtime.config.routingTags?.length ? runtime.config.routingTags.join(", ") : "none";
   const responsibilities = runtime.config.responsibilities?.length ? runtime.config.responsibilities.map((item) => `- ${item}`).join("\n") : "- Use your role prompt and the assigned task.";
   const reports = runtime.config.allowedAgents || [];
-  const delegationScope = runtime.config.allowedAgents === undefined
-    ? "No explicit nested delegation scope configured."
-    : reports.length
-      ? `You lead a team. Your direct reports are: ${reports.join(", ")}. When a task should reach them (e.g. it asks you to fan work out, propagate something downstream, or it needs their specialist judgment), you MUST actually call delegate_agent for each relevant report and wait for their real answers — do NOT describe, assume, or fabricate what they would say. Only answer directly for work that is genuinely yours alone and does not involve your reports. Then synthesize their actual responses into your final answer.`
-      : "You have no reports; you cannot delegate. Do the work yourself and, if a task needs another agent, say so in your answer for your lead to route.";
+  // Only leads (agents with reports) get delegation guidance; a leaf worker has
+  // no reports and needs no paragraph about them.
+  const delegationScope = reports.length
+    ? `\nNested delegation: You lead a team. Your direct reports are: ${reports.join(", ")}. When a task should reach them (e.g. it asks you to fan work out, propagate something downstream, or it needs their specialist judgment), you MUST actually call delegate_agent for each relevant report and wait for their real answers — do NOT describe, assume, or fabricate what they would say. Only answer directly for work that is genuinely yours alone and does not involve your reports. Then synthesize their actual responses into your final answer.`
+    : "";
   const knowledgeContext = renderKnowledgeRefs(ctx, "Context and mental model", runtime.config.context);
-  const sdd = renderSddPromptBlock(state);
   const domain = renderDomainScopes(runtime.config.domain);
+  const operatingContract = buildOperatingContract(runtime);
 
   return `${runtime.systemPrompt}
 
 ## Hive operating context
 ${group}
-Agent: ${runtime.config.name}
-Consult when: ${runtime.config.consultWhen || "Any task matching your role"}
-Routing tags: ${routingTags}
-Nested delegation: ${delegationScope}
+Agent: ${runtime.config.name}${delegationScope}
 
 ## Responsibilities
 ${responsibilities}
 
-You are one participant in a larger team. The orchestrator may synthesize your answer with other agents.
+You are one participant in a larger team. Your lead has passed you the context it judged relevant; work from your task and the context below.
 Be direct, evidence-backed, and explicit about uncertainty. Do not claim changes were made unless you actually made them.
 
-${domain}
+${operatingContract ? `${operatingContract}\n\n` : ""}${domain}
 
 ${knowledgeContext}
 
-${sdd ? `${sdd}\n\n` : ""}## Shared project context
+## Shared project context
 ${sharedContext || "No shared context files were readable."}
-
-## Cross-agent context
-Your task below carries the context your lead judged relevant. If you need more — e.g. exactly what a reviewer found — call team_conversation with that agent's name (e.g. team_conversation(agent: "Security Reviewer")) to read its own transcript. Do not assume you can see other agents' work otherwise.
 
 ## Assigned task
 ${task}

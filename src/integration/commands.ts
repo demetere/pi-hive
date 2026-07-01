@@ -1,107 +1,39 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { HiveState } from "../core/types";
-import { toggleTeamMode } from "../ui/tui/widget";
-import { hiveTelemetryRegistryPath, hiveTelemetryServerPidPath } from "../engine/observability";
+import { applyMode, cycleMode } from "../ui/tui/widget";
 import { renderHiveDoctor } from "../engine/doctor";
-import { killProcess, spawnManaged } from "../engine/process";
+import { ensureDashboard, stopDashboard } from "../engine/dashboard";
+import { changeExists, hasTasks, listChangeIds, readTasks } from "../engine/plan-store";
+import { truncateMiddle } from "../core/utils";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-type DashboardPidFile = {
-  pid?: number;
-  host?: string;
-  port?: number;
-  url?: string;
-  cwd?: string;
-  startedAt?: string;
-};
-
-function readDashboardPidFile(): DashboardPidFile | null {
-  try {
-    return JSON.parse(readFileSync(hiveTelemetryServerPidPath(), "utf8")) as DashboardPidFile;
-  } catch {
-    return null;
-  }
-}
-
-function writeDashboardPidFile(info: DashboardPidFile) {
-  const path = hiveTelemetryServerPidPath();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(info, null, 2)}\n`);
-}
-
-function removeDashboardPidFile() {
-  try { rmSync(hiveTelemetryServerPidPath(), { force: true }); } catch { /* noop */ }
-}
-
-function killPid(pid: number | undefined, killed: Set<number>): void {
-  if (!Number.isFinite(pid) || !pid || pid <= 0 || pid === process.pid) return;
-  try {
-    process.kill(pid, "SIGTERM");
-    killed.add(pid);
-  } catch { /* noop */ }
-}
-
-async function isHiveDashboard(host: string, port: number): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 700);
-  try {
-    const response = await fetch(`http://${host}:${port}/health`, { signal: controller.signal });
-    if (!response.ok) return false;
-    const body = await response.json() as { ok?: boolean; mode?: string; registry?: string; db?: string };
-    return body.ok === true && body.mode === "global" && typeof body.registry === "string" && typeof body.db === "string";
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function stopDashboardOnPort(state: HiveState, port: number, host = process.env.HIVE_TELEMETRY_HOST || "127.0.0.1"): Promise<number[]> {
-  const killed = new Set<number>();
-
-  if (state.obsServer?.proc && !state.obsServer.proc.killed) {
-    const pid = killProcess(state.obsServer.proc);
-    if (typeof pid === "number") killed.add(pid);
-  }
-  state.obsServer = undefined;
-
-  const pidFile = readDashboardPidFile();
-  if (pidFile?.port === port) killPid(pidFile.pid, killed);
-
-  // Only kill a listener discovered by port scan after proving the HTTP server
-  // is pi-hive. This avoids terminating an unrelated local process that happens
-  // to be using the configured port.
-  if (await isHiveDashboard(host, port)) {
-    try {
-      const out = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
-      for (const raw of out.split("\n")) killPid(Number(raw.trim()), killed);
-    } catch { /* lsof exits non-zero when no process is listening */ }
-  }
-
-  if (killed.size) {
-    await sleep(300);
-    removeDashboardPidFile();
-  }
-  return Array.from(killed);
-}
-
 export function registerCommands(pi: ExtensionAPI, state: HiveState) {
+  // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
+  pi.registerCommand("hive-normal", {
+    description: "Switch to normal Pi chat (no hive, no enforcement)",
+    handler: async (_args: string, ctx: ExtensionContext) => applyMode(state, ctx, "normal"),
+  });
+  pi.registerCommand("hive-plan-mode", {
+    description: "Switch to plan mode — planning team produces full specs",
+    handler: async (_args: string, ctx: ExtensionContext) => applyMode(state, ctx, "plan"),
+  });
+  pi.registerCommand("hive", {
+    description: "Switch to hive mode — execution team builds the specs",
+    handler: async (_args: string, ctx: ExtensionContext) => applyMode(state, ctx, "hive"),
+  });
+  // Back-compat alias: /hive-toggle now cycles through the three modes.
   pi.registerCommand("hive-toggle", {
-    description: "Toggle normal chat / hive orchestrator mode",
-    handler: async (_args: string, ctx: ExtensionContext) => toggleTeamMode(state, ctx),
+    description: "Cycle session mode: normal → plan → hive → normal",
+    handler: async (_args: string, ctx: ExtensionContext) => cycleMode(state, ctx),
   });
 
   pi.registerShortcut(Key.ctrlAlt("t"), {
-    description: "Toggle normal chat / hive orchestrator mode",
-    handler: async (ctx: ExtensionContext) => toggleTeamMode(state, ctx),
+    description: "Cycle session mode: normal → plan → hive → normal",
+    handler: async (ctx: ExtensionContext) => cycleMode(state, ctx),
   });
 
   pi.registerCommand("hive-doctor", {
@@ -112,56 +44,83 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
     },
   });
 
+  pi.registerCommand("hive-execute", {
+    description: "Execute a plan change's tasks.md through the hive (usage: /hive-execute <change-id>)",
+    getArgumentCompletions: (prefix: string) => {
+      const cwd = state.widgetCtx?.cwd || process.cwd();
+      return listChangeIds(cwd)
+        .filter((id) => id.startsWith(prefix))
+        .map((id) => ({ value: id, label: id }));
+    },
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const changeId = args.trim().split(/\s+/)[0] || "";
+      if (!changeId) {
+        const available = listChangeIds(ctx.cwd);
+        if (ctx.hasUI) ctx.ui.notify(`Usage: /hive-execute <change-id>. Available: ${available.join(", ") || "none (create one first)"}`, "warning");
+        return;
+      }
+      if (!changeExists(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`No plan change "${changeId}" under .pi/hive/plans/. Available: ${listChangeIds(ctx.cwd).join(", ") || "none"}`, "error");
+        return;
+      }
+      if (!hasTasks(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" has no tasks.md yet. Complete the planning gates (proposal → requirements → design → tasks) first.`, "error");
+        return;
+      }
+      // Select the change so delegations are scoped to it, ensure HIVE (execution)
+      // mode is active, then drive execution via a user turn. The main session
+      // reads the tasks and delegates to coder/tester leads.
+      state.activeChangeId = changeId;
+      if (state.mode !== "hive") applyMode(state, ctx, "hive", { notify: false });
+      const tasks = truncateMiddle(readTasks(ctx.cwd, changeId), 12_000);
+      pi.sendUserMessage(
+        `Execute the approved plan for change "${changeId}" (.pi/hive/plans/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead and record implementation evidence. Do not edit files yourself.\n\n## tasks.md\n${tasks}`,
+      );
+      if (ctx.hasUI) ctx.ui.notify(`Executing plan "${changeId}" — driving the hive from tasks.md.`, "info");
+    },
+  });
+
+  pi.registerCommand("hive-plan", {
+    description: "List plan changes, or show the active one (usage: /hive-plan [change-id])",
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const requested = args.trim().split(/\s+/)[0] || "";
+      const available = listChangeIds(ctx.cwd);
+      if (requested) {
+        if (!changeExists(ctx.cwd, requested)) {
+          if (ctx.hasUI) ctx.ui.notify(`No plan change "${requested}". Available: ${available.join(", ") || "none"}`, "error");
+          return;
+        }
+        state.activeChangeId = requested;
+        if (ctx.hasUI) ctx.ui.notify(`Active plan change set to "${requested}".`, "info");
+        return;
+      }
+      const lines = available.length
+        ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}${hasTasks(ctx.cwd, id) ? " — tasks ready" : ""}`).join("\n")
+        : "No plan changes yet. Ask the orchestrator to plan a change, or a lead to run plan_new.";
+      if (ctx.hasUI) ctx.ui.notify(`Plan changes under .pi/hive/plans/:\n${lines}`, "info");
+    },
+  });
+
   pi.registerCommand("hive-observe", {
-    description: "Restart/open the pi-hive telemetry dashboard",
+    description: "Restart and open the global pi-hive telemetry dashboard",
     handler: async (_args: string, ctx: ExtensionContext) => {
       if (!state.session) {
         if (ctx.hasUI) ctx.ui.notify("Hive session is not initialized yet.", "error");
         return;
       }
-      const port = Number(process.env.HIVE_TELEMETRY_PORT || 43191);
-      const host = process.env.HIVE_TELEMETRY_HOST || "127.0.0.1";
-      const url = `http://${host}:${port}`;
-      const killed = await stopDashboardOnPort(state, port, host);
-      const serverPath = resolve(EXTENSION_ROOT, "src", "observability", "server", "index.ts");
-      if (!existsSync(serverPath)) {
-        if (ctx.hasUI) ctx.ui.notify(`Missing hive observability server: ${serverPath}`, "error");
-        return;
-      }
-      const { proc } = spawnManaged("bun", [serverPath], {
-        cwd: ctx.cwd,
-        detached: true,
-        stdio: "ignore",
-        env: {
-          ...process.env,
-          HIVE_TELEMETRY_PORT: String(port),
-          HIVE_TELEMETRY_HOST: host,
-          HIVE_TELEMETRY_LOG: state.session.observabilityLog,
-          HIVE_TELEMETRY_REGISTRY: hiveTelemetryRegistryPath(),
-          HIVE_CONVERSATION_LOG: state.session.conversationLog,
-          HIVE_SESSION_ID: state.session.sessionId,
-          HIVE_PROJECT_CWD: ctx.cwd,
-        },
-      });
-      proc.on("error", (error: Error) => {
-        if (ctx.hasUI) ctx.ui.notify(`Failed to start hive observability (is Bun installed?): ${error.message}`, "error");
-      });
-      state.obsServer = { proc, url, port };
-      writeDashboardPidFile({ pid: proc.pid, host, port, url, cwd: ctx.cwd, startedAt: new Date().toISOString() });
-      if (process.env.HIVE_TELEMETRY_NO_OPEN !== "1" && process.platform === "darwin") {
-        spawnManaged("open", [url], { detached: true, stdio: "ignore" });
-      }
-      if (ctx.hasUI) ctx.ui.notify(`pi-hive telemetry restarted: ${url}${killed.length ? ` (stopped ${killed.length} old process${killed.length === 1 ? "" : "es"})` : ""}`, "info");
+      // Explicit command: force a clean restart and open the browser tab.
+      const result = await ensureDashboard(state, ctx, EXTENSION_ROOT, { open: true, forceRestart: true });
+      if (!ctx.hasUI) return;
+      if (result.running) ctx.ui.notify(`pi-hive telemetry restarted: ${result.url}`, "info");
+      else ctx.ui.notify(result.bunMissing ? "Cannot start dashboard: Bun is not installed." : `Failed to start dashboard: ${result.error || "unknown error"}`, "error");
     },
   });
 
   pi.registerCommand("hive-observe-stop", {
-    description: "Stop the pi-hive telemetry dashboard on the configured port",
+    description: "Stop the global pi-hive telemetry dashboard",
     handler: async (_args: string, ctx: ExtensionContext) => {
-      const port = Number(process.env.HIVE_TELEMETRY_PORT || 43191);
-      const host = process.env.HIVE_TELEMETRY_HOST || "127.0.0.1";
-      const killed = await stopDashboardOnPort(state, port, host);
-      if (ctx.hasUI) ctx.ui.notify(killed.length ? `Stopped pi-hive telemetry dashboard (${killed.join(", ")})` : `No pi-hive telemetry dashboard found on port ${port}`, "info");
+      const killed = await stopDashboard(state);
+      if (ctx.hasUI) ctx.ui.notify(killed.length ? `Stopped pi-hive telemetry dashboard (${killed.join(", ")})` : "No pi-hive telemetry dashboard was running.", "info");
     },
   });
 }

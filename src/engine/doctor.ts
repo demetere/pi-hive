@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { HiveState } from "../core/types";
 import { HIVE_ROOT } from "../core/constants";
+import { auditAgentTypes } from "../core/agent-type-audit";
 import { hiveTelemetryRegistryPath } from "./observability";
 
 export type DoctorSeverity = "info" | "warning";
@@ -47,7 +48,21 @@ export function renderHiveDoctor(state: HiveState, cwd: string, extensionDir: st
     `info: Telemetry registry path: ${registryPath}`,
   ];
 
+  // agent-type audit: report every agent missing/invalid agent-type with an
+  // inferred suggestion. This is resilient to a config that now fails to load
+  // BECAUSE an agent-type is missing (validation hard-fails), so it re-parses
+  // the raw config independently. Report only — never auto-writes files.
+  const audit = existsSync(configPath) ? auditAgentTypes(cwd) : { rows: [], offenders: [] };
+  if (audit.rows.length) {
+    lines.push(checkLine(audit.offenders.length === 0, `agent-type declared on all ${audit.rows.length} configured agents${audit.offenders.length ? ` (${audit.offenders.length} missing/invalid)` : ""}`));
+    for (const row of audit.offenders) {
+      const reason = row.declared ? `invalid agent-type "${row.declared}"` : "no agent-type";
+      lines.push(`  - ${row.name}: ${reason}; suggest agent-type: ${row.suggestion}${row.path ? ` (${row.path})` : ""}`);
+    }
+  }
+
   if (!existsSync(configPath)) lines.push(`remedy: create ${HIVE_ROOT}/hive-config.yaml to activate pi-hive in this project`);
+  if (audit.offenders.length) lines.push("remedy: add the suggested 'agent-type:' to each agent's frontmatter, then restart pi (validation hard-fails without it)");
   if (!bunVersion) lines.push("remedy: install Bun or avoid /hive-observe dashboard commands");
   if (!existsSync(dashboardIndex) || !existsSync(dashboardStamp)) lines.push("remedy: run just build-dashboard before packaging");
 

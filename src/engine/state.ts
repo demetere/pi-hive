@@ -12,13 +12,14 @@ export function createState(pi: ExtensionAPI): HiveState {
     runtimes: new Map(),
     widgetCtx: null,
     activeRuns: 0,
-    teamMode: "normal",
+    mode: "normal",
     normalToolNames: [],
     streamStartMs: 0,
     streamedChars: 0,
     lastTokPerSec: 0,
     sddStatus: null,
     obsSeq: 0,
+    latestVerdicts: new Map(),
   };
 }
 

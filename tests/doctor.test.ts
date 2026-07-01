@@ -14,7 +14,7 @@ function state(overrides: Partial<HiveState> = {}): HiveState {
     runtimes: new Map([["orchestrator", {} as any]]),
     widgetCtx: null,
     activeRuns: 0,
-    teamMode: "team",
+    mode: "hive",
     normalToolNames: [],
     streamStartMs: 0,
     streamedChars: 0,
@@ -28,10 +28,11 @@ function state(overrides: Partial<HiveState> = {}): HiveState {
 test("renderHiveDoctor reports package assets and workspace state", () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-doctor-cwd-"));
   const extensionDir = mkdtempSync(join(tmpdir(), "pi-hive-doctor-ext-"));
-  mkdirSync(join(cwd, ".pi", "hive"), { recursive: true });
+  mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   mkdirSync(join(extensionDir, "src", "observability", "server"), { recursive: true });
   mkdirSync(join(extensionDir, "ui", "web", "dist"), { recursive: true });
-  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), "orchestrator:\n  name: Orchestrator\n");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nLead.");
+  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), "orchestrator:\n  name: Orchestrator\n  path: .pi/hive/agents/orchestrator.md\n");
   writeFileSync(join(extensionDir, "src", "observability", "server", "index.ts"), "export {};\n");
   writeFileSync(join(extensionDir, "ui", "web", "dist", "index.html"), "<div></div>\n");
   writeFileSync(join(extensionDir, "ui", "web", "dist", ".build-hash"), "hash\n");
@@ -43,6 +44,22 @@ test("renderHiveDoctor reports package assets and workspace state", () => {
   assert.match(result.text, /pass: Opt-in config present/);
   assert.match(result.text, /pass: Telemetry server present/);
   assert.match(result.text, /pass: Dashboard dist index present/);
+  assert.match(result.text, /pass: agent-type declared on all/);
+});
+
+test("renderHiveDoctor flags agents missing agent-type with a suggestion", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-doctor-untyped-"));
+  const extensionDir = mkdtempSync(join(tmpdir(), "pi-hive-doctor-ext-"));
+  mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
+  // Orchestrator typed, but a top-level "Security Reviewer" is untyped.
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nagent-type: lead\n---\nLead.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "reviewer.md"), "---\nmodel: openai/gpt-5\n---\nReview.");
+  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), "orchestrator:\n  name: Orchestrator\n  path: .pi/hive/agents/orchestrator.md\nagents:\n  - name: Security Reviewer\n    path: .pi/hive/agents/reviewer.md\n");
+
+  const result = renderHiveDoctor(state(), cwd, extensionDir);
+
+  assert.match(result.text, /Security Reviewer: no agent-type; suggest agent-type: reviewer/);
+  assert.match(result.text, /remedy: add the suggested 'agent-type:'/);
 });
 
 test("renderHiveDoctor includes remedies for missing required assets", () => {

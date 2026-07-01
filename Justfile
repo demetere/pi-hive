@@ -139,6 +139,13 @@ dev-dashboard:
 test:
   node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
 
+# Run the Bun-only test suite (plan-store SQLite layer, dashboard security).
+# Kept separate from `test` because db.ts uses bun:sqlite and the core must load
+# without Bun. Named *.spec.ts so the Node runner never picks them up.
+[group('quality')]
+test-db:
+  bun test ./tests/*.spec.ts
+
 # Verify package manifest, required files, peer deps, and dashboard stamp.
 [group('quality')]
 verify-package:
@@ -146,12 +153,12 @@ verify-package:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck-core typecheck-dashboard test verify-dashboard verify-package
+verify: typecheck-core typecheck-dashboard test test-db verify-dashboard verify-package
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck-core typecheck-dashboard test verify-dashboard verify-package pack-dry-run
+ci: typecheck-core typecheck-dashboard test test-db verify-dashboard verify-package pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================

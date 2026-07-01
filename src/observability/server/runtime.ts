@@ -9,6 +9,9 @@ import {
   dbSessionRowFromEvent,
   deleteSessionRows,
   insertEvent,
+  insertPlanApproval,
+  insertPlanComment,
+  insertPlanVerdict,
   loadPersistedEvents,
   loadPersistedStates,
   upsertSession,
@@ -139,6 +142,52 @@ function enrichEvent(event: HiveTelemetryEvent, source: Source): HiveTelemetryEv
   return event;
 }
 
+// Materialize plan-store events into their typed tables. The core extension
+// emits these as ordinary telemetry events (it cannot reach bun:sqlite); the
+// dashboard turns them into queryable rows here. The event_id is reused as the
+// row id so INSERT OR IGNORE makes materialization idempotent on replay.
+function materializePlanEvent(event: HiveTelemetryEvent) {
+  const payload = (event.payload || {}) as any;
+  const changeId = typeof payload.changeId === "string" ? payload.changeId.trim() : "";
+  if (!changeId) return; // no active change ⇒ nothing plan-scoped to record
+  if (event.type === "review_verdict") {
+    insertPlanVerdict({
+      id: event.event_id,
+      changeId,
+      reviewer: String(payload.reviewer || event.actor || "reviewer"),
+      verdict: String(payload.verdict || "yellow"),
+      summary: payload.summary ? String(payload.summary) : undefined,
+      evidence: payload.evidence,
+      concerns: payload.concerns,
+      blockers: payload.blockers,
+      sessionId: event.session_id,
+      createdAt: event.ts,
+    });
+  } else if (event.type === "plan_approval") {
+    insertPlanApproval({
+      id: event.event_id,
+      changeId,
+      phase: String(payload.phase || "proposal"),
+      approvedBy: String(payload.approvedBy || "chat"),
+      actor: payload.actor ? String(payload.actor) : (event.actor || undefined),
+      summary: payload.summary ? String(payload.summary) : undefined,
+      sessionId: event.session_id,
+      createdAt: event.ts,
+    });
+  } else if (event.type === "plan_comment") {
+    insertPlanComment({
+      id: event.event_id,
+      changeId,
+      file: payload.file ? String(payload.file) : undefined,
+      anchor: payload.anchor ? String(payload.anchor) : undefined,
+      author: payload.author ? String(payload.author) : (event.actor || undefined),
+      body: String(payload.body || ""),
+      sessionId: event.session_id,
+      createdAt: event.ts,
+    });
+  }
+}
+
 function addEvent(event: HiveTelemetryEvent) {
   if (!event || !event.event_id) return;
   // Progress is volatile node state, not durable history. Older logs may contain
@@ -148,6 +197,7 @@ function addEvent(event: HiveTelemetryEvent) {
   const result = insertEvent.run(dbEventRow(event));
   upsertSession.run(dbSessionRowFromEvent(event));
   if (result.changes === 0) return;
+  materializePlanEvent(event);
   events.push(event);
   events.sort((a, b) => String(a.ts).localeCompare(String(b.ts)) || String(a.session_id).localeCompare(String(b.session_id)) || Number(a.seq || 0) - Number(b.seq || 0));
   if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);

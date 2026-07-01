@@ -4,6 +4,7 @@ const TABS = [
   { id: "overview", label: "Overview" },
   { id: "sessions", label: "Sessions" },
   { id: "agents", label: "Agents" },
+  { id: "plans", label: "Plans" },
   { id: "activity", label: "Activity" },
   { id: "cost", label: "Cost" },
 ];

@@ -3,7 +3,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { spawnManaged } from "./process";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { HIVE_AGENTS_DIR } from "../core/constants";
+import { HIVE_AGENTS_DIR, TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
 import { normalizeMentalModelSpine } from "../core/mental-model";
 import type { AgentRuntime, HiveState } from "../core/types";
 import {
@@ -18,7 +18,7 @@ import {
   extractUsage,
 } from "../core/utils";
 import { logRecord } from "./state";
-import { currentAgentName, runAsAgent } from "./session";
+import { currentAgentName, currentChangeId, runAsAgent, runWithChange } from "./session";
 import { canDelegateTo } from "./domain";
 import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
@@ -131,7 +131,10 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   }
 
   const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
-  const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name));
+  // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
+  // not the tools list, so keep them even when the agent does not enumerate
+  // them. buildHiveTools only emits them for the eligible type.
+  const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
   const skillPaths = (runtime.config.skills || []).map((skill) => resolve(ctx.cwd, skill.path));
 
   const chunks: string[] = [];
@@ -199,7 +202,14 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     //
     // prompt() throws synchronously for pre-acceptance failures (no model, no
     // API key); a failure mid-run instead surfaces via session.state.errorMessage.
-    await runAsAgent(runtime.config.name, () => session.prompt(task));
+    //
+    // The active change-id is scoped alongside the agent name so the worker's
+    // tools (e.g. submit_review_verdict / approve_plan) resolve currentChangeId()
+    // to the selected change. A nested delegation inherits the caller's change-id
+    // unless a more specific one is set. state.activeChangeId is the persistent
+    // selection; currentChangeId() carries an already-scoped value into nesting.
+    const scopedChangeId = currentChangeId() ?? state.activeChangeId;
+    await runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(task)));
     errorMessage = session.state.errorMessage;
     // The 1s timer polls this too, but relying on it alone can miss the final,
     // most accurate reading if the last tick landed moments before completion.

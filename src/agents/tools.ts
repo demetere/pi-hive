@@ -2,7 +2,8 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { HiveState } from "../core/types";
+import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
+import { PLAN_STAGES } from "../core/normalize";
 import {
   extractFinalAnswer,
   hexAnsi,
@@ -13,6 +14,9 @@ import {
 import { routeAgents } from "../engine/routing";
 import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
+import { currentChangeId } from "../engine/session";
+import { emitHiveEvent } from "../engine/observability";
+import { changeExists, createChange, listChangeIds, readPlanMeta } from "../engine/plan-store";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
@@ -32,7 +36,9 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     return hexAnsi(color, name) || theme.fg("accent", name);
   };
 
-  return [
+  const callerType: AgentType | undefined = state.runtimes.get(callerName.toLowerCase())?.config.agentType;
+
+  const baseTools: ToolDefinition[] = [
     defineTool({
     name: "route_agent",
     label: "Route Agent",
@@ -67,14 +73,19 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         costUsd: runtime.costUsd,
         tokens: runtime.inputTokens + runtime.outputTokens,
       }));
+      const verdicts = Array.from((state.latestVerdicts || new Map()).values());
+      const verdictLines = verdicts.length
+        ? ["", "latest verdicts:", ...verdicts.map((v) => `- ${v.changeId}: ${v.verdict.toUpperCase()} by ${v.reviewer}${v.verdict === "red" && v.blockers.length ? ` — ${v.blockers.length} blocker(s)` : v.verdict === "yellow" && v.concerns.length ? ` — ${v.concerns.length} concern(s)` : ""}${v.summary ? ` — ${v.summary.slice(0, 120)}` : ""}`)]
+        : [];
       const text = [
         `session: ${state.session?.sessionId || "not initialized"}`,
         `conversation: ${state.session?.conversationLog || "n/a"}`,
         `active_runs: ${state.activeRuns}`,
         "",
         ...rows.map((row) => `- ${row.agent} [${row.group}] ${row.status}, runs=${row.runs}, tokens=${row.tokens}, cost=$${row.costUsd.toFixed(3)}${row.task ? ` — ${row.task.slice(0, 120)}` : ""}`),
+        ...verdictLines,
       ].join("\n");
-      return { content: [{ type: "text", text }], details: { session: state.session, activeRuns: state.activeRuns, agents: rows } };
+      return { content: [{ type: "text", text }], details: { session: state.session, activeRuns: state.activeRuns, agents: rows, verdicts } };
     },
   }),
 
@@ -165,6 +176,120 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     },
   }),
   ];
+
+  // Type-scoped tools. These are granted by AGENT TYPE (not the tools list), so
+  // they are appended here only for the eligible type and are kept through
+  // dispatch's tools-list filter (see TYPE_SCOPED_TOOL_NAMES).
+  const typeScopedTools: ToolDefinition[] = [];
+
+  // submit_review_verdict — reviewer-only by construction. Non-reviewers never
+  // see it, so there is no runtime-rejection path.
+  if (callerType === "reviewer") {
+    typeScopedTools.push(defineTool({
+      name: "submit_review_verdict",
+      label: "Submit Review Verdict",
+      description: "Submit your FINAL structured review verdict (red/yellow/green). green = clean approval; yellow = approve with non-blocking concerns (proceed, surface them); red = blocked, list blockers. This is how a reviewer reports its conclusion — do not put the verdict only in chat text.",
+      parameters: Type.Object({
+        verdict: Type.Union([Type.Literal("red"), Type.Literal("yellow"), Type.Literal("green")], { description: "red = blocked (populate blockers); yellow = approve with non-blocking concerns; green = clean approval." }),
+        summary: Type.String({ description: "One- or two-sentence summary of the review conclusion." }),
+        evidence: Type.Optional(Type.Array(Type.String(), { description: "What was checked / commands run / files inspected." })),
+        concerns: Type.Optional(Type.Array(Type.String(), { description: "Yellow: non-blocking follow-ups to surface to the human." })),
+        blockers: Type.Optional(Type.Array(Type.String(), { description: "Red: must-fix items before proceeding." })),
+        changeId: Type.Optional(Type.String({ description: "The change-id under review. Defaults to the active change if one is set." })),
+      }),
+      async execute(_toolCallId: string, params: unknown) {
+        const p = params as { verdict: ReviewVerdictLevel; summary: string; evidence?: string[]; concerns?: string[]; blockers?: string[]; changeId?: string };
+        const changeId = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
+        const evidence = p.evidence || [];
+        const concerns = p.concerns || [];
+        const blockers = p.blockers || [];
+        // Emit as a telemetry event; the dashboard materializes it into
+        // plan_verdicts. The core cannot reach bun:sqlite, so this is the path.
+        emitHiveEvent(state, "review_verdict", { changeId, reviewer: callerName, verdict: p.verdict, summary: p.summary, evidence, concerns, blockers }, callerName);
+        // Also cache in-memory so team_status can surface the latest verdict
+        // without a SQLite read (the core has no access to plan_verdicts).
+        if (changeId) {
+          (state.latestVerdicts ||= new Map()).set(changeId, {
+            changeId, reviewer: callerName, verdict: p.verdict, summary: p.summary,
+            evidence, concerns, blockers, createdAt: new Date().toISOString(),
+          });
+        }
+        const scope = changeId ? `change "${changeId}"` : "the current session (no active change-id)";
+        const detail = p.verdict === "red" ? `${blockers.length} blocker(s)` : p.verdict === "yellow" ? `${concerns.length} concern(s)` : "clean";
+        return {
+          content: [{ type: "text", text: `Verdict recorded for ${scope}: ${p.verdict.toUpperCase()} — ${detail}. ${p.summary}` }],
+          details: { ok: true, changeId, verdict: p.verdict, evidence, concerns, blockers },
+        };
+      },
+    }));
+  }
+
+  // Plan lifecycle + approval tools. Available to leads (incl. the orchestrator),
+  // who select/create a change and then delegate planners/coders under it.
+  if (callerType === "lead") {
+    typeScopedTools.push(defineTool({
+      name: "plan_new",
+      label: "New Plan",
+      description: "Create a new plan change under .pi/hive/plans/<change-id>/ (scaffolds plan.yaml) and make it the active change. Planners you then delegate to will write proposal/requirements/design/tasks artifacts into it.",
+      parameters: Type.Object({
+        title: Type.String({ description: "Human title for the change (also used to derive the kebab change-id)." }),
+        owner: Type.Optional(Type.String({ description: "Who owns this change. Optional." })),
+      }),
+      async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
+        const { title, owner } = params as { title: string; owner?: string };
+        const result = createChange(ctx.cwd, title, owner);
+        state.activeChangeId = result.changeId;
+        const note = result.created ? "created" : "already existed";
+        return { content: [{ type: "text", text: `Plan change "${result.changeId}" ${note} and is now the active change (${result.path}). Delegate planners to write proposal/requirements/design/tasks here.` }], details: { ok: true, ...result } };
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "plan_select",
+      label: "Select Plan",
+      description: "Set the active plan change by change-id (must exist under .pi/hive/plans/). With no argument, lists available changes.",
+      parameters: Type.Object({
+        changeId: Type.Optional(Type.String({ description: "The change-id to activate. Omit to list available changes." })),
+      }),
+      async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
+        const changeId = String((params as any).changeId || "").trim();
+        const available = listChangeIds(ctx.cwd);
+        if (!changeId) {
+          const list = available.length ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}`).join("\n") : "(none)";
+          return { content: [{ type: "text", text: `Available plan changes:\n${list}` }], details: { ok: true, available, active: state.activeChangeId } };
+        }
+        if (!changeExists(ctx.cwd, changeId)) {
+          return { content: [{ type: "text", text: `No change "${changeId}" under .pi/hive/plans/. Available: ${available.join(", ") || "none"}. Use plan_new to create one.` }], details: { ok: false, available } };
+        }
+        state.activeChangeId = changeId;
+        const meta = readPlanMeta(ctx.cwd, changeId);
+        return { content: [{ type: "text", text: `Active change set to "${changeId}"${meta.phase ? ` (phase: ${meta.phase})` : ""}.` }], details: { ok: true, changeId, meta } };
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
+      name: "approve_plan",
+      label: "Approve Plan",
+      description: "Record a chat-side approval of a planning gate (proposal/requirements/design/tasks) for a change. Use when the user has approved that gate in conversation.",
+      parameters: Type.Object({
+        phase: Type.Union(PLAN_STAGES.map((stage) => Type.Literal(stage)) as any, { description: "Which planning gate is approved." }),
+        changeId: Type.Optional(Type.String({ description: "The change-id being approved. Defaults to the active change if set." })),
+        actor: Type.Optional(Type.String({ description: "Who approved (e.g. the user's name). Optional." })),
+        summary: Type.Optional(Type.String({ description: "Optional note about the approval." })),
+      }),
+      async execute(_toolCallId: string, params: unknown) {
+        const p = params as { phase: string; changeId?: string; actor?: string; summary?: string };
+        const changeId = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
+        if (!changeId) {
+          return { content: [{ type: "text", text: "No active change-id. Select or create a change first, or pass changeId." }], details: { ok: false } };
+        }
+        emitHiveEvent(state, "plan_approval", { changeId, phase: p.phase, approvedBy: "chat", actor: p.actor, summary: p.summary }, callerName);
+        return { content: [{ type: "text", text: `Approved gate "${p.phase}" for change "${changeId}".` }], details: { ok: true, changeId, phase: p.phase } };
+      },
+    }));
+  }
+
+  return [...baseTools, ...typeScopedTools];
 }
 
 export function registerTools(pi: ExtensionAPI, state: HiveState) {

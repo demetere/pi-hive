@@ -6,6 +6,7 @@ import Sessions from "./tabs/Sessions";
 import Agents from "./tabs/Agents";
 import Activity from "./tabs/Activity";
 import Cost from "./tabs/Cost";
+import Plans from "./tabs/Plans";
 import AgentLog from "./components/AgentLog";
 import ConfirmModal from "./components/ConfirmModal";
 import { activeTab, connect, now, scope, scopeTitle, scopedStats, selectFleet, selectProject } from "./store";
@@ -58,6 +59,7 @@ export default function App() {
             <Match when={activeTab() === "overview"}><Overview /></Match>
             <Match when={activeTab() === "sessions"}><Sessions search={search()} /></Match>
             <Match when={activeTab() === "agents"}><Agents search={search()} /></Match>
+            <Match when={activeTab() === "plans"}><Plans search={search()} /></Match>
             <Match when={activeTab() === "activity"}><Activity search={search()} /></Match>
             <Match when={activeTab() === "cost"}><Cost /></Match>
           </Switch>

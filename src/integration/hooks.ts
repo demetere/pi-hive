@@ -1,24 +1,31 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
 import { configuredChildAgents, textFromMessage } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
 import { buildOrchestratorPrompt } from "../agents/prompts";
-import { applyTeamMode, captureNormalTools, updateWidget } from "../ui/tui/widget";
+import { applyMode, captureNormalTools, installHeader, updateWidget } from "../ui/tui/widget";
 import { resolveHiveSddStatus } from "../engine/sdd";
+import { ensureDashboard } from "../engine/dashboard";
 import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveStateSnapshot } from "../engine/observability";
+
+const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
-    if (state.teamMode === "normal") return;
+    // Enforcement (domain + agent-type policy) runs in plan AND hive mode; only
+    // normal mode is unguarded plain Pi.
+    if (state.mode === "normal") return;
     return enforceDomainForTool(state, event, ctx);
   });
 
   pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
-    if (!state.config || state.teamMode === "normal") return;
+    if (!state.config || state.mode === "normal") return;
+    const planMode = state.mode === "plan";
     const catalog = state.config.agents.map((root) => {
       const lines: string[] = [];
       const renderCatalogAgent = (agent: AgentConfig, depth: number) => {
@@ -33,17 +40,24 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       return `## ${root.name}\n- ${root.name}${root.routingTags?.length ? ` [${root.routingTags.join(", ")}]` : ""}: ${root.consultWhen || "team work"}\n${lines.join("\n")}`;
     }).join("\n\n");
 
+    const planBlock = planMode
+      ? `# Plan mode — you are the main session of the PLANNING team
+You are running as the visible main session in PLAN mode. Your job is to produce a COMPLETE spec for the requested change, not to implement it. Drive the planning team (or write artifacts yourself) to fill the plan store under \`.pi/hive/plans/<change-id>/\` one gate at a time: proposal → requirements → design → tasks. Use plan_new to create/select a change, delegate to planners for each gate, and stop at each gate for user confirmation when scope is uncertain. Do NOT write or modify production/test code in this mode — that is execution, which happens in hive mode. The end result of plan mode is an approved tasks.md; then the user switches to hive mode (or runs /hive-execute) to build it.
+
+`
+      : "";
+
     return {
       systemPrompt: `${event.systemPrompt}
 
-# Hive orchestrator mode
-${buildOrchestratorPrompt(state, _ctx)}
+# ${planMode ? "Hive plan mode" : "Hive orchestrator mode"}
+${planBlock}${buildOrchestratorPrompt(state, _ctx)}
 
 Use route_agent when the best specialist is not obvious, delegate to specialists with delegate_agent, then synthesize their findings.
 Use team_status to inspect live team state and team_conversation(agent: "<name>") to read one specific agent's own transcript. When stable lessons should be preserved, ask the relevant specialist to update its own mental model.
 Keep delegations focused and include enough context for the worker to act independently.
 
-Available agents:
+Available ${planMode ? "planners" : "agents"}:
 ${catalog}`,
     };
   });
@@ -100,7 +114,16 @@ ${catalog}`,
       }, "System");
       writeHiveStateSnapshot(state);
       captureNormalTools(state);
-      applyTeamMode(state, ctx, "normal", { notify: false });
+      applyMode(state, ctx, "normal", { notify: false });
+      // Ensure the shared, global telemetry dashboard daemon is running. This
+      // hook only fires for hive-opted-in projects (the extension registers
+      // nothing otherwise), so the opt-in gate is satisfied. Fire-and-forget and
+      // Bun-gated: the first hive session with Bun starts the daemon, later
+      // sessions adopt the running one. No browser tab opens automatically — the
+      // header shows the URL. It is NOT torn down on session shutdown (shared).
+      void ensureDashboard(state, ctx, EXTENSION_ROOT, { open: false }).then((result) => {
+        if (result.running && ctx.mode === "tui") installHeader(state, ctx);
+      }).catch(() => { /* best-effort; the dashboard is optional */ });
       const missingSkills = Array.from(state.runtimes.values()).flatMap((runtime) =>
         (runtime.config.skills || [])
           .filter((ref) => !existsSync(ref.path.startsWith("/") ? ref.path : resolve(ctx.cwd, ref.path)))
@@ -118,10 +141,10 @@ ${catalog}`,
       if (runtime.timer) clearInterval(runtime.timer);
       if (runtime.session) { try { runtime.session.dispose(); } catch { /* noop */ } runtime.session = undefined; }
     }
-    if (state.obsServer?.proc) {
-      try { state.obsServer.proc.kill(); } catch { /* noop */ }
-      state.obsServer = undefined;
-    }
+    // The telemetry dashboard is a SHARED global daemon — other sessions may be
+    // using it — so we do NOT kill it here. Just drop this session's reference.
+    // Explicit teardown is /hive-observe-stop.
+    state.obsServer = undefined;
     state.onRuntimeUpdate = undefined;
     state.onRuntimeFinish = undefined;
     if (ctx.mode === "tui") {

@@ -43,6 +43,41 @@ CREATE TABLE IF NOT EXISTS states (
   telemetry_log TEXT,
   state_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plan_verdicts (
+  id            TEXT PRIMARY KEY,
+  change_id     TEXT NOT NULL,
+  reviewer      TEXT NOT NULL,
+  verdict       TEXT NOT NULL,
+  summary       TEXT,
+  evidence_json TEXT,
+  concerns_json TEXT,
+  blockers_json TEXT,
+  session_id    TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_verdicts_change ON plan_verdicts(change_id, created_at);
+CREATE TABLE IF NOT EXISTS plan_approvals (
+  id           TEXT PRIMARY KEY,
+  change_id    TEXT NOT NULL,
+  phase        TEXT NOT NULL,
+  approved_by  TEXT NOT NULL,
+  actor        TEXT,
+  summary      TEXT,
+  session_id   TEXT,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_approvals_change ON plan_approvals(change_id, created_at);
+CREATE TABLE IF NOT EXISTS plan_comments (
+  id           TEXT PRIMARY KEY,
+  change_id    TEXT NOT NULL,
+  file         TEXT,
+  anchor       TEXT,
+  author       TEXT,
+  body         TEXT NOT NULL,
+  session_id   TEXT,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_comments_change ON plan_comments(change_id, created_at);
 `);
 
 export const insertEvent = db.query(`
@@ -158,4 +193,169 @@ export function deleteSessionRows(ids: string[]): void {
     }
   });
   tx(ids);
+}
+
+// ── Plan-store typed tables (verdicts / approvals / comments) ────────────────
+
+const insertPlanVerdictStmt = db.query(`
+  INSERT OR IGNORE INTO plan_verdicts
+    (id, change_id, reviewer, verdict, summary, evidence_json, concerns_json, blockers_json, session_id, created_at)
+  VALUES
+    ($id, $change_id, $reviewer, $verdict, $summary, $evidence_json, $concerns_json, $blockers_json, $session_id, $created_at)
+`);
+
+const insertPlanApprovalStmt = db.query(`
+  INSERT OR IGNORE INTO plan_approvals
+    (id, change_id, phase, approved_by, actor, summary, session_id, created_at)
+  VALUES
+    ($id, $change_id, $phase, $approved_by, $actor, $summary, $session_id, $created_at)
+`);
+
+const insertPlanCommentStmt = db.query(`
+  INSERT OR IGNORE INTO plan_comments
+    (id, change_id, file, anchor, author, body, session_id, created_at)
+  VALUES
+    ($id, $change_id, $file, $anchor, $author, $body, $session_id, $created_at)
+`);
+
+function jsonArray(value: unknown): string {
+  return JSON.stringify(Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+}
+
+export interface PlanVerdictInput {
+  id: string;
+  changeId: string;
+  reviewer: string;
+  verdict: string;
+  summary?: string;
+  evidence?: unknown;
+  concerns?: unknown;
+  blockers?: unknown;
+  sessionId?: string;
+  createdAt: string;
+}
+
+export function insertPlanVerdict(input: PlanVerdictInput): void {
+  insertPlanVerdictStmt.run({
+    $id: input.id,
+    $change_id: input.changeId,
+    $reviewer: input.reviewer,
+    $verdict: input.verdict,
+    $summary: input.summary ?? null,
+    $evidence_json: jsonArray(input.evidence),
+    $concerns_json: jsonArray(input.concerns),
+    $blockers_json: jsonArray(input.blockers),
+    $session_id: input.sessionId ?? null,
+    $created_at: input.createdAt,
+  });
+}
+
+export interface PlanApprovalInput {
+  id: string;
+  changeId: string;
+  phase: string;
+  approvedBy: string;
+  actor?: string;
+  summary?: string;
+  sessionId?: string;
+  createdAt: string;
+}
+
+export function insertPlanApproval(input: PlanApprovalInput): void {
+  insertPlanApprovalStmt.run({
+    $id: input.id,
+    $change_id: input.changeId,
+    $phase: input.phase,
+    $approved_by: input.approvedBy,
+    $actor: input.actor ?? null,
+    $summary: input.summary ?? null,
+    $session_id: input.sessionId ?? null,
+    $created_at: input.createdAt,
+  });
+}
+
+export interface PlanCommentInput {
+  id: string;
+  changeId: string;
+  file?: string;
+  anchor?: string;
+  author?: string;
+  body: string;
+  sessionId?: string;
+  createdAt: string;
+}
+
+export function insertPlanComment(input: PlanCommentInput): void {
+  insertPlanCommentStmt.run({
+    $id: input.id,
+    $change_id: input.changeId,
+    $file: input.file ?? null,
+    $anchor: input.anchor ?? null,
+    $author: input.author ?? null,
+    $body: input.body,
+    $session_id: input.sessionId ?? null,
+    $created_at: input.createdAt,
+  });
+}
+
+function parseJsonArray(value: unknown): string[] {
+  try {
+    const parsed = JSON.parse(typeof value === "string" ? value : "[]");
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function verdictRow(row: any) {
+  return {
+    id: row.id,
+    changeId: row.change_id,
+    reviewer: row.reviewer,
+    verdict: row.verdict,
+    summary: row.summary || "",
+    evidence: parseJsonArray(row.evidence_json),
+    concerns: parseJsonArray(row.concerns_json),
+    blockers: parseJsonArray(row.blockers_json),
+    sessionId: row.session_id || undefined,
+    createdAt: row.created_at,
+  };
+}
+
+export function listVerdicts(changeId: string) {
+  const rows = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id ORDER BY created_at ASC`).all({ $id: changeId }) as any[];
+  return rows.map(verdictRow);
+}
+
+export function latestVerdict(changeId: string) {
+  const row = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id ORDER BY created_at DESC LIMIT 1`).get({ $id: changeId }) as any;
+  return row ? verdictRow(row) : null;
+}
+
+export function listApprovals(changeId: string) {
+  const rows = db.query(`SELECT * FROM plan_approvals WHERE change_id = $id ORDER BY created_at ASC`).all({ $id: changeId }) as any[];
+  return rows.map((row) => ({
+    id: row.id,
+    changeId: row.change_id,
+    phase: row.phase,
+    approvedBy: row.approved_by,
+    actor: row.actor || undefined,
+    summary: row.summary || "",
+    sessionId: row.session_id || undefined,
+    createdAt: row.created_at,
+  }));
+}
+
+export function listComments(changeId: string) {
+  const rows = db.query(`SELECT * FROM plan_comments WHERE change_id = $id ORDER BY created_at ASC`).all({ $id: changeId }) as any[];
+  return rows.map((row) => ({
+    id: row.id,
+    changeId: row.change_id,
+    file: row.file || undefined,
+    anchor: row.anchor || undefined,
+    author: row.author || undefined,
+    body: row.body,
+    sessionId: row.session_id || undefined,
+    createdAt: row.created_at,
+  }));
 }

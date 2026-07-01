@@ -12,6 +12,11 @@ export type HiveTelemetryEventType =
   | "worker_tool_end"
   | "distill_start"
   | "distill_end"
+  // Plan-store events. Emitted by the core (which cannot reach bun:sqlite) and
+  // materialized into typed plan_* tables by the dashboard on ingest (§7.4).
+  | "review_verdict"
+  | "plan_approval"
+  | "plan_comment"
   | "error";
 
 export type TelemetryAgentStatus = "idle" | "running" | "waiting" | "done" | "error";
