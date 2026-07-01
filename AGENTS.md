@@ -32,6 +32,7 @@ The extension must stay safe to install globally: it should do nothing unless th
 ## Repository hygiene
 
 - Do not commit `node_modules/`, `.tgz` package artifacts, runtime sessions, logs, or local telemetry databases.
+- Use Conventional Commits for commit messages, for example `feat: add hive policy checks`, `fix(dashboard): preserve runtime counters`, or `docs: update setup guide`.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
 
