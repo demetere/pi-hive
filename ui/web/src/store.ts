@@ -3,7 +3,7 @@ import { createStore, produce } from "solid-js/store";
 import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView, Snapshot } from "./types";
 import { deleteProjectRemote, deleteSessionRemote, fetchInitialData, openEventStream } from "./api";
 import { projectName, sessionSlug } from "./lib/format";
-import { buildHistoryBySession, historyTotals as totalsFromHistory } from "./store/history";
+import { applyHistoryToRuntime, buildHistoryBySession, historyTotals as totalsFromHistory } from "./store/history";
 import { buildEventStatus } from "./store/status";
 import { buildAgents, flattenTopology } from "./store/topology";
 
@@ -227,11 +227,7 @@ export const sessions = createMemo<SessionView[]>(() => {
     if (hist) {
       for (const [name, p] of hist) {
         const a = v.agents.get(name);
-        const histTok = p.input + p.output;
-        if (a) {
-          if ((a.inputTokens || 0) + (a.outputTokens || 0) < histTok) { a.inputTokens = p.input; a.outputTokens = p.output; }
-          if ((a.costUsd || 0) < p.cost) a.costUsd = p.cost;
-        }
+        if (a) applyHistoryToRuntime(a, p);
       }
     }
     const agents = snap.agents || [];
@@ -308,7 +304,7 @@ export const currentSession = createMemo<SessionView | undefined>(() => {
   const inScope = s.level === "project" ? sessions().filter((x) => x.project === s.project) : sessions();
   // prefer a live one, else most recent (sessions() is already last_ts desc)
   return inScope.find((x) => x.live) || inScope[0];
-});
+}, undefined, { equals: false });
 
 // Project groups for the sidebar. Structure (which sessions, totals) is stable
 // across the 1s tick; the live flag is derived from liveSet so it stays current.
@@ -393,7 +389,7 @@ export const scopedAgents = createMemo<ScopeAgent[]>(() => {
       const cost = Math.max(rt?.costUsd || 0, h?.cost || 0);
       out.push({
         key: sess.session_id + "::" + node.name, name: node.name, role: node.role, model: node.model, color: node.color,
-        status: agentStatus(sess.session_id, node.name, rt?.status), tokens, cost, runs: rt?.runCount || 0, tools: rt?.toolCount || 0,
+        status: agentStatus(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
         task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
       });
       for (const c of node.children || []) walk(c, depth + 1);

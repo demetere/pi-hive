@@ -27,10 +27,15 @@ test("buildEventStatus tracks nested delegation waiting and resume states", () =
 
 test("buildHistoryBySession keeps peak cumulative usage per agent", () => {
   const events: any[] = [
-    { session_id: "s1", type: "delegation_end", payload: { from: "A", runtime: { name: "A", inputTokens: 10, outputTokens: 5, costUsd: 0.01 } } },
-    { session_id: "s1", type: "delegation_end", payload: { from: "A", runtime: { name: "A", inputTokens: 7, outputTokens: 20, costUsd: 0.03 } } },
+    { session_id: "s1", type: "delegation_start", payload: { to: "A", runtime: { name: "A", runCount: 1 } } },
+    { session_id: "s1", type: "worker_tool_start", payload: { agent: "A" } },
+    { session_id: "s1", type: "delegation_end", payload: { from: "A", runtime: { name: "A", inputTokens: 10, outputTokens: 5, costUsd: 0.01, runCount: 1, toolCount: 1 } } },
+    { session_id: "s1", type: "delegation_start", payload: { to: "A", runtime: { name: "A", inputTokens: 10, outputTokens: 5, costUsd: 0.01, runCount: 2 } } },
+    { session_id: "s1", type: "worker_tool_start", payload: { agent: "A" } },
+    { session_id: "s1", type: "delegation_end", payload: { from: "A", runtime: { name: "A", inputTokens: 7, outputTokens: 20, costUsd: 0.03, runCount: 2, toolCount: 1 } } },
   ];
 
   const history = buildHistoryBySession(events);
   assert.deepEqual(historyTotals(history, "s1"), { tokens: 30, cost: 0.03 });
+  assert.deepEqual(history.get("s1")?.get("A"), { input: 10, output: 20, cost: 0.03, runs: 2, tools: 2 });
 });
