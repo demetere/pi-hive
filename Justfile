@@ -67,8 +67,9 @@ install-dashboard:
 dev:
   pi -e .
 
-# Copy this checkout into the user-level Pi extension directory.
-# Mirrors Pi's /reload workflow: sync here, then run /reload in Pi.
+# Copy this checkout into the user-level Pi extension directory, then restart
+# the local telemetry dashboard so it serves the newly synced bundle.
+# Mirrors Pi's /reload workflow: sync here, then run /reload in Pi for commands/hooks.
 [group('setup')]
 [group('pi')]
 reload:
@@ -83,7 +84,8 @@ reload:
     --exclude '.env.*' \
     ./ "{{extension_dir}}/"
   @printf "{{GREEN}}Synced pi-hive to %s{{NC}}\n" "{{extension_dir}}"
-  @printf "Run /reload in Pi to load the synced extension.\n"
+  node scripts/restart-dashboard.mjs "{{extension_dir}}"
+  @printf "Run /reload in Pi to load the synced extension commands/hooks.\n"
 
 # Show what reload would copy/delete without changing the live extension.
 [group('pi')]
