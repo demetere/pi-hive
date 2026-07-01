@@ -9,6 +9,7 @@ import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
 import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyMode, captureNormalTools, installHeader, updateWidget } from "../ui/tui/widget";
+import { installHiveFooter, registerFooterHooks } from "../ui/tui/footer";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
 import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveStateSnapshot } from "../engine/observability";
@@ -16,6 +17,8 @@ import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveSta
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
+  registerFooterHooks(pi, state);
+
   pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
     // Enforcement (domain + agent-type policy) runs in plan AND hive mode; only
     // normal mode is unguarded plain Pi.
@@ -115,6 +118,11 @@ ${catalog}`,
       writeHiveStateSnapshot(state);
       captureNormalTools(state);
       applyMode(state, ctx, "normal", { notify: false });
+      // Other globally-installed footer extensions may also handle session_start.
+      // Reinstall Hive's footer after the session_start dispatch settles so
+      // hive-configured projects keep the Hive-extended footer instead of the
+      // last generic footer that happened to register.
+      if (ctx.mode === "tui") setTimeout(() => installHiveFooter(state, ctx), 0);
       // Ensure the shared, global telemetry dashboard daemon is running. This
       // hook only fires for hive-opted-in projects (the extension registers
       // nothing otherwise), so the opt-in gate is satisfied. Fire-and-forget and

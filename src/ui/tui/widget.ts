@@ -1,17 +1,17 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { execSync } from "node:child_process";
 import { HIVE_TOOL_NAMES } from "../../core/constants";
 import { canonicalMode } from "../../core/types";
 import type { AgentConfig, AgentRuntime, HiveMode, HiveState } from "../../core/types";
-import { hasPlanningTeam } from "../../core/config";
 import { activateTeamRuntimes } from "../../engine/session";
-import { configuredChildAgents, extractUsage } from "../../core/utils";
+import { configuredChildAgents } from "../../core/utils";
+import { installHiveFooter, requestHiveFooterRender } from "./footer";
 
-// The hive toolset active in BOTH plan and hive mode (the type-scoped tools —
-// plan_new/submit_review_verdict/etc. — are added per agent-type by the tool
-// builder, not here).
-const HIVE_MODE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
+// Common hive tools are active in both plan and execution mode. Plan lifecycle
+// tools are active only in plan mode so approvals happen before /hive-execute.
+const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
+const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "approve_plan"];
+const HIVE_MODE_TOOLS = COMMON_HIVE_TOOLS;
 
 export function captureNormalTools(state: HiveState) {
   const active = state.pi.getActiveTools().filter((name: string) => !HIVE_TOOL_NAMES.has(name));
@@ -42,12 +42,6 @@ export function modeStatusText(state: HiveState, mode: HiveMode = state.mode): s
 export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMode, options: { notify?: boolean } = {}) {
   const shouldNotify = options.notify ?? true;
 
-  // Guard: plan mode without a configured planning team. Fall back to the hive
-  // team (planners in the hive tree still work) but tell the user.
-  if (mode === "plan" && !hasPlanningTeam(state.config)) {
-    if (shouldNotify && ctx.hasUI) ctx.ui.notify("No planning: block configured — plan mode uses the hive team's planners. Add a planning: block to hive-config.yaml for a dedicated planning hierarchy.", "warning");
-  }
-
   const previous = state.mode;
   state.mode = mode;
 
@@ -58,8 +52,9 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
   }
 
   installHeader(state, ctx);
-  installFooter(state, ctx);
+  installHiveFooter(state, ctx);
   if (ctx.hasUI) ctx.ui.setStatus("hive", modeStatusText(state, mode));
+  requestHiveFooterRender();
 
   if (mode === "normal") {
     state.pi.setActiveTools(state.normalToolNames);
@@ -68,7 +63,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     return;
   }
 
-  state.pi.setActiveTools(HIVE_MODE_TOOLS);
+  state.pi.setActiveTools(mode === "plan" ? PLAN_MODE_TOOLS : HIVE_MODE_TOOLS);
   updateWidget(state);
   if (shouldNotify && ctx.hasUI) {
     const msg = mode === "plan"
@@ -78,47 +73,6 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
   }
 }
 
-
-export function shortPath(path: string): string {
-  const home = process.env.HOME || "";
-  return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-}
-
-export function formatCount(value: number): string {
-  if (!Number.isFinite(value)) return "0";
-  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(value) >= 1_000) return `${Math.round(value / 1000)}K`;
-  return `${Math.round(value)}`;
-}
-
-export function gitStatusLabel(cwd: string): string {
-  try {
-    const raw = execSync("git status --porcelain", { cwd, encoding: "utf-8", timeout: 500 }).trim();
-    if (!raw) return "clean";
-    const lines = raw.split("\n").filter(Boolean);
-    const untracked = lines.filter((line: string) => line.startsWith("??")).length;
-    if (untracked === lines.length) return `${untracked} untracked`;
-    return `${lines.length} changes`;
-  } catch {
-    return "";
-  }
-}
-
-export function aggregateUsage(ctx: ExtensionContext): { input: number; output: number; cost: number } {
-  let input = 0;
-  let output = 0;
-  let cost = 0;
-  for (const entry of ctx.sessionManager.getBranch()) {
-    const message = (entry as any).message;
-    if ((entry as any).type === "message" && message?.role === "assistant" && message.usage) {
-      const u = extractUsage(message.usage);
-      input += u.input;
-      output += u.output;
-      cost += u.cost;
-    }
-  }
-  return { input, output, cost };
-}
 
 export function installHeader(state: HiveState, ctx: ExtensionContext) {
   if (ctx.mode !== "tui") return;
@@ -143,43 +97,6 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
   }));
 }
 
-export function installFooter(state: HiveState, ctx: ExtensionContext) {
-  if (ctx.mode !== "tui") return;
-  ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
-    const unsub = footerData.onBranchChange(() => tui.requestRender());
-    queueMicrotask(() => tui.requestRender());
-    return {
-      dispose: unsub,
-      invalidate() {},
-      render(width: number): string[] {
-        const usage = ctx.getContextUsage?.();
-        const pct = usage ? Number(usage.percent || 0) : 0;
-        const contextWindow = (ctx as any).model?.contextWindow || (ctx as any).model?.context_window || 0;
-        const branch = footerData.getGitBranch?.() || "";
-        const gitStatus = gitStatusLabel(ctx.cwd);
-        const totals = aggregateUsage(ctx);
-        const totalCost = totals.cost + Array.from(state.runtimes.values()).reduce((sum, runtime) => sum + runtime.costUsd, 0);
-        const model = (ctx as any).model?.id || "no-model";
-        const thinking = state.pi.getThinkingLevel?.() || "off";
-        const speed = state.lastTokPerSec > 0 ? `${Math.round(state.lastTokPerSec)} tok/s` : `${formatCount(totals.output)} tok`;
-
-        const label = modeLabel(state.mode);
-        const modeColor = state.mode === "hive" ? "accent" : state.mode === "plan" ? "warning" : "muted";
-        const modePart = theme.fg(modeColor, `[${label}] `);
-        const left = modePart + theme.fg("dim", `${shortPath(ctx.cwd)} `) +
-          (branch ? theme.fg("accent", `↯ ${branch}`) : "") +
-          (gitStatus ? theme.fg("dim", ` · ${gitStatus}`) : "");
-        const right = theme.fg("dim", `${model} · `) +
-          theme.fg("accent", `think ${thinking}`) +
-          theme.fg("dim", ` · ⚡ ${speed} · `) +
-          theme.fg("muted", `🧠 ${pct.toFixed(1)}%${contextWindow ? ` of ${formatCount(contextWindow)}` : ""} · `) +
-          theme.fg("success", `$${totalCost.toFixed(3)}`);
-        const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-        return [truncateToWidth(left + pad + right, width)];
-      },
-    };
-  });
-}
 
 export function renderTeamLines(state: HiveState, width: number, theme: any): string[] {
   if (!state.config || !state.session) return [theme.fg("dim", "hive: not loaded")];
@@ -223,6 +140,7 @@ export function updateWidget(state: HiveState) {
   if (!state.widgetCtx || state.widgetCtx.mode !== "tui") return;
   state.widgetCtx.ui.setWidget("hive-tree", undefined);
   installHeader(state, state.widgetCtx);
+  requestHiveFooterRender();
 }
 
 // Cycle normal → plan → hive → normal.
