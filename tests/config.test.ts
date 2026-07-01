@@ -11,6 +11,7 @@ function fixtureProject() {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-config-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: medium\nagent-type: lead\n---\nOrchestrate.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: medium\nagent-type: lead\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "frontend.md"), "---\nmodel: anthropic/claude-sonnet\nagent-type: coder\n---\nBuild UI.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "qa.md"), "---\nmodel: anthropic/claude-sonnet\nagent-type: tester\n---\nTest UI.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
@@ -19,24 +20,30 @@ settings:
   max-parallel: 2
   distiller:
     enabled: false
-orchestrator:
-  name: Orchestrator
-  path: .pi/hive/agents/orchestrator.md
 shared-context:
   - README.md
-agents:
-  - name: Frontend Dev
-    path: .pi/hive/agents/frontend.md
-    routing-tags: [frontend, react]
-    domain:
-      - path: ui
-        read: true
-        upsert: true
-        delete: false
-    members:
-      - name: QA Engineer
-        path: .pi/hive/agents/qa.md
-        routing-tags: [test]
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+  agents: []
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents:
+    - name: Frontend Dev
+      path: .pi/hive/agents/frontend.md
+      routing-tags: [frontend, react]
+      domain:
+        - path: ui
+          read: true
+          upsert: true
+          delete: false
+      members:
+        - name: QA Engineer
+          path: .pi/hive/agents/qa.md
+          routing-tags: [test]
 `);
   return cwd;
 }
@@ -71,14 +78,19 @@ test("loadConfig rejects duplicate agent names with a clear schema error", () =>
 settings:
   distiller:
     enabled: false
-orchestrator:
-  name: Orchestrator
-  path: .pi/hive/agents/orchestrator.md
-agents:
-  - name: Frontend Dev
-    path: .pi/hive/agents/frontend.md
-  - name: frontend dev
-    path: .pi/hive/agents/frontend.md
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents:
+    - name: Frontend Dev
+      path: .pi/hive/agents/frontend.md
+    - name: frontend dev
+      path: .pi/hive/agents/frontend.md
 `);
 
   assert.throws(() => loadConfig(cwd), /Duplicate agent name/);
@@ -90,16 +102,21 @@ test("loadConfig requires explicit domain capabilities", () => {
 settings:
   distiller:
     enabled: false
-orchestrator:
-  name: Orchestrator
-  path: .pi/hive/agents/orchestrator.md
-agents:
-  - name: Frontend Dev
-    path: .pi/hive/agents/frontend.md
-    domain:
-      - path: ui
-        read: true
-        upsert: true
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents:
+    - name: Frontend Dev
+      path: .pi/hive/agents/frontend.md
+      domain:
+        - path: ui
+          read: true
+          upsert: true
 `);
 
   assert.throws(() => loadConfig(cwd), /domain\[0\]\.delete must be explicitly set/);
@@ -115,18 +132,23 @@ test("loadConfig validates domain include and exclude globs", () => {
 settings:
   distiller:
     enabled: false
-orchestrator:
-  name: Orchestrator
-  path: .pi/hive/agents/orchestrator.md
-agents:
-  - name: Frontend Dev
-    path: .pi/hive/agents/frontend.md
-    domain:
-      - path: ui
-        read: true
-        upsert: true
-        delete: false
-        include: "**/*.test.ts"
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents:
+    - name: Frontend Dev
+      path: .pi/hive/agents/frontend.md
+      domain:
+        - path: ui
+          read: true
+          upsert: true
+          delete: false
+          include: "**/*.test.ts"
 `);
 
   assert.throws(() => loadConfig(cwd), /domain\[0\]\.include must be a list of strings/);
@@ -138,17 +160,23 @@ test("loadConfig reads agent-type/stages/commit from frontmatter onto config", (
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\ncommit: \"Only commit after review is green.\"\n---\nLead.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "planner.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\nstages: [proposal, requirements]\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
   distiller:
     enabled: false
-orchestrator:
-  name: Orchestrator
-  path: .pi/hive/agents/orchestrator.md
-agents:
-  - name: Requirements Planner
-    path: .pi/hive/agents/planner.md
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents:
+    - name: Requirements Planner
+      path: .pi/hive/agents/planner.md
 `);
 
   const config = loadConfig(cwd);
@@ -162,17 +190,23 @@ function typedFixture(orchestratorFrontmatter: string, agentFrontmatter: string,
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${orchestratorFrontmatter}\n---\nLead.`);
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "agent.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${agentFrontmatter}\n---\nWork.`);
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
   distiller:
     enabled: false
-orchestrator:
-  name: Orchestrator
-  path: .pi/hive/agents/orchestrator.md
-agents:
-  - name: Worker
-    path: .pi/hive/agents/agent.md
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents:
+    - name: Worker
+      path: .pi/hive/agents/agent.md
 ${agentConfigExtra}`);
   return cwd;
 }

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { changeExists, createChange, hasTasks, listArtifacts, listChangeIds, readPlanMeta, resolveArtifact, toChangeId } from "../src/engine/plan-store.ts";
+import { approveGate, changeExists, createChange, hasTasks, isReadyToExecute, isSafeChangeId, listArtifacts, listChangeIds, readPlanMeta, resolveArtifact, toChangeId } from "../src/engine/plan-store.ts";
 import { resolveHiveSddStatus } from "../src/engine/sdd.ts";
 import { currentChangeId, runWithChange } from "../src/engine/session.ts";
 import type { HiveState } from "../src/core/types.ts";
@@ -34,9 +34,9 @@ test("toChangeId slugs titles", () => {
   assert.equal(toChangeId("Fix: retries!"), "fix-retries");
 });
 
-test("createChange scaffolds plan.yaml and is idempotent", () => {
+test("createChange scaffolds plan.yaml and is idempotent", async () => {
   const cwd = project();
-  const first = createChange(cwd, "Add Auth", "demetre");
+  const first = await createChange(cwd, "Add Auth", "demetre");
   assert.equal(first.changeId, "add-auth");
   assert.equal(first.created, true);
   assert.ok(changeExists(cwd, "add-auth"));
@@ -45,7 +45,7 @@ test("createChange scaffolds plan.yaml and is idempotent", () => {
   assert.equal(meta.owner, "demetre");
   assert.equal(meta.phase, "proposal");
 
-  const second = createChange(cwd, "Add Auth");
+  const second = await createChange(cwd, "Add Auth");
   assert.equal(second.created, false); // did not overwrite
 });
 
@@ -59,12 +59,43 @@ test("listChangeIds and hasTasks reflect the store", () => {
   assert.deepEqual(listArtifacts(cwd, "alpha"), ["proposal.md", "tasks.md"]);
 });
 
+test("approveGate advances gates in order and marks tasks ready", async () => {
+  const cwd = project();
+  await createChange(cwd, "Add Auth");
+  await assert.rejects(() => approveGate(cwd, "missing", "proposal"), /No change/);
+  await assert.rejects(() => approveGate(cwd, "add-auth", "tasks"), /waiting for "proposal"/);
+
+  assert.equal((await approveGate(cwd, "add-auth", "proposal")).phase, "requirements");
+  assert.equal((await approveGate(cwd, "add-auth", "requirements")).phase, "design");
+  assert.equal((await approveGate(cwd, "add-auth", "design")).phase, "tasks");
+  const ready = await approveGate(cwd, "add-auth", "tasks");
+  assert.equal(ready.status, "ready");
+  assert.equal(ready.phase, "apply");
+  assert.equal(isReadyToExecute(cwd, "add-auth"), true);
+});
+
 test("resolveArtifact guards against path traversal", () => {
   const cwd = project();
   writePlan(cwd, "x", { "design.md": "# D" });
   assert.ok(resolveArtifact(cwd, "x", "design.md")?.endsWith("/x/design.md"));
   assert.equal(resolveArtifact(cwd, "x", "../../../etc/passwd"), null);
   assert.equal(resolveArtifact(cwd, "x", "/etc/passwd"), null);
+});
+
+test("change IDs must be safe kebab-case path segments", async () => {
+  const cwd = project();
+  writePlan(cwd, "safe-id", { "proposal.md": "# Safe" });
+  writePlan(cwd, "..", { "proposal.md": "# Unsafe" });
+
+  assert.equal(isSafeChangeId("safe-id-1"), true);
+  assert.equal(isSafeChangeId("../escape"), false);
+  assert.equal(isSafeChangeId(""), false);
+  assert.deepEqual(listChangeIds(cwd), ["safe-id"]);
+  assert.equal(changeExists(cwd, "../escape"), false);
+  assert.equal(readPlanMeta(cwd, "../escape").phase, undefined);
+  assert.equal(resolveArtifact(cwd, "../escape", "proposal.md"), null);
+  await assert.rejects(() => createChange(cwd, "!!!"), /Invalid change-id/);
+  await assert.rejects(() => approveGate(cwd, "../escape", "proposal"), /Invalid change-id/);
 });
 
 // ── sdd phase derivation over the new layout ────────────────────────────────

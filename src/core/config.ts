@@ -37,17 +37,17 @@ function teamMain(block: any): AgentConfig | undefined {
   return block?.main || block?.orchestrator;
 }
 
-// Resolve the raw team blocks with back-compat. Precedence for the hive team:
-// an explicit `hive:` block, else the legacy top-level `main:`/`orchestrator:` +
-// `agents:`. The planning team comes only from an explicit `planning:` block.
-function resolveTeams(parsed: any): { hive: HiveTeam; planning?: HiveTeam } {
-  const hiveBlock = parsed.hive;
-  const hive: HiveTeam = hiveBlock
-    ? { main: teamMain(hiveBlock)!, agents: hiveBlock.agents || [] }
-    : { main: teamMain(parsed)!, agents: parsed.agents || [] };
-  const planning: HiveTeam | undefined = parsed.planning
-    ? { main: teamMain(parsed.planning)!, agents: parsed.planning.agents || [] }
-    : undefined;
+// Resolve the raw team blocks. The current architecture requires explicit,
+// separate hierarchies for PLAN mode and HIVE execution mode. The legacy
+// top-level `orchestrator:`/`agents:` shape is intentionally rejected so a
+// project cannot silently run plan mode against the coding hierarchy.
+function resolveTeams(parsed: any): { hive: HiveTeam; planning: HiveTeam } {
+  if (!parsed.planning) throw new Error("hive-config.yaml must define a dedicated `planning:` team block for plan mode.");
+  if (!parsed.hive) throw new Error("hive-config.yaml must define a dedicated `hive:` team block for execution mode.");
+  const planning: HiveTeam = { main: teamMain(parsed.planning)!, agents: parsed.planning.agents || [] };
+  const hive: HiveTeam = { main: teamMain(parsed.hive)!, agents: parsed.hive.agents || [] };
+  if (!planning.main) throw new Error("planning.main is required (or planning.orchestrator as a legacy alias inside the planning block).");
+  if (!hive.main) throw new Error("hive.main is required (or hive.orchestrator as a legacy alias inside the hive block).");
   return { hive, planning };
 }
 
@@ -64,7 +64,6 @@ export function loadConfig(cwd: string): HiveConfig {
   const parsed = parseYamlLite(raw) as any;
 
   const { hive, planning } = resolveTeams(parsed);
-  if (!hive.main) throw new Error("hive-config.yaml must define a main session: a top-level `main:` (or legacy `orchestrator:`), or a `hive:` block with a `main:`.");
 
   const settings = parsed.settings || ({} as HiveConfig["settings"]);
   const distiller = (settings as any).distiller || {};
@@ -105,11 +104,9 @@ export function loadConfig(cwd: string): HiveConfig {
   };
 }
 
-// The team that is active for a given mode. Hive/normal use the hive team;
-// plan uses the planning team when configured, otherwise falls back to the hive
-// team (so plan mode still functions, just without a dedicated planning tree).
-// Falls back to the active orchestrator/agents when the raw blocks are absent
-// (e.g. a hand-built HiveConfig in tests).
+// The team that is active for a given mode. Hive/normal use the hive execution
+// team; plan uses the dedicated planning team. loadConfig requires both blocks,
+// but the fallback keeps hand-built test configs from crashing.
 export function teamForMode(config: HiveConfig, mode: HiveMode): HiveTeam {
   if (mode === "plan" && config.planning) return config.planning;
   return config.hive ?? { main: config.orchestrator, agents: config.agents };

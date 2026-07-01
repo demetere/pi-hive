@@ -51,6 +51,8 @@ test("planDetail includes gates, artifacts, and empty timelines initially", () =
 test("planFile reads an artifact and guards against traversal", () => {
   expect(plans.planFile(PROJECT, "add-auth", "proposal.md")?.content).toContain("We need login.");
   expect(plans.planFile(PROJECT, "add-auth", "../../../../etc/passwd")).toBeNull();
+  expect(plans.planFile(PROJECT, "../escape", "proposal.md")).toBeNull();
+  expect(plans.planDetail(PROJECT, "../escape")).toBeNull();
 });
 
 test("addComment and addApproval round-trip and appear in planDetail", () => {

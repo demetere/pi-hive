@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildHiveTools } from "../src/agents/tools.ts";
+import { createChange } from "../src/engine/plan-store.ts";
 import { runWithChange } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -78,12 +79,17 @@ test("submit_review_verdict caches the latest verdict per change and degrades wi
   assert.equal(state.latestVerdicts?.size, 1); // still just add-auth
 });
 
-test("approve_plan requires a change-id", async () => {
+test("approve_plan requires an existing change-id", async () => {
   const state = stateWith([runtime("Lead", { agentType: "lead" })]);
+  const ctx = { cwd: state.session!.sessionDir };
   const tool = buildHiveTools(state, "Lead").find((t) => t.name === "approve_plan")!;
-  const res = await (tool.execute as any)("id", { phase: "proposal" });
+  const res = await (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx);
   assert.equal(res.details.ok, false);
-  const ok = await runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }));
+  const missing = await runWithChange("missing", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
+  assert.equal(missing.details.ok, false);
+
+  await createChange(ctx.cwd, "Add Auth");
+  const ok = await runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
   assert.equal(ok.details.ok, true);
   assert.equal(ok.details.changeId, "add-auth");
 });

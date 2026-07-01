@@ -16,7 +16,7 @@ import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
-import { changeExists, createChange, listChangeIds, readPlanMeta } from "../engine/plan-store";
+import { approveGate, changeExists, createChange, listChangeIds, readPlanMeta } from "../engine/plan-store";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
@@ -36,7 +36,13 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     return hexAnsi(color, name) || theme.fg("accent", name);
   };
 
-  const callerType: AgentType | undefined = state.runtimes.get(callerName.toLowerCase())?.config.agentType;
+  const callerRuntime = state.runtimes.get(callerName.toLowerCase())
+    || (callerName === "Orchestrator" ? state.runtimes.get(state.config?.orchestrator?.name?.toLowerCase() || "") : undefined);
+  // The visible main session's tools are registered before config/runtimes are
+  // loaded, and its configured name may be "Plan Main" / "Hive Main" rather
+  // than the legacy literal "Orchestrator". Treat that registered top-level
+  // tool set as a lead so plan lifecycle tools are available in plan mode.
+  const callerType: AgentType | undefined = callerRuntime?.config.agentType || (callerName === "Orchestrator" ? "lead" : undefined);
 
   const baseTools: ToolDefinition[] = [
     defineTool({
@@ -237,7 +243,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
         const { title, owner } = params as { title: string; owner?: string };
-        const result = createChange(ctx.cwd, title, owner);
+        const result = await createChange(ctx.cwd, title, owner);
         state.activeChangeId = result.changeId;
         const note = result.created ? "created" : "already existed";
         return { content: [{ type: "text", text: `Plan change "${result.changeId}" ${note} and is now the active change (${result.path}). Delegate planners to write proposal/requirements/design/tasks here.` }], details: { ok: true, ...result } };
@@ -277,14 +283,25 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         actor: Type.Optional(Type.String({ description: "Who approved (e.g. the user's name). Optional." })),
         summary: Type.Optional(Type.String({ description: "Optional note about the approval." })),
       }),
-      async execute(_toolCallId: string, params: unknown) {
+      async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
         const p = params as { phase: string; changeId?: string; actor?: string; summary?: string };
         const changeId = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
         if (!changeId) {
           return { content: [{ type: "text", text: "No active change-id. Select or create a change first, or pass changeId." }], details: { ok: false } };
         }
-        emitHiveEvent(state, "plan_approval", { changeId, phase: p.phase, approvedBy: "chat", actor: p.actor, summary: p.summary }, callerName);
-        return { content: [{ type: "text", text: `Approved gate "${p.phase}" for change "${changeId}".` }], details: { ok: true, changeId, phase: p.phase } };
+        if (!changeExists(ctx.cwd, changeId)) {
+          const available = listChangeIds(ctx.cwd);
+          return { content: [{ type: "text", text: `No change "${changeId}" under .pi/hive/plans/. Available: ${available.join(", ") || "none"}. Use plan_new to create one.` }], details: { ok: false, changeId, available } };
+        }
+        try {
+          const meta = await approveGate(ctx.cwd, changeId, p.phase);
+          emitHiveEvent(state, "plan_approval", { changeId, phase: p.phase, approvedBy: "chat", actor: p.actor, summary: p.summary, nextPhase: meta.phase, status: meta.status }, callerName);
+          const ready = meta.status === "ready" ? " Change is ready for /hive-execute." : ` Next phase: ${meta.phase}.`;
+          return { content: [{ type: "text", text: `Approved gate "${p.phase}" for change "${changeId}".${ready}` }], details: { ok: true, changeId, phase: p.phase, meta } };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { content: [{ type: "text", text: message }], details: { ok: false, changeId, phase: p.phase } };
+        }
       },
     }));
   }

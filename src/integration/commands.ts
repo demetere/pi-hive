@@ -6,7 +6,7 @@ import type { HiveState } from "../core/types";
 import { applyMode, cycleMode } from "../ui/tui/widget";
 import { renderHiveDoctor } from "../engine/doctor";
 import { ensureDashboard, stopDashboard } from "../engine/dashboard";
-import { changeExists, hasTasks, listChangeIds, readTasks } from "../engine/plan-store";
+import { changeExists, hasTasks, isReadyToExecute, listChangeIds, readTasks } from "../engine/plan-store";
 import { truncateMiddle } from "../core/utils";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -65,6 +65,10 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
       }
       if (!hasTasks(ctx.cwd, changeId)) {
         if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" has no tasks.md yet. Complete the planning gates (proposal → requirements → design → tasks) first.`, "error");
+        return;
+      }
+      if (!isReadyToExecute(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not approved for execution yet. Approve the tasks gate in plan mode first (approve_plan phase=tasks).`, "error");
         return;
       }
       // Select the change so delegations are scoped to it, ensure HIVE (execution)

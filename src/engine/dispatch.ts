@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { spawnManaged } from "./process";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -24,6 +24,7 @@ import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extrac
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { workerResourceLoader } from "./worker-extension";
+import { isReadyToExecute } from "./plan-store";
 
 function resolveModel(ctx: ExtensionContext, modelString: string): any {
   const [provider, ...idParts] = modelString.split("/");
@@ -57,6 +58,15 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   if (!runtime) {
     const available = Array.from(state.runtimes.values()).map((agent) => agent.config.name).join(", ");
     return { output: `Unknown agent "${agentName}". Available: ${available}`, exitCode: 1, elapsed: 0 };
+  }
+  if (state.mode === "plan" && runtime.config.agentType !== "planner" && runtime.config.agentType !== "lead") {
+    return { output: `Delegation blocked: plan mode may only delegate to planning leads/planners; ${runtime.config.name} is agent-type "${runtime.config.agentType || "unknown"}". Switch to hive mode or use /hive-execute after tasks approval for execution.`, exitCode: 1, elapsed: 0 };
+  }
+  if (state.mode === "hive" && (runtime.config.agentType === "coder" || runtime.config.agentType === "tester")) {
+    const changeId = currentChangeId() || state.activeChangeId || "";
+    if (!changeId || !isReadyToExecute(ctx.cwd, changeId)) {
+      return { output: `Delegation blocked: execution agents require an approved plan. Create specs in plan mode, approve the tasks gate, then run /hive-execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
+    }
   }
   const permission = canDelegateTo(state, caller, runtime.config.name);
   if (!permission.ok) {
@@ -331,7 +341,9 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
     // even if the distiller's output drifts. The soft body is left byte-exact.
     const distilled = extracted ? normalizeMentalModelSpine(extracted, runtime.config.name).trim() : null;
     if (distilled && distilled !== currentModel.trim()) {
-      writeFileSync(targetPath, `${distilled}\n`);
+      await withFileMutationQueue(targetPath, async () => {
+        writeFileSync(targetPath, `${distilled}\n`);
+      });
       logRecord(state, { from: "Distiller", to: runtime.config.name, type: "mental_model_distilled", message: `Updated ${target.path}`, path: target.path });
       emitHiveEvent(state, "distill_end", { agent: runtime.config.name, target: target.path, changed: true }, "Distiller");
     }

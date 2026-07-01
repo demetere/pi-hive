@@ -48,7 +48,8 @@ declare module "node:child_process" { export type ChildProcess = any; export typ
 declare module "node:crypto" { export function randomUUID(): string; }
 declare module "node:os" { export function homedir(): string; export function tmpdir(): string; }
 declare module "node:url" { export function fileURLToPath(url: string): string; }
-declare module "node:assert/strict" { const assert: any; export default assert; export const equal: any; export const deepEqual: any; export const ok: any; export const match: any; export const throws: any; }
+declare module "node:assert/strict" { const assert: any; export default assert; export const equal: any; export const deepEqual: any; export const ok: any; export const match: any; export const throws: any; export const rejects: any; }
+declare module "node:async_hooks" { export class AsyncLocalStorage<T = any> { getStore(): T | undefined; run<R>(store: T, callback: () => R): R; } }
 declare module "node:test" { export function test(name: string, fn: (...args: any[]) => any): void; }
 declare module "bun:sqlite" { export class Database { constructor(path: string); run(...args: any[]): any; query(...args: any[]): any; transaction(fn: any): any; } }
 
@@ -60,6 +61,7 @@ declare module "@earendil-works/pi-coding-agent" {
   export type ToolDefinition = any;
   export function createAgentSession(options?: any): Promise<{ session: any; extensionsResult?: any; modelFallbackMessage?: string }>;
   export function defineTool(tool: any): any;
+  export function withFileMutationQueue<T>(filePath: string, fn: () => Promise<T>): Promise<T>;
   export class SessionManager {
     static create(cwd: string, sessionDir?: string, options?: any): any;
     static open(path: string, sessionDir?: string, cwdOverride?: string): any;

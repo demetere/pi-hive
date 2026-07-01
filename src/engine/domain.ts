@@ -6,8 +6,13 @@ import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
 import { checkPlannerStages, checkTypePolicy, type PolicyAction } from "./policy";
 
+function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | undefined {
+  return state.runtimes.get(callerName.toLowerCase())
+    || (callerName === "Orchestrator" ? state.runtimes.get(state.config?.orchestrator?.name?.toLowerCase() || "") : undefined);
+}
+
 export function canDelegateTo(state: HiveState, callerName: string, targetName: string): { ok: boolean; reason?: string } {
-  const caller = state.runtimes.get(callerName.toLowerCase());
+  const caller = runtimeForCaller(state, callerName);
   if (!caller) return { ok: true };
   // Delegation is scoped to direct reports for EVERY node, including the
   // orchestrator (whose reports are the team leads). No blanket bypass.

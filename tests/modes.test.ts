@@ -91,7 +91,7 @@ test("plan team flattens to main + planner reports", () => {
   assert.ok(!names.includes("Coder"));
 });
 
-// ── back-compat: legacy top-level orchestrator/agents ───────────────────────
+// ── required split: planning + hive blocks ─────────────────────────────────
 
 function legacyProject(): string {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-legacy-"));
@@ -112,12 +112,8 @@ agents:
   return cwd;
 }
 
-test("legacy orchestrator:/agents: still loads as the hive team; no planning team", () => {
-  const config = loadConfig(legacyProject());
-  assert.equal(config.orchestrator.name, "Orchestrator");
-  assert.equal(hasPlanningTeam(config), false);
-  // plan mode falls back to the hive team when no planning: block exists.
-  assert.equal(teamForMode(config, "plan").main.name, "Orchestrator");
+test("legacy top-level orchestrator:/agents: is rejected; split teams are required", () => {
+  assert.throws(() => loadConfig(legacyProject()), /planning.*team block/i);
 });
 
 test("auditAgentTypes walks both planning and hive blocks", () => {
