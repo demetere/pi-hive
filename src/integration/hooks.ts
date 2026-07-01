@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
 import { configuredChildAgents, textFromMessage } from "../core/utils";
 import { logRecord } from "../engine/state";
@@ -7,7 +9,6 @@ import { enforceDomainForTool } from "../engine/domain";
 import { startConversationWatch, stopConversationWatch } from "../engine/watch";
 import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyTeamMode, captureNormalTools, updateWidget } from "../ui/tui/widget";
-import { refreshSkillRegistry } from "../engine/skill-registry";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveStateSnapshot } from "../engine/observability";
 
@@ -89,7 +90,6 @@ ${catalog}`,
     };
     try {
       reloadTeam(state, ctx);
-      const registry = refreshSkillRegistry(state, ctx);
       state.sddStatus = resolveHiveSddStatus(state, ctx.cwd);
       logRecord(state, { from: "System", type: "system", message: process.env.PI_HIVE_CHILD === "1" ? `Nested worker started: ${process.env.PI_HIVE_PARENT_AGENT || "unknown"}` : "Session started" });
       if (process.env.PI_HIVE_CHILD === "1") {
@@ -110,8 +110,13 @@ ${catalog}`,
       startConversationWatch(state);
       captureNormalTools(state);
       applyTeamMode(state, ctx, "normal", { notify: false });
-      const missing = registry.missingConfigured.length ? `\nMissing configured skills: ${registry.missingConfigured.slice(0, 5).join(", ")}${registry.missingConfigured.length > 5 ? "..." : ""}` : "";
-      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nSkill registry: ${registry.entries.length} skill(s) → ${registry.path}\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, registry.missingConfigured.length ? "warning" : "info");
+      const missingSkills = Array.from(state.runtimes.values()).flatMap((runtime) =>
+        (runtime.config.skills || [])
+          .filter((ref) => !existsSync(ref.path.startsWith("/") ? ref.path : resolve(ctx.cwd, ref.path)))
+          .map((ref) => `${runtime.config.name}: ${ref.path}`),
+      );
+      const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";
+      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nConfigured agent skills are passed to worker pi processes explicitly with --no-skills/--skill.\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
     } catch (error: any) {
       if (ctx.hasUI) ctx.ui.notify(`Hive failed to load: ${error?.message || error}`, "error");
     }

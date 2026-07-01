@@ -12,14 +12,6 @@ export interface KnowledgeRef {
   updatable?: boolean;
 }
 
-export interface SkillRegistryEntry {
-  name: string;
-  path: string;
-  description: string;
-  scope: "project" | "user";
-  useWhen?: string;
-}
-
 export interface SddChangeStatus {
   name: string;
   path: string;
@@ -137,7 +129,6 @@ export interface HiveState {
   streamStartMs: number;
   streamedChars: number;
   lastTokPerSec: number;
-  skillRegistry: SkillRegistryEntry[];
   sddStatus: SddStatus | null;
   obsSeq: number;
   onRuntimeUpdate?: (state: HiveState) => void;

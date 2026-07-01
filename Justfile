@@ -79,7 +79,6 @@ reload:
     --exclude 'ui/web/node_modules/' \
     --exclude '*.tgz' \
     --exclude '.pi/' \
-    --exclude '.atl/' \
     --exclude '.env' \
     --exclude '.env.*' \
     ./ "{{extension_dir}}/"
@@ -96,7 +95,6 @@ reload-dry-run:
     --exclude 'ui/web/node_modules/' \
     --exclude '*.tgz' \
     --exclude '.pi/' \
-    --exclude '.atl/' \
     --exclude '.env' \
     --exclude '.env.*' \
     ./ "{{extension_dir}}/"

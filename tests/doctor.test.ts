@@ -19,7 +19,6 @@ function state(overrides: Partial<HiveState> = {}): HiveState {
     streamStartMs: 0,
     streamedChars: 0,
     lastTokPerSec: 0,
-    skillRegistry: [{ name: "review", path: "skills/review/SKILL.md", description: "Review", scope: "project" }],
     sddStatus: { configured: true, activeChanges: [], suggestedRouting: [] },
     obsSeq: 0,
     ...overrides,
@@ -47,7 +46,7 @@ test("renderHiveDoctor reports package assets and workspace state", () => {
 });
 
 test("renderHiveDoctor includes remedies for missing required assets", () => {
-  const result = renderHiveDoctor(state({ config: null, runtimes: new Map(), session: null, skillRegistry: [], sddStatus: null }), "/missing-cwd", "/missing-extension");
+  const result = renderHiveDoctor(state({ config: null, runtimes: new Map(), session: null, sddStatus: null }), "/missing-cwd", "/missing-extension");
 
   assert.equal(result.severity, "warning");
   assert.match(result.text, /fail: Opt-in config missing/);

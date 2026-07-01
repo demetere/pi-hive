@@ -1,4 +1,4 @@
-export const HIVE_TOOL_NAMES = new Set(["route_agent", "delegate_agent", "team_status", "team_conversation", "load_skill", "hive_sdd_status"]);
+export const HIVE_TOOL_NAMES = new Set(["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"]);
 
 // Fixed layout (relative to cwd). The whole extension assumes this tree, so it is
 // a convention, not a configurable knob.

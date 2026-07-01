@@ -92,10 +92,11 @@ Create exactly this structure under the project root. Each agent lives in its ow
           <member>.md
           <member>-mental-model.yaml
     <lead-b>/ ...
-  knowledge/                            # flat pool of reusable context/skill files
+  knowledge/                            # always-inlined context/reference files
     behavior-*.md                       # cross-cutting behaviors (shared by many agents)
-    <role>-*.md                         # role-owned knowledge / review checklists
     <project>-architecture.md           # reference docs
+  skills/                               # Pi Agent Skills explicitly granted to agents
+    <skill-name>/SKILL.md               # standard skill frontmatter + instructions
   sessions/                             # runtime-generated; do NOT hand-create. gitignore it.
 ```
 
@@ -204,7 +205,7 @@ Every agent (orchestrator, leads, members) is a Markdown file: **YAML frontmatte
 | `thinking` | **yes** | string | One of `off, minimal, low, medium, high, xhigh`. |
 | `tools` | no | list | Allow-list of tool names for this agent. Falls back to `default-tools` if omitted. See §7. |
 | `context` | no | list of `{path, use-when}` | Files **always inlined** into the prompt (full content). The agent's always-on knowledge. |
-| `skills` | no | list of `{path, use-when}` | On-demand knowledge. Only a **menu** is injected; the agent calls `load_skill` to pull full content when relevant. |
+| `skills` | no | list of `{path, use-when}` | On-demand procedures using Pi's native skill system. Worker launches disable ambient discovery with `--no-skills` and pass these paths explicitly with `--skill`. |
 | `domain` | no | list of `{path, read, upsert, delete, description}` | **Enforced** filesystem scopes. See §8. |
 | `routing-tags` | no | list | Keywords that bias the orchestrator/leads to route matching tasks here. |
 | `consult-when` | no | string | One-line "use me when…" shown in the routing catalog. |
@@ -228,16 +229,15 @@ These extension tools can be granted via an agent's `tools` list:
 | `route_agent` | leads / orchestrator | Score which agent should handle a task before delegating. |
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
-| `load_skill` | any with `skills:` or discovered registry matches | Pull a configured or registry-discovered skill's full instructions on demand. |
 | `hive_sdd_status` | orchestrator / leads | Inspect OpenSpec/SDD active changes and recommended phase routing. |
 
 Built-in `pi` tools you allow per role: `read`, `grep`, `find`, `ls` (read/search — safe default for everyone), `edit`, `write` (mutate files — only implementers), `bash` (shell — grant sparingly; mutating bash is gated by domains, see §8).
 
 Guidance:
-- **Members that only analyze** → `read, grep, find, ls` + (`team_conversation`, `load_skill`).
+- **Members that only analyze** → `read, grep, find, ls` + `team_conversation`.
 - **Members that implement** → add `edit, write` (and `bash` only if they must run builds/tests).
-- **Leads** → `read, grep, find, ls, delegate_agent, route_agent, team_status, team_conversation, load_skill` (they coordinate; usually no `edit`/`write` unless they also do small fixes).
-- **Orchestrator** → `route_agent, delegate_agent, team_status, team_conversation, load_skill` (no file tools — it never edits).
+- **Leads** → `read, grep, find, ls, delegate_agent, route_agent, team_status, team_conversation` (they coordinate; usually no `edit`/`write` unless they also do small fixes).
+- **Orchestrator** → `route_agent, delegate_agent, team_status, team_conversation` (no file tools — it never edits).
 
 ---
 
@@ -297,7 +297,6 @@ tools:
   - delegate_agent
   - team_status
   - team_conversation
-  - load_skill
   - hive_sdd_status
 context:
   - path: .pi/hive/knowledge/behavior-conversational-response.md
@@ -354,7 +353,6 @@ tools:
   - route_agent
   - team_status
   - team_conversation
-  - load_skill
   - hive_sdd_status
 context:
   - path: .pi/hive/knowledge/behavior-conversational-response.md
@@ -364,7 +362,7 @@ context:
   - path: .pi/hive/knowledge/behavior-zero-micromanagement.md
     use-when: Always. You are a leader — delegate, never execute unless the task is tiny.
 skills:
-  - path: .pi/hive/knowledge/<lead-domain-skill>.md
+  - path: .pi/hive/skills/<lead-domain-skill>/SKILL.md
     use-when: <when this procedure applies>
 domain:
   - path: docs/
@@ -413,7 +411,6 @@ tools:
   - edit                # include only if this member modifies files
   - write               # include only if this member creates files
   - team_conversation
-  - load_skill
 context:
   - path: .pi/hive/knowledge/behavior-conversational-response.md
     use-when: Always use when writing responses.
@@ -422,7 +419,7 @@ context:
   - path: <area>/AGENTS.md
     use-when: Always before working in <area> code.
 skills:
-  - path: .pi/hive/knowledge/<role-review-checklist>.md
+  - path: .pi/hive/skills/<role-review-checklist>/SKILL.md
     use-when: <when reviewing/implementing in this area>
 domain:
   - path: <area this member owns>
@@ -463,18 +460,18 @@ The distiller routes new durable facts under pinned body categories: `domain_map
 
 ---
 
-## 10. Knowledge files (`knowledge/`)
+## 10. Knowledge and skill files (`knowledge/`, `skills/`)
 
-A flat pool of reusable `.md` files referenced by agents via `context:` (always inlined) or `skills:` (on-demand). **Context vs. skill is a per-agent choice, not a property of the file** — the same file can be always-on for one agent and on-demand for another.
+Use `knowledge/` for reusable context files referenced via `context:` (always inlined). Use `skills/` for reusable procedures referenced via `skills:` (on-demand). Skill paths are passed to Pi's native skill loader for that worker with `--no-skills --skill <path>`.
 
 Recommended starters to create (adapt to the project):
 - `behavior-conversational-response.md` — how agents phrase answers.
 - `behavior-active-listener.md` — use inlined context; `team_conversation(agent)` only for a specific transcript. **Do not tell agents to bulk-read the shared log** (it's unbounded).
 - `behavior-zero-micromanagement.md` — leads delegate, don't hoard implementation.
 - `<project>-architecture.md` — a reference map of the codebase/stack.
-- Role checklists, e.g. `backend-change-review.md`, `qa-test-matrix.md`, `security-threat-check.md`.
+- Role procedures as skills, e.g. `skills/backend-change-review/SKILL.md`, `skills/qa-test-matrix/SKILL.md`, `skills/security-threat-check/SKILL.md`.
 
-The extension also scans project/user `SKILL.md` roots into `.atl/hive-skill-registry.md` automatically on session start. Agents can call `load_skill` by a discovered skill name when the registry entry applies, even if the skill is not explicitly listed in that agent's frontmatter. Explicit `skills:` still take priority.
+For `skills:`, prefer standard Agent Skills: a directory with `SKILL.md` and `name`/`description` frontmatter. Hive does not scan ambient project/user skill roots for agents; list every skill path the agent should see explicitly.
 
 Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned), plus reference docs. Keep each file focused; large files inlined as `context` cost tokens on every run.
 
@@ -488,7 +485,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 3. Write `hive-config.yaml` reflecting the confirmed tree (§5).
 4. Write each agent `.md` from the templates (§9), filling role-specific body, tools, domains, models.
 5. Seed each `<stem>-mental-model.yaml` (§9d).
-6. Create the `knowledge/` files the agents reference (§10).
+6. Create the `knowledge/` and `skills/` files the agents reference (§10).
 7. Add `.pi/hive/sessions/` to `.gitignore` (or confirm `.pi/` is already ignored).
 8. Validate against the checklist below, then tell the user to **restart their `pi` session** and run `/hive-status` or `/hive-observe` (then `/hive-toggle` or `Ctrl+Alt+T` to enter orchestrator mode).
 
@@ -504,7 +501,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] The orchestrator has **no** `edit`/`write`/`bash`.
 - [ ] `settings.distiller.model` is set (or `distiller.enabled: false`).
 - [ ] SDD/OpenSpec is treated as the default for non-trivial work: `openspec/config.yaml` exists, or the Planning lead is explicitly instructed to initialize OpenSpec on the first substantial change. Teams map naturally: Planning → proposal/spec/design/tasks, Engineering → apply-progress, Validation → verify-report.
-- [ ] After session start, `.atl/hive-skill-registry.md` lists relevant project/user skills automatically.
+- [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
 - [ ] `/hive-observe` opens the global local telemetry dashboard when Bun is installed.
 - [ ] All YAML keys are kebab-case; no tabs; consistent 2-space indentation.
 

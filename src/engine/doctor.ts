@@ -43,7 +43,6 @@ export function renderHiveDoctor(state: HiveState, cwd: string, extensionDir: st
     checkLine(Boolean(bunVersion), `Bun runtime ${bunVersion ? `available (${bunVersion})` : "not found; dashboard commands need Bun"}`, true),
     checkLine(existsSync(dashboardIndex), `Dashboard dist index ${existsSync(dashboardIndex) ? "present" : "missing"}`),
     checkLine(existsSync(dashboardStamp), `Dashboard build stamp ${existsSync(dashboardStamp) ? "present" : "missing"}`),
-    checkLine(state.skillRegistry.length > 0, `Skill registry ${state.skillRegistry.length ? `${state.skillRegistry.length} skill(s)` : "empty or not discovered"}`, true),
     checkLine(Boolean(state.sddStatus?.configured), `SDD/OpenSpec ${state.sddStatus?.configured ? "configured" : "not configured"}`, true),
     `info: Telemetry registry path: ${registryPath}`,
   ];

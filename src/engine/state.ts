@@ -17,7 +17,6 @@ export function createState(pi: ExtensionAPI): HiveState {
     streamStartMs: 0,
     streamedChars: 0,
     lastTokPerSec: 0,
-    skillRegistry: [],
     sddStatus: null,
     obsSeq: 0,
   };

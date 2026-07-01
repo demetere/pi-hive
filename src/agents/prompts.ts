@@ -1,7 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HiveState } from "../core/types";
-import { renderDomainScopes, renderKnowledgeRefs, renderSkillMenu } from "../core/prompting";
-import { renderSkillRegistryMenu } from "../engine/skill-registry";
+import { renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
 import { renderSddPromptBlock } from "../engine/sdd";
 
 export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext): string {
@@ -10,8 +9,6 @@ export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext)
   if (!runtime) return "";
   const responsibilities = runtime.config.responsibilities?.length ? runtime.config.responsibilities.map((item) => `- ${item}`).join("\n") : "- Route work to the team leads and synthesize results.";
   const context = renderKnowledgeRefs(ctx, "Orchestrator context and mental model", runtime.config.context);
-  const skills = renderSkillMenu(runtime.config.skills);
-  const discoveredSkills = renderSkillRegistryMenu(state);
   const sdd = renderSddPromptBlock(state);
   const domain = renderDomainScopes(runtime.config.domain);
   const leadRoster = state.config.agents
@@ -29,10 +26,6 @@ ${responsibilities}
 ${domain}
 
 ${context}
-
-${skills}
-
-${discoveredSkills}
 
 ${sdd ? `${sdd}\n\n` : ""}## Chain of command
 You delegate ONLY to the team leads below. Each lead owns its team and fans work

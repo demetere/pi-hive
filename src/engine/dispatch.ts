@@ -128,7 +128,9 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     "--thinking", thinking,
     "--append-system-prompt", prompt,
     "--session", runtime.sessionFile,
+    "--no-skills",
   ];
+  for (const skill of runtime.config.skills || []) args.push("--skill", resolve(ctx.cwd, skill.path));
   if (hasExistingSession) args.push("-c");
   args.push(task);
 

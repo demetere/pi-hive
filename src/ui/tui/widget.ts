@@ -28,7 +28,7 @@ export function applyTeamMode(state: HiveState, ctx: ExtensionContext, mode: Tea
   if (ctx.hasUI) ctx.ui.setStatus("hive", modeStatusText(state, mode));
 
   if (mode === "team") {
-    state.pi.setActiveTools(["route_agent", "delegate_agent", "team_status", "team_conversation", "load_skill", "hive_sdd_status"]);
+    state.pi.setActiveTools(["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"]);
     updateWidget(state);
     if (shouldNotify && ctx.hasUI) ctx.ui.notify("Hive orchestrator mode enabled", "success");
     return;

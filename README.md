@@ -70,7 +70,7 @@ Point an agent at the build guide and let it interview you:
 - `/hive-observe` — restart/open the local browser dashboard for global hive telemetry (`http://127.0.0.1:43191` by default).
 - `/hive-observe-stop` — stop the telemetry dashboard on the configured port.
 
-SDD/OpenSpec is the default operating mode for non-trivial hive work. Skill discovery is automatic on session start; discovered project/user skills are indexed at `.atl/hive-skill-registry.md` and can be loaded by agents via `load_skill`.
+SDD/OpenSpec is the default operating mode for non-trivial hive work. Agent `skills:` paths are passed to worker Pi processes explicitly with `--no-skills` plus repeated `--skill <path>`, so Hive reuses Pi's native skill system without automatic discovery bleed-through.
 
 ## Layout of a configured project
 
@@ -78,10 +78,9 @@ SDD/OpenSpec is the default operating mode for non-trivial hive work. Skill disc
 .pi/hive/
   hive-config.yaml      # the team tree + global settings (also the activation trigger)
   agents/               # one folder per agent, mirroring the tree; each holds <name>.md + <name>-mental-model.yaml
-  knowledge/            # shared context/skill files referenced by agents
+  knowledge/            # always-inlined context/reference files
+  skills/               # Pi Agent Skills explicitly granted to agents
   sessions/             # runtime transcripts + hive-events.jsonl telemetry (gitignore this)
-.atl/
-  hive-skill-registry.md # generated discovered project/user SKILL.md index
 ```
 
 See SETUP.md §4 for the full directory contract.

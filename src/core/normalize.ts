@@ -10,8 +10,12 @@ export function normalizeTools(tools: string | undefined, fallback: string): str
 
 export function normalizeWorkerTools(tools: string | undefined, fallback: string): string {
   // Nested delegation is intentionally enabled: workers may receive extension
-  // tools such as delegate_agent when their per-agent config grants them.
-  return normalizeTools(tools, fallback);
+  // tools such as delegate_agent when their per-agent config grants them. Filter
+  // retired Hive tools so older configs don't pass unknown names to child pi.
+  return normalizeTools(tools, fallback)
+    .split(",")
+    .filter((tool) => tool !== "load_skill")
+    .join(",");
 }
 
 export function normalizeStringList(value: any): string[] {

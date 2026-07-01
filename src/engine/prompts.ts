@@ -1,8 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BODY_CATEGORIES } from "../core/mental-model";
 import type { AgentRuntime, HiveState, KnowledgeRef } from "../core/types";
-import { buildSharedContext, renderDomainScopes, renderKnowledgeRefs, renderSkillMenu } from "../core/prompting";
-import { renderSkillRegistryMenu } from "./skill-registry";
+import { buildSharedContext, renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
 import { renderSddPromptBlock } from "./sdd";
 
 export function buildWorkerPrompt(state: HiveState, ctx: ExtensionContext, runtime: AgentRuntime, task: string): string {
@@ -17,8 +16,6 @@ export function buildWorkerPrompt(state: HiveState, ctx: ExtensionContext, runti
       ? `You lead a team. Your direct reports are: ${reports.join(", ")}. When a task should reach them (e.g. it asks you to fan work out, propagate something downstream, or it needs their specialist judgment), you MUST actually call delegate_agent for each relevant report and wait for their real answers — do NOT describe, assume, or fabricate what they would say. Only answer directly for work that is genuinely yours alone and does not involve your reports. Then synthesize their actual responses into your final answer.`
       : "You have no reports; you cannot delegate. Do the work yourself and, if a task needs another agent, say so in your answer for your lead to route.";
   const knowledgeContext = renderKnowledgeRefs(ctx, "Context and mental model", runtime.config.context);
-  const skills = renderSkillMenu(runtime.config.skills);
-  const discoveredSkills = renderSkillRegistryMenu(state, 25);
   const sdd = renderSddPromptBlock(state);
   const domain = renderDomainScopes(runtime.config.domain);
 
@@ -40,10 +37,6 @@ Be direct, evidence-backed, and explicit about uncertainty. Do not claim changes
 ${domain}
 
 ${knowledgeContext}
-
-${skills}
-
-${discoveredSkills}
 
 ${sdd ? `${sdd}\n\n` : ""}## Shared project context
 ${sharedContext || "No shared context files were readable."}

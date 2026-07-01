@@ -1,22 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { resolve } from "node:path";
 import type { HiveState } from "../core/types";
 import {
   extractFinalAnswer,
   hexAnsi,
-  readIfSmall,
   safeRead,
-  slug,
   tailLines,
   truncateMiddle,
 } from "../core/utils";
-import { currentAgentName } from "../engine/session";
 import { routeAgents } from "../engine/routing";
-import { skillName } from "../core/prompting";
 import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
-import { findRegisteredSkill } from "../engine/skill-registry";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 
 type ToolUpdate = (result: any) => void;
@@ -159,36 +153,6 @@ export function registerTools(pi: ExtensionAPI, state: HiveState) {
       const status = resolveHiveSddStatus(state, ctx.cwd);
       state.sddStatus = status;
       return { content: [{ type: "text", text: renderHiveSddStatus(status) }], details: status };
-    },
-  });
-
-  pi.registerTool({
-    name: "load_skill",
-    label: "Load Skill",
-    description: "Load the full instructions for one of your configured skills, by name. Call this before doing work the skill applies to (the skill menu in your prompt lists what is available).",
-    parameters: Type.Object({
-      name: Type.String({ description: "Skill name as shown in your skill menu, e.g. backend-change-review." }),
-    }),
-    async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-      const name = String((params as any).name || "").trim();
-      const wanted = slug(name);
-      const runtime = state.runtimes.get(currentAgentName().toLowerCase());
-      const skills = runtime?.config.skills || [];
-      const match = skills.find((ref) => slug(skillName(ref)) === wanted || (ref.useWhen ? slug(ref.useWhen) === wanted : false));
-      const registryMatch = match ? undefined : (findRegisteredSkill(state, name) || state.skillRegistry.find((entry) => slug(entry.description) === wanted));
-      if (!match && !registryMatch) {
-        const configured = skills.map(skillName);
-        const discovered = state.skillRegistry.map((entry) => entry.name).slice(0, 30);
-        const available = [...configured, ...discovered].join(", ") || "none";
-        return { content: [{ type: "text", text: `No skill named "${name}". Pass exactly one skill key/name, not a natural-language query. Available: ${available}.` }], details: { ok: false } };
-      }
-      const skillPath = match?.path || registryMatch!.path;
-      const content = readIfSmall(resolve(ctx.cwd, skillPath), 96_000);
-      if (!content) return { content: [{ type: "text", text: `Skill "${name}" is not readable (${skillPath}).` }], details: { ok: false } };
-      return { content: [{ type: "text", text: content }], details: { ok: true, skill: name, path: skillPath, source: match ? "configured" : "registry" } };
-    },
-    renderCall(args: unknown, theme: any) {
-      return new Text(theme.fg("toolTitle", theme.bold("load_skill ")) + theme.fg("accent", String((args as any).name || "?")), 0, 0);
     },
   });
 }
