@@ -87,6 +87,38 @@ reload:
   node scripts/restart-dashboard.mjs "{{extension_dir}}"
   @printf "Run /reload in Pi to load the synced extension commands/hooks.\n"
 
+# Symlink this checkout into the user-level Pi extension directory for live development.
+# Moves an existing copied extension aside once, then points Pi at this repo.
+[group('setup')]
+[group('pi')]
+symlink:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  target="{{extension_dir}}"
+  source="{{justfile_directory()}}"
+  mkdir -p "$(dirname "$target")"
+  if [ -L "$target" ]; then
+    current="$(readlink "$target")"
+    if [ "$current" = "$source" ]; then
+      printf "{{GREEN}}pi-hive already symlinked to %s{{NC}}\n" "$source"
+    else
+      rm "$target"
+      ln -s "$source" "$target"
+      printf "{{GREEN}}Updated pi-hive symlink: %s -> %s{{NC}}\n" "$target" "$source"
+    fi
+  elif [ -e "$target" ]; then
+    backup="$target.backup.$(date +%Y%m%d%H%M%S)"
+    mv "$target" "$backup"
+    ln -s "$source" "$target"
+    printf "{{YELLOW}}Moved existing extension to %s{{NC}}\n" "$backup"
+    printf "{{GREEN}}Created pi-hive symlink: %s -> %s{{NC}}\n" "$target" "$source"
+  else
+    ln -s "$source" "$target"
+    printf "{{GREEN}}Created pi-hive symlink: %s -> %s{{NC}}\n" "$target" "$source"
+  fi
+  node scripts/restart-dashboard.mjs "$target"
+  printf "Run /reload in Pi once to load the symlinked extension; file edits are then live from this checkout.\n"
+
 # Show what reload would copy/delete without changing the live extension.
 [group('pi')]
 reload-dry-run:
