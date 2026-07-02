@@ -1,36 +1,40 @@
-import { Match, Switch } from "solid-js";
+import { createSignal, Match, Switch } from "solid-js";
 import Kpis from "../components/Kpis";
 import Widget from "../components/WidgetModal";
 import TopologyGraph from "../components/TopologyGraph";
 import LiveActivity from "../components/LiveActivity";
 import CostTokensChart from "../components/CostTokensChart";
 import ModelMix from "../components/ModelMix";
-import ProjectsLeaderboard from "../components/ProjectsLeaderboard";
-import SessionsCards from "../components/SessionsCards";
 import { currentSession, scope } from "../store";
 import { projectName, sessionSlug } from "../lib/format";
 
 export default function Overview() {
-  const level = () => scope().level;
+  const [topologyView, setTopologyView] = createSignal<"hive" | "planning">("hive");
 
-  // The hero widget changes by scope: fleet=projects, project=sessions,
-  // session=topology. Topology only exists when there is exactly one topology.
-  const heroTitle = () => level() === "fleet" ? "Projects" : level() === "project" ? "Sessions" : "Agent topology";
+  const topoTitle = () => scope().level === "session" ? "Session topology" : "Latest topology";
   const topoLabel = () => {
     const s = currentSession();
-    return s ? `${projectName(s.cwd)} · ${sessionSlug(s.session_id)}` : "";
+    return s ? `${projectName(s.cwd)} · ${sessionSlug(s.session_id)}` : "Waiting for hive telemetry";
   };
 
   return (
     <>
       <Kpis />
       <div class="widgets">
-        <Widget title={heroTitle()} class="span2 hero" sub={level() === "session" ? <small class="dim">{topoLabel()}</small> : undefined}>
-          <Switch>
-            <Match when={level() === "fleet"}><ProjectsLeaderboard /></Match>
-            <Match when={level() === "project"}><SessionsCards /></Match>
-            <Match when={level() === "session"}><TopologyGraph /></Match>
-          </Switch>
+        <Widget title={topoTitle()} class="span2 hero" sub={<small class="dim">{topoLabel()}</small>}>
+          <div class="topology-pane single">
+            <div class="topology-pane-head">
+              <div class="topology-switch" role="tablist" aria-label="Topology team">
+                <button class={topologyView() === "hive" ? "active" : ""} onClick={() => setTopologyView("hive")}>Hive execution</button>
+                <button class={topologyView() === "planning" ? "active" : ""} onClick={() => setTopologyView("planning")}>Planning</button>
+              </div>
+              <Switch>
+                <Match when={currentSession()?.live}><b>live</b></Match>
+                <Match when={currentSession()?.topologies?.active === topologyView()}><b>active</b></Match>
+              </Switch>
+            </div>
+            <TopologyGraph kind={topologyView()} />
+          </div>
         </Widget>
 
         <Widget title="Live activity" class="hero" headExtra={<span class="now-pip" />}>

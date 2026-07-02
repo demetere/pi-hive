@@ -1,12 +1,23 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { hierarchy, tree, type HierarchyPointNode } from "d3-hierarchy";
-import type { AgentRuntime, TopologyNode } from "../types";
+import type { AgentRuntime, SessionView, Topology, TopologyNode } from "../types";
 import { agentStatus, currentSession, flattenTopology, viewAgent } from "../store";
 import { fmtCost, fmtNum, shortModel, clip } from "../lib/format";
 import "./graph.css";
 
 const NODE_W = 184;
 const NODE_H = 66;
+
+type TopologyKind = "active" | "hive" | "planning";
+
+function pickTopology(sess: SessionView | undefined, kind: TopologyKind): Topology | undefined {
+  if (!sess) return undefined;
+  if (kind === "active") return sess.topology;
+  const teamTopo = kind === "hive" ? sess.topologies?.hive : sess.topologies?.planning;
+  if (teamTopo) return teamTopo;
+  if (!sess.topologies && kind === "hive") return sess.topology;
+  return sess.topologies?.active === kind ? sess.topology : undefined;
+}
 
 // Collect every name that appears strictly BELOW the given node (its descendants).
 function descendantNames(node: TopologyNode | undefined, into: Set<string>) {
@@ -21,8 +32,7 @@ function descendantNames(node: TopologyNode | undefined, into: Set<string>) {
 // which is what made a running leaf "jump" to the far left and detach). So we
 // only promote a top-level `agents[]` entry to a root child if it is not
 // already nested somewhere in the tree, and we de-duplicate by name.
-function rootOf(topo: ReturnType<typeof currentSession> extends infer _ ? any : never): TopologyNode | null {
-  const t = topo?.topology;
+function rootOf(t: Topology | undefined): TopologyNode | null {
   if (!t) return null;
   const agents: TopologyNode[] = t.agents || [];
   if (!t.orchestrator) {
@@ -46,20 +56,22 @@ function dedupeByName(nodes: TopologyNode[]): TopologyNode[] {
   return out;
 }
 
-export default function TopologyGraph() {
+export default function TopologyGraph(props: { kind?: TopologyKind }) {
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [view, setView] = createSignal({ k: 1, x: 0, y: 0 });
   let svgRef: SVGSVGElement | undefined;
   let pan: { x: number; y: number; vx: number; vy: number } | null = null;
 
   const session = currentSession;
+  const kind = () => props.kind || "active";
+  const topology = createMemo(() => pickTopology(session(), kind()));
 
   // Structural signature: the layout (node positions) depends ONLY on the tree
   // shape + which subtrees are collapsed — never on status/tokens/cost. Keying
   // the layout memo on this means a live status tick does NOT recompute d3
   // positions, so nodes never shift or jump while the hive runs.
   const structureKey = createMemo(() => {
-    const root = rootOf(session());
+    const root = rootOf(topology());
     if (!root) return "∅";
     const sig: string[] = [];
     const walk = (n: TopologyNode, depth: number) => {
@@ -74,7 +86,7 @@ export default function TopologyGraph() {
   // so live status ticks never reposition nodes.
   const layout = createMemo(() => {
     structureKey();
-    const root = rootOf(session());
+    const root = rootOf(topology());
     if (!root) return null;
     const col = collapsed();
     // Global de-dup: each agent name is expanded at most once across the whole
@@ -101,11 +113,20 @@ export default function TopologyGraph() {
   });
 
   // Live runtime data (status/tokens/cost), read separately so it updates
-  // without touching positions.
+  // without touching positions. Only the active team has live runtime rows; the
+  // inactive team's nodes still render from config and appear idle/done based on
+  // the event history overlay.
   const agentsMap = createMemo(() => session()?.agents || new Map<string, AgentRuntime>());
 
   function statusOf(name: string): string {
-    const sid = session()?.session_id || "";
+    const sess = session();
+    const selected = kind();
+    // When viewing a configured but inactive team, do not project the live
+    // event-status overlay onto it. Planning and execution can both have a root
+    // named/aliased like "Orchestrator" in historical telemetry; applying the
+    // active team's events to the inactive graph makes it look incorrectly live.
+    if (sess?.topologies && selected !== "active" && sess.topologies.active !== selected) return "idle";
+    const sid = sess?.session_id || "";
     return agentStatus(sid, name, agentsMap().get(name)?.status);
   }
 
@@ -122,15 +143,12 @@ export default function TopologyGraph() {
     setView({ k, x: (box.width - lo.width * k) / 2, y: Math.max(18, (box.height - lo.height * k) / 2) });
   }
 
-  // Auto-fit on first paint and when the SESSION changes or the underlying
-  // topology gains/loses agents from DATA — but NOT when the user collapses a
-  // subtree (that's a deliberate view action; recentering on it is jarring) and
-  // NOT on status/token ticks. So the fit key is derived from the full topology
-  // (ignoring the collapsed set), not the laid-out (post-collapse) nodes.
+  // Auto-fit on first paint and when the SESSION or selected team topology
+  // gains/loses agents from DATA — but NOT when the user collapses a subtree.
   const fitKey = createMemo(() => {
     const sess = currentSession();
-    const names = (flattenTopology(sess?.topology) || []).map((n: any) => n.name).join(",");
-    return (sess?.session_id || "") + "|" + names;
+    const names = (flattenTopology(topology()) || []).map((n: any) => n.name).join(",");
+    return (sess?.session_id || "") + "|" + kind() + "|" + names;
   });
   onMount(() => {
     fit();
@@ -194,6 +212,10 @@ export default function TopologyGraph() {
     return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
   }
 
+  const emptyText = () => kind() === "planning"
+    ? "No planning topology yet. Add a planning team and start a hive session."
+    : "No topology yet. Start a hive session so it emits session_start.";
+
   return (
     <div class="graph-wrap" onWheel={onWheel}>
       <div class="graph-controls">
@@ -201,7 +223,7 @@ export default function TopologyGraph() {
         <button onClick={() => setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.15) }))} title="Zoom out">−</button>
         <button onClick={() => fit()} title="Fit to view">⤢</button>
       </div>
-      <Show when={layout()} fallback={<div class="g-empty">No topology yet. Start a hive session so it emits session_start.</div>}>
+      <Show when={layout()} fallback={<div class="g-empty">{emptyText()}</div>}>
         {(lo) => (
           <svg
             ref={svgRef}
@@ -226,6 +248,7 @@ export default function TopologyGraph() {
                   const tokens = () => (rt()?.inputTokens || 0) + (rt()?.outputTokens || 0);
                   const hasKids = (data.children?.length || 0) > 0;
                   const isCollapsed = () => collapsed().has(data.name);
+                  const nodeKind = () => data.agentType || data.role || "member";
                   const openLog = (ev: MouseEvent) => {
                     ev.stopPropagation();
                     const sid = currentSession()?.session_id;
@@ -243,7 +266,7 @@ export default function TopologyGraph() {
                       <circle class={`g-dot ${status()}`} cx="19" cy="20" r="4.5" />
                       <text class="g-title" x="32" y="24">{clip(data.name, hasKids ? 17 : 19)}</text>
                       <text class="g-sub" x="16" y="43">{status()} · {fmtNum(tokens())} tok · {fmtCost(rt()?.costUsd || 0)}</text>
-                      <text class="g-sub dim" x="16" y="56">{clip(shortModel(data.model), 22)} · {data.role || "member"}</text>
+                      <text class="g-sub dim" x="16" y="56">{clip(shortModel(data.model), 18)} · {nodeKind()}</text>
                       <Show when={hasKids}>
                         {/* Collapse toggle, kept fully inside the box (clear of
                             the rounded border) with a generous hit area. */}
