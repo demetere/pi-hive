@@ -1,18 +1,11 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { scopedEvents } from "../store";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useHive } from "../store";
 import { fmtCost, fmtNum } from "../lib/format";
 import type { HiveEvent } from "../types";
-import "./chart.css";
 
 interface Pt { t: number; tok: number; cost: number; }
 
 // Cumulative cost/token series from the (scope-filtered) event stream.
-//
-// Each delegation_end carries the agent's CUMULATIVE runtime total at that
-// moment (runtime.inputTokens etc. is a running peak, not a per-call delta).
-// So the fleet total at any time = the SUM of every agent's latest cumulative
-// value seen so far — NOT a running sum of those numbers (that would count each
-// agent's growing total repeatedly and massively over-report).
 function buildSeries(events: HiveEvent[]): Pt[] {
   const evs = [...events].reverse(); // scopedEvents is newest-first → chronological
   const pts: Pt[] = [];
@@ -22,12 +15,11 @@ function buildSeries(events: HiveEvent[]): Pt[] {
   for (const e of evs) {
     if (e.type !== "delegation_end") continue;
     const p = e.payload || {};
-    const rt = p.runtime || {};
-    const name = rt.name || p.from;
+    const rt = (p as any).runtime || {};
+    const name = rt.name || (p as any).from;
     if (!name) continue;
     const tok = Number(rt.inputTokens || 0) + Number(rt.outputTokens || 0);
-    const cost = Number(rt.costUsd || p.costUsd || 0);
-    // keep the running peak per agent (cumulative can only grow)
+    const cost = Number(rt.costUsd || (p as any).costUsd || 0);
     tokByAgent.set(name, Math.max(tokByAgent.get(name) || 0, tok));
     costByAgent.set(name, Math.max(costByAgent.get(name) || 0, cost));
     let sumTok = 0, sumCost = 0;
@@ -36,16 +28,14 @@ function buildSeries(events: HiveEvent[]): Pt[] {
     lastTok = sumTok; lastCost = sumCost;
     pts.push({ t: new Date(e.ts).getTime(), tok: sumTok, cost: sumCost });
   }
-  // ensure monotonic (cumulative never decreases) in case of out-of-order ts
   let mTok = 0, mCost = 0;
   for (const pt of pts) { mTok = Math.max(mTok, pt.tok); mCost = Math.max(mCost, pt.cost); pt.tok = mTok; pt.cost = mCost; }
   void lastTok; void lastCost;
   return pts;
 }
 
-const PAD = { l: 56, r: 56, t: 16, b: 30 }; // room for left (tokens) + right (cost) axes
+const PAD = { l: 56, r: 56, t: 16, b: 30 };
 
-// "nice" max for an axis so ticks land on round numbers
 function niceMax(v: number): number {
   if (v <= 0) return 1;
   const exp = Math.floor(Math.log10(v));
@@ -60,26 +50,26 @@ function fmtTime(t: number): string {
 }
 
 export default function CostTokensChart() {
-  const series = createMemo(() => buildSeries(scopedEvents()));
-  const [hover, setHover] = createSignal<{ i: number; px: number } | null>(null);
-  // Size tracks the container so the chart FILLS the widget (no fixed box).
-  const [size, setSize] = createSignal({ w: 760, h: 240 });
-  let svgRef: SVGSVGElement | undefined;
-  let hostRef: HTMLDivElement | undefined;
+  const scopedEvents = useHive((s) => s.scopedEvents);
+  const series = useMemo(() => buildSeries(scopedEvents), [scopedEvents]);
+  const [hover, setHover] = useState<{ i: number; px: number } | null>(null);
+  const [size, setSize] = useState({ w: 760, h: 240 });
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
 
-  onMount(() => {
-    if (!hostRef || !("ResizeObserver" in window)) return;
+  useEffect(() => {
+    if (!hostRef.current || !("ResizeObserver" in window)) return;
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
       if (r && r.width > 0 && r.height > 0) setSize({ w: Math.round(r.width), h: Math.round(r.height) });
     });
-    ro.observe(hostRef);
-    onCleanup(() => ro.disconnect());
-  });
+    ro.observe(hostRef.current);
+    return () => ro.disconnect();
+  }, []);
 
-  const geom = createMemo(() => {
-    const pts = series();
-    const { w: W, h: H } = size();
+  const geom = useMemo(() => {
+    const pts = series;
+    const { w: W, h: H } = size;
     const PLOT_W = W - PAD.l - PAD.r;
     const PLOT_H = H - PAD.t - PAD.b;
     if (pts.length < 2 || PLOT_W <= 0 || PLOT_H <= 0) return null;
@@ -93,77 +83,71 @@ export default function CostTokensChart() {
     const area = (acc: (p: Pt) => number) => line(acc) + ` L ${x(t1).toFixed(1)} ${PAD.t + PLOT_H} L ${x(t0).toFixed(1)} ${PAD.t + PLOT_H} Z`;
     const ticks = [0, 0.25, 0.5, 0.75, 1];
     return { pts, W, H, PLOT_H, t0, t1, maxTok, maxCost, x, yT, yC, line, area, ticks };
-  });
+  }, [series, size]);
 
-  function onMove(e: PointerEvent) {
-    const g = geom(); if (!g || !svgRef) return;
-    const rect = svgRef.getBoundingClientRect();
+  function onMove(e: React.PointerEvent) {
+    const g = geom; if (!g || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
     const vx = ((e.clientX - rect.left) / rect.width) * g.W;
     let best = 0, bestD = Infinity;
     g.pts.forEach((p, i) => { const d = Math.abs(g.x(p.t) - vx); if (d < bestD) { bestD = d; best = i; } });
     setHover({ i: best, px: g.x(g.pts[best].t) });
   }
-  function onLeave() { setHover(null); }
+
+  const hp = geom && hover ? geom.pts[hover.i] : null;
+  const plotBottom = geom ? PAD.t + geom.PLOT_H : 0;
 
   return (
-    <div class="chart-wrap">
-      <div class="chart-host" ref={hostRef}>
-        <Show when={geom()} fallback={<div class="empty">Not enough activity to chart yet.</div>}>
-          {(g) => {
-            const hp = () => { const h = hover(); return h ? g().pts[h.i] : null; };
-            const plotBottom = () => PAD.t + g().PLOT_H;
-            return (<>
-              <svg ref={svgRef} viewBox={`0 0 ${g().W} ${g().H}`} preserveAspectRatio="none" class="chart-svg" onPointerMove={onMove} onPointerLeave={onLeave}>
-                <defs>
-                  <linearGradient id="gTok" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".28" /><stop offset="1" stop-color="var(--accent)" stop-opacity="0" /></linearGradient>
-                  <linearGradient id="gCost" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--ok)" stop-opacity=".18" /><stop offset="1" stop-color="var(--ok)" stop-opacity="0" /></linearGradient>
-                </defs>
+    <div className="chart-wrap">
+      <div className="chart-host" ref={hostRef}>
+        {!geom ? <div className="empty">Not enough activity to chart yet.</div> : (
+          <>
+            <svg ref={svgRef} viewBox={`0 0 ${geom.W} ${geom.H}`} preserveAspectRatio="none" className="chart-svg" onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
+              <defs>
+                <linearGradient id="gTok" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="var(--accent)" stopOpacity=".28" /><stop offset="1" stopColor="var(--accent)" stopOpacity="0" /></linearGradient>
+                <linearGradient id="gCost" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="var(--ok)" stopOpacity=".18" /><stop offset="1" stopColor="var(--ok)" stopOpacity="0" /></linearGradient>
+              </defs>
 
-                <For each={g().ticks}>
-                  {(f) => {
-                    const y = plotBottom() - f * g().PLOT_H;
-                    return (<>
-                      <line class="grid" x1={PAD.l} x2={g().W - PAD.r} y1={y} y2={y} />
-                      <text class="ax tok" x={PAD.l - 8} y={y + 3} text-anchor="end">{fmtNum(g().maxTok * f)}</text>
-                      <text class="ax cost" x={g().W - PAD.r + 8} y={y + 3} text-anchor="start">{fmtCost(g().maxCost * f)}</text>
-                    </>);
-                  }}
-                </For>
+              {geom.ticks.map((f) => {
+                const y = plotBottom - f * geom.PLOT_H;
+                return (
+                  <g key={f}>
+                    <line className="chart-grid" x1={PAD.l} x2={geom.W - PAD.r} y1={y} y2={y} />
+                    <text className="ax tok" x={PAD.l - 8} y={y + 3} textAnchor="end">{fmtNum(geom.maxTok * f)}</text>
+                    <text className="ax cost" x={geom.W - PAD.r + 8} y={y + 3} textAnchor="start">{fmtCost(geom.maxCost * f)}</text>
+                  </g>
+                );
+              })}
 
-                <For each={[0, 0.5, 1]}>
-                  {(f) => {
-                    const t = g().t0 + (g().t1 - g().t0) * f;
-                    const x = PAD.l + f * (g().W - PAD.l - PAD.r);
-                    return <text class="ax x" x={x} y={g().H - 8} text-anchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}>{fmtTime(t)}</text>;
-                  }}
-                </For>
+              {[0, 0.5, 1].map((f) => {
+                const t = geom.t0 + (geom.t1 - geom.t0) * f;
+                const x = PAD.l + f * (geom.W - PAD.l - PAD.r);
+                return <text key={f} className="ax x" x={x} y={geom.H - 8} textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}>{fmtTime(t)}</text>;
+              })}
 
-                <path d={g().area((p) => g().yT(p.tok))} fill="url(#gTok)" />
-                <path d={g().area((p) => g().yC(p.cost))} fill="url(#gCost)" />
-                <path class="ln tok" d={g().line((p) => g().yT(p.tok))} />
-                <path class="ln cost" d={g().line((p) => g().yC(p.cost))} />
+              <path d={geom.area((p) => geom.yT(p.tok))} fill="url(#gTok)" />
+              <path d={geom.area((p) => geom.yC(p.cost))} fill="url(#gCost)" />
+              <path className="ln tok" d={geom.line((p) => geom.yT(p.tok))} />
+              <path className="ln cost" d={geom.line((p) => geom.yC(p.cost))} />
 
-                <Show when={hp()}>
-                  {(p) => (<>
-                    <line class="crosshair" x1={hover()!.px} x2={hover()!.px} y1={PAD.t} y2={plotBottom()} />
-                    <circle class="dot tok" cx={hover()!.px} cy={g().yT(p().tok)} r="3.5" />
-                    <circle class="dot cost" cx={hover()!.px} cy={g().yC(p().cost)} r="3.5" />
-                  </>)}
-                </Show>
-              </svg>
+              {hp && hover && (
+                <>
+                  <line className="crosshair" x1={hover.px} x2={hover.px} y1={PAD.t} y2={plotBottom} />
+                  <circle className="dot tok" cx={hover.px} cy={geom.yT(hp.tok)} r="3.5" />
+                  <circle className="dot cost" cx={hover.px} cy={geom.yC(hp.cost)} r="3.5" />
+                </>
+              )}
+            </svg>
 
-              <Show when={hp()}>
-                {(p) => (
-                  <div class="chart-tip" style={{ left: `${(hover()!.px / g().W) * 100}%` }}>
-                    <div class="tip-time">{fmtTime(p().t)}</div>
-                    <div class="tip-row"><i class="lg tok" />tokens<b>{fmtNum(p().tok)}</b></div>
-                    <div class="tip-row"><i class="lg cost" />cost<b>{fmtCost(p().cost)}</b></div>
-                  </div>
-                )}
-              </Show>
-            </>);
-          }}
-        </Show>
+            {hp && hover && (
+              <div className="chart-tip" style={{ left: `${(hover.px / geom.W) * 100}%` }}>
+                <div className="tip-time">{fmtTime(hp.t)}</div>
+                <div className="tip-row"><i className="lg tok" />tokens<b>{fmtNum(hp.tok)}</b></div>
+                <div className="tip-row"><i className="lg cost" />cost<b>{fmtCost(hp.cost)}</b></div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );

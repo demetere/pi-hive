@@ -1,6 +1,5 @@
-import { createSignal, onCleanup, onMount, type JSX, Show } from "solid-js";
-import { Portal } from "solid-js/web";
-import "./modal.css";
+import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 // A widget shell that can expand into a full-screen modal. To avoid mounting
 // the (stateful) body twice, the children render in exactly one place at a
@@ -8,49 +7,50 @@ import "./modal.css";
 // shows a lightweight placeholder while expanded.
 export default function Widget(props: {
   title: string;
-  sub?: JSX.Element;
-  headExtra?: JSX.Element;
-  class?: string;
+  sub?: ReactNode;
+  headExtra?: ReactNode;
+  className?: string;
   expandable?: boolean;
-  children: JSX.Element;
+  children: ReactNode;
 }) {
-  const [open, setOpen] = createSignal(false);
+  const [open, setOpen] = useState(false);
 
-  function onKey(e: KeyboardEvent) { if (e.key === "Escape") setOpen(false); }
-  onMount(() => document.addEventListener("keydown", onKey));
-  onCleanup(() => document.removeEventListener("keydown", onKey));
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") setOpen(false); }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   const head = (inModal: boolean) => (
-    <div class="w-head">
-      <span class="w-title">{props.title}</span>
+    <div className="w-head">
+      <span className="w-title">{props.title}</span>
       {props.sub}
-      <span class="w-tools">
+      <span className="w-tools">
         {props.headExtra}
-        <Show when={props.expandable !== false}>
+        {props.expandable !== false && (
           <button title={inModal ? "Close" : "Expand"} onClick={() => setOpen(!inModal)}>{inModal ? "✕" : "⤢"}</button>
-        </Show>
+        )}
       </span>
     </div>
   );
 
   return (
     <>
-      <section class={`widget ${props.class || ""}`}>
+      <section className={`widget ${props.className || ""}`}>
         {head(false)}
-        <Show when={!open()} fallback={<div class="w-collapsed" onClick={() => setOpen(true)}>Expanded — click to focus, Esc to close</div>}>
-          {props.children}
-        </Show>
+        {open
+          ? <div className="w-collapsed" onClick={() => setOpen(true)}>Expanded — click to focus, Esc to close</div>
+          : props.children}
       </section>
-      <Show when={open()}>
-        <Portal>
-          <div class="modal-backdrop" onClick={() => setOpen(false)}>
-            <div class="modal-panel" onClick={(e) => e.stopPropagation()}>
-              {head(true)}
-              <div class="modal-body">{props.children}</div>
-            </div>
+      {open && createPortal(
+        <div className="modal-backdrop" onClick={() => setOpen(false)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            {head(true)}
+            <div className="modal-body">{props.children}</div>
           </div>
-        </Portal>
-      </Show>
+        </div>,
+        document.body,
+      )}
     </>
   );
 }

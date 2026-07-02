@@ -1,22 +1,27 @@
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
-import { scopedSessions, scope, selectSessionScope, deleteSession, isLive, now } from "../store";
-import { confirmAction } from "../components/ConfirmModal";
-import { absTime, fmtCost, fmtNum, relTime, sessionSlug } from "../lib/format";
+import { useCallback, useMemo, useState } from "react";
+import { useHive } from "../store";
+import { deleteSession, selectSessionScope, confirmAction } from "../store/raw";
+import { useFrozenOrder } from "../hooks/useFrozenOrder";
+import RelTime from "../hooks/RelTime";
+import { absTime, fmtCost, fmtNum, sessionSlug } from "../lib/format";
 import type { SessionView } from "../types";
-import "./tabs.css";
 
 type Key = "project" | "first_ts" | "last_ts" | "running" | "event_count" | "tokens" | "cost";
 
 export default function Sessions(props: { search: string }) {
-  const [sortKey, setSortKey] = createSignal<Key>("last_ts");
-  const [dir, setDir] = createSignal<1 | -1>(-1);
+  const scopedSessions = useHive((s) => s.scopedSessions);
+  const scope = useHive((s) => s.scope);
+  const liveSet = useHive((s) => s.liveSet);
+
+  const [sortKey, setSortKey] = useState<Key>("last_ts");
+  const [dir, setDir] = useState<1 | -1>(-1);
 
   function clickSort(k: Key) {
-    if (sortKey() === k) setDir((d) => (d === 1 ? -1 : 1));
+    if (sortKey === k) setDir((d) => (d === 1 ? -1 : 1));
     else { setSortKey(k); setDir(k === "project" ? 1 : -1); }
   }
 
-  function askDelete(s: SessionView, e: MouseEvent) {
+  function askDelete(s: SessionView, e: React.MouseEvent) {
     e.stopPropagation();
     confirmAction({
       title: "Delete session telemetry?",
@@ -27,75 +32,57 @@ export default function Sessions(props: { search: string }) {
     });
   }
 
-  // The visible set, filtered by search (no sort here).
-  const filtered = createMemo<SessionView[]>(() => {
+  const filtered = useMemo<SessionView[]>(() => {
     const q = props.search.toLowerCase();
-    return scopedSessions().filter((s) => !q || s.project.toLowerCase().includes(q) || s.session_id.toLowerCase().includes(q) || (s.cwd || "").toLowerCase().includes(q));
-  });
+    return scopedSessions.filter((s) => !q || s.project.toLowerCase().includes(q) || s.session_id.toLowerCase().includes(q) || (s.cwd || "").toLowerCase().includes(q));
+  }, [scopedSessions, props.search]);
 
-  // Frozen row order: recomputed ONLY when the sort (key/dir), the search, or the
-  // SET of sessions changes — NOT when a session's values change on a live
-  // snapshot. This keeps rows from jumping/reordering (and "flashing") every
-  // update; values still refresh in place. A manual sort-column click re-sorts.
-  const [order, setOrder] = createSignal<string[]>([]);
-  const resortKey = createMemo(() => sortKey() + ":" + dir() + "|" + filtered().map((s) => s.session_id).slice().sort().join(","));
-  createEffect(on(resortKey, () => {
-    const k = sortKey(), d = dir();
-    const sorted = [...filtered()].sort((a, b) => {
-      const va = a[k] as any, vb = b[k] as any;
-      const cmp = typeof va === "string" ? String(va).localeCompare(String(vb)) : (va - vb);
-      return cmp * d;
-    });
-    setOrder(sorted.map((s) => s.session_id));
-  }));
+  const resortKey = sortKey + ":" + dir + "|" + filtered.map((s) => s.session_id).slice().sort().join(",");
+  const idOf = useCallback((s: SessionView) => s.session_id, []);
+  const sorter = useCallback((a: SessionView, b: SessionView) => {
+    const va = a[sortKey] as any, vb = b[sortKey] as any;
+    const cmp = typeof va === "string" ? String(va).localeCompare(String(vb)) : (va - vb);
+    return cmp * dir;
+  }, [sortKey, dir]);
+  const rows = useFrozenOrder(filtered, idOf, resortKey, sorter);
 
-  const rows = createMemo<SessionView[]>(() => {
-    const byId = new Map(filtered().map((s) => [s.session_id, s]));
-    const ordered = order().map((id) => byId.get(id)).filter(Boolean) as SessionView[];
-    // include any brand-new session not yet in the frozen order, appended
-    for (const s of filtered()) if (!order().includes(s.session_id)) ordered.push(s);
-    return ordered;
-  });
-
-  const arrow = (k: Key) => (sortKey() === k ? <span class="arrow">{dir() === 1 ? "↑" : "↓"}</span> : null);
+  const arrow = (k: Key) => (sortKey === k ? <span className="arrow">{dir === 1 ? "↑" : "↓"}</span> : null);
 
   return (
-    <div class="tab-card">
-      <table class="table">
+    <div className="tab-card">
+      <table className="table">
         <thead>
           <tr>
             <th onClick={() => clickSort("project")}>Project {arrow("project")}</th>
             <th>Session</th>
             <th onClick={() => clickSort("first_ts")}>Started {arrow("first_ts")}</th>
-            <th onClick={() => clickSort("running")} class="num">Running {arrow("running")}</th>
-            <th onClick={() => clickSort("event_count")} class="num">Events {arrow("event_count")}</th>
-            <th onClick={() => clickSort("tokens")} class="num">Tokens {arrow("tokens")}</th>
-            <th onClick={() => clickSort("cost")} class="num">Cost {arrow("cost")}</th>
-            <th onClick={() => clickSort("last_ts")} class="num">Updated {arrow("last_ts")}</th>
-            <th class="del-col" />
+            <th onClick={() => clickSort("running")} className="num">Running {arrow("running")}</th>
+            <th onClick={() => clickSort("event_count")} className="num">Events {arrow("event_count")}</th>
+            <th onClick={() => clickSort("tokens")} className="num">Tokens {arrow("tokens")}</th>
+            <th onClick={() => clickSort("cost")} className="num">Cost {arrow("cost")}</th>
+            <th onClick={() => clickSort("last_ts")} className="num">Updated {arrow("last_ts")}</th>
+            <th className="del-col" />
           </tr>
         </thead>
         <tbody>
-          <For each={rows()}>
-            {(s) => (
-              <tr class={scope().level === "session" && (scope() as any).sessionId === s.session_id ? "active" : ""} onClick={() => selectSessionScope(s.session_id)}>
-                <td><span class={`dot ${isLive(s.session_id) ? "live" : "idle"}`} /><b>{s.project}</b></td>
-                <td class="mono">{sessionSlug(s.session_id)}</td>
-                <td class="muted-cell">{absTime(s.first_ts)}</td>
-                <td class="num">{s.running}</td>
-                <td class="num">{s.event_count}</td>
-                <td class="num">{fmtNum(s.tokens)}</td>
-                <td class="num">{fmtCost(s.cost)}</td>
-                <td class="num muted-cell">{relTime(s.last_ts, now())}</td>
-                <td class="del-col" onClick={(e) => e.stopPropagation()}>
-                  <button class="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
-                </td>
-              </tr>
-            )}
-          </For>
+          {rows.map((s) => (
+            <tr key={s.session_id} className={scope.level === "session" && (scope as any).sessionId === s.session_id ? "active" : ""} onClick={() => selectSessionScope(s.session_id)}>
+              <td><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{s.project}</b></td>
+              <td className="mono">{sessionSlug(s.session_id)}</td>
+              <td className="muted-cell">{absTime(s.first_ts)}</td>
+              <td className="num">{s.running}</td>
+              <td className="num">{s.event_count}</td>
+              <td className="num">{fmtNum(s.tokens)}</td>
+              <td className="num">{fmtCost(s.cost)}</td>
+              <td className="num muted-cell"><RelTime ts={s.last_ts} /></td>
+              <td className="del-col" onClick={(e) => e.stopPropagation()}>
+                <button className="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
-      <Show when={!rows().length}><div class="empty">No sessions match.</div></Show>
+      {!rows.length && <div className="empty">No sessions match.</div>}
     </div>
   );
 }

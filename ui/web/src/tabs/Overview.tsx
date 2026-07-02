@@ -1,48 +1,52 @@
-import { createSignal, Match, Switch } from "solid-js";
+import { lazy, Suspense, useState } from "react";
 import Kpis from "../components/Kpis";
 import Widget from "../components/WidgetModal";
-import TopologyGraph from "../components/TopologyGraph";
 import LiveActivity from "../components/LiveActivity";
 import CostTokensChart from "../components/CostTokensChart";
 import ModelMix from "../components/ModelMix";
-import { currentSession, scope } from "../store";
+import { useHive } from "../store";
 import { projectName, sessionSlug } from "../lib/format";
 
-export default function Overview() {
-  const [topologyView, setTopologyView] = createSignal<"hive" | "planning">("hive");
+// The topology graph pulls in d3-hierarchy; code-split it so that dependency
+// only loads when the Overview tab (the sole consumer) actually renders.
+const TopologyGraph = lazy(() => import("../components/TopologyGraph"));
 
-  const topoTitle = () => scope().level === "session" ? "Session topology" : "Latest topology";
-  const topoLabel = () => {
-    const s = currentSession();
-    return s ? `${projectName(s.cwd)} · ${sessionSlug(s.session_id)}` : "Waiting for hive telemetry";
-  };
+export default function Overview() {
+  const [topologyView, setTopologyView] = useState<"hive" | "planning">("hive");
+  const currentSession = useHive((s) => s.currentSession);
+  const scope = useHive((s) => s.scope);
+
+  const topoTitle = scope.level === "session" ? "Session topology" : "Latest topology";
+  const topoLabel = currentSession
+    ? `${projectName(currentSession.cwd)} · ${sessionSlug(currentSession.session_id)}`
+    : "Waiting for hive telemetry";
 
   return (
     <>
       <Kpis />
-      <div class="widgets">
-        <Widget title={topoTitle()} class="span2 hero" sub={<small class="dim">{topoLabel()}</small>}>
-          <div class="topology-pane single">
-            <div class="topology-pane-head">
-              <div class="topology-switch" role="tablist" aria-label="Topology team">
-                <button class={topologyView() === "hive" ? "active" : ""} onClick={() => setTopologyView("hive")}>Hive execution</button>
-                <button class={topologyView() === "planning" ? "active" : ""} onClick={() => setTopologyView("planning")}>Planning</button>
+      <div className="widgets">
+        <Widget title={topoTitle} className="span2 hero" sub={<small className="text-muted">{topoLabel}</small>}>
+          <div className="topology-pane single">
+            <div className="topology-pane-head">
+              <div className="topology-switch" role="tablist" aria-label="Topology team">
+                <button className={topologyView === "hive" ? "active" : ""} onClick={() => setTopologyView("hive")}>Hive execution</button>
+                <button className={topologyView === "planning" ? "active" : ""} onClick={() => setTopologyView("planning")}>Planning</button>
               </div>
-              <Switch>
-                <Match when={currentSession()?.live}><b>live</b></Match>
-                <Match when={currentSession()?.topologies?.active === topologyView()}><b>active</b></Match>
-              </Switch>
+              {currentSession?.live ? <b>live</b>
+                : currentSession?.topologies?.active === topologyView ? <b>active</b> : null}
             </div>
-            <TopologyGraph kind={topologyView()} />
+            <Suspense fallback={<div className="g-empty">Loading topology…</div>}>
+              <TopologyGraph kind={topologyView} />
+            </Suspense>
           </div>
         </Widget>
 
-        <Widget title="Live activity" class="hero" headExtra={<span class="now-pip" />}>
+        <Widget title="Live activity" className="hero" headExtra={<span className="w-2 h-2 rounded-full bg-ok animate-ping2" />}>
           <LiveActivity limit={40} />
         </Widget>
 
-        <Widget title="Cost & tokens over time" class="span2"
-          headExtra={<span class="w-legend"><i class="lg cost" />cost<i class="lg tok" />tokens</span>}>
+        <Widget title="Cost & tokens over time" className="span2"
+          headExtra={<span className="w-legend"><i className="lg cost" />cost<i className="lg tok" />tokens</span>}>
           <CostTokensChart />
         </Widget>
 

@@ -1,0 +1,503 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── theme tokens (the only hand-authored CSS): variable declarations that back
+   the Tailwind color/shadow tokens, switched at runtime via data-theme. ─── */
+@layer base {
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --app-bg: #0a0b10; --panel: #12141c; --border: #1f232e; --hover: #1a1e29; --chip: #191d28;
+    --fg: #e7eaf1; --fg2: #aab2c2; --muted: #69728a;
+    --accent: #7c6cff; --accent-hi: #8f80ff; --accent-fg: #cfc7ff; --accent-soft: #7c6cff1c; --accent-border: #3a3470; --accent-glow: #7c6cff55;
+    --ok: #3ddc97; --ok-soft: #3ddc9714; --ok-border: #2a7a59; --warn: #f59e0b; --warn-soft: #f59e0b14; --err: #ff6b6b;
+    --done: #5b6b86; --done-soft: #5b6b8618;
+    --node-bg: #161922; --node-border: #272c3a; --edge: #2a303d;
+    --graph-bg: radial-gradient(circle at 1px 1px, #1b2030 1px, transparent 0), linear-gradient(180deg, #0d0f16, #0a0b10);
+    --shadow: 0 12px 32px #0007;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --app-bg: #f4f5f9; --panel: #ffffff; --border: #e8eaf0; --hover: #f2f3f8; --chip: #eef0f6;
+    --fg: #161a24; --fg2: #525a6b; --muted: #9099aa;
+    --accent: #6c5cff; --accent-hi: #5a48f5; --accent-fg: #5a48f5; --accent-soft: #6c5cff14; --accent-border: #d6d2ff; --accent-glow: #6c5cff33;
+    --ok: #16a34a; --ok-soft: #16a34a10; --ok-border: #bbe6cb; --warn: #d97706; --warn-soft: #d977060e; --err: #e0483b;
+    --done: #8693a8; --done-soft: #8693a818;
+    --node-bg: #ffffff; --node-border: #e4e7ef; --edge: #d6dae4;
+    --graph-bg: radial-gradient(circle at 1px 1px, #e9ebf2 1px, transparent 0), linear-gradient(180deg, #fbfcfe, #f5f6fb);
+    --shadow: 0 8px 24px #1a223010;
+  }
+
+  html, body, #root { height: 100%; margin: 0; }
+  body {
+    background: var(--app-bg);
+    color: var(--fg);
+    font-family: "Inter", ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Custom scrollbars (theme-aware; no Tailwind utility equivalent). */
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 9px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--accent-border); }
+}
+
+/* ── component primitives ─────────────────────────────────────────────────
+   Repeated UI classes, composed purely from Tailwind utilities via @apply so
+   the ported components keep their original class names and stay pixel-identical
+   to the pre-rewrite build. No hand-written property rules except the few things
+   Tailwind can't express (pseudo-element overlays, color-mix, keyframes). */
+@layer components {
+  /* buttons */
+  .btn { @apply font-semibold rounded-[10px] px-3.5 py-2 cursor-pointer border border-border bg-panel text-fg inline-flex items-center gap-[7px] transition-[transform,background,border-color] duration-[.12s]; }
+  .btn:hover { @apply -translate-y-px; }
+  .btn.primary { @apply bg-accent border-accent text-white shadow-[0_6px_16px_var(--accent-glow)]; }
+  .btn.primary:hover { @apply bg-accent-hi; }
+  .btn.ghost { @apply text-ok border-ok-border bg-ok-soft; }
+  .btn.ghost.off { @apply text-muted border-border bg-panel; }
+  .btn.pill { @apply rounded-[9px] px-3 py-[7px] font-medium text-fg2; }
+  .btn.sm { @apply px-3 py-[7px]; }
+  .btn.danger { @apply bg-err border-err text-white; }
+  .btn.danger:hover { filter: brightness(1.08); }
+  .btn:disabled { @apply opacity-45 cursor-not-allowed translate-y-0; }
+
+  /* kpi cards */
+  .kpis { @apply grid gap-3 mb-3.5; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .kpi { @apply bg-panel border border-border rounded-[14px] px-4 py-3.5 transition-[border-color,transform] duration-[.14s]; }
+  .kpi:hover { @apply -translate-y-0.5 border-accent-border; }
+  .kpi-top { @apply flex items-center justify-between; }
+  .kpi-label { @apply text-muted text-xs font-medium; }
+  .kpi-val { @apply text-[26px] font-bold mt-2 mb-0.5 tracking-[-.5px] tabular-nums; }
+  .kpi-sub { @apply text-muted text-[11.5px]; }
+
+  /* widgets */
+  .widgets { @apply grid grid-cols-3 gap-3; }
+  .widget { @apply bg-panel border border-border rounded-2xl overflow-hidden shadow-panel flex flex-col; }
+  .widget.span2 { grid-column: span 2; }
+  .widget.hero { @apply h-[440px]; }
+  .w-head { @apply flex items-center gap-2.5 px-4 py-[13px] border-b border-border; }
+  .w-title { @apply font-bold text-[13.5px]; }
+  .w-tools { @apply ml-auto text-muted cursor-pointer flex gap-2 items-center; }
+  .w-tools button { @apply bg-transparent border-0 text-muted cursor-pointer text-[13px] px-1 py-0.5 rounded-md; }
+  .w-tools button:hover { @apply text-fg bg-hover; }
+  .w-legend { @apply ml-auto flex items-center gap-1.5 text-muted text-[11.5px]; }
+  .w-legend .lg { @apply w-[18px] h-[3px] rounded-sm inline-block; }
+  .w-legend .lg.cost { @apply bg-ok; }
+  .w-legend .lg.tok { @apply bg-accent; }
+
+  .empty { @apply text-muted p-7 text-center; }
+  .empty.small { @apply p-3 text-xs; }
+
+  /* tables */
+  .tab-card { @apply bg-panel border border-border rounded-2xl overflow-hidden shadow-panel; }
+  .table { @apply w-full border-collapse text-[12.5px]; }
+  .table th { @apply text-left text-muted font-semibold text-[11px] uppercase tracking-[.5px] px-3.5 py-3 border-b border-border cursor-pointer select-none whitespace-nowrap; }
+  .table th:hover { @apply text-fg; }
+  .table th .arrow { @apply text-accent ml-1; }
+  .table td { @apply px-3.5 py-[11px] border-b border-border align-middle; }
+  .table tbody tr { @apply cursor-pointer transition-[background] duration-[.12s]; }
+  .table tbody tr:hover { @apply bg-hover; }
+  .table tbody tr.active { @apply bg-accent-soft; }
+  .table tbody tr:last-child td { @apply border-b-0; }
+  .num { @apply tabular-nums text-left; }
+  .table th.num, .table td.num { @apply w-[92px]; }
+  .mono { @apply tabular-nums; }
+  .muted-cell { @apply text-muted; }
+
+  .dot { @apply w-2 h-2 rounded-full inline-block mr-[7px]; }
+  .dot.running { @apply bg-ok shadow-[0_0_7px_var(--ok)] animate-pulse13; }
+  .dot.live { @apply bg-ok shadow-[0_0_7px_var(--ok)]; }
+  .dot.idle, .dot.done { @apply bg-muted; }
+  .dot.error { @apply bg-err; }
+  .cdot { @apply w-[9px] h-[9px] rounded-full inline-block mr-2 align-middle; }
+
+  .status-tag { @apply text-[10.5px] font-bold px-2 py-0.5 rounded-full uppercase tracking-[.4px]; }
+  .status-tag.running { @apply text-ok bg-ok-soft; }
+  .status-tag.waiting { @apply text-warn bg-warn-soft; }
+  .status-tag.done { @apply text-done bg-done-soft; }
+  .status-tag.error { @apply text-err bg-[#ff6b6b14]; }
+  .status-tag.idle { @apply text-muted bg-chip; }
+
+  .del-col { @apply w-14 text-right; }
+  .row-del { @apply bg-transparent border-0 cursor-pointer text-xs opacity-0 px-1.5 py-[3px] rounded-md grayscale transition-[opacity] duration-[.12s]; }
+  .table tbody tr:hover .row-del { @apply opacity-55; }
+  .row-del:hover { @apply !opacity-100 bg-[#ff6b6b1f] grayscale-0; }
+
+  .toolbar { @apply flex items-center gap-2.5 mb-3; }
+  .toolbar select, .toolbar input { @apply bg-panel border border-border text-fg rounded-[9px] px-[11px] py-2 text-[12.5px]; font: inherit; }
+  .toolbar .spacer { @apply flex-1; }
+  .pager { @apply flex items-center gap-2; }
+
+  /* cost bars */
+  .cost-grid { @apply grid gap-3; grid-template-columns: 2fr 1fr; }
+  .bar-row { @apply flex items-center gap-2.5 py-2; }
+  .bar-name { @apply w-[150px] overflow-hidden text-ellipsis whitespace-nowrap text-[12.5px]; }
+  .bar-track { @apply block flex-1 h-2.5 bg-chip rounded-md overflow-hidden; }
+  .bar-fill { @apply block h-full min-w-[3px] rounded-md transition-[width] duration-500 ease-smooth; }
+  .bar-val { @apply w-16 text-right tabular-nums font-semibold text-xs; }
+}
+@media (max-width: 1180px) { .widgets, .kpis { grid-template-columns: repeat(2, 1fr) !important; } }
+@media (max-width: 1000px) { .cost-grid { grid-template-columns: 1fr !important; } }
+
+/* ── overview: topology graph ─────────────────────────────────────────────── */
+@layer components {
+  .topology-pane { @apply flex-1 min-w-0 min-h-0 flex flex-col bg-panel; }
+  .topology-pane-head { @apply h-[42px] flex items-center gap-2 px-3 border-b border-border text-fg2 text-[11px] font-bold uppercase tracking-[.45px]; }
+  .topology-pane-head b { @apply ml-auto text-ok bg-ok-soft border border-ok-border rounded-full px-[7px] py-px text-[9.5px] tracking-[.35px]; }
+  .topology-switch { @apply inline-flex gap-[3px] p-[3px] border border-border rounded-[10px] bg-chip; }
+  .topology-switch button { @apply border-0 rounded-[7px] bg-transparent text-muted cursor-pointer text-[11px] font-bold px-2.5 py-[5px] uppercase tracking-[.35px]; font: inherit; }
+  .topology-switch button:hover { @apply text-fg bg-hover; }
+  .topology-switch button.active { @apply text-accent-fg bg-accent-soft shadow-[inset_0_0_0_1px_var(--accent-border)]; }
+
+  .graph-wrap { @apply flex-1 min-h-0 relative overflow-hidden; background: var(--graph-bg); background-size: 24px 24px, 100% 100%; }
+  /* Naming a color token `border` makes Tailwind's bare `border`/`border-*`
+     utilities also emit `stroke: var(--border)`. Since SVG `stroke` inherits,
+     that stray border-colored stroke bleeds onto every <text> and fill-only
+     shape, smudging labels. Neutralize it at the SVG roots; elements that need a
+     real stroke (edges, node box, chart lines) set their own below. */
+  .graph-svg, .chart-svg, .donut { stroke: none; }
+  .graph-svg text, .chart-svg text, .donut text { stroke: none; }
+  .graph-svg { @apply block w-full h-full min-h-[300px]; touch-action: none; }
+  .g-empty { @apply text-muted p-10 text-center; }
+  .graph-controls { @apply absolute top-3 right-3 z-[2] flex flex-col gap-1; }
+  .graph-controls button { @apply w-[30px] h-[30px] rounded-lg border border-border bg-panel text-fg2 cursor-pointer text-[15px] leading-none grid place-items-center shadow-panel; }
+  .graph-controls button:hover { @apply text-fg border-accent-border; }
+
+  .g-edge { fill: none; @apply stroke-edge; stroke-width: 1.8; }
+  .g-edge.running { @apply stroke-accent; stroke-dasharray: 6 6; @apply animate-dash; filter: drop-shadow(0 0 4px var(--accent-glow)); }
+  .g-node { @apply cursor-pointer; outline: none; }
+  .g-node.clickable .g-bg:hover { @apply stroke-accent; }
+  .g-node:focus-visible .g-bg { @apply stroke-accent; filter: drop-shadow(0 0 6px var(--accent-glow)); }
+  .g-bg { @apply fill-[var(--node-bg)] stroke-[var(--node-border)]; stroke-width: 1.2; transition: stroke .2s; }
+  .g-node.running .g-bg { @apply stroke-ok; filter: drop-shadow(0 0 7px #3ddc9744); }
+  .g-node.waiting .g-bg { @apply stroke-warn; filter: drop-shadow(0 0 5px #f59e0b22); }
+  .g-node.done .g-bg { @apply stroke-done; }
+  .g-node.error .g-bg { @apply stroke-err; }
+  .g-dot { @apply fill-muted; }
+  .g-dot.running { @apply fill-ok animate-gdotpulse; transform-box: fill-box; transform-origin: center; }
+  .g-dot.waiting { @apply fill-warn animate-gdotwait; transform-box: fill-box; transform-origin: center; }
+  .g-dot.done { @apply fill-done; }
+  .g-dot.error { @apply fill-err; }
+  .g-dot-halo { @apply fill-ok animate-gdothalo; transform-box: fill-box; transform-origin: center; }
+  .g-title { @apply fill-fg; font-weight: 700; font-size: 12px; }
+  .g-sub { @apply fill-[var(--fg2)]; font-size: 10px; }
+  .g-sub.dim { @apply fill-muted; }
+  .g-collapse { @apply cursor-pointer; }
+  .g-collapse-hit { fill: transparent; }
+  .g-collapse circle { @apply fill-chip stroke-[var(--border)]; stroke-width: 1; }
+  .g-collapse text { @apply fill-[var(--fg2)]; font-size: 13px; font-weight: 700; pointer-events: none; }
+  .g-collapse:hover circle { @apply fill-hover stroke-[var(--accent)]; }
+}
+
+/* ── overview: cost/tokens chart ──────────────────────────────────────────── */
+@layer components {
+  .chart-wrap { @apply px-4 py-3.5 flex-1 flex min-h-[260px]; }
+  .chart-host { @apply relative w-full flex-1 flex; }
+  .chart-svg { @apply w-full h-full min-h-[240px] block; touch-action: none; }
+  .chart-grid { @apply stroke-[var(--border)]; stroke-width: 1; opacity: .6; }
+  .ax { @apply fill-muted tabular-nums; font-size: 10px; }
+  .ax.tok { @apply fill-accent; opacity: .85; }
+  .ax.cost { @apply fill-ok; opacity: .85; }
+  .ax.x { @apply fill-muted; }
+  .ln { fill: none; stroke-width: 2; }
+  .ln.tok { @apply stroke-accent; }
+  .ln.cost { @apply stroke-ok; }
+  .crosshair { @apply stroke-[var(--fg2)]; stroke-width: 1; stroke-dasharray: 3 3; opacity: .5; }
+  .chart-svg .dot { @apply stroke-[var(--panel)]; stroke-width: 2; }
+  .chart-svg .dot.tok { @apply fill-accent; }
+  .chart-svg .dot.cost { @apply fill-ok; }
+  .chart-tip { @apply absolute top-2.5 pointer-events-none bg-panel border border-border rounded-[9px] px-[11px] py-2 shadow-panel min-w-[120px] z-[2]; transform: translateX(-50%); }
+  .chart-tip .tip-time { @apply text-muted text-[10.5px] mb-[5px] tabular-nums; }
+  .chart-tip .tip-row { @apply flex items-center gap-[7px] text-xs text-fg2; }
+  .chart-tip .tip-row b { @apply ml-auto text-fg tabular-nums; }
+  .chart-tip .lg { @apply w-3.5 h-[3px] rounded-sm inline-block; }
+  .chart-tip .lg.tok { @apply bg-accent; }
+  .chart-tip .lg.cost { @apply bg-ok; }
+}
+
+/* ── overview: model mix ──────────────────────────────────────────────────── */
+@layer components {
+  .mix-wrap { @apply px-4 py-3.5 flex flex-col gap-3.5 flex-1; }
+  .donut-row { @apply flex items-center gap-4; }
+  .donut { @apply w-[140px] h-[140px] shrink-0; }
+  .track { fill: none; @apply stroke-chip; stroke-width: 14; }
+  .seg { fill: none; stroke-width: 14; stroke-linecap: butt; transition: stroke-dasharray .5s var(--ease); }
+  .d-big { @apply fill-fg; font-size: 19px; font-weight: 800; text-anchor: middle; }
+  .d-sm { @apply fill-muted; font-size: 10px; text-anchor: middle; }
+  .lg-list { @apply flex flex-col gap-1.5 flex-1; }
+  .lg-row { @apply flex items-center gap-[7px] text-xs text-fg2; }
+  .lg-row b { @apply ml-auto text-fg; }
+  .lg-dot { @apply w-[9px] h-[9px] rounded-[3px] shrink-0; }
+  .leaders { @apply flex flex-col gap-1 border-t border-border pt-3; }
+  .ld { @apply flex items-center gap-[9px] px-1.5 py-[5px] rounded-lg text-xs; }
+  .ld:hover { @apply bg-hover; }
+  .ld-dot { @apply w-2 h-2 rounded-full shrink-0; }
+  .ld-name { @apply flex-1 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .ld-tok { @apply text-muted tabular-nums; }
+  .ld-cost { @apply font-bold tabular-nums min-w-[48px] text-right; }
+}
+
+/* ── modals + confirm ─────────────────────────────────────────────────────── */
+@layer components {
+  .modal-backdrop { @apply fixed inset-0 z-50 grid place-items-center p-5 animate-fadein; background: #0008; backdrop-filter: blur(6px); }
+  .modal-panel { @apply bg-panel border border-border rounded-[18px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: min(1800px, 96vw); height: min(1100px, 94vh); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
+  .modal-body { @apply flex-1 flex flex-col min-h-0 overflow-auto; }
+  .modal-body > * { @apply flex-1; }
+  .w-collapsed { @apply flex-1 grid place-items-center text-muted text-xs cursor-pointer min-h-[120px]; }
+  .w-collapsed:hover { @apply text-accent; }
+  .confirm-backdrop { @apply z-[60]; }
+  .confirm-card { @apply bg-panel border border-border rounded-2xl p-6 text-center; box-shadow: 0 30px 80px #000a; width: min(420px, 92vw); animation: activityIn .18s cubic-bezier(.2,.7,.3,1); }
+  .confirm-icon { @apply w-[46px] h-[46px] rounded-xl grid place-items-center text-xl mx-auto mb-3.5 bg-chip border border-border; }
+  .confirm-icon.danger { @apply bg-[#ff6b6b18] border-err; }
+  .confirm-title { @apply m-0 mb-2 text-[17px] font-bold; }
+  .confirm-msg { @apply text-fg2 text-[13px] leading-normal mb-5; }
+  .confirm-msg b { @apply text-fg; }
+  .confirm-actions { @apply flex gap-2.5 justify-center; }
+  .confirm-actions .btn { @apply min-w-[96px] justify-center; }
+}
+
+/* ── agent log ────────────────────────────────────────────────────────────── */
+@layer components {
+  .log-panel { width: min(960px, 92vw); height: min(860px, 92vh); }
+  .log-head { @apply gap-2.5; }
+  .log-dot { @apply w-2.5 h-2.5 rounded-full shrink-0; }
+  .log-model { @apply text-muted text-[11px] tabular-nums; }
+  .log-live { @apply inline-flex items-center gap-1.5 text-ok text-[11px] font-bold; }
+  .log-runs { @apply flex items-center gap-1.5 px-4 py-2 border-b border-border flex-wrap; }
+  .log-runs-label { @apply text-muted text-[11px] font-bold uppercase tracking-[.5px] mr-1; }
+  .log-run-tab { @apply bg-chip border border-border text-fg2 rounded-full text-[11.5px] font-semibold px-[11px] py-1 cursor-pointer transition-[color,border-color,background] duration-[.12s]; }
+  .log-run-tab:hover { @apply text-fg border-accent-border; }
+  .log-run-tab.active { @apply bg-accent-soft text-accent-fg border-accent-border; }
+  .log-body { @apply flex-1 min-h-0 overflow-y-auto px-[18px] py-4 block; }
+  .log-body > * { @apply mb-3; }
+  .log-body > *:last-child { @apply mb-0; }
+  .log-inv { @apply border border-border rounded-xl overflow-hidden bg-transparent; }
+  .log-inv.open { @apply border-accent-border; }
+  .log-inv-head { @apply flex items-center gap-2.5 px-[13px] py-2.5 cursor-pointer transition-[background] duration-[.12s]; }
+  .log-inv-head:hover { @apply bg-hover; }
+  .log-inv-caret { @apply text-muted text-[10px] w-3 shrink-0; }
+  .log-inv-num { @apply font-bold text-[12.5px] text-accent-fg whitespace-nowrap shrink-0; }
+  .log-inv-task { @apply text-fg2 text-xs overflow-hidden text-ellipsis whitespace-nowrap flex-1 min-w-0; }
+  .log-inv-count { @apply text-muted text-[11px] whitespace-nowrap shrink-0; }
+  .log-inv-body { @apply px-3.5 pt-2.5 pb-3.5 flex flex-col gap-3 border-t border-border; }
+  .log-meta { @apply self-center text-muted text-[11px] bg-chip px-2.5 py-[3px] rounded-full; }
+  .log-msg { @apply flex flex-col gap-[5px]; }
+  .log-role { @apply text-[10px] font-bold uppercase tracking-[.6px] text-muted; }
+  .log-msg.user .log-role { @apply text-accent; }
+  .log-msg.assistant .log-role { @apply text-ok; }
+  .log-parts { @apply flex flex-col gap-2; }
+  .log-text { @apply bg-transparent border border-border rounded-[10px] px-[13px] py-[11px] text-[13px] leading-normal whitespace-pre-wrap break-words; }
+  .log-msg.user .log-text { @apply bg-accent-soft border-accent-border; }
+  .log-thinking { @apply text-fg2 text-[12.5px] whitespace-pre-wrap break-words bg-accent-soft rounded-r-lg px-3 py-[9px]; border-left: 2px solid var(--accent-border); line-height: 1.55; }
+  .log-tool { @apply bg-chip border border-border rounded-[10px] overflow-hidden; }
+  .log-tool.err { @apply border-err; }
+  .log-tool-head { @apply flex items-center gap-2 px-3 py-2 cursor-pointer text-[12.5px]; }
+  .log-tool-head:hover { @apply bg-hover; }
+  .log-tool-head .tool-ic { opacity: .8; }
+  .log-tool-head b { @apply font-bold; }
+  .log-tool-head .tool-toggle { @apply ml-auto text-accent font-semibold text-[11px]; }
+  .log-tool-head .tool-toggle.dim { @apply text-muted; }
+  .log-tool-args { @apply m-0 px-[13px] py-[9px] border-t border-border font-mono text-[11px] whitespace-pre-wrap break-words text-fg2 max-h-[160px] overflow-auto; line-height: 1.45; }
+  .log-tool-body { @apply m-0 px-[13px] py-2.5 border-t border-border font-mono text-[11.5px] whitespace-pre-wrap break-words max-h-[360px] overflow-auto text-fg2; background: var(--app-bg); line-height: 1.5; }
+  .log-bulk { @apply bg-chip border border-border text-fg2 rounded-[7px] text-[11px] font-semibold px-[9px] py-1 cursor-pointer; }
+  .log-bulk:hover { @apply text-fg border-accent-border; }
+}
+
+/* ── activity feed ────────────────────────────────────────────────────────── */
+@layer components {
+  .tl-scroll { @apply overflow-auto px-3.5 py-3 flex-1; }
+  .tl-type { @apply text-[9.5px] uppercase tracking-[.5px] text-accent font-bold; }
+  .tl-time { @apply ml-auto text-muted text-[10.5px] whitespace-nowrap; }
+  .tl-text { @apply text-fg2 text-xs mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .activity-layout { @apply grid gap-3 items-start; grid-template-columns: 310px minmax(0, 1fr); }
+  .activity-agents { @apply sticky top-0 min-h-0 overflow-hidden p-2.5 flex flex-col; height: calc(100vh - 154px); max-height: calc(100vh - 154px); }
+  .activity-panel-head { @apply shrink-0 flex items-center justify-between gap-2 px-1 pt-0.5 pb-2.5 text-fg2; }
+  .activity-panel-head b { @apply text-fg; }
+  .activity-panel-head span { @apply text-muted text-[11px] font-bold; }
+  .team-filters { @apply shrink-0 grid grid-cols-3 gap-1 pb-2; }
+  .team-filter { @apply border border-border rounded-[9px] bg-chip text-fg2 text-[11px] font-bold px-1 py-1.5 cursor-pointer; font: inherit; }
+  .team-filter:hover { @apply text-fg bg-hover; }
+  .team-filter.active { @apply text-accent-fg bg-accent-soft border-accent-border; }
+  .activity-agent-list { @apply min-h-0 overflow-auto pr-0.5; }
+  .agent-filter { @apply w-full flex items-center gap-2 p-2 border border-transparent rounded-[10px] bg-transparent text-fg2 text-left cursor-pointer; font: inherit; }
+  .agent-filter:hover { @apply bg-hover text-fg; }
+  .agent-filter.active { @apply bg-accent-soft text-accent-fg border-accent-border; }
+  .agent-filter .cdot { @apply mr-0 shrink-0; }
+  .agent-filter-main { @apply min-w-0 flex-1 flex flex-col; line-height: 1.2; }
+  .agent-filter-main b { @apply overflow-hidden text-ellipsis whitespace-nowrap text-xs; }
+  .agent-filter-main small { @apply text-muted overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px]; }
+  .agent-filter-stat { @apply text-muted text-[10.5px] font-bold tabular-nums flex flex-col items-end; line-height: 1.15; }
+  .agent-filter-stat b { @apply text-fg2 text-[11px]; }
+  .agent-filter-stat small { @apply text-muted text-[9.5px]; }
+  .activity-feed { @apply min-w-0; }
+  .activity-card-grid { @apply flex flex-col gap-[9px]; }
+  .activity-box { @apply relative bg-panel border border-border rounded-[14px] shadow-panel px-3.5 py-3 overflow-hidden animate-activityIn; --agent-color: var(--accent); border-left: 4px solid var(--agent-color); transition: border-color .16s var(--ease), background .16s var(--ease); }
+  .activity-box::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 42px; background: linear-gradient(90deg, color-mix(in srgb, var(--agent-color) 16%, transparent), transparent); pointer-events: none; }
+  .activity-box.ok { @apply border-ok-border; border-left-color: var(--agent-color); }
+  .activity-box.err { border-color: #ff6b6b55; border-left-color: var(--err); }
+  .activity-box.compact { @apply shadow-none px-3 py-2.5 rounded-xl min-h-[72px] overflow-visible shrink-0; }
+  .live-cards { @apply flex flex-col gap-2.5 items-stretch; }
+  .live-cards .activity-event-head { @apply min-h-[18px] cursor-default; line-height: 1.35; }
+  .live-cards .activity-event-head b { line-height: 1.35; }
+  .live-cards .activity-box { @apply cursor-default; }
+  .live-cards .activity-summary { @apply whitespace-nowrap mt-1.5; line-height: 1.35; }
+  .live-agent-chip { @apply inline-flex mt-1.5; width: fit-content; }
+  .activity-event-head { @apply w-full flex items-baseline gap-2 border-0 bg-transparent p-0 text-left cursor-pointer relative; color: inherit; font: inherit; }
+  .activity-event-head b { @apply text-fg text-[12.5px] overflow-hidden text-ellipsis whitespace-nowrap; }
+  .agent-chip { @apply border border-border bg-chip text-fg2 rounded-full px-[7px] py-px text-[10.5px] font-bold whitespace-nowrap; }
+  .expand-mark { @apply text-muted font-extrabold ml-0.5; }
+  .activity-summary { @apply whitespace-nowrap relative max-w-[860px]; }
+  .activity-detail { @apply mt-2 p-2.5 border border-border rounded-xl bg-chip; }
+  .activity-detail pre { @apply mt-2.5 max-h-[320px] overflow-auto text-fg2 whitespace-pre-wrap break-words; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .detail-grid { @apply grid text-[11.5px]; grid-template-columns: 70px 1fr; gap: 4px 10px; }
+  .tool-detail-grid { @apply pb-2.5 border-b border-border; grid-template-columns: 70px minmax(0, 1fr) 70px minmax(0, 1fr); }
+  .detail-grid span { @apply text-muted; }
+  .detail-grid b { @apply text-fg2 font-semibold min-w-0 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .tool-phases { @apply grid gap-2.5 mt-2.5; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tool-phase { @apply border border-border rounded-xl p-2.5 bg-panel; }
+  .tool-phase.start { border-left: 3px solid var(--accent); }
+  .tool-phase.end { border-left: 3px solid var(--ok); }
+  .tool-phase.err { border-left: 3px solid var(--err); }
+  .tool-phase h4 { @apply m-0 mb-2 text-[11px] uppercase tracking-[.5px] text-fg; }
+  .meta-list { @apply mt-2 flex flex-col gap-[5px]; }
+  .meta-list p { @apply m-0 grid text-[11.5px]; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; }
+  .meta-list span { @apply text-muted; }
+  .meta-list b { @apply text-fg2 font-medium overflow-hidden text-ellipsis whitespace-nowrap; }
+  .phase-payload { @apply mt-2.5 max-h-[220px] overflow-auto text-fg2 bg-chip border border-border rounded-[10px] p-[9px] whitespace-pre-wrap break-words; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+}
+@media (max-width: 760px) { .tool-phases { grid-template-columns: 1fr !important; } .tool-detail-grid { grid-template-columns: 70px minmax(0, 1fr) !important; } }
+@media (max-width: 1050px) { .activity-layout { grid-template-columns: 1fr !important; } .activity-agents { position: static !important; height: auto !important; max-height: 360px !important; } }
+
+/* ── plans tab ────────────────────────────────────────────────────────────── */
+@layer components {
+  .plans-layout { @apply grid gap-3.5 items-start; grid-template-columns: 300px 1fr; }
+  .plans-list { @apply p-0 overflow-hidden; }
+  .plans-list-head { @apply flex items-center justify-between px-3.5 py-3 border-b border-border text-[11px] font-bold uppercase tracking-[.5px] text-muted; }
+  .plans-refresh { @apply bg-transparent border-0 text-muted cursor-pointer text-[15px] leading-none px-1.5 py-0.5 rounded-md; }
+  .plans-refresh:hover { @apply text-fg bg-hover; }
+  .plan-row { @apply block w-full text-left px-3.5 py-[11px] border-x-0 border-t-0 border-b border-border bg-transparent cursor-pointer transition-[background] duration-[.12s]; font: inherit; color: inherit; }
+  .plan-row:last-child { @apply border-b-0; }
+  .plan-row:hover { @apply bg-hover; }
+  .plan-row.active { @apply bg-accent-soft; }
+  .plan-row-main { @apply flex flex-col gap-0.5 mb-1.5; }
+  .plan-title { @apply text-[12.5px] font-semibold text-fg overflow-hidden text-ellipsis whitespace-nowrap; }
+  .plan-id { @apply text-[10.5px] text-muted; }
+  .plan-row-meta { @apply flex items-center gap-1.5; }
+  .phase-badge { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip text-fg2; }
+  .phase-badge.ready { @apply text-ok bg-ok-soft; }
+  .verdict-pill { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
+  .verdict-pill.v-green { @apply text-ok bg-ok-soft; }
+  .verdict-pill.v-yellow { @apply text-warn bg-warn-soft; }
+  .verdict-pill.v-red { @apply text-err bg-[#ff6b6b1a]; }
+  .plans-detail { @apply flex flex-col gap-3.5; }
+  .plans-empty { @apply p-10 text-center; }
+  .plan-head { @apply px-[18px] py-4; }
+  .plan-head-title { @apply flex items-baseline gap-2.5 flex-wrap; }
+  .plan-head-title h2 { @apply m-0 text-[17px]; }
+  .plan-head-meta { @apply flex items-center gap-2 mt-2 flex-wrap; }
+  .meta-chip { @apply text-[11px] text-muted bg-chip px-2 py-0.5 rounded-md; }
+  .gate-track { @apply flex items-center gap-1.5 mt-3.5 flex-wrap; }
+  .gate { @apply flex items-center gap-[5px] text-[11.5px] px-2.5 py-1 rounded-lg border border-border; }
+  .gate.on { @apply text-ok border-ok-border bg-ok-soft; }
+  .gate.off { @apply text-muted; }
+  .gate-mark { @apply text-[10px]; }
+  .review-box { @apply mt-3.5 p-3 border border-border rounded-xl bg-chip grid gap-2.5 items-start; grid-template-columns: minmax(0, 1fr) auto; }
+  .review-box.slim { @apply bg-transparent p-0 border-0; }
+  .review-main { @apply min-w-0 flex flex-col gap-2.5; }
+  .review-box textarea { @apply min-h-[48px] resize-y w-full bg-panel border border-border text-fg rounded-[9px] px-2.5 py-2 text-[12.5px] box-border; font: inherit; }
+  .review-actions { @apply flex gap-2 items-center; }
+  .annotation-list { @apply flex flex-col gap-1.5; }
+  .annotation-item { @apply grid items-center p-2 border border-border rounded-[10px] bg-panel; grid-template-columns: auto 1fr auto; gap: 6px 8px; }
+  .annotation-item b { @apply text-[11.5px] text-fg; }
+  .annotation-item span { @apply text-muted text-[10.5px] overflow-hidden text-ellipsis whitespace-nowrap; }
+  .annotation-item button { @apply border-0 bg-transparent text-muted cursor-pointer text-base; }
+  .annotation-item p { @apply m-0 text-fg2 text-xs overflow-hidden text-ellipsis whitespace-nowrap; grid-column: 1 / -1; }
+  .annotation-item small { @apply text-muted text-[11.5px] whitespace-pre-wrap; grid-column: 1 / -1; }
+  .selection-popover { @apply fixed z-[80] bg-panel border border-accent-border rounded-xl p-2 animate-activityIn; transform: translate(-50%, -100%); width: min(340px, calc(100vw - 24px)); box-shadow: 0 18px 50px #0009; }
+  .selection-popover::after { content: ""; position: absolute; left: 50%; bottom: -7px; width: 12px; height: 12px; transform: translateX(-50%) rotate(45deg); background: var(--panel); border-right: 1px solid var(--accent-border); border-bottom: 1px solid var(--accent-border); }
+  .selection-popover textarea { @apply w-full box-border mt-1.5 bg-chip border border-border rounded-[9px] text-fg px-2.5 py-2 text-[12.5px] resize-y; font: inherit; }
+  .selection-popover-actions { @apply flex gap-1.5 items-center justify-start; }
+  .selection-popover-actions.end { @apply justify-end mt-[7px]; }
+  .selection-popover-actions button { @apply border border-border rounded-lg bg-chip text-fg2 text-[11.5px] font-bold px-[9px] py-1.5 cursor-pointer; font: inherit; }
+  .selection-popover-actions button:hover { @apply text-fg border-accent-border; }
+  .selection-popover-actions .btn-submit { @apply bg-accent border-accent text-white; }
+  .plan-artifacts { @apply p-0 overflow-hidden; }
+  .artifact-tabs { @apply flex gap-1 px-3 py-2.5 border-b border-border flex-wrap; }
+  .artifact-tab { @apply bg-chip border border-border text-fg2 text-[11.5px] px-[11px] py-[5px] rounded-lg cursor-pointer transition-all duration-[.12s]; font: inherit; }
+  .artifact-tab:hover { @apply bg-hover text-fg; }
+  .artifact-tab.active { @apply bg-accent-soft text-accent border-accent-border; }
+  .empty-inline { @apply text-xs text-muted p-1; }
+  .artifact-review-shell { @apply grid min-h-[360px]; grid-template-columns: minmax(0, 1fr) 280px; }
+  .artifact-body { @apply px-5 pt-2 pb-5 max-h-[620px] overflow-auto min-w-0; }
+  .artifact-rail { @apply border-l border-border p-3 max-h-[620px] overflow-auto; }
+  .rail-head { @apply flex items-center justify-between text-fg text-xs mb-2.5; }
+  .rail-head span { @apply text-muted bg-chip border border-border rounded-full px-[7px] py-px; }
+  .rail-ann { @apply border border-border rounded-[10px] p-[9px] mb-[9px] bg-panel; border-left-width: 3px; }
+  .rail-ann.pending { border-style: dashed; }
+  .rail-ann.comment { border-left-color: var(--warn); }
+  .rail-ann.deletion { border-left-color: var(--err); }
+  .rail-ann.looks_good { border-left-color: var(--ok); }
+  .rail-ann-top { @apply flex items-center justify-between gap-2 text-[11px] uppercase tracking-[.35px] text-fg; }
+  .rail-ann-top button { @apply border-0 bg-transparent text-muted cursor-pointer text-base leading-none; }
+  .rail-ann blockquote { @apply mt-[7px] pl-2 text-muted text-[11.5px] max-h-[72px] overflow-hidden; border-left: 2px solid var(--border); }
+  .rail-ann p { @apply mt-[7px] text-xs text-fg2 whitespace-pre-wrap; }
+  .md { @apply text-[13px] text-fg; line-height: 1.65; }
+  .md-h1 { @apply text-[18px] mt-[18px] mb-2.5; }
+  .md-h2 { @apply text-[15px] mt-4 mb-2; }
+  .md-h3 { @apply text-[13px] mt-3.5 mb-1.5 text-fg2; }
+  .md-p { @apply my-2; }
+  .md-ul { @apply my-2 pl-5; list-style: disc; }
+  .md-li { @apply my-[3px]; }
+  .md-task { @apply my-[3px] flex items-start gap-2; list-style: none; }
+  .md-task input { @apply mt-[3px]; }
+  .md-task-done { @apply text-muted line-through; }
+  .md-code { @apply font-mono text-xs bg-chip px-[5px] py-px rounded-[5px]; }
+  .md-pre { @apply border border-border rounded-[10px] px-3.5 py-3 overflow-auto my-2.5; background: var(--app-bg); }
+  .md-pre code { @apply font-mono text-xs; white-space: pre; }
+  .md-link { @apply text-accent no-underline; }
+  .md-link:hover { @apply underline; }
+  .plan-mark { @apply rounded px-0.5; color: inherit; }
+  .plan-mark.comment { background: #f59e0b33; box-shadow: inset 0 -1px 0 #f59e0baa; }
+  .plan-mark.deletion { background: #ff6b6b2e; text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--err); }
+  .plan-mark.looks_good { @apply bg-ok-soft; box-shadow: inset 0 -1px 0 var(--ok); }
+  .plan-grid { @apply grid grid-cols-2 gap-3.5; }
+  .timeline-card, .comments-card { @apply px-4 py-3.5; }
+  .card-h { @apply m-0 mb-3 text-xs uppercase tracking-[.5px] text-muted; }
+  .timeline-item { @apply py-2.5 border-b border-border; }
+  .timeline-item:last-child { @apply border-b-0; }
+  .ti-head { @apply flex items-center gap-2; }
+  .ti-who { @apply text-xs font-semibold; }
+  .ti-time { @apply text-[11px] text-muted ml-auto; }
+  .ti-summary { @apply text-[12.5px] mt-1.5 text-fg2; }
+  .ti-list { @apply mt-1.5 pl-[18px] text-xs; list-style: disc; }
+  .ti-list.blockers li { @apply text-err; }
+  .ti-list.concerns li { @apply text-warn; }
+  .ti-list.evidence li { @apply text-muted; }
+  .approve-phase { @apply text-[11px] font-bold uppercase tracking-[.4px] text-ok bg-ok-soft px-2 py-0.5 rounded-full; }
+  .comment-form { @apply flex flex-col gap-2 mb-3.5; }
+  .comment-form select, .comment-form input, .comment-form textarea { @apply bg-panel border border-border text-fg rounded-lg px-2.5 py-[7px] text-[12.5px]; font: inherit; }
+  .comment-form textarea { @apply resize-y w-full box-border; }
+  .cf-row { @apply flex gap-2; }
+  .cf-row select { @apply shrink-0; }
+  .cf-row input { @apply flex-1; }
+  .cf-actions { @apply flex justify-end; }
+  .btn-approve, .btn-submit { @apply bg-accent text-accent-fg border-0 rounded-lg px-3.5 py-[7px] text-[12.5px] font-semibold cursor-pointer; }
+  .btn-approve:hover, .btn-submit:hover { filter: brightness(1.08); }
+  .btn-submit:disabled, .btn-approve:disabled { @apply opacity-50 cursor-default; filter: none; }
+  .comment-item { @apply py-2.5 border-b border-border; }
+  .comment-item:last-child { @apply border-b-0; }
+  .ci-head { @apply flex items-center gap-2; }
+  .ci-who { @apply text-xs font-semibold; }
+  .ci-target { @apply text-[10.5px] text-muted bg-chip px-1.5 py-px rounded-[5px]; }
+  .ann-kind { @apply text-[10px] font-extrabold uppercase tracking-[.35px] px-1.5 py-px rounded-full bg-chip text-fg2; }
+  .ann-kind.comment { @apply text-warn bg-warn-soft; }
+  .ann-kind.deletion { @apply text-err bg-[#ff6b6b1a]; }
+  .ann-kind.looks_good { @apply text-ok bg-ok-soft; }
+  .ci-quote { @apply mt-[7px] pl-2.5 text-muted text-xs whitespace-nowrap overflow-hidden text-ellipsis; border-left: 2px solid var(--border); }
+  .ci-body { @apply text-[12.5px] mt-[5px] text-fg2 whitespace-pre-wrap; }
+}
+@media (max-width: 1100px) { .artifact-review-shell { grid-template-columns: 1fr !important; } .artifact-rail { border-left: 0 !important; border-top: 1px solid var(--border) !important; max-height: none !important; } }
+@media (max-width: 1000px) { .plans-layout, .plan-grid { grid-template-columns: 1fr !important; } }
+@media (max-width: 900px) { .review-box { grid-template-columns: 1fr !important; } .review-actions { justify-content: flex-end !important; } }

@@ -1,57 +1,52 @@
-import { createSignal, onCleanup, Show, type JSX } from "solid-js";
-import { Portal } from "solid-js/web";
-import "./modal.css";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { useHive } from "../store";
+import { clearConfirm } from "../store/raw";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
-interface ConfirmState {
-  title: string;
-  message: JSX.Element;
-  confirmLabel?: string;
-  danger?: boolean;
-  onConfirm: () => unknown | Promise<unknown>;
-}
-
-// Global confirm-dialog singleton. Call `confirm({...})` from anywhere to pop a
-// modal; it resolves the action on confirm. Keeps destructive actions behind a
-// real dialog instead of inline buttons.
-const [state, setState] = createSignal<ConfirmState | null>(null);
-const [busy, setBusy] = createSignal(false);
-
-export function confirmAction(opts: ConfirmState) { setBusy(false); setState(opts); }
-
+// Global confirm-dialog singleton. Call `confirmAction({...})` (from store/raw)
+// anywhere to pop a modal; it resolves the action on confirm.
 export default function ConfirmModal() {
-  function close() { if (!busy()) setState(null); }
-  async function go() {
-    const s = state(); if (!s) return;
-    setBusy(true);
-    try { await s.onConfirm(); } finally { setBusy(false); setState(null); }
-  }
-  function onKey(e: KeyboardEvent) {
-    if (!state()) return;
-    if (e.key === "Escape") close();
-    if (e.key === "Enter") go();
-  }
-  document.addEventListener("keydown", onKey);
-  onCleanup(() => document.removeEventListener("keydown", onKey));
+  const state = useHive((s) => s.confirm);
+  const [busy, setBusy] = useState(false);
+  const trapRef = useFocusTrap<HTMLDivElement>(!!state);
 
-  return (
-    <Show when={state()}>
-      {(s) => (
-        <Portal>
-          <div class="modal-backdrop confirm-backdrop" onClick={close}>
-            <div class="confirm-card" onClick={(e) => e.stopPropagation()}>
-              <div class={`confirm-icon ${s().danger ? "danger" : ""}`}>{s().danger ? "🗑" : "?"}</div>
-              <h3 class="confirm-title">{s().title}</h3>
-              <div class="confirm-msg">{s().message}</div>
-              <div class="confirm-actions">
-                <button class="btn pill" disabled={busy()} onClick={close}>Cancel</button>
-                <button class={`btn ${s().danger ? "danger" : "primary"}`} disabled={busy()} onClick={go}>
-                  {busy() ? "Deleting…" : (s().confirmLabel || "Confirm")}
-                </button>
-              </div>
-            </div>
-          </div>
-        </Portal>
-      )}
-    </Show>
+  function close() { if (!busy) clearConfirm(); }
+  async function go() {
+    if (!state) return;
+    setBusy(true);
+    try { await state.onConfirm(); } finally { setBusy(false); clearConfirm(); }
+  }
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!state) return;
+      if (e.key === "Escape") { if (!busy) clearConfirm(); }
+      if (e.key === "Enter") go();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, busy]);
+
+  // reset busy whenever a fresh confirm opens
+  useEffect(() => { setBusy(false); }, [state]);
+
+  if (!state) return null;
+  return createPortal(
+    <div className="modal-backdrop confirm-backdrop" onClick={close}>
+      <div ref={trapRef} className="confirm-card" role="alertdialog" aria-modal="true" aria-label={state.title} onClick={(e) => e.stopPropagation()}>
+        <div className={`confirm-icon ${state.danger ? "danger" : ""}`}>{state.danger ? "🗑" : "?"}</div>
+        <h3 className="confirm-title">{state.title}</h3>
+        <div className="confirm-msg">{state.message}</div>
+        <div className="confirm-actions">
+          <button className="btn pill" disabled={busy} onClick={close}>Cancel</button>
+          <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={busy} onClick={go}>
+            {busy ? "Deleting…" : (state.confirmLabel || "Confirm")}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

@@ -1,15 +1,17 @@
 import { defineConfig } from "vite";
-import solid from "vite-plugin-solid";
+import react from "@vitejs/plugin-react";
 
-// The dashboard is served by src/observability/server.ts from this dist/ folder.
-// `base: "./"` makes all asset URLs relative so it works regardless of the
-// path the server mounts it at. During UI development, `vite` dev server
-// proxies the API endpoints to the running Bun telemetry server.
+// The dashboard is served by src/observability/static.ts from this dist/ folder
+// at the server root. `base: "/"` makes asset URLs absolute so they resolve to
+// /assets/* regardless of the client-route depth (e.g. /project/foo/cost must
+// still load /assets/index.js, not /project/foo/assets/index.js). During UI
+// development, the vite dev server proxies API endpoints to the Bun server.
 const API_PORT = (globalThis as any).process?.env?.HIVE_TELEMETRY_PORT || "43191";
+const target = `http://127.0.0.1:${API_PORT}`;
 
 export default defineConfig({
-  base: "./",
-  plugins: [solid()],
+  base: "/",
+  plugins: [react()],
   build: {
     outDir: "dist",
     emptyOutDir: true,
@@ -18,11 +20,14 @@ export default defineConfig({
   server: {
     port: 43192,
     proxy: {
-      "/events": `http://127.0.0.1:${API_PORT}`,
-      "/states": `http://127.0.0.1:${API_PORT}`,
-      "/sessions": `http://127.0.0.1:${API_PORT}`,
-      "/stream": `http://127.0.0.1:${API_PORT}`,
-      "/health": `http://127.0.0.1:${API_PORT}`,
+      "/events": target,
+      "/states": target,
+      "/sessions": target,
+      "/stream": target,
+      "/health": target,
+      "/plans": target,
+      "/agent-log": target,
+      "/projects": target,
     },
   },
 });

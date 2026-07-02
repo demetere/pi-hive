@@ -1,22 +1,19 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { Portal } from "solid-js/web";
-import { openAgent, closeAgent } from "../store";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useHive } from "../store";
+import { closeAgent } from "../store/raw";
 import { shortModel } from "../lib/format";
-import "./agentlog.css";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 interface Part { type: "text" | "thinking" | "toolCall" | "toolResult"; text?: string; name?: string; args?: any; result?: string | null; resultError?: boolean; }
 interface Entry { kind: "message" | "meta"; role?: string; parts?: Part[]; text?: string; ts?: string; }
 interface Invoc { task: string; entries: Entry[] }
+interface RunRef { id: string; label: string; }
 
-// Split a transcript into invocations. Each user-role message is the task handed
-// to the agent for one invocation (the orchestrator re-calling it with -continue
-// appends a new user turn to the SAME log). Leading meta lines (model/thinking)
-// that appear before the first user message are folded INTO the first
-// invocation rather than forming an empty "(no task text)" group.
 function splitInvocations(entries: Entry[]): Invoc[] {
   const invs: Invoc[] = [];
   let cur: Invoc | null = null;
-  let pending: Entry[] = []; // leading entries before the first user message
+  let pending: Entry[] = [];
   const firstTextOf = (e: Entry) => e.parts?.find((p) => p.type === "text")?.text || "";
   for (const e of entries) {
     if (e.kind === "message" && e.role === "user") {
@@ -24,194 +21,200 @@ function splitInvocations(entries: Entry[]): Invoc[] {
       pending = [];
       invs.push(cur);
     } else if (!cur) {
-      pending.push(e); // hold until the first user message
+      pending.push(e);
     } else {
       cur.entries.push(e);
     }
   }
-  // No user message at all (rare) — show the leading entries as one block.
   if (!invs.length && pending.length) invs.push({ task: "", entries: pending });
   return invs;
 }
 
-// Broadcast expand/collapse to every tool card. A bump on this signal forces
-// all cards to (un)collapse their result regardless of individual state.
-const [bulkResult, setBulkResult] = createSignal<{ open: boolean; n: number }>({ open: false, n: 0 });
-
-interface RunRef { id: string; label: string; }
-
 export default function AgentLog() {
-  const [entries, setEntries] = createSignal<Entry[]>([]);
-  const [status, setStatus] = createSignal<string>("");
-  const [loading, setLoading] = createSignal(true);
-  const [exists, setExists] = createSignal(true);
-  const [runs, setRuns] = createSignal<RunRef[]>([]);
-  const [selectedRun, setSelectedRun] = createSignal<string>("current");
-  const invocations = createMemo(() => splitInvocations(entries()));
-  let offset = 0;
-  let timer: ReturnType<typeof setInterval> | undefined;
-  let scroller: HTMLDivElement | undefined;
+  const openAgent = useHive((s) => s.openAgent);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [exists, setExists] = useState(true);
+  const [runs, setRuns] = useState<RunRef[]>([]);
+  const [selectedRun, setSelectedRun] = useState("current");
+  const [bulk, setBulk] = useState<{ open: boolean; n: number }>({ open: false, n: 0 });
 
-  async function poll(initial: boolean) {
-    const a = openAgent();
+  const invocations = useMemo(() => splitInvocations(entries), [entries]);
+  const trapRef = useFocusTrap<HTMLDivElement>(!!openAgent);
+  const offset = useRef(0);
+  const timer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const selectedRunRef = useRef(selectedRun);
+  selectedRunRef.current = selectedRun;
+
+  const poll = useCallback(async (initial: boolean) => {
+    const a = openAgent;
     if (!a) return;
+    // Don't hit the network for a background tab's live tail; the visibility
+    // handler re-polls once when the tab comes back to the foreground.
+    if (!initial && typeof document !== "undefined" && document.visibilityState === "hidden") return;
     try {
-      const run = selectedRun();
-      const url = `/agent-log?session=${encodeURIComponent(a.sessionId)}&agent=${encodeURIComponent(a.name)}&offset=${offset}&run=${encodeURIComponent(run)}`;
+      const run = selectedRunRef.current;
+      const url = `/agent-log?session=${encodeURIComponent(a.sessionId)}&agent=${encodeURIComponent(a.name)}&offset=${offset.current}&run=${encodeURIComponent(run)}`;
       const res = await fetch(url);
       const data = await res.json();
       setStatus(data.status || "");
       setExists(!!data.exists);
       if (Array.isArray(data.runs)) setRuns(data.runs);
-      if (data.offset != null) offset = data.offset;
+      if (data.offset != null) offset.current = data.offset;
       if (data.entries?.length) {
-        const atBottom = scroller ? scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 60 : true;
+        const el = scroller.current;
+        const atBottom = el ? el.scrollTop + el.clientHeight >= el.scrollHeight - 60 : true;
         setEntries((prev) => initial ? data.entries : [...prev, ...data.entries]);
-        if (atBottom) queueMicrotask(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
+        if (atBottom) queueMicrotask(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight }));
       }
-      // only tail the live "current" run
-      const shouldTail = data.running && selectedRun() === "current";
-      if (shouldTail && !timer) timer = setInterval(() => poll(false), 1500);
-      if (!shouldTail && timer) { clearInterval(timer); timer = undefined; }
+      const shouldTail = data.running && selectedRunRef.current === "current";
+      if (shouldTail && !timer.current) timer.current = setInterval(() => poll(false), 1500);
+      if (!shouldTail && timer.current) { clearInterval(timer.current); timer.current = undefined; }
     } catch { /* transient */ }
     setLoading(false);
-  }
+  }, [openAgent]);
 
   function loadRun(runId: string) {
-    if (timer) { clearInterval(timer); timer = undefined; }
+    if (timer.current) { clearInterval(timer.current); timer.current = undefined; }
     setSelectedRun(runId);
-    offset = 0; setEntries([]); setLoading(true);
+    selectedRunRef.current = runId;
+    offset.current = 0; setEntries([]); setLoading(true);
     poll(true);
   }
 
   // (re)load when the target agent changes
-  createEffect(on(openAgent, (a) => {
-    if (timer) { clearInterval(timer); timer = undefined; }
-    offset = 0; setEntries([]); setLoading(true); setExists(true); setRuns([]); setSelectedRun("current");
-    if (a) poll(true);
-  }));
-  onCleanup(() => { if (timer) clearInterval(timer); });
+  useEffect(() => {
+    if (timer.current) { clearInterval(timer.current); timer.current = undefined; }
+    offset.current = 0; setEntries([]); setLoading(true); setExists(true); setRuns([]); setSelectedRun("current");
+    selectedRunRef.current = "current";
+    if (openAgent) poll(true);
+    return () => { if (timer.current) { clearInterval(timer.current); timer.current = undefined; } };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAgent]);
 
-  function onKey(e: KeyboardEvent) { if (e.key === "Escape") closeAgent(); }
-  createEffect(() => { if (openAgent()) document.addEventListener("keydown", onKey); else document.removeEventListener("keydown", onKey); });
-  onCleanup(() => document.removeEventListener("keydown", onKey));
+  useEffect(() => {
+    if (!openAgent) return;
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") closeAgent(); }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [openAgent]);
 
-  return (
-    <Show when={openAgent()}>
-      {(a) => (
-        <Portal>
-          <div class="modal-backdrop" onClick={closeAgent}>
-            <div class="modal-panel log-panel" onClick={(e) => e.stopPropagation()}>
-              <div class="w-head log-head">
-                <span class="log-dot" style={{ background: a().color || "var(--accent)" }} />
-                <span class="w-title">{a().name}</span>
-                <span class={`status-tag ${status() || a().status || "idle"}`}>{status() || a().status || "idle"}</span>
-                <Show when={a().model}><span class="log-model">{shortModel(a().model)}</span></Show>
-                <Show when={status() === "running"}><span class="log-live"><span class="live-pip" /> live</span></Show>
-                <span class="w-tools">
-                  <button class="log-bulk" onClick={() => setBulkResult((b) => ({ open: true, n: b.n + 1 }))} title="Expand all results">Expand all</button>
-                  <button class="log-bulk" onClick={() => setBulkResult((b) => ({ open: false, n: b.n + 1 }))} title="Collapse all results">Collapse all</button>
-                  <button onClick={closeAgent} title="Close">✕</button>
-                </span>
-              </div>
-              <Show when={runs().length > 1}>
-                <div class="log-runs">
-                  <span class="log-runs-label">Runs:</span>
-                  <For each={runs()}>
-                    {(r) => (
-                      <button class={`log-run-tab ${selectedRun() === r.id ? "active" : ""}`} onClick={() => loadRun(r.id)}>{r.label}</button>
-                    )}
-                  </For>
-                </div>
-              </Show>
-              <div class="log-body" ref={scroller}>
-                <Show when={!loading()} fallback={<div class="empty">Loading transcript…</div>}>
-                  <Show when={exists()} fallback={<div class="empty">No transcript for this agent yet{status() === "idle" ? " — it hasn't run." : "."}</div>}>
-                    <For each={invocations()}>
-                      {(inv, i) => <Invocation inv={inv} index={i()} total={invocations().length} />}
-                    </For>
-                    <Show when={!entries().length}><div class="empty">Transcript is empty.</div></Show>
-                  </Show>
-                </Show>
-              </div>
-            </div>
-          </div>
-        </Portal>
-      )}
-    </Show>
-  );
-}
+  // When the tab returns to the foreground, immediately catch up on any live
+  // tail that was skipped while hidden.
+  useEffect(() => {
+    if (!openAgent) return;
+    function onVisible() {
+      if (document.visibilityState === "visible" && status === "running" && selectedRunRef.current === "current") poll(false);
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [openAgent, status, poll]);
 
-// One collapsible invocation block. The latest invocation (and a single-
-// invocation log) is expanded by default; earlier ones collapse so the
-// orchestrator↔agent back-and-forth is navigable.
-function Invocation(props: { inv: Invoc; index: number; total: number }) {
-  const isLatest = () => props.index === props.total - 1;
-  const [open, setOpen] = createSignal(props.total === 1 || isLatest());
-  const taskPreview = () => props.inv.task ? props.inv.task.replace(/\s+/g, " ").slice(0, 90) : "(no task text)";
-  return (
-    <div class={`log-inv ${open() ? "open" : ""}`}>
-      <div class="log-inv-head" onClick={() => setOpen(!open())}>
-        <span class="log-inv-caret">{open() ? "▾" : "▸"}</span>
-        <span class="log-inv-num">{props.index === 0 ? "Invocation 1" : `↻ Invocation ${props.index + 1}`}</span>
-        <span class="log-inv-task">{taskPreview()}</span>
-        <span class="log-inv-count">{props.inv.entries.length} msg{props.inv.entries.length === 1 ? "" : "s"}</span>
-      </div>
-      <Show when={open()}>
-        <div class="log-inv-body">
-          <For each={props.inv.entries}>{(e) => <LogEntry entry={e} />}</For>
+  if (!openAgent) return null;
+  const a = openAgent;
+
+  return createPortal(
+    <div className="modal-backdrop" onClick={closeAgent}>
+      <div ref={trapRef} className="modal-panel log-panel" role="dialog" aria-modal="true" aria-label={`${a.name} transcript`} onClick={(e) => e.stopPropagation()}>
+        <div className="w-head log-head">
+          <span className="log-dot" style={{ background: a.color || "var(--accent)" }} />
+          <span className="w-title">{a.name}</span>
+          <span className={`status-tag ${status || a.status || "idle"}`}>{status || a.status || "idle"}</span>
+          {a.model && <span className="log-model">{shortModel(a.model)}</span>}
+          {status === "running" && <span className="log-live"><span className="w-2 h-2 rounded-full bg-ok animate-ping2" /> live</span>}
+          <span className="w-tools">
+            <button className="log-bulk" onClick={() => setBulk((b) => ({ open: true, n: b.n + 1 }))} title="Expand all results">Expand all</button>
+            <button className="log-bulk" onClick={() => setBulk((b) => ({ open: false, n: b.n + 1 }))} title="Collapse all results">Collapse all</button>
+            <button onClick={closeAgent} title="Close">✕</button>
+          </span>
         </div>
-      </Show>
+        {runs.length > 1 && (
+          <div className="log-runs">
+            <span className="log-runs-label">Runs:</span>
+            {runs.map((r) => (
+              <button key={r.id} className={`log-run-tab ${selectedRun === r.id ? "active" : ""}`} onClick={() => loadRun(r.id)}>{r.label}</button>
+            ))}
+          </div>
+        )}
+        <div className="log-body" ref={scroller}>
+          {loading ? <div className="empty">Loading transcript…</div>
+            : !exists ? <div className="empty">No transcript for this agent yet{status === "idle" ? " — it hasn't run." : "."}</div>
+            : (<>
+                {invocations.map((inv, i) => <Invocation key={i} inv={inv} index={i} total={invocations.length} bulk={bulk} />)}
+                {!entries.length && <div className="empty">Transcript is empty.</div>}
+              </>)}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function Invocation(props: { inv: Invoc; index: number; total: number; bulk: { open: boolean; n: number } }) {
+  const isLatest = props.index === props.total - 1;
+  const [open, setOpen] = useState(props.total === 1 || isLatest);
+  const taskPreview = props.inv.task ? props.inv.task.replace(/\s+/g, " ").slice(0, 90) : "(no task text)";
+  return (
+    <div className={`log-inv ${open ? "open" : ""}`}>
+      <div className="log-inv-head" onClick={() => setOpen(!open)}>
+        <span className="log-inv-caret">{open ? "▾" : "▸"}</span>
+        <span className="log-inv-num">{props.index === 0 ? "Invocation 1" : `↻ Invocation ${props.index + 1}`}</span>
+        <span className="log-inv-task">{taskPreview}</span>
+        <span className="log-inv-count">{props.inv.entries.length} msg{props.inv.entries.length === 1 ? "" : "s"}</span>
+      </div>
+      {open && (
+        <div className="log-inv-body">
+          {props.inv.entries.map((e, i) => <LogEntry key={i} entry={e} bulk={props.bulk} />)}
+        </div>
+      )}
     </div>
   );
 }
 
-function LogEntry(props: { entry: Entry }) {
+function LogEntry(props: { entry: Entry; bulk: { open: boolean; n: number } }) {
   const e = props.entry;
-  if (e.kind === "meta") return <div class="log-meta">{e.text}</div>;
+  if (e.kind === "meta") return <div className="log-meta">{e.text}</div>;
   return (
-    <div class={`log-msg ${e.role}`}>
-      <div class="log-role">{e.role}</div>
-      <div class="log-parts">
-        <For each={e.parts}>{(p) => <LogPart part={p} />}</For>
+    <div className={`log-msg ${e.role}`}>
+      <div className="log-role">{e.role}</div>
+      <div className="log-parts">
+        {e.parts?.map((p, i) => <LogPart key={i} part={p} bulk={props.bulk} />)}
       </div>
     </div>
   );
 }
 
-function LogPart(props: { part: Part }) {
+function LogPart(props: { part: Part; bulk: { open: boolean; n: number } }) {
   const p = props.part;
-  if (p.type === "text") return <div class="log-text">{p.text}</div>;
-  if (p.type === "thinking") return <div class="log-thinking">💭 {p.text}</div>;
+  if (p.type === "text") return <div className="log-text">{p.text}</div>;
+  if (p.type === "thinking") return <div className="log-thinking">💭 {p.text}</div>;
   if (p.type === "toolResult") {
-    // Unpaired result (rare, e.g. live-tail across chunks) — render standalone.
-    return <ToolCard name={p.name || "result"} result={p.result ?? p.text ?? ""} resultError={p.resultError} />;
+    return <ToolCard name={p.name || "result"} result={p.result ?? p.text ?? ""} resultError={p.resultError} bulk={props.bulk} />;
   }
-  // toolCall — one merged card: request (args) shown, result collapsed.
-  return <ToolCard name={p.name || "tool"} args={p.args} result={p.result ?? undefined} resultError={p.resultError} />;
+  return <ToolCard name={p.name || "tool"} args={p.args} result={p.result ?? undefined} resultError={p.resultError} bulk={props.bulk} />;
 }
 
-// One card for a tool invocation: the call (name + args) is always shown; the
-// result is collapsed by default and toggled per-card or via Expand/Collapse all.
-function ToolCard(props: { name: string; args?: any; result?: string; resultError?: boolean }) {
-  const [open, setOpen] = createSignal(false);
-  // react to the global Expand all / Collapse all bump
-  createEffect(on(bulkResult, (b, prev) => { if (prev && b.n !== prev.n) setOpen(b.open); }));
-  const hasResult = () => props.result !== undefined && props.result !== null && props.result !== "";
+function ToolCard(props: { name: string; args?: any; result?: string; resultError?: boolean; bulk: { open: boolean; n: number } }) {
+  const [open, setOpen] = useState(false);
+  const lastBulk = useRef(props.bulk.n);
+  useEffect(() => {
+    if (props.bulk.n !== lastBulk.current) { lastBulk.current = props.bulk.n; setOpen(props.bulk.open); }
+  }, [props.bulk]);
+  const hasResult = props.result !== undefined && props.result !== null && props.result !== "";
   return (
-    <div class={`log-tool ${props.resultError ? "err" : ""}`}>
-      <div class="log-tool-head" onClick={() => hasResult() && setOpen(!open())}>
-        <span class="tool-ic">{props.resultError ? "✗" : "⚙"}</span>
+    <div className={`log-tool ${props.resultError ? "err" : ""}`}>
+      <div className="log-tool-head" onClick={() => hasResult && setOpen(!open)}>
+        <span className="tool-ic">{props.resultError ? "✗" : "⚙"}</span>
         <b>{props.name}</b>
-        <Show when={hasResult()}><span class="tool-toggle">{open() ? "hide result −" : "show result +"}</span></Show>
-        <Show when={!hasResult()}><span class="tool-toggle dim">no result</span></Show>
+        {hasResult ? <span className="tool-toggle">{open ? "hide result −" : "show result +"}</span>
+          : <span className="tool-toggle dim">no result</span>}
       </div>
-      <Show when={props.args && Object.keys(props.args).length}>
-        <pre class="log-tool-args">{JSON.stringify(props.args, null, 2)}</pre>
-      </Show>
-      <Show when={open() && hasResult()}>
-        <pre class="log-tool-body">{props.result}</pre>
-      </Show>
+      {props.args && Object.keys(props.args).length > 0 && (
+        <pre className="log-tool-args">{JSON.stringify(props.args, null, 2)}</pre>
+      )}
+      {open && hasResult && <pre className="log-tool-body">{props.result}</pre>}
     </div>
   );
 }
