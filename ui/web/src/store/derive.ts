@@ -250,7 +250,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
       const cost = Math.max(rt?.costUsd || 0, h?.cost || 0);
       out.push({
-        key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), model: node.model || rt?.model, color: node.color,
+        key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || (rt as any)?.agentType, model: node.model || rt?.model, color: node.color,
         status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
         elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
       });
@@ -269,7 +269,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
       const cost = Math.max(rt.costUsd || 0, h?.cost || 0);
       out.push({
-        key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", model: rt.model, color: undefined,
+        key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", agentType: (rt as any).agentType, model: rt.model, color: undefined,
         status: statusOf(sess.session_id, rt.name, rt.status), tokens, cost, runs: Math.max(rt.runCount || 0, h?.runs || 0), tools: Math.max(rt.toolCount || 0, h?.tools || 0),
         elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
       });

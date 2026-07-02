@@ -88,6 +88,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     name: runtime.config.name,
     group: runtime.config.groupName || "Orchestration",
     role: runtime.config.role,
+    agentType: runtime.config.agentType,
     status: runtime.status,
     task: runtime.task,
     lastWork: truncateMiddle(runtime.lastWork || "", 400),

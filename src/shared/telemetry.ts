@@ -92,6 +92,7 @@ export interface TelemetryAgentRuntime {
   name: string;
   group?: string;
   role?: TelemetryAgentRole;
+  agentType?: string;
   status: TelemetryAgentStatus;
   task?: string;
   lastWork?: string;

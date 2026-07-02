@@ -19,7 +19,7 @@ export interface AgentRef { sessionId: string; name: string; color?: string; sta
 // Agent rows for the current scope (session::name keyed so same-named agents
 // across sessions don't collide).
 export interface ScopeAgent {
-  key: string; name: string; role?: string; model?: string; color?: string; status: string;
+  key: string; name: string; role?: string; agentType?: string; model?: string; color?: string; status: string;
   tokens: number; cost: number; runs: number; tools: number; elapsedMs?: number; contextPct?: number;
   task?: string; session_id: string; depth: number; order: number;
 }
