@@ -12,7 +12,7 @@ function emptyState(): HiveState {
   return {
     pi: {} as any, config: null, session: null, runtimes: new Map(),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
   };
 }
 

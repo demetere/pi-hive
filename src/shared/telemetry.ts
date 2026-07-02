@@ -22,6 +22,15 @@ export type HiveTelemetryEventType =
   | "thinking_level_select"
   | "turn"
   | "provider_response"
+  // Remaining SDK event classes (Phase 4, Item): user bash commands, input
+  // source, session fork/tree navigation, and session-name changes. Bounded
+  // payloads; surfaced generically in the Activity feed.
+  | "user_bash"
+  | "input"
+  | "session_fork"
+  | "session_tree"
+  | "session_info_changed"
+  | "queue_update"
   | "model_catalog"
   | "distill_start"
   | "distill_end"
@@ -115,6 +124,11 @@ export interface TelemetryAgentRuntime {
   reasoningTokens?: number;
   costUsd?: number;
   contextPct?: number;
+  // Raw context-window fill behind contextPct (Phase 4.7): the tokens currently
+  // in context and the model's window. Threaded from the worker poll / main
+  // session's turn-end capture so the UI can show the absolute numbers.
+  contextTokens?: number;
+  contextWindow?: number;
   sessionFile?: string;
   model?: string;
   thinking?: string;

@@ -75,7 +75,17 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
       // mode is active, then drive execution via a user turn. The main session
       // reads the tasks and delegates to coder/tester leads.
       state.activeChangeId = changeId;
-      if (state.mode !== "hive") applyMode(state, ctx, "hive", { notify: false });
+      // W1.5: the drain guard refuses a plan→hive switch while a planning worker is
+      // still running. applyMode returns false then; proceeding would send the
+      // "execute the plan" turn while still stuck in plan mode (fail-safe but
+      // confusing — the turn would be blocked by the plan-mode delegation guard).
+      // Abort with a clear message instead, including on headless (no-UI) sessions.
+      if (state.mode !== "hive" && !applyMode(state, ctx, "hive", { notify: false })) {
+        const msg = `Cannot execute "${changeId}": still in ${state.mode} mode because ${state.activeRuns} agent${state.activeRuns === 1 ? " is" : "s are"} running. Wait for the current work to finish, then re-run /hive-execute ${changeId}.`;
+        if (ctx.hasUI) ctx.ui.notify(msg, "error");
+        else console.warn(`[pi-hive] ${msg}`);
+        return;
+      }
       const tasks = truncateMiddle(readTasks(ctx.cwd, changeId), 12_000);
       pi.sendUserMessage(
         `Execute the approved plan for change "${changeId}" (.pi/hive/plans/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead and record implementation evidence. Do not edit files yourself.\n\n## tasks.md\n${tasks}`,

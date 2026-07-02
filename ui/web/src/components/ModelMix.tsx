@@ -14,21 +14,19 @@ export default function ModelMix() {
   // token-only byAgent.size would otherwise undercount idle/zero-token agents).
   const scopedAgentCount = useHive((s) => s.scopedAgentCount);
 
-  const scopedEvents = useHive((s) => s.scopedEvents);
-  // Actual model per agent from delegation_end.models (A3) — the real model the
-  // provider ran, resolving a config-declared "inherit" to something concrete
-  // (E4). Falls back to the config model when no delegation recorded one.
+  const scopedDelegations = useHive((s) => s.scopedDelegations);
+  // Actual model per agent from the typed delegation rows (Phase 3.1) — the real
+  // model the provider ran, resolving a config-declared "inherit" to something
+  // concrete (E4). Reading the untruncated delegation projection instead of the
+  // raw-event window means older sessions no longer lose their model attribution.
+  // Rows are cursor-ordered, so the last row for an agent wins (its latest run).
   const actualModelByAgent = useMemo(() => {
     const m = new Map<string, string>();
-    for (const e of scopedEvents) {
-      if (e.type !== "delegation_end") continue;
-      const p: any = e.payload || {};
-      const name = p.runtime?.name || p.from;
-      const models: string[] = Array.isArray(p.models) ? p.models : [];
-      if (name && models.length) m.set(name, models[models.length - 1]);
+    for (const d of scopedDelegations) {
+      if (d.agent && d.model) m.set(d.agent, d.model);
     }
     return m;
-  }, [scopedEvents]);
+  }, [scopedDelegations]);
 
   const data = useMemo(() => {
     const byModel = new Map<string, number>();

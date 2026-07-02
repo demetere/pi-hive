@@ -20,7 +20,7 @@ function stateWith(runtimes: AgentRuntime[]): HiveState {
     pi: {} as any, config: null, session: null,
     runtimes: new Map(runtimes.map((entry) => [entry.config.name.toLowerCase(), entry])),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
   };
 }
 

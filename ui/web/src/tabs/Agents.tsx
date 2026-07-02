@@ -19,6 +19,21 @@ function modelCapabilityTitle(m: ModelInfo | undefined): string | undefined {
   return lines.length ? lines.join("\n") : undefined;
 }
 
+// Compact millisecond formatter for the turn-latency cell (Phase 4.11).
+function fmtMs(ms?: number): string {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+// Raw context-window fill behind the percentage (Phase 4.7), as a hover detail:
+// the absolute tokens currently in context over the model's window.
+function contextTitle(r: ScopeAgent): string | undefined {
+  if (r.contextTokens == null && r.contextWindow == null) return undefined;
+  const tok = r.contextTokens != null ? fmtNum(r.contextTokens) : "?";
+  const win = r.contextWindow != null ? fmtNum(r.contextWindow) : "?";
+  return `context: ${tok} / ${win} tokens`;
+}
+
 // Status group order: actively-running first, then those blocked waiting on a
 // child, then finished, idle, errored. Within a group, keep hierarchy order.
 const STATUS_RANK: Record<string, number> = { running: 0, waiting: 1, done: 2, idle: 3, error: 4 };
@@ -92,8 +107,28 @@ function enforcementCell(r: ScopeAgent) {
 
 export default function Agents(props: { search: string }) {
   const scopedAgents = useHive((s) => s.scopedAgents);
+  const scopedEvents = useHive((s) => s.scopedEvents);
   const modelInfo = useHive((s) => s.modelInfo);
   const scope = useHive((s) => s.scope);
+  // Per-agent average turn latency (Phase 4.11). `turn` events carry the SDK's
+  // measured per-turn duration and are actor-tagged; today only the main session
+  // emits them, so this populates the Orchestrator row (workers have no turn
+  // lifecycle of their own). Keyed by actor so it lights up automatically if
+  // worker turn events are ever added.
+  const turnLatency = useMemo(() => {
+    const acc = new Map<string, { total: number; n: number }>();
+    for (const e of scopedEvents) {
+      if (e.type !== "turn") continue;
+      const ms = Number(e.payload?.durationMs);
+      const who = e.payload?.agent || e.actor;
+      if (!who || !Number.isFinite(ms)) continue;
+      const cur = acc.get(who) || { total: 0, n: 0 };
+      cur.total += ms; cur.n += 1; acc.set(who, cur);
+    }
+    const out = new Map<string, number>();
+    for (const [who, { total, n }] of acc) if (n) out.set(who, total / n);
+    return out;
+  }, [scopedEvents]);
   // Resolve a row's model to its capability record (Phase 6.5), matching the
   // store's normalized keys (full "provider/id" or bare id, lowercased).
   const capabilityOf = (model?: string): ModelInfo | undefined => {
@@ -122,6 +157,7 @@ export default function Agents(props: { search: string }) {
           <tr>
             <th>Agent</th><th>Role</th><th>Type</th><th>Domain</th><th>Status</th><th>Model</th>
             <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Runs</th><th className="num">Tools</th>
+            <th className="num" title="Average per-turn latency (main session only)">Turn</th>
             {!collapsed && <th className="num">Context</th>}
           </tr>
         </thead>
@@ -141,7 +177,8 @@ export default function Agents(props: { search: string }) {
               <td className="num">{fmtCost(r.cost)}</td>
               <td className="num">{r.runs}</td>
               <td className="num">{r.tools}</td>
-              {!collapsed && <td className="num">{r.contextPct != null ? `${Math.round(r.contextPct)}%` : "—"}</td>}
+              <td className="num">{turnLatency.has(r.name) ? fmtMs(turnLatency.get(r.name)!) : "—"}</td>
+              {!collapsed && <td className="num" title={contextTitle(r)}>{r.contextPct != null ? `${Math.round(r.contextPct)}%` : "—"}</td>}
             </tr>
           ))}
         </tbody>

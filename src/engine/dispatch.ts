@@ -37,6 +37,15 @@ function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
 }
 
+// Coerce to a finite number or undefined. Unlike `Number(x) || undefined`, this
+// preserves a legitimate 0 (a real delayMs/tokensAfter of 0 is meaningful; only
+// NaN/absent should drop to undefined). Mirrors the Number.isFinite guards used
+// on the SessionStats overwrite below.
+function finiteOrUndef(x: unknown): number | undefined {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 // Move an agent's current session log aside to a numbered archive so a fresh run
 // can start clean without losing the prior run's transcript. "<slug>.jsonl"
 // becomes "<slug>.run-<N>.jsonl" with N the next free index. Returns silently if
@@ -101,8 +110,24 @@ export async function dispatchAgent(
   // prior session (which would lose the transcript of earlier runs while their
   // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
   // can show every run. The live sessionFile always holds the current run.
+  //
+  // Archiving means end-of-run getSessionStats() covers ONLY the fresh session
+  // (the prior transcript is no longer attached), so runtime.* will be overwritten
+  // with just-this-run totals — but the run-start baselines below would still hold
+  // the prior lifetime aggregates, making `runOnly − priorLifetime` go negative and
+  // silently clamp to 0 (the fresh-archive under-count). Reset the lifetime
+  // counters to 0 here so the baselines captured below are 0 and the per-run delta
+  // equals the fresh session's real usage.
   if (fresh && existsSync(runtime.sessionFile)) {
-    try { archivePriorRun(runtime.sessionFile); } catch { /* noop */ }
+    try {
+      archivePriorRun(runtime.sessionFile);
+      runtime.inputTokens = 0;
+      runtime.outputTokens = 0;
+      runtime.cacheReadTokens = 0;
+      runtime.cacheWriteTokens = 0;
+      runtime.reasoningTokens = 0;
+      runtime.costUsd = 0;
+    } catch { /* noop */ }
   }
 
   // Resolve the model FIRST, before mutating any per-run state. This is the
@@ -208,6 +233,11 @@ export async function dispatchAgent(
 
   // Distinct actual models seen across this run's assistant messages (A3).
   const modelsSeen = new Set<string>();
+  // Distinct providers behind this run's assistant messages (Item 9). The
+  // assistant message carries `.provider` alongside `.model`; the SDK exposes no
+  // per-message responseId/api/diagnostics field, so provider is the identity we
+  // can truthfully record.
+  const providersSeen = new Set<string>();
   let lastStopReason: string | undefined;
   // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
   // calls: deleted on tool_execution_end.
@@ -259,8 +289,8 @@ export async function dispatchAgent(
         attempt: event.attempt,
         maxAttempts: event.maxAttempts,
         errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
-        // Phase 4.6: the backoff delay before this retry.
-        delayMs: Number(event.delayMs) || undefined,
+        // Phase 4.6: the backoff delay before this retry (W1.7: 0 is a valid delay).
+        delayMs: finiteOrUndef(event.delayMs),
         phase: "start",
       }, runtime.config.name);
     } else if (event.type === "auto_retry_end") {
@@ -282,16 +312,30 @@ export async function dispatchAgent(
       const result = event.result || {};
       emitHiveEvent(state, "worker_compaction", {
         agent: runtime.config.name, reason: event.reason, phase: "end",
-        tokensBefore: Number(result.tokensBefore ?? event.tokensBefore) || undefined,
-        estimatedTokensAfter: Number(result.estimatedTokensAfter ?? event.estimatedTokensAfter) || undefined,
+        tokensBefore: finiteOrUndef(result.tokensBefore ?? event.tokensBefore),
+        estimatedTokensAfter: finiteOrUndef(result.estimatedTokensAfter ?? event.estimatedTokensAfter),
         aborted: (result.aborted ?? event.aborted) === true ? true : undefined,
         willRetry: (result.willRetry ?? event.willRetry) === true ? true : undefined,
         errorMessage: (result.errorMessage ?? event.errorMessage) ? truncateMiddle(String(result.errorMessage ?? event.errorMessage), 500) : undefined,
+      }, runtime.config.name);
+    } else if (event.type === "queue_update") {
+      // Worker steering/follow-up queue depth (Phase 4). Bounded to counts — the
+      // queued message bodies are not carried into telemetry.
+      emitHiveEvent(state, "queue_update", {
+        agent: runtime.config.name,
+        steering: Array.isArray(event.steering) ? event.steering.length : 0,
+        followUp: Array.isArray(event.followUp) ? event.followUp.length : 0,
+      }, runtime.config.name);
+    } else if (event.type === "session_info_changed") {
+      emitHiveEvent(state, "session_info_changed", {
+        agent: runtime.config.name,
+        name: event.name ? truncateMiddle(String(event.name), 200) : undefined,
       }, runtime.config.name);
     } else if (event.type === "message_end") {
       const message = event.message;
       const actualModel = message?.model || message?.responseModel;
       if (actualModel) modelsSeen.add(String(actualModel));
+      if (message?.provider) providersSeen.add(String(message.provider));
       if (message?.stopReason) lastStopReason = String(message.stopReason);
       const usage = message?.usage;
       if (usage) {
@@ -341,8 +385,12 @@ export async function dispatchAgent(
     errorMessage = session.state.errorMessage;
     // The 1s timer polls this too, but relying on it alone can miss the final,
     // most accurate reading if the last tick landed moments before completion.
+    // Refresh the raw tokens/window alongside the percent (Phase 4.7) so the
+    // final snapshot carries the last context fill, not just its percentage.
     const finalUsage = session.getContextUsage?.();
     if (finalUsage?.percent != null) runtime.contextPct = finalUsage.percent;
+    if (finalUsage?.tokens != null) runtime.contextTokens = finalUsage.tokens;
+    if (finalUsage?.contextWindow != null) runtime.contextWindow = finalUsage.contextWindow;
   } catch (error: any) {
     errorMessage = error?.message || String(error);
   }
@@ -351,9 +399,24 @@ export async function dispatchAgent(
   // the SDK's session-lifetime aggregate (includes cache splits). This kills
   // the double-count and any accumulation drift in one move (Decision 1). If
   // stats throws, the incremental values already on the runtime are kept.
+  // Item 9: SessionStats also carries authoritative message/tool counts —
+  // preferred over the hand-tallied toolCount so the numbers match the SDK's own.
+  let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
   try {
     const stats: any = session.getSessionStats?.();
     if (stats) {
+      const toolCalls = Number(stats.toolCalls);
+      const toolResults = Number(stats.toolResults);
+      const userMessages = Number(stats.userMessages);
+      const assistantMessages = Number(stats.assistantMessages);
+      sdkCounts = {
+        toolCalls: Number.isFinite(toolCalls) ? toolCalls : undefined,
+        toolResults: Number.isFinite(toolResults) ? toolResults : undefined,
+        userMessages: Number.isFinite(userMessages) ? userMessages : undefined,
+        assistantMessages: Number.isFinite(assistantMessages) ? assistantMessages : undefined,
+      };
+      // Prefer the SDK's tool-call count over the tool_execution_start tally.
+      if (Number.isFinite(toolCalls)) runtime.toolCount = toolCalls;
       const tokens = stats.tokens ?? stats.usage ?? stats;
       const input = Number(tokens.input ?? tokens.inputTokens);
       const output = Number(tokens.output ?? tokens.outputTokens);
@@ -366,10 +429,14 @@ export async function dispatchAgent(
       const cost = Number(stats.cost?.total ?? stats.cost ?? stats.costUsd);
       if (Number.isFinite(cost)) runtime.costUsd = cost;
       // reasoning is NOT part of SessionStats.tokens (Phase 4.8): only overwrite
-      // when the SDK actually reports it, otherwise keep the value accumulated
-      // from message_end so reasoning tokens are not silently zeroed.
+      // when the SDK actually reports a POSITIVE value, otherwise keep the value
+      // accumulated from message_end. A finite 0 from stats (reasoning simply
+      // absent) must not wipe accumulation — only trust it to zero when nothing
+      // was accumulated in the first place.
       const reasoning = Number(tokens.reasoning ?? tokens.reasoningTokens);
-      if (Number.isFinite(reasoning)) runtime.reasoningTokens = reasoning;
+      if (Number.isFinite(reasoning) && (reasoning > 0 || runtime.reasoningTokens === 0)) {
+        runtime.reasoningTokens = reasoning;
+      }
     }
   } catch { /* keep incremental values if stats is unavailable */ }
 
@@ -406,7 +473,9 @@ export async function dispatchAgent(
   // (overwritten from getSessionStats above), so a re-run agent's runtime would
   // make SUM() over delegations double-count. Subtract the run-start baseline so
   // each delegation_end row records only what THIS run consumed. Clamp at 0 in
-  // case the SDK's lifetime total ever regresses across a compaction.
+  // case the SDK's lifetime total ever regresses across a compaction — and as a
+  // last-resort guard for the fresh-archive path (where the baselines are reset to
+  // 0 above precisely so this clamp is NOT what saves the delta from going negative).
   const nonneg = (n: number) => (Number.isFinite(n) && n > 0 ? n : 0);
   const delta = {
     inputTokens: nonneg(runtime.inputTokens - (runtime.runStartInputTokens ?? 0)),
@@ -423,6 +492,14 @@ export async function dispatchAgent(
     stopReason: lastStopReason,
     errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
     models: [...modelsSeen],
+    // Per-message identity the SDK actually exposes (Item 9): the distinct
+    // providers behind this run's assistant messages. No responseId/api/
+    // diagnostics field exists on the message, so provider is the identity.
+    providers: providersSeen.size ? [...providersSeen] : undefined,
+    // Authoritative SDK message/tool counts for this session (Item 9), preferred
+    // over the hand-tallied toolCount. Session-lifetime (not per-run) — a re-run
+    // agent's stats cover the whole conversation.
+    counts: sdkCounts,
     // Schema marker so the materializer stores per-run deltas and the dashboard
     // never sums these rows with legacy cumulative ones (delegationsSchema=1).
     delegationsSchema: 1,

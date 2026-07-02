@@ -6,20 +6,49 @@ import { fmtCost, fmtNum, shortModel } from "../lib/format";
 export default function Cost() {
   const scope = useHive((s) => s.scope);
   const scopedAgents = useHive((s) => s.scopedAgents);
+  const scopedDelegations = useHive((s) => s.scopedDelegations);
   const scopedStats = useHive((s) => s.scopedStats);
 
+  // Per-agent cost/tokens from the typed delegation deltas (Phase 3.1) — additive
+  // and untruncated, so a dead session outside the raw-event window still counts.
+  // The live snapshot (scopedAgents) is a per-agent top-up via max(): it carries
+  // an in-flight run's usage before its delegation_end row lands, mirroring how
+  // Kpis treats the delta series as authoritative and the snapshot as live top-up.
   const breakdown = useMemo(() => {
     const byName = new Map<string, { name: string; color: string; model: string; cost: number; tokens: number }>();
-    for (const a of scopedAgents) {
-      if (a.cost <= 0 && a.tokens <= 0) continue;
-      const cur = byName.get(a.name) || { name: a.name, color: a.color || "var(--accent)", model: shortModel(a.model), cost: 0, tokens: 0 };
-      cur.cost += a.cost; cur.tokens += a.tokens;
-      byName.set(a.name, cur);
+    const ensure = (name: string) => {
+      let cur = byName.get(name);
+      if (!cur) { cur = { name, color: "var(--accent)", model: "", cost: 0, tokens: 0 }; byName.set(name, cur); }
+      return cur;
+    };
+    for (const d of scopedDelegations) {
+      const name = d.agent;
+      if (!name) continue;
+      const cur = ensure(name);
+      cur.cost += d.costUsd || 0;
+      cur.tokens += (d.inputTokens || 0) + (d.outputTokens || 0);
+      if (!cur.model && d.model) cur.model = shortModel(d.model);
     }
-    const rows = Array.from(byName.values()).sort((a, b) => b.cost - a.cost);
+    // Snapshot top-up: fold in live per-agent totals (color/model + max usage so
+    // an in-flight run isn't undercounted before its delegation row completes).
+    const snapByName = new Map<string, { cost: number; tokens: number }>();
+    for (const a of scopedAgents) {
+      const s = snapByName.get(a.name) || { cost: 0, tokens: 0 };
+      s.cost += a.cost; s.tokens += a.tokens;
+      snapByName.set(a.name, s);
+      const cur = ensure(a.name);
+      if (cur.color === "var(--accent)" && a.color) cur.color = a.color;
+      if (!cur.model && a.model) cur.model = shortModel(a.model);
+    }
+    for (const [name, s] of snapByName) {
+      const cur = byName.get(name)!;
+      cur.cost = Math.max(cur.cost, s.cost);
+      cur.tokens = Math.max(cur.tokens, s.tokens);
+    }
+    const rows = Array.from(byName.values()).filter((r) => r.cost > 0 || r.tokens > 0).sort((a, b) => b.cost - a.cost);
     const max = Math.max(0.0001, ...rows.map((r) => r.cost));
     return { rows, max };
-  }, [scopedAgents]);
+  }, [scopedAgents, scopedDelegations]);
   const scopeLabel = scope.level === "fleet" ? "all projects" : scope.level === "project" ? "this project" : "this session";
 
   return (

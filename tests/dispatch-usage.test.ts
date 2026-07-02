@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -63,7 +63,7 @@ test("dispatchAgent totals equal getSessionStats exactly — no message_end/agen
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
     runtimes: new Map([["builder", worker]]),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
   } as any;
 
   // ctx with a model registry that resolves our test model.
@@ -113,7 +113,7 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
     runtimes: new Map([["builder", worker]]),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
   } as any;
   const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
 
@@ -146,6 +146,60 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
   assert.equal(run2.runtime.inputTokens, 260);
 });
 
+// W1.1: a fresh=true re-run archives the prior session, so end-of-run
+// getSessionStats() covers ONLY the new session. Without resetting the runtime
+// lifetime counters at archive time, the run-start baselines still hold the prior
+// lifetime totals, so `runOnly − priorLifetime` goes negative and the nonneg clamp
+// silently zeroes the whole delta (the fresh-archive under-count). This test proves
+// the fresh run's delta equals its OWN usage, not ~0.
+test("fresh re-run resets lifetime counters so the delta is the fresh session's usage, not clamped ~0 (W1.1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-fresh-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+
+  // Run 1 (not fresh): lifetime stats after this run = 500/200.
+  const create1: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 500, output: 200, cacheRead: 50, cacheWrite: 20, cost: 0.50 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run one", ctx, false, create1);
+  assert.equal(worker.inputTokens, 500);
+  // The scripted session doesn't persist a transcript, so materialize the prior
+  // session file to model the real fresh=true precondition (a prior run exists to
+  // archive). This is what triggers the archive+counter-reset path on run 2.
+  writeFileSync(worker.sessionFile, "{}\n");
+
+  // Run 2 with fresh=true: the prior builder.jsonl is archived, so this run's
+  // getSessionStats reports ONLY the fresh session (80/30 — smaller than run 1's
+  // lifetime). Pre-fix, delta = 80−500 → clamped to 0. Post-fix, baselines are 0,
+  // so delta = 80/30 exactly.
+  const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 80, output: 30, cacheRead: 5, cacheWrite: 2, cost: 0.08 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run two fresh", ctx, true, create2);
+
+  const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
+  assert.equal(ends.length, 2, "expected a delegation_end per run");
+  const run2 = ends[1].payload;
+  // The fresh run's delta is its OWN usage — not clamped to 0 by a stale baseline.
+  assert.equal(run2.delta.inputTokens, 80);
+  assert.equal(run2.delta.outputTokens, 30);
+  assert.equal(run2.delta.cacheReadTokens, 5);
+  assert.equal(run2.delta.cacheWriteTokens, 2);
+  assert.ok(Math.abs(run2.delta.costUsd - 0.08) < 1e-9, `run2 cost delta ${run2.delta.costUsd} ≈ 0.08`);
+  // Runtime now holds the fresh session's lifetime totals (overwritten by stats).
+  assert.equal(worker.inputTokens, 80);
+});
+
 // Phase 4.8: reasoning ("thinking") tokens are extracted from message_end usage,
 // accumulated on the runtime, and carried through the per-run delta + runtime
 // summary. getSessionStats() lacks reasoning, so the end-of-run overwrite must
@@ -165,7 +219,7 @@ test("dispatchAgent carries reasoning tokens through the delta + summary (Phase 
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
     runtimes: new Map([["builder", worker]]),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
   } as any;
   const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
   // Two turns each reporting reasoning; getSessionStats (no reasoning field)
@@ -208,7 +262,7 @@ test("first-run delegation_start carries thinkingLevels + effective model (J4/M8
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
     runtimes: new Map([["builder", worker]]),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
   } as any;
   const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
   const create: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 } }) })) as any;

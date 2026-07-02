@@ -70,7 +70,11 @@ export function modeStatusText(state: HiveState, mode: HiveMode = state.mode): s
 // execution team active. Switching plan/hive rebuilds the active team's runtimes
 // so "who I can delegate to now" and the main session's own identity/permissions
 // match the mode.
-export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMode, options: { notify?: boolean } = {}) {
+// Returns true when the mode was applied, false when the drain guard refused the
+// switch (a worker is still running). Callers that drive follow-up work off a mode
+// change (e.g. /hive-execute) MUST check the result so they don't proceed while
+// stuck in the previous mode.
+export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMode, options: { notify?: boolean } = {}): boolean {
   const shouldNotify = options.notify ?? true;
 
   const previous = state.mode;
@@ -84,7 +88,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     if (shouldNotify && ctx.hasUI) {
       ctx.ui.notify(`Cannot switch mode while ${state.activeRuns} agent${state.activeRuns === 1 ? " is" : "s are"} running. Wait for the current work to finish, then switch.`, "error");
     }
-    return;
+    return false;
   }
 
   state.mode = mode;
@@ -104,7 +108,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     state.pi.setActiveTools(state.normalToolNames);
     if (ctx.mode === "tui") ctx.ui.setWidget("hive-tree", undefined);
     if (shouldNotify && ctx.hasUI) ctx.ui.notify("Normal Pi chat mode enabled", "info");
-    return;
+    return true;
   }
 
   startHiveTelemetrySession(state, ctx.cwd);
@@ -118,6 +122,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
       : "Hive mode enabled — delegate execution to coders/testers/reviewers.";
     ctx.ui.notify(msg, "success");
   }
+  return true;
 }
 
 

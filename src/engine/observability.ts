@@ -102,6 +102,10 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     reasoningTokens: runtime.reasoningTokens,
     costUsd: runtime.costUsd,
     contextPct: runtime.contextPct,
+    // Raw context-window fill behind contextPct (Phase 4.7) — carried through so
+    // the dashboard can show tokens/window, not just the percentage.
+    contextTokens: runtime.contextTokens,
+    contextWindow: runtime.contextWindow,
     sessionFile: runtime.sessionFile,
     model: runtime.config.model,
     thinking: runtime.config.thinking,
@@ -135,6 +139,10 @@ function withOrchestratorUsage(
     costUsd: (summary.costUsd || 0) + orch.costUsd,
     // Phase 4.3: the main session's live context fill, captured at each turn end.
     contextPct: orch.contextPct ?? summary.contextPct,
+    // Phase 4.7: the raw tokens/window behind that percent, threaded through the
+    // same overlay so the main node carries them like a worker does.
+    contextTokens: orch.tokens ?? summary.contextTokens,
+    contextWindow: orch.contextWindow ?? summary.contextWindow,
   };
 }
 

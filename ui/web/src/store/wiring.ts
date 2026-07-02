@@ -155,6 +155,12 @@ function wire() {
   // New typed delegation rows change the scoped cost/token series (Phase 3.1).
   store.subscribe((s) => s.delegations, recomputeScoped);
   store.subscribe((s) => s.now, recomputeLive);
+  // W1.2 secondary: the scoped tier (Agents tab) reads the event-status overlay,
+  // which demotes stale sessions using `now`. recomputeLive alone doesn't rebuild
+  // scopedAgents, so a demotion wouldn't reach the Agents tab until the next
+  // heavy/scope change. Re-run the scoped tier on the tick too so a stuck-"running"
+  // agent flips to idle promptly. recomputeScoped is cheap relative to heavy.
+  store.subscribe((s) => s.now, recomputeScoped);
   // Re-fetch thinking whenever the scoped session set changes.
   store.subscribe((s) => s.scopedSessions, () => { void refreshThinking(); });
   // Prime the versioned-topology cache for the cwds in scope (K2), so version
@@ -182,7 +188,7 @@ export function connect(): EventSource | undefined {
   void refreshDelegations(true); // load typed delegation deltas for cost/token series
   void refreshModels(); // load model capabilities for the thinking dial (K3)
 
-  fetchInitialData().then(({ events, states, cursor }) => {
+  const initialFetch = fetchInitialData().then(({ events, states, cursor }) => {
     ingestEvents(events);
     for (const snap of states) ingestSnapshot(snap);
     // Seed the cursor high-water mark even if the recent-events page didn't
@@ -253,13 +259,23 @@ export function connect(): EventSource | undefined {
   es.addEventListener("hello", (e) => {
     try {
       const { cursor } = JSON.parse((e as MessageEvent).data) as { cursor?: number };
-      if (typeof cursor === "number" && cursor > store.getState().lastCursor) {
-        void fetchEventsAfter(store.getState().lastCursor).then(({ events, cursor: c }) => {
+      if (typeof cursor !== "number") return;
+      // W1.3: the hello frame can arrive BEFORE fetchInitialData() resolves. Acting
+      // on it then would gap-fetch from lastCursor=0 — the entire unbounded history
+      // into the client eventMap. Wait for the initial fetch to seed lastCursor
+      // first, then re-read it and only fetch the genuine tail gap. event_id dedup
+      // makes the small overlap with the initial page harmless. On reconnect the
+      // open-handler resync already covers the gap, so this only fires meaningfully
+      // when the server is genuinely ahead of our seeded high-water mark.
+      void initialFetch.then(() => {
+        const from = store.getState().lastCursor;
+        if (cursor <= from) return;
+        return fetchEventsAfter(from).then(({ events, cursor: c }) => {
           if (events.length) ingestEvents(events);
           if (c > store.getState().lastCursor) store.setState({ lastCursor: c });
           if (events.some((ev) => ev.type === "delegation_end")) scheduleDelegationsRefresh();
         });
-      }
+      });
     } catch { /* */ }
   });
   es.addEventListener("hive", (e) => {

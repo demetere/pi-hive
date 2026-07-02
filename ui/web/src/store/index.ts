@@ -21,6 +21,9 @@ export interface AgentRef { sessionId: string; name: string; color?: string; sta
 export interface ScopeAgent {
   key: string; name: string; role?: string; agentType?: string; model?: string; color?: string; status: string;
   tokens: number; cost: number; runs: number; tools: number; elapsedMs?: number; contextPct?: number;
+  // Raw context-window fill behind contextPct (Phase 4.7), for the Agents-tab
+  // hover detail (absolute tokens / window).
+  contextTokens?: number; contextWindow?: number;
   task?: string; session_id: string; depth: number; order: number;
   // Enforcement contract from the topology node (Phase 6.1): what the agent may
   // touch / commit / which gates it owns. Undefined for runtime-only agents that

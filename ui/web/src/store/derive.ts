@@ -11,6 +11,24 @@ import { store, type HiveState, type ScopeAgent, type ScopeStats, type ScopeTitl
 // likely died without a final delegation_end), so it stops counting as live.
 const STALE_LIVE_MS = 5 * 60_000;
 
+// A session's snapshot is stale when its last update is older than STALE_LIVE_MS.
+// Used to suppress the event-status overlay's running/waiting for dead sessions:
+// buildEventStatus only clears "running" on delegation_end, the one event a killed
+// process never emits, so a stale session's overlay would pin an agent "running"
+// forever. `now` defaults to the store tick so callers on the live tier stay in
+// sync with the same clock recomputeLive uses.
+export function sessionIsStale(sessionId: string, now: number): boolean {
+  const at = sessionUpdatedAt.get(sessionId) || 0;
+  return at > 0 && now - at >= STALE_LIVE_MS;
+}
+
+// Demote an overlay status for a stale session: running/waiting become idle (the
+// process is presumed dead); terminal/idle states pass through unchanged.
+export function demoteIfStale(status: string, sessionId: string, now: number): string {
+  if ((status === "running" || status === "waiting") && sessionIsStale(sessionId, now)) return "idle";
+  return status;
+}
+
 // Module-level cache of the last heavy-tier products so the scoped/live tiers
 // can rebuild off them without recomputing the heavy work.
 let historyBySession = new Map<string, Map<string, HistPeak>>();
@@ -259,8 +277,14 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
   const hist = historyBySession;
   const out: ScopeAgent[] = [];
   let order = 0;
-  const st = store.getState().eventStatus;
-  const statusOf = (sessionId: string, name: string, snapStatus?: string) => st.get(sessionId)?.get(name) || snapStatus || "idle";
+  const gs = store.getState();
+  const st = gs.eventStatus;
+  const now = gs.now || Date.now();
+  // W1.2: the overlay marks running/waiting but only clears on delegation_end, so a
+  // dead session's overlay pins an agent active forever. Demote overlay entries for
+  // stale sessions before they win over the snapshot status.
+  const statusOf = (sessionId: string, name: string, snapStatus?: string) =>
+    demoteIfStale(st.get(sessionId)?.get(name) || snapStatus || "idle", sessionId, now);
   for (const sess of scopedSessions) {
     const sessHist = hist.get(sess.session_id);
     const seen = new Set<string>();
@@ -284,7 +308,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       out.push({
         key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || (rt as any)?.agentType, model: node.model || rt?.model, color: node.color,
         status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
-        elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
+        elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, contextTokens: rt?.contextTokens, contextWindow: rt?.contextWindow, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
         // Enforcement contract carried from the topology node (Phase 6.1).
         domain: node.domain, commit: node.commit, stages: node.stages, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
       });
@@ -305,7 +329,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       out.push({
         key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", agentType: (rt as any).agentType, model: rt.model, color: undefined,
         status: statusOf(sess.session_id, rt.name, rt.status), tokens, cost, runs: Math.max(rt.runCount || 0, h?.runs || 0), tools: Math.max(rt.toolCount || 0, h?.tools || 0),
-        elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
+        elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, contextTokens: rt.contextTokens, contextWindow: rt.contextWindow, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
       });
     }
   }

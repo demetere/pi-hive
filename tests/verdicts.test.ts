@@ -23,7 +23,7 @@ function stateWith(runtimes: AgentRuntime[]): HiveState {
     session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
     runtimes: new Map(runtimes.map((entry) => [entry.config.name.toLowerCase(), entry])),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
-    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+    sddStatus: null, obsSeq: 0,
     latestVerdicts: new Map(),
   };
 }

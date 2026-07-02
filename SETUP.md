@@ -38,7 +38,7 @@ The session runs in one of three modes; the main Pi session changes identity wit
 
 Switch modes with `/hive-normal`, `/hive-plan-mode`, `/hive`, or cycle normal → plan → hive → normal with **`/hive-toggle`** / **Ctrl+Alt+T**. `/hive-execute <change-id>` switches to hive mode and drives execution from an approved `tasks.md`.
 
-The two teams are configured as separate blocks in `hive-config.yaml` — a `planning:` block (optional) and a `hive:` block — each with its own `main:` (the main session's identity for that mode) and `agents:` (its reports). Legacy top-level `orchestrator:`/`agents:` still works and maps to the hive block; without a `planning:` block, plan mode falls back to the hive team's planners.
+The two teams are configured as **two required blocks** in `hive-config.yaml` — a `planning:` block **and** a `hive:` block — each with its own `main:` (the main session's identity for that mode) and `agents:` (its reports). The loader **hard-throws** if either block is missing: there is no top-level `orchestrator:`/`agents:` shape and no fallback of plan mode onto the hive team. Keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree (see §1's shape reference below).
 
 ### The one rule that drives the whole structure
 **Roles are derived from structure, never declared.** A node is:

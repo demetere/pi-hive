@@ -120,9 +120,20 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // emits one `turn` event carrying turnIndex + the measured duration — the only
   // per-turn timing the dashboard can surface for the main session.
   const turnStartedAt = new Map<number, number>();
+  // W1.7: a turn that errors or is aborted never fires turn_end, so its start
+  // stamp would live in the map forever. Cap the map by evicting the oldest
+  // insertion (Map preserves insertion order) whenever it grows past the bound —
+  // only the newest in-flight turns can still legitimately match a turn_end.
+  const MAX_TRACKED_TURNS = 64;
   pi.on("turn_start", async (event: any) => {
     if (state.mode === "normal") return;
-    if (typeof event?.turnIndex === "number") turnStartedAt.set(event.turnIndex, Date.now());
+    if (typeof event?.turnIndex !== "number") return;
+    turnStartedAt.set(event.turnIndex, Date.now());
+    while (turnStartedAt.size > MAX_TRACKED_TURNS) {
+      const oldest = turnStartedAt.keys().next().value;
+      if (oldest === undefined) break;
+      turnStartedAt.delete(oldest);
+    }
   });
   pi.on("turn_end", async (event: any) => {
     if (state.mode === "normal") return;
@@ -150,6 +161,55 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       status,
       retryAfter: pick("retry-after"),
       rateLimitRemaining: pick("anthropic-ratelimit-requests-remaining") ?? pick("x-ratelimit-remaining"),
+    }, "Orchestrator");
+  });
+
+  // Remaining SDK event classes (Phase 4, "everything the SDK exposes"). Each is
+  // emitted with a bounded payload and rendered generically in the Activity feed
+  // (the feed titles the common ones and dumps the payload for the rest). None
+  // carries unbounded bodies.
+  pi.on("user_bash", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "user_bash", {
+      agent: "Orchestrator",
+      command: truncateMiddle(String(event?.command || ""), 500),
+      excludeFromContext: event?.excludeFromContext === true,
+    }, "Orchestrator");
+  });
+  // `input` telemetry is source-only (the footer already re-renders on input, a
+  // separate concern): record where user input came from and how it will be
+  // delivered, not the text (that lands as a user_message already).
+  pi.on("input", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "input", {
+      agent: "User",
+      source: event?.source,
+      streamingBehavior: event?.streamingBehavior,
+      hasImages: Array.isArray(event?.images) && event.images.length > 0,
+    }, "User");
+  });
+  pi.on("session_before_fork", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "session_fork", {
+      agent: "Orchestrator",
+      entryId: event?.entryId,
+      position: event?.position,
+    }, "Orchestrator");
+  });
+  pi.on("session_tree", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "session_tree", {
+      agent: "Orchestrator",
+      newLeafId: event?.newLeafId ?? undefined,
+      oldLeafId: event?.oldLeafId ?? undefined,
+      fromExtension: event?.fromExtension === true,
+    }, "Orchestrator");
+  });
+  pi.on("session_info_changed", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "session_info_changed", {
+      agent: "Orchestrator",
+      name: event?.name ? truncateMiddle(String(event.name), 200) : undefined,
     }, "Orchestrator");
   });
 
@@ -192,29 +252,8 @@ ${catalog}`,
     };
   });
 
-  pi.on("message_update", async (event: any) => {
-    const delta = (event as any).assistantMessageEvent;
-    if (delta?.type === "text_delta" && typeof delta.delta === "string") {
-      if (!state.streamStartMs) state.streamStartMs = Date.now();
-      state.streamedChars += delta.delta.length;
-      const elapsedSeconds = Math.max(0.1, (Date.now() - state.streamStartMs) / 1000);
-      state.lastTokPerSec = (state.streamedChars / 4) / elapsedSeconds;
-    }
-  });
-
   pi.on("message_end", async (event: any, ctx: ExtensionContext) => {
     if ((event as any).message?.role === "assistant") {
-      // Phase 4.12: reconcile the live chars÷4 TOK/S estimate against the real
-      // output-token count now that the turn is complete. The streaming estimate
-      // (message_update) is a rough proxy; the SDK's usage.output is exact, so
-      // replace the footer rate with tokens-over-elapsed before resetting.
-      const realOutput = extractUsage((event as any).message?.usage).output;
-      if (realOutput > 0 && state.streamStartMs) {
-        const elapsedSeconds = Math.max(0.1, (Date.now() - state.streamStartMs) / 1000);
-        state.lastTokPerSec = realOutput / elapsedSeconds;
-      }
-      state.streamStartMs = 0;
-      state.streamedChars = 0;
       // Phase 4.3: capture the MAIN session's live context-window fill, mirroring
       // the per-worker poll in dispatch.ts. tokens is null right after compaction
       // until the next response, so keep the last known percent rather than
@@ -266,7 +305,13 @@ ${catalog}`,
         agent: "Orchestrator",
         stopReason: message?.stopReason ? String(message.stopReason) : undefined,
         errorMessage: message?.errorMessage ? truncateMiddle(String(message.errorMessage), 500) : undefined,
+        // W1.6: keep BOTH the requested model and the ground-truth served model.
+        // Collapsing them (`model || responseModel`) hid provider fallbacks/routing
+        // where the served model differs from the one asked for. `model` stays the
+        // requested field for back-compat; `responseModel` is the authoritative
+        // served model.
         model: message?.model || message?.responseModel,
+        responseModel: message?.responseModel ? String(message.responseModel) : undefined,
         usage: u ? { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, reasoning: u.reasoning, cost: u.cost } : undefined,
       }, "Orchestrator");
     }

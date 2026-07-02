@@ -386,8 +386,8 @@ function ingestEvent(event: HiveTelemetryEvent): { event: HiveTelemetryEvent; cu
   return { event, cursor: Number(result.lastInsertRowid) };
 }
 
-// Materialize hot entities (delegations / tool_calls / messages) from their
-// source events (B3). Idempotent via event_id PK / tool_call_id uniqueness.
+// Materialize hot entities (delegations, tool_calls, and the model catalog) from
+// their source events (B3). Idempotent via event_id PK / tool_call_id uniqueness.
 function materializeTypedEvent(event: HiveTelemetryEvent) {
   const p = (event.payload || {}) as any;
   const sessionId = event.session_id || "unknown";

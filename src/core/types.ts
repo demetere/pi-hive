@@ -246,9 +246,6 @@ export interface HiveState {
   // execution team. (Was `teamMode`; renamed for the three-mode model.)
   mode: HiveMode;
   normalToolNames: string[];
-  streamStartMs: number;
-  streamedChars: number;
-  lastTokPerSec: number;
   sddStatus: SddStatus | null;
   obsSeq: number;
   // Dashboard telemetry is registered lazily: normal chat sessions stay out of

@@ -38,6 +38,7 @@ function delegationDetail(e: any): Array<[string, string]> {
   const model = Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model;
   const inTok = Number(d.inputTokens ?? p.inputTokens ?? 0);
   const outTok = Number(d.outputTokens ?? p.outputTokens ?? 0);
+  const reasoningTok = Number(d.reasoningTokens ?? p.runtime?.reasoningTokens ?? 0);
   const rows: Array<[string, string]> = [
     ["Outcome", String(p.type || "—")],
     ["Stop reason", String(p.stopReason || "—")],
@@ -45,6 +46,7 @@ function delegationDetail(e: any): Array<[string, string]> {
     ["Model", model ? shortModel(String(model)) : "—"],
     ["Tokens (in+out)", fmtNum(inTok + outTok)],
     ["Cache (r+w)", fmtNum(Number(d.cacheReadTokens ?? 0) + Number(d.cacheWriteTokens ?? 0))],
+    ["Reasoning", reasoningTok > 0 ? fmtNum(reasoningTok) : "—"],
     ["Cost", p.costUsd != null || d.costUsd != null ? fmtCost(Number(d.costUsd ?? p.costUsd)) : "—"],
   ];
   if (p.errorMessage) rows.push(["Error", String(p.errorMessage)]);
@@ -81,6 +83,13 @@ function itemTitle(item: ActivityItem): string {
     case "thinking_level_select": return `Thinking → ${p.level ?? "?"}`;
     case "turn": return `Turn ${p.turnIndex ?? "?"}${p.durationMs != null ? ` · ${fmtMs(Number(p.durationMs))}` : ""}`;
     case "provider_response": return `Provider ${p.status ?? "?"}${p.retryAfter ? ` · retry ${p.retryAfter}s` : ""}`;
+    // Remaining SDK event classes (Phase 4). Rendered generically otherwise.
+    case "user_bash": return `Bash: ${p.command || ""}`;
+    case "input": return `Input (${p.source || "?"})`;
+    case "session_fork": return "Session forked";
+    case "session_tree": return "Session tree navigation";
+    case "session_info_changed": return p.name ? `Session renamed → ${p.name}` : "Session name cleared";
+    case "queue_update": return `Queue: ${p.steering ?? 0} steering · ${p.followUp ?? 0} follow-up`;
     default: return e.type;
   }
 }
