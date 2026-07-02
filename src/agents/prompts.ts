@@ -14,6 +14,15 @@ export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext)
   const leadRoster = state.config.agents
     .map((agent) => `- ${agent.name}: ${agent.consultWhen || agent.routingTags?.join(", ") || "team work"}`)
     .join("\n");
+  // H3/Decision 8: build the mandatory-routing guidance from the ACTUAL
+  // configured leads (their consultWhen / routing tags), not hardcoded example
+  // names. A team with custom lead names gets a correct routing prompt.
+  const routingGuidance = state.config.agents
+    .map((agent) => {
+      const cue = agent.consultWhen || agent.routingTags?.join(", ") || "its area of work";
+      return `- Work matching "${cue}" → ${agent.name}.`;
+    })
+    .join("\n");
 
   return `${runtime.systemPrompt}
 
@@ -37,9 +46,8 @@ ${leadRoster}
 
 ## Mandatory routing behavior
 - If the user asks you to read, inspect, analyze, compare, or find gaps in files, immediately delegate to the right team lead. Do not say you cannot read it; use delegate_agent on a lead.
-- Backend/frontend/architecture/testing work → Engineering Lead. Requirements, scope, product, or UX → Planning Lead. Verification, QA, security, or release confidence → Validation Lead.
-- If the user says "plan", "plan first", "spec", "approach", or "don't implement yet", delegate to Planning Lead first and stop for user confirmation before execution.
-- After implementation-oriented findings, delegate to Validation Lead when evidence, QA, or security confidence matters.
+${routingGuidance}
+- If the user says "plan", "plan first", "spec", "approach", or "don't implement yet", switch to plan mode (or delegate to the planning lead) first and stop for user confirmation before execution.
 - For cross-cutting work, delegate to multiple leads (up to the parallel limit) and let each fan out within its team.
 - Synthesize the leads' results into one answer with evidence, risks, and next steps.`;
 }

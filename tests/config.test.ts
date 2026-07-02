@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -57,6 +57,62 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.orchestrator.model, "openai/gpt-5");
   assert.equal(config.orchestrator.thinking, "medium");
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
+});
+
+test("allowedAgents in config warns but still loads (H1)", () => {
+  const cwd = fixtureProject();
+  // Inject a user-set allowedAgents on a node — it must be ignored (derivation
+  // wins), not crash the load. Capture the warning.
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const yaml = readFileSync(cfgPath, "utf8").replace(
+    "      routing-tags: [frontend, react]",
+    "      routing-tags: [frontend, react]\n      allowedAgents: [Nonexistent]",
+  );
+  writeFileSync(cfgPath, yaml);
+
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (msg?: any) => { warnings.push(String(msg)); };
+  try {
+    const config = loadConfig(cwd);
+    // Derivation wins: Frontend Dev's reports are its actual members, not the
+    // discarded user value.
+    const agents = allConfiguredAgents(config);
+    const fe = agents.find((a) => a.name === "Frontend Dev");
+    assert.deepEqual(fe?.allowedAgents, ["QA Engineer"]);
+  } finally {
+    console.warn = orig;
+  }
+  assert.ok(warnings.some((w) => /allowedAgents/.test(w)), "expected an allowedAgents warning");
+});
+
+test("main-node model/thinking are optional; workers still require them (H2)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-mainopt-"));
+  mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
+  // Main nodes with NO model/thinking frontmatter — must not throw at runtime load.
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "main.md"), "---\nagent-type: lead\n---\nOrchestrate.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan.md"), "---\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "coder.md"), "---\nmodel: anthropic/claude-sonnet\nthinking: medium\nagent-type: coder\n---\nCode.");
+  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
+settings:
+  distiller:
+    enabled: false
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan.md
+  agents: []
+hive:
+  main:
+    name: Main
+    path: .pi/hive/agents/main.md
+  agents:
+    - name: Coder
+      path: .pi/hive/agents/coder.md
+`);
+  // loadConfig validates shape; it must not require main-node model/thinking.
+  const config = loadConfig(cwd);
+  assert.equal(config.orchestrator.name, "Main");
 });
 
 test("allConfiguredAgents derives hierarchy roles and delegation targets", () => {

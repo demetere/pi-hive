@@ -96,6 +96,10 @@ export interface AgentConfig {
   consultWhen?: string;
   routingTags?: string[];
   responsibilities?: string[];
+  // DERIVED, not user-configured (H1/Decision 7): the names of this node's direct
+  // reports, computed from members/children during config load. A user-set
+  // `allowedAgents` in hive-config.yaml is ignored (with a warning) — this is
+  // purely the internal delegation-scope field.
   allowedAgents?: string[];
   context?: KnowledgeRef[];
   skills?: KnowledgeRef[];
@@ -183,7 +187,6 @@ export interface SessionState {
   sessionDir: string;
   conversationLog: string;
   observabilityLog: string;
-  activeTeam: string;
 }
 
 // Accumulated telemetry for the visible main session (the orchestrator), which

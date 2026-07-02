@@ -41,7 +41,10 @@ export function logRecord(state: HiveState, record: JsonRecord) {
   const mainName = state.config?.orchestrator?.name || "Orchestrator";
   const from = String((record as any).from || "");
   const to = String((record as any).to || "");
-  const isMainAlias = (name: string) => name === mainName || name === "Orchestrator" || name === "Planning Lead";
+  // The main session may be logged under its configured name or the generic
+  // "Orchestrator" alias (H3: no hardcoded "Planning Lead" special-case — a
+  // planning-team main node is matched by mainName, which is its actual name).
+  const isMainAlias = (name: string) => name === mainName || name === "Orchestrator";
   const include = from === "User" || from === "System" || isMainAlias(from) || isMainAlias(to);
   if (!include) return;
   const runtimeFile = state.runtimes.get(mainName.toLowerCase())?.sessionFile;

@@ -41,7 +41,6 @@ export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, 
     sessionDir,
     conversationLog: join(sessionDir, "conversation.jsonl"),
     observabilityLog: join(sessionDir, "hive-events.jsonl"),
-    activeTeam: "all",
   };
   state.pi.appendEntry("hive-session", created);
   return created;
@@ -54,12 +53,16 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
   const agentSlug = slug(agent.name || attrs.name || fullPath);
   const sessionFile = join(state.session!.sessionDir, "agents", `${agentSlug}.jsonl`);
   const tools = normalizeTools(String(attrs.tools || agent.tools || cfg.settings.defaultTools), cfg.settings.defaultTools);
-  // model and thinking are required per-agent (no global default): every agent
-  // declares them explicitly in its frontmatter.
-  const model = String(attrs.model || agent.model || "").trim();
-  const thinking = String(attrs.thinking || agent.thinking || "").trim();
-  if (!model) throw new Error(`Agent "${agent.name || agentSlug}" is missing required 'model' in frontmatter (${agent.path}).`);
-  if (!thinking) throw new Error(`Agent "${agent.name || agentSlug}" is missing required 'thinking' in frontmatter (${agent.path}).`);
+  // model and thinking are required for WORKER agents (they create their own
+  // AgentSession with an explicit model). For the MAIN node they are optional
+  // and display-only (H2/Decision 8): the visible session runs Pi's
+  // user-selected model, so a main-node model/thinking is prompt/telemetry
+  // decoration, never applied. Default to placeholders when absent.
+  const isMainNode = agent.role === "orchestrator";
+  const model = String(attrs.model || agent.model || "").trim() || (isMainNode ? "inherit" : "");
+  const thinking = String(attrs.thinking || agent.thinking || "").trim() || (isMainNode ? "medium" : "");
+  if (!isMainNode && !model) throw new Error(`Agent "${agent.name || agentSlug}" is missing required 'model' in frontmatter (${agent.path}).`);
+  if (!isMainNode && !thinking) throw new Error(`Agent "${agent.name || agentSlug}" is missing required 'thinking' in frontmatter (${agent.path}).`);
 
   // Mental model is loaded by convention: the sibling <stem>-mental-model.yaml
   // next to the agent's .md. It is always-on and updatable (the distiller

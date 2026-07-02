@@ -164,6 +164,14 @@ ${catalog}`,
       const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";
       if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
     } catch (error: any) {
+      // H5: on a config-load failure, force the session back to plain-Pi normal
+      // mode so it is never left with hive tools registered but unconfigured.
+      // Best-effort — capture whatever the current tool set is and restore it.
+      try {
+        state.mode = "normal";
+        captureNormalTools(state);
+        applyMode(state, ctx, "normal", { notify: false });
+      } catch { /* nothing more we can do; the notify below tells the user */ }
       if (ctx.hasUI) ctx.ui.notify(`Hive failed to load: ${error?.message || error}`, "error");
     }
   });

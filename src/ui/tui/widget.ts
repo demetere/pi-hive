@@ -1,13 +1,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { HIVE_TOOL_NAMES } from "../../core/constants";
 import { canonicalMode } from "../../core/types";
-import type { AgentConfig, AgentRuntime, HiveMode, HiveState } from "../../core/types";
+import type { HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
 import { emitModelCatalog, startHiveTelemetrySession } from "../../engine/observability";
-import { configuredChildAgents } from "../../core/utils";
 import { installHiveFooter, requestHiveFooterRender } from "./footer";
 
 // Common hive tools are active in both plan and execution mode. Plan lifecycle
@@ -132,43 +131,6 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
   }));
 }
 
-
-export function renderTeamLines(state: HiveState, width: number, theme: any): string[] {
-  if (!state.config || !state.session) return [theme.fg("dim", "hive: not loaded")];
-  const lines: string[] = [];
-  const orch = state.runtimes.get(state.config.orchestrator.name.toLowerCase());
-  const title = theme.fg("accent", theme.bold(`hive`)) + theme.fg("dim", ` | ${state.session.sessionId.slice(0, 14)} | ${state.activeRuns} running`);
-  lines.push(truncateToWidth(title, width));
-
-  const renderAgent = (prefix: string, runtime: AgentRuntime, last: boolean) => {
-    const statusIcon = runtime.status === "running" ? "●" : runtime.status === "done" ? "✓" : runtime.status === "error" ? "✗" : "○";
-    const statusRole = runtime.status === "running" ? "accent" : runtime.status === "done" ? "success" : runtime.status === "error" ? "error" : "dim";
-    const tokens = runtime.inputTokens + runtime.outputTokens;
-    const usage = `$${runtime.costUsd.toFixed(3)} 🧠${Math.round(tokens / 1000)}K`;
-    const elapsed = runtime.status === "running" ? ` ${Math.round(runtime.elapsedMs / 1000)}s` : "";
-    const raw = `${prefix}${last ? "└" : "├"} ${statusIcon} ${runtime.config.name} ${usage}${elapsed} ${runtime.config.model || "inherit"}`;
-    const styled = theme.fg("dim", `${prefix}${last ? "└" : "├"} `) + theme.fg(statusRole, statusIcon) + " " + theme.fg("accent", runtime.config.name) + theme.fg("dim", ` ${usage}${elapsed} ${runtime.config.model || "inherit"}`);
-    lines.push(truncateToWidth(styled, width || visibleWidth(raw)));
-  };
-
-  const renderAgentNode = (agent: AgentConfig, prefix: string, last: boolean, childrenOverride?: AgentConfig[]) => {
-    const runtime = state.runtimes.get(agent.name.toLowerCase());
-    if (runtime) renderAgent(prefix, runtime, last);
-    const children = childrenOverride || configuredChildAgents(agent);
-    const childPrefix = `${prefix}${last ? "   " : "│  "}`;
-    for (let i = 0; i < children.length; i++) {
-      renderAgentNode(children[i], childPrefix, i === children.length - 1);
-    }
-  };
-
-  if (orch) renderAgent("", orch, false);
-  // Top-level agents are the orchestrator's direct reports; render each as a
-  // normal node (it heads its own subtree).
-  for (let t = 0; t < state.config.agents.length; t++) {
-    renderAgentNode(state.config.agents[t], "│  ", t === state.config.agents.length - 1);
-  }
-  return lines.slice(0, 28);
-}
 
 export function updateWidget(state: HiveState) {
   // Keep team mode active without rendering the full team tree near the footer.

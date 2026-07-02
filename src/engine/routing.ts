@@ -34,21 +34,23 @@ export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ 
         if (runtime.config.groupName?.toLowerCase().includes(term)) score += 4;
         if (searchable.includes(term)) score += 1;
       }
-      if (/security|auth|permission|tenant|secret|injection|data exposure/i.test(task) && runtime.config.name === "Security Reviewer") {
-        score += 10;
-        reasons.push("security-sensitive");
+      // H3/Decision 8: no literal-name scoring bonuses. Routing scores by the
+      // agent's declared routingTags, name/group term overlap, and agentType —
+      // all above — so any team routes correctly regardless of how its agents
+      // are named. Group-based SDD-phase heuristics below stay (they key off the
+      // configured group name, not a hardcoded agent name).
+      const at = runtime.config.agentType;
+      if (at === "reviewer" && /security|auth|permission|tenant|secret|injection|data exposure|review/i.test(task)) {
+        score += 4;
+        reasons.push("reviewer-type");
       }
-      if (/test|qa|verify|regression|evidence|acceptance/i.test(task) && runtime.config.name === "QA Engineer") {
-        score += 8;
-        reasons.push("verification");
+      if (at === "tester" && /test|qa|verify|regression|evidence|acceptance/i.test(task)) {
+        score += 4;
+        reasons.push("tester-type");
       }
-      if (/frontend|react|ui|component|hook|css|locale|accessibility/i.test(task) && runtime.config.name === "Frontend Dev") {
-        score += 8;
-        reasons.push("frontend");
-      }
-      if (/backend|api|service|database|migration|worker|fastapi|schema/i.test(task) && runtime.config.name === "Backend Dev") {
-        score += 8;
-        reasons.push("backend");
+      if (at === "coder" && /implement|code|refactor|fix|build|component|api|service|migration|schema/i.test(task)) {
+        score += 3;
+        reasons.push("coder-type");
       }
       if (/plan|scope|requirement|product|ux|acceptance|proposal|spec|design|tasks|openspec|sdd/i.test(task) && /planning/i.test(runtime.config.groupName || runtime.config.name)) {
         score += 4;

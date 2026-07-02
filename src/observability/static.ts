@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-// The dashboard is a prebuilt Solid SPA under ui/web/dist. We serve its
+// The dashboard is a prebuilt React SPA under ui/web/dist. We serve its
 // index.html at "/" and its hashed assets from "/assets/*". If the build is
 // missing (developer hasn't run `just build-dashboard`), we fall back to a short
 // instructional page rather than a blank screen.

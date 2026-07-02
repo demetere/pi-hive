@@ -11,6 +11,28 @@ import { validateAgentTypes, validateHiveConfigShape } from "./schema";
 // off the config node (e.g. the status modal, the footer) shows "inherit"/"off"
 // even though the agent actually runs on its frontmatter model. Enriching here
 // makes the config the single source of truth for display + spawn fallback.
+// Warn if any raw config node carries `allowedAgents` (removed from the schema,
+// H1). The delegation hierarchy is derived from `members`/`children`; honoring a
+// user filter would silently fight that derivation. Warn-only — the value is
+// ignored either way (derivation overwrites it).
+function warnOnAllowedAgents(parsed: any): void {
+  const seen: string[] = [];
+  const walk = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if ("allowedAgents" in node) seen.push(String(node.name || "a node"));
+    for (const child of node.members || node.children || []) walk(child);
+  };
+  for (const block of [parsed?.hive, parsed?.planning]) {
+    if (!block) continue;
+    walk(block.main || block.orchestrator);
+    (block.agents || []).forEach(walk);
+  }
+  if (seen.length) {
+    console.warn(`[pi-hive] 'allowedAgents' is no longer a config field and is ignored (found on: ${seen.join(", ")}). Delegation is derived from 'members'/'children'.`);
+  }
+}
+
 function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): void {
   if (!agent) return;
   // agent-type/stages/commit live in the agent's .md frontmatter (like
@@ -62,6 +84,11 @@ export function loadConfig(cwd: string): HiveConfig {
   const raw = safeRead(configPath);
   if (!raw) throw new Error(`Missing config: ${configPath}`);
   const parsed = parseYamlLite(raw) as any;
+
+  // H1 (Decision 7): allowedAgents is no longer a user config field — the
+  // delegation hierarchy is derived from members/children. A user-set value was
+  // silently discarded before; warn instead so the mechanism is discoverable.
+  warnOnAllowedAgents(parsed);
 
   const { hive, planning } = resolveTeams(parsed);
 

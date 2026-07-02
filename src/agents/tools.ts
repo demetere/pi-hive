@@ -58,7 +58,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       const recommendations = routeAgents(state, task, Math.max(1, Math.min(10, Number(limit || 5))));
       const text = recommendations.length
         ? recommendations.map((entry, index) => `${index + 1}. ${entry.name}${entry.group ? ` (${entry.group})` : ""} — score ${entry.score}${entry.reasons.length ? ` — ${entry.reasons.join(", ")}` : ""}`).join("\n")
-        : "No strong route found. Use Planning Lead for clarification or Engineering Lead for codebase mapping.";
+        : "No strong route found. Delegate to the team lead whose consultWhen best matches, or ask the user to clarify scope.";
       return { content: [{ type: "text", text }], details: { task, recommendations } };
     },
   }),
@@ -100,7 +100,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     label: "Delegate Agent",
     description: "Delegate a focused task to one configured hive agent and receive its answer. Use this for all substantive work. By default the agent RESUMES its prior session (it remembers earlier work — ideal for a review→fix loop); pass fresh=true to start it from a clean slate.",
     parameters: Type.Object({
-      agent: Type.String({ description: "Configured agent name, e.g. Frontend Dev, Backend Dev, Planning Lead." }),
+      agent: Type.String({ description: "Configured agent name (one of your delegation targets)." }),
       task: Type.String({ description: "Focused task for that agent. Include the exact question and expected output." }),
       fresh: Type.Optional(Type.Boolean({ description: "Start the agent from a clean session, discarding its prior memory. Default false (resume). Use when the previous session is irrelevant or should not influence this task." })),
     }),

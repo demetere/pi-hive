@@ -10,7 +10,7 @@ function state(overrides: Partial<HiveState> = {}): HiveState {
   return {
     pi: {} as any,
     config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 1, distiller: { enabled: false, model: "", conversationLines: 10 } } },
-    session: { sessionId: "test-session", sessionDir: "/tmp/session", conversationLog: "/tmp/session/conversation.jsonl", observabilityLog: "/tmp/session/hive-events.jsonl", activeTeam: "all" },
+    session: { sessionId: "test-session", sessionDir: "/tmp/session", conversationLog: "/tmp/session/conversation.jsonl", observabilityLog: "/tmp/session/hive-events.jsonl" },
     runtimes: new Map([["orchestrator", {} as any]]),
     widgetCtx: null,
     activeRuns: 0,

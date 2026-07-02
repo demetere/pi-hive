@@ -20,7 +20,7 @@ function stateWith(runtimes: AgentRuntime[]): HiveState {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-verdict-"));
   return {
     pi: {} as any, config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 1, distiller: { enabled: false, model: "", conversationLines: 10 } } },
-    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl"), activeTeam: "all" },
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
     runtimes: new Map(runtimes.map((entry) => [entry.config.name.toLowerCase(), entry])),
     widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
     streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,

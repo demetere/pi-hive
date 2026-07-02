@@ -588,7 +588,7 @@ export function agentLogPath(sessionId: string, agentName: string): { file?: str
   const snap = snapshots.get(sessionId);
   if (!snap) return {};
   const activeRoot = snap.topologies?.active ? snap.topologies[snap.topologies.active]?.orchestrator?.name : snap.topology?.orchestrator?.name;
-  const isMain = agentName === activeRoot || (agentName === "Orchestrator" && !!activeRoot) || (agentName === "Planning Lead" && activeRoot === "Planning Lead");
+  const isMain = agentName === activeRoot || (agentName === "Orchestrator" && !!activeRoot);
   const agent = Array.isArray(snap.agents) ? snap.agents.find((candidate) => candidate.name === agentName) : undefined;
   if (isMain) return { file: agent?.sessionFile && fs.existsSync(agent.sessionFile) ? agent.sessionFile : snap.conversation_log, status: agent?.status || "running", main: true };
   if (!agent || !agent.sessionFile) return { status: agent?.status };
