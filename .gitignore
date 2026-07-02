@@ -23,3 +23,6 @@ ui/web/node_modules/
 # NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
 # extension needs no build step at install time. Rebuild it after editing
 # ui/web/src/ with: just build-dashboard
+
+# Local Claude Code workspace (skills, scheduled tasks, etc.)
+.claude/
