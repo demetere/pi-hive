@@ -45,6 +45,29 @@ export function openEventStream(): EventSource {
   return new EventSource("/stream");
 }
 
+// Recent agent "thinking"/reasoning across a session — lives only in per-agent
+// transcripts, so it's fetched separately and merged into the activity feed.
+export interface ThinkingEntry { agent: string; ts: string; text: string; tokens?: number; }
+export async function fetchThinking(sessionId: string): Promise<ThinkingEntry[]> {
+  if (!sessionId) return [];
+  const data = await jsonOr<{ thinking: ThinkingEntry[] }>(fetch(`/thinking?session=${encodeURIComponent(sessionId)}`), { thinking: [] });
+  return data.thinking || [];
+}
+
+// ── project display-name overrides (settings) ────────────────────────────────
+export interface ProjectOverride { cwd: string; label: string; updatedAt?: string; }
+export async function fetchProjectOverrides(): Promise<ProjectOverride[]> {
+  const data = await jsonOr<{ overrides: ProjectOverride[] }>(fetch("/project-overrides"), { overrides: [] });
+  return data.overrides || [];
+}
+// Set (label non-empty) or clear (label empty) a project's override by cwd.
+export async function saveProjectOverride(cwd: string, label: string): Promise<boolean> {
+  try {
+    const res = await fetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, label }) });
+    return res.ok;
+  } catch { return false; }
+}
+
 // ── Plan store ───────────────────────────────────────────────────────────────
 
 export interface PlanVerdict {

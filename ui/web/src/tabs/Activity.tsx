@@ -3,7 +3,7 @@ import { useHive } from "../store";
 import { viewAgent } from "../store/raw";
 import RelTime from "../hooks/RelTime";
 import { fmtCost, fmtNum, sessionSlug, shortModel } from "../lib/format";
-import { agentTeam, bundleEvents, itemAgent, itemHaystack, type ActivityItem } from "../lib/activity";
+import { agentTeam, bundleEvents, itemAgent, itemHaystack, mergeThinking, type ActivityItem } from "../lib/activity";
 
 const PAGE = 60;
 
@@ -13,6 +13,7 @@ function itemParticipants(item: ActivityItem): Set<string> {
     const p = e?.payload || {};
     for (const v of [e?.actor, p.agent, p.from, p.to]) if (v) out.add(v);
   };
+  if (item.kind === "thinking") { out.add(item.agent); return out; }
   if (item.kind === "tool") { add(item.start); add(item.end); }
   else add(item.event);
   return out;
@@ -30,6 +31,7 @@ function toolDuration(item: Extract<ActivityItem, { kind: "tool" }>): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 function itemTitle(item: ActivityItem): string {
+  if (item.kind === "thinking") return `${item.agent} thinking`;
   if (item.kind === "tool") {
     const p = (item.end || item.start)?.payload || {};
     const state = item.end ? (p.isError ? "failed" : "finished") : "started";
@@ -48,6 +50,7 @@ function itemTitle(item: ActivityItem): string {
   }
 }
 function itemSummary(item: ActivityItem): string {
+  if (item.kind === "thinking") return item.text.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
   if (item.kind === "tool") {
     const s = item.start?.payload || {};
     const e = item.end?.payload || {};
@@ -70,6 +73,7 @@ export default function Activity(props: { search: string }) {
   const scopedEvents = useHive((s) => s.scopedEvents);
   const scopedAgents = useHive((s) => s.scopedAgents);
   const scopedSessions = useHive((s) => s.scopedSessions);
+  const thinkingBySession = useHive((s) => s.thinkingBySession);
 
   const [type, setType] = useState("");
   const [agent, setAgent] = useState("");
@@ -77,7 +81,12 @@ export default function Activity(props: { search: string }) {
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState<Set<string>>(new Set());
 
-  const items = useMemo(() => bundleEvents(scopedEvents), [scopedEvents]);
+  const thinking = useMemo(() => {
+    const out: Array<{ agent: string; ts: string; text: string }> = [];
+    for (const s of scopedSessions) for (const t of thinkingBySession.get(s.session_id) || []) out.push(t);
+    return out;
+  }, [scopedSessions, thinkingBySession]);
+  const items = useMemo(() => mergeThinking(bundleEvents(scopedEvents), thinking), [scopedEvents, thinking]);
   const types = useMemo(() => Array.from(new Set(items.map((e) => e.type))).sort(), [items]);
 
   const agents = useMemo(() => {
@@ -207,20 +216,28 @@ export default function Activity(props: { search: string }) {
               const expanded = open.has(item.id);
               const a = itemAgent(item);
               const color = agentColor.get(a) || "var(--accent)";
-              const raw = item.kind === "tool" ? (item.end || item.start) : item.event;
+              const isThinking = item.kind === "thinking";
+              const raw = item.kind === "tool" ? (item.end || item.start) : item.kind === "event" ? item.event : undefined;
               const errored = item.kind === "tool" ? item.end?.payload?.isError : raw?.payload?.isError || raw?.type === "error";
+              const succeeded = !errored && item.kind === "tool" && !!item.end;
               const summary = itemSummary(item);
               return (
-                <article key={item.id} className={`activity-box ${errored ? "err" : item.kind === "tool" && item.end ? "ok" : ""}`} style={{ "--agent-color": color } as React.CSSProperties}>
+                <article key={item.id} className={`activity-box ${errored ? "err" : succeeded ? "ok" : ""}`} style={{ "--agent-color": color } as React.CSSProperties}>
                   <button className="activity-event-head" onClick={() => toggle(item.id)}>
                     <span className="tl-type">{item.type}</span>
+                    {errored ? <span className="outcome err" title="failed">✗</span>
+                      : succeeded ? <span className="outcome ok" title="succeeded">✓</span> : null}
                     <b>{itemTitle(item)}</b>
                     {a && <span className="agent-chip">{a}</span>}
+                    {isThinking && item.tokens ? <span className="tok-meta">+{fmtNum(item.tokens)} tok</span> : null}
                     <span className="tl-time"><RelTime ts={item.ts} /></span>
                     <span className="expand-mark">{expanded ? "−" : "+"}</span>
                   </button>
-                  {summary && <div className="tl-text activity-summary">{summary}</div>}
-                  {expanded && (
+                  {summary && !isThinking && <div className="tl-text activity-summary">{summary}</div>}
+                  {isThinking && (
+                    <div className={`think-text ${expanded ? "expanded" : ""}`}>{item.text.replace(/\*\*/g, "").trim()}</div>
+                  )}
+                  {expanded && !isThinking && (
                     <div className="activity-detail">
                       {item.kind === "tool" ? (
                         <>

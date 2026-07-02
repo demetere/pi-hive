@@ -4,10 +4,25 @@ import type { AgentRuntime, SessionView, Topology, TopologyNode } from "../types
 import { useHive } from "../store";
 import { viewAgent } from "../store/raw";
 import { usePanZoom } from "../hooks/usePanZoom";
-import { fmtCost, fmtNum, shortModel, clip } from "../lib/format";
+import { fmtNum, clip } from "../lib/format";
+import { ctxColor, modelTag, statusKey, thinkBars, thinkLevel, thinkName, tokPerSec } from "../lib/agents";
 
-const NODE_W = 184;
-const NODE_H = 66;
+const NODE_H = 92;
+// Card width adapts to content so full agent names + model tags fit without
+// cropping. Computed per-tree from the widest name+badge, clamped to a range.
+const NODE_W_MIN = 188;
+const NODE_W_MAX = 340;
+
+// Width the model pill needs for its tag text (≈5.4px/char at 8px mono + pad).
+function tagWidth(tag: string): number {
+  return Math.min(120, Math.max(22, tag.length * 5.4 + 12));
+}
+// Width a node needs to show its full id + model badge on row 1:
+//   left pad(12) + dot(~15) + id text + gap(8) + badge + right pad(12)
+function nodeWidthFor(name: string, tag: string): number {
+  const idW = name.length * 6.7;
+  return 12 + 15 + idW + 8 + tagWidth(tag) + 12;
+}
 
 type TopologyKind = "active" | "hive" | "planning";
 
@@ -70,7 +85,8 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
     if (!root) return "∅";
     const sig: string[] = [];
     const walk = (n: TopologyNode, depth: number) => {
-      sig.push(depth + ":" + n.name + (collapsed.has(n.name) ? "*" : ""));
+      // include model so card width (which depends on the model tag) recomputes
+      sig.push(depth + ":" + n.name + "@" + (n.model || "") + (collapsed.has(n.name) ? "*" : ""));
       if (!collapsed.has(n.name)) for (const c of n.children || []) walk(c, depth + 1);
     };
     walk(root, 0);
@@ -86,7 +102,20 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
       if (col.has(d.name)) return null;
       return (d.children || []).filter((c) => { if (visited.has(c.name)) return false; visited.add(c.name); return true; });
     });
-    const layoutTree = tree<TopologyNode>().nodeSize([NODE_W + 34, NODE_H + 58]);
+    // First pass over the visible nodes to size all cards to the widest content,
+    // so no name/model gets cropped and every card stays a uniform width.
+    const probe = hierarchy(root, (d) => {
+      if (col.has(d.name)) return null;
+      return (d.children || []);
+    });
+    let needed = NODE_W_MIN;
+    for (const n of probe.descendants()) {
+      const d = n.data;
+      needed = Math.max(needed, nodeWidthFor(d.name, modelTag(d.model)));
+    }
+    const nodeW = Math.min(NODE_W_MAX, Math.ceil(needed));
+
+    const layoutTree = tree<TopologyNode>().nodeSize([nodeW + 44, NODE_H + 62]);
     const laidOut = layoutTree(h);
     const nodes = laidOut.descendants();
     const links = laidOut.links();
@@ -94,10 +123,10 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const maxY = Math.max(...nodes.map((n) => n.y));
     return {
-      nodes, links,
-      width: (maxX - minX) + NODE_W + 80,
+      nodes, links, nodeW,
+      width: (maxX - minX) + nodeW + 80,
       height: maxY + NODE_H + 60,
-      ox: -minX + NODE_W / 2 + 24,
+      ox: -minX + nodeW / 2 + 24,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structureKey]);
@@ -167,6 +196,12 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
           {...handlers}
           style={{ cursor: grabbing ? "grabbing" : "grab" }}
         >
+          <defs>
+            <pattern id="topo-dots" width="26" height="26" patternUnits="userSpaceOnUse" patternTransform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+              <circle cx="1.5" cy="1.5" r="1.1" className="g-dotgrid" />
+            </pattern>
+          </defs>
+          <rect x="0" y="0" width="100%" height="100%" fill="url(#topo-dots)" />
           <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
             {layout.links.map((l) => (
               <EdgeLine key={l.target.data.name} link={l} ox={layout.ox} sessionId={session?.session_id || ""} inactiveTeam={inactiveTeam} snapStatus={agentsMap.get(l.target.data.name)?.status} />
@@ -176,6 +211,7 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
                 key={n.data.name}
                 node={n}
                 ox={layout.ox}
+                nodeW={layout.nodeW}
                 sessionId={session?.session_id || ""}
                 inactiveTeam={inactiveTeam}
                 rt={agentsMap.get(n.data.name)}
@@ -203,49 +239,123 @@ function EdgeLine(props: { link: any; ox: number; sessionId: string; inactiveTea
   return <path className={`g-edge ${status === "running" ? "running" : ""}`} d={edgePath(props.link, props.ox)} />;
 }
 
+// A short-height bar dial for reasoning effort, drawn as SVG rects that ascend
+// left→right; filled up to the current level. Rendered inside the node card.
+function ThinkDial({ x, y, model, level, tier }: { x: number; y: number; model?: string; level: number; tier: "lead" | "worker" }) {
+  const bars = thinkBars(model, level, tier);
+  const gap = tier === "lead" ? 2 : 1.3;
+  const maxH = tier === "lead" ? 9 : 7;
+  let cx = x;
+  return (
+    <g>
+      {bars.map((b, i) => {
+        const bx = cx; cx += b.w + gap;
+        return <rect key={i} x={bx} y={y + (maxH - b.h)} width={b.w} height={b.h} rx="1" className={b.on ? "g-bar-on" : "g-bar-off"} />;
+      })}
+    </g>
+  );
+}
+
 function Node(props: {
-  node: HierarchyPointNode<TopologyNode>; ox: number; sessionId: string; inactiveTeam: boolean;
+  node: HierarchyPointNode<TopologyNode>; ox: number; nodeW: number; sessionId: string; inactiveTeam: boolean;
   rt?: AgentRuntime; collapsed: boolean; onToggle: (name: string, hasKids: boolean) => void;
 }) {
   const { node, ox, rt } = props;
   const data = node.data;
   const status = useStatus(props.sessionId, data.name, props.inactiveTeam, rt?.status);
+  const sk = statusKey(status);
   const tokens = (rt?.inputTokens || 0) + (rt?.outputTokens || 0);
   const hasKids = (data.children?.length || 0) > 0;
-  const nodeKind = data.agentType || data.role || "member";
+  const role = data.agentType || data.role || "member";
+  const isOrchestrator = role === "orchestrator";
+  const isLead = isOrchestrator || role === "lead" || hasKids;
+  const tier: "lead" | "worker" = isLead ? "lead" : "worker";
+
+  const model = data.model || rt?.model;
+  const ctxPct = Math.max(0, Math.min(100, Math.round(rt?.contextPct ?? 0)));
+  const level = thinkLevel(model, rt?.thinking);
+  const tps = tokPerSec(rt?.inputTokens, rt?.outputTokens, rt?.elapsedMs);
 
   const openLog = () => {
-    if (props.sessionId) viewAgent({ sessionId: props.sessionId, name: data.name, color: data.color, status, model: data.model });
+    if (props.sessionId) viewAgent({ sessionId: props.sessionId, name: data.name, color: data.color, status, model });
   };
   const onClick = (ev: React.MouseEvent) => { ev.stopPropagation(); openLog(); };
   const onKeyDown = (ev: React.KeyboardEvent) => {
     if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); openLog(); }
   };
 
+  const W = props.nodeW, H = NODE_H;
+  const ctxCol = ctxColor(ctxPct);
+  const tag = modelTag(model);
+  const tagW = tagWidth(tag);
+  // Agent identity color (every agent carries one). Used as a left accent so the
+  // topology speaks the same per-agent color language as the activity feed and
+  // leaderboard — distinct from the status dot, which stays the status signal.
+  const agentColor = data.color || "var(--brand)";
+  const safeName = data.name.replace(/[^a-z0-9]/gi, "");
+  const clipId = `nclip-${safeName}`;
+  const gradId = `nwash-${safeName}`;
+
   return (
     <g
-      className={`g-node clickable ${status}`}
-      transform={`translate(${node.x + ox - NODE_W / 2},${node.y})`}
-      style={{ "--nc": data.color || "var(--accent)" } as React.CSSProperties}
+      className={`g-node clickable ${sk} ${isOrchestrator ? "orchestrator" : isLead ? "lead" : "worker"}`}
+      transform={`translate(${node.x + ox - W / 2},${node.y})`}
       role="button"
       tabIndex={0}
-      aria-label={`${data.name} — ${status}, ${fmtNum(tokens)} tokens, ${fmtCost(rt?.costUsd || 0)}. Open transcript.`}
+      aria-label={`${data.name} — ${status}, ${ctxPct}% context, ${fmtNum(tokens)} tokens. Open transcript.`}
       onClick={onClick}
       onKeyDown={onKeyDown}
     >
-      <rect className="g-bg" rx="12" width={NODE_W} height={NODE_H} />
-      {status === "running" && <circle className="g-dot-halo" cx="19" cy="20" r="4.5" />}
-      <circle className={`g-dot ${status}`} cx="19" cy="20" r="4.5" />
-      <text className="g-title" x="32" y="24">{clip(data.name, hasKids ? 17 : 19)}</text>
-      <text className="g-sub" x="16" y="43">{status} · {fmtNum(tokens)} tok · {fmtCost(rt?.costUsd || 0)}</text>
-      <text className="g-sub dim" x="16" y="56">{clip(shortModel(data.model), 18)} · {nodeKind}</text>
+      <defs>
+        <clipPath id={clipId}><rect rx="14" width={W} height={H} /></clipPath>
+        {/* wash carries the full card width, fading left→right into transparent */}
+        <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stopColor={agentColor} stopOpacity="0.14" />
+          <stop offset="0.5" stopColor={agentColor} stopOpacity="0.05" />
+          <stop offset="1" stopColor={agentColor} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <rect className="g-bg" rx="14" width={W} height={H} />
+      {/* identity accent: colored left edge + full-width wash, clipped to the card */}
+      <g clipPath={`url(#${clipId})`}>
+        <rect x="0" y="0" width={W} height={H} fill={`url(#${gradId})`} />
+        <rect x="0" y="0" width="3" height={H} fill={agentColor} opacity="0.9" />
+      </g>
+
+      {/* Row 1: status dot + halo, id, model badge */}
+      {sk === "running" && <circle className="g-dot-halo" cx="17" cy="19" r="4" />}
+      <circle className={`g-dot ${sk}`} cx="17" cy="19" r="3.5" />
+      {/* id gets the width left of the model pill; ~6.6px per char at 12px */}
+      <text className="g-id" x="27" y="23" style={{ fontSize: 12 }}>{clip(data.name, Math.max(6, Math.floor((W - 12 - tagW - 27 - 6) / 6.6)))}</text>
+      <g transform={`translate(${W - 12 - tagW},13)`}>
+        <rect className="g-badge-bg" width={tagW} height="14" rx="7" />
+        <text className="g-badge-tx" x={tagW / 2} y="10" textAnchor="middle" style={{ fontSize: 8, letterSpacing: ".02em" }}>{tag}</text>
+      </g>
+
+      {/* Row 2: CTX bar */}
+      <text className="g-cap" x="12" y="45" style={{ fontSize: 7.5 }}>CTX</text>
+      <rect x="32" y="40" width={W - 76} height="4" rx="2" className="g-ctx-track" />
+      <rect x="32" y="40" width={(W - 76) * (ctxPct / 100)} height="4" rx="2" fill={ctxCol} />
+      <text x={W - 12} y="45" textAnchor="end" className="g-val" style={{ fontSize: 8.5, fill: ctxCol }}>{ctxPct}%</text>
+
+      {/* Row 3: THINK dial · TOK/S · TOTAL */}
+      <text className="g-cap" x="12" y="63" style={{ fontSize: 7 }}>THINK</text>
+      <ThinkDial x={12} y={66} model={model} level={level} tier={tier} />
+      <text className="g-cap" x="12" y="84" style={{ fontSize: 6.5 }}>{thinkName(model, level).toUpperCase()}</text>
+
+      <text className="g-cap" x={W / 2} y="63" textAnchor="middle" style={{ fontSize: 7 }}>TOK/S</text>
+      <text className="g-val" x={W / 2} y="78" textAnchor="middle" style={{ fontSize: 10.5 }}>{tps ? Math.round(tps) : "—"}</text>
+
+      <text className="g-cap" x={W - 12} y="63" textAnchor="end" style={{ fontSize: 7 }}>TOTAL</text>
+      <text className="g-val" x={W - 12} y="78" textAnchor="end" style={{ fontSize: 10.5 }}>{fmtNum(tokens)}</text>
+
       {hasKids && (
-        <g className="g-collapse" transform={`translate(${NODE_W - 26},6)`}
+        <g className="g-collapse" transform={`translate(${W - 26},${H - 24})`}
            onClick={(ev) => { ev.stopPropagation(); props.onToggle(data.name, hasKids); }}
            onPointerDown={(ev) => ev.stopPropagation()}>
-          <rect className="g-collapse-hit" x="-2" y="-2" width="24" height="24" rx="6" />
-          <circle r="9" cx="9" cy="9" />
-          <text x="9" y="13" textAnchor="middle">{props.collapsed ? "+" : "−"}</text>
+          <rect className="g-collapse-hit" x="-2" y="-2" width="22" height="22" rx="6" />
+          <circle r="8" cx="8" cy="8" />
+          <text x="8" y="12" textAnchor="middle">{props.collapsed ? "+" : "−"}</text>
         </g>
       )}
     </g>

@@ -139,15 +139,21 @@ export function recomputeLive() {
     if (isLive) live.add(v.session_id);
   }
   // Project groups for the sidebar; live flag derived from the live set.
+  const overrides = s.projectOverrides;
   const groups = new Map<string, ProjectGroup>();
   for (const sess of s.sessions) {
     let g = groups.get(sess.project);
-    if (!g) { g = { name: sess.project, sessions: [], live: false, totalCost: 0 }; groups.set(sess.project, g); }
+    if (!g) { g = { name: sess.project, label: sess.project, sessions: [], live: false, totalCost: 0, cwds: [] }; groups.set(sess.project, g); }
     g.sessions.push(sess);
     g.live = g.live || live.has(sess.session_id);
     g.totalCost += sess.cost;
+    if (sess.cwd && !g.cwds.includes(sess.cwd)) g.cwds.push(sess.cwd);
   }
-  const projectGroups = Array.from(groups.values()).sort((a, b) => Number(b.live) - Number(a.live) || a.name.localeCompare(b.name));
+  // Apply display-name overrides: first matching cwd in the group wins.
+  for (const g of groups.values()) {
+    for (const cwd of g.cwds) { const l = overrides.get(cwd); if (l) { g.label = l; break; } }
+  }
+  const projectGroups = Array.from(groups.values()).sort((a, b) => Number(b.live) - Number(a.live) || a.label.localeCompare(b.label));
   store.setState({ liveSet: live, projectGroups, fleetStats: computeFleetStats(s.sessions) });
 }
 
@@ -183,13 +189,22 @@ export function recomputeScoped() {
 
   const scopedAgents = computeScopedAgents(scopedSessions);
 
+  // Display label for the scoped project (override its derived name if set).
+  const labelFor = (project: string) => {
+    for (const sess of s.sessions) {
+      if (sess.project === project && sess.cwd) { const l = s.projectOverrides.get(sess.cwd); if (l) return l; }
+    }
+    return project;
+  };
+
   // scope title + breadcrumb
   let scopeTitle: ScopeTitle;
   if (scope.level === "fleet") scopeTitle = { title: "Overview", crumbs: ["Overview"], live: scopedStats.live };
-  else if (scope.level === "project") scopeTitle = { title: scope.project, crumbs: ["Overview", scope.project], live: scopedStats.live };
+  else if (scope.level === "project") { const pl = labelFor(scope.project); scopeTitle = { title: pl, crumbs: ["Overview", pl], live: scopedStats.live }; }
   else {
     const sess = s.sessionsById.get(scope.sessionId);
-    scopeTitle = { title: scope.project, crumbs: ["Overview", scope.project, sessionSlug(scope.sessionId)], live: scopedStats.live, session: sess };
+    const pl = labelFor(scope.project);
+    scopeTitle = { title: pl, crumbs: ["Overview", pl, sessionSlug(scope.sessionId)], live: scopedStats.live, session: sess };
   }
 
   store.setState({ scopedSessions, scopedEvents, scopedStats, currentSession, scopedAgents, scopeTitle });

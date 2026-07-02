@@ -16,16 +16,35 @@ import type { Scope } from "./index";
 // Project names and session ids are URL-encoded. The server serves index.html
 // for any of these paths (SPA history fallback), so deep links work.
 
-const TABS = new Set(["overview", "sessions", "activity", "plans", "cost"]);
+const TABS = new Set(["overview", "sessions", "activity", "plans", "cost", "settings"]);
 
 function normTab(tab: string | undefined): string {
   return tab && TABS.has(tab) ? tab : "overview";
 }
 
+// The URL uses the project's DISPLAY label (its official name after a rename)
+// when one exists, falling back to the derived name. `projectSlug` resolves the
+// internal derived key → label; `resolveProject` reverses it when parsing.
+function projectSlug(project: string): string {
+  const groups = store.getState().projectGroups;
+  const g = groups.find((x) => x.name === project);
+  return g?.label || project;
+}
+
+// Given a URL project segment (which may be a label or the derived name), find
+// the internal derived project key it refers to.
+export function resolveProject(segment: string): string {
+  const groups = store.getState().projectGroups;
+  const byName = groups.find((x) => x.name === segment);
+  if (byName) return byName.name;
+  const byLabel = groups.find((x) => x.label === segment);
+  return byLabel ? byLabel.name : segment;
+}
+
 export function pathFor(scope: Scope, tab: string): string {
   const t = normTab(tab);
   if (scope.level === "fleet") return t === "overview" ? "/" : `/${t}`;
-  const proj = encodeURIComponent(scope.project);
+  const proj = encodeURIComponent(projectSlug(scope.project));
   if (scope.level === "project") return `/project/${proj}/${t}`;
   return `/project/${proj}/session/${encodeURIComponent(scope.sessionId)}/${t}`;
 }
@@ -52,8 +71,12 @@ export function parsePath(pathname: string): ParsedRoute {
 // Apply a parsed route to the store. Sets selectedSession when landing directly
 // on a session URL so scoped derivations resolve to the right session.
 function applyRoute(route: ParsedRoute) {
-  const patch: Partial<HiveState> = { scope: route.scope, activeTab: route.activeTab };
-  if (route.scope.level === "session") patch.selectedSession = route.scope.sessionId;
+  // The URL carries the project label; map it back to the internal derived key.
+  let scope = route.scope;
+  if (scope.level === "project") scope = { ...scope, project: resolveProject(scope.project) };
+  else if (scope.level === "session") scope = { ...scope, project: resolveProject(scope.project) };
+  const patch: Partial<HiveState> = { scope, activeTab: route.activeTab };
+  if (scope.level === "session") patch.selectedSession = scope.sessionId;
   store.setState(patch);
 }
 
@@ -66,9 +89,25 @@ export function installRouter() {
   installed = true;
 
   // 1. Seed state from the current URL before the first render settles.
-  applyRoute(parsePath(window.location.pathname));
+  const initialRoute = parsePath(window.location.pathname);
+  applyRoute(initialRoute);
 
-  // 2. Reflect scope/tab changes into the URL (pushState on real navigation).
+  // If a project deep-link used a label that isn't resolvable yet (groups load
+  // async), re-resolve once the project groups arrive, then stop.
+  if (initialRoute.scope.level !== "fleet") {
+    const unresolvedSeg = (initialRoute.scope as any).project as string;
+    const stop = store.subscribe((s) => s.projectGroups, (groups) => {
+      if (!groups.length) return;
+      const key = resolveProject(unresolvedSeg);
+      const cur = store.getState().scope;
+      if (cur.level !== "fleet" && cur.project !== key) {
+        store.setState({ scope: { ...cur, project: key } as Scope });
+      }
+      stop();
+    });
+  }
+
+  // 2. Reflect scope/tab/label changes into the URL (pushState on real navigation).
   const sync = (s: HiveState) => {
     const next = pathFor(s.scope, s.activeTab);
     if (next === window.location.pathname) return;
@@ -76,6 +115,8 @@ export function installRouter() {
   };
   store.subscribe((s) => s.scope, () => sync(store.getState()));
   store.subscribe((s) => s.activeTab, () => sync(store.getState()));
+  // A rename doesn't change scope but changes the label → refresh the URL.
+  store.subscribe((s) => s.projectOverrides, () => sync(store.getState()));
 
   // 3. Back/forward → update the store.
   window.addEventListener("popstate", () => {

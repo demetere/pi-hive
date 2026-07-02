@@ -57,7 +57,13 @@ export interface HiveState {
   scopedAgents: ScopeAgent[];
   scopeTitle: ScopeTitle;
   eventStatus: Map<string, Map<string, string>>;
+  // Agent thinking/reasoning by session (fetched from transcripts, not events).
+  thinkingBySession: Map<string, ThinkingEntry[]>;
+  // Per-project display-name overrides, keyed by cwd (from settings, DB-backed).
+  projectOverrides: Map<string, string>;
 }
+
+export interface ThinkingEntry { agent: string; ts: string; text: string; tokens?: number; }
 
 const initialStats: ScopeStats = { sessions: 0, live: 0, running: 0, tokens: 0, cost: 0 };
 
@@ -86,6 +92,8 @@ const initialState: HiveState = {
     scopedAgents: [],
     scopeTitle: { title: "Overview", crumbs: ["Overview"], live: 0 },
     eventStatus: new Map(),
+    thinkingBySession: new Map(),
+    projectOverrides: new Map(),
 };
 
 export const store = createStore<HiveState>()(subscribeWithSelector(() => initialState));

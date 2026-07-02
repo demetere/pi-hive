@@ -40,8 +40,10 @@ export interface SessionView {
 }
 
 export interface ProjectGroup {
-  name: string;
+  name: string;   // internal key (derived from cwd)
+  label: string;  // display label (override, or === name)
   sessions: SessionView[];
   live: boolean;
   totalCost: number;
+  cwds: string[]; // distinct working dirs in this group (for settings)
 }

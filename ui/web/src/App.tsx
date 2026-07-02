@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import Sidebar from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import Overview from "./tabs/Overview";
@@ -7,10 +7,11 @@ import Agents from "./tabs/Agents";
 import Activity from "./tabs/Activity";
 import Cost from "./tabs/Cost";
 import Plans from "./tabs/Plans";
+import Settings from "./tabs/Settings";
 import AgentLog from "./components/AgentLog";
 import ConfirmModal from "./components/ConfirmModal";
 import { useHive } from "./store";
-import { selectFleet, selectProject } from "./store/raw";
+import { selectProject, setActiveTab } from "./store/raw";
 import { connect } from "./store/wiring";
 import { relTime, sessionSlug } from "./lib/format";
 
@@ -32,63 +33,54 @@ function ScopeSubtitle() {
     const sess = scopeTitle.session;
     text = sess ? `Session ${sessionSlug(sess.session_id)} · ${sess.live ? `${sess.running} agents running` : "idle"} · updated ${relTime(sess.last_ts, now || Date.now())}` : "session";
   }
-  return <div className="text-muted text-xs mt-1">{text}</div>;
+  return <div className="text-ink-dim text-xs mt-1">{text}</div>;
 }
 
 export default function App() {
-  const [search, setSearch] = useState("");
   const activeTab = useHive((s) => s.activeTab);
   const scope = useHive((s) => s.scope);
   const scopeTitle = useHive((s) => s.scopeTitle);
 
   useEffect(() => { connect(); }, []);
 
-  // breadcrumb: clicking a crumb navigates up the scope.
-  function clickCrumb(i: number) {
-    const s = scope;
-    if (i === 0) selectFleet();
-    else if (i === 1 && (s.level === "project" || s.level === "session")) selectProject(s.project);
-  }
-
-  const crumbs = scopeTitle.crumbs;
+  // Settings is project-scoped: if the user drops to fleet scope while on the
+  // Settings tab, send them back to Overview so they aren't on a hidden tab.
+  useEffect(() => {
+    if (activeTab === "settings" && scope.level === "fleet") setActiveTab("overview");
+  }, [activeTab, scope.level]);
 
   return (
-    <div className="grid grid-cols-[260px_1fr] h-screen p-3 gap-3 overflow-hidden">
+    <div className="flex h-screen p-3 gap-3 overflow-hidden bg-bg text-ink">
       <Sidebar />
-      <div className="flex flex-col min-w-0 min-h-0 overflow-hidden">
-        <Topbar search={search} setSearch={setSearch} />
-        <div className="flex-1 min-h-0 overflow-auto pt-3.5 px-0.5 pb-6">
+      <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+        <Topbar />
+        <div className="flex-1 min-h-0 overflow-auto pt-3.5 px-0.5 pb-10">
           <div className="flex items-end justify-between gap-3 mb-4">
-            <div>
-              <div className="flex items-center gap-[7px] text-xs mb-1.5">
-                {crumbs.map((c, i) => {
-                  const last = i === crumbs.length - 1;
-                  return (
-                    <span key={i} className="contents">
-                      {i > 0 && <span className="text-muted opacity-60">›</span>}
-                      {last ? (
-                        <span className="text-fg2 font-semibold">{c}</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="text-muted cursor-pointer hover:text-accent bg-transparent border-0 p-0"
-                          style={{ font: "inherit" }}
-                          onClick={() => clickCrumb(i)}
-                        >{c}</button>
-                      )}
-                    </span>
-                  );
-                })}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5">
+                <h1 className="m-0 text-[21px] font-bold tracking-[-.015em]">{scopeTitle.title}</h1>
+                {scope.level === "session" && (
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 bg-brand-bg text-brand rounded-full pl-2.5 pr-2 py-1 text-[11px] font-semibold cursor-pointer border-0 hover:brightness-110"
+                    title="Back to project — clear session filter"
+                    onClick={() => selectProject((scope as { project: string }).project)}
+                  >
+                    <span className="w-[6px] h-[6px] rounded-full bg-brand" />
+                    session {sessionSlug((scope as { sessionId: string }).sessionId)}
+                    <span className="text-brand/70 text-[13px] leading-none ml-0.5">×</span>
+                  </button>
+                )}
               </div>
-              <h1 className="m-0 text-[21px] font-bold tracking-[-.2px]">{scopeTitle.title}</h1>
               <ScopeSubtitle />
             </div>
           </div>
-          {activeTab === "sessions" ? <Sessions search={search} />
-            : activeTab === "agents" ? <Agents search={search} />
-            : activeTab === "plans" ? <Plans search={search} />
-            : activeTab === "activity" ? <Activity search={search} />
+          {activeTab === "sessions" ? <Sessions search="" />
+            : activeTab === "agents" ? <Agents search="" />
+            : activeTab === "plans" ? <Plans search="" />
+            : activeTab === "activity" ? <Activity search="" />
             : activeTab === "cost" ? <Cost />
+            : activeTab === "settings" ? (scope.level !== "fleet" ? <Settings /> : <Overview />)
             : <Overview />}
         </div>
       </div>

@@ -4,7 +4,8 @@
 
 export type ActivityItem =
   | { kind: "event"; id: string; type: string; ts: string; event: any }
-  | { kind: "tool"; id: string; type: "worker_tool"; ts: string; start?: any; end?: any };
+  | { kind: "tool"; id: string; type: "worker_tool"; ts: string; start?: any; end?: any }
+  | { kind: "thinking"; id: string; type: "thinking"; ts: string; agent: string; text: string; tokens?: number };
 
 export function eventAgent(e: any): string {
   const p = e?.payload || {};
@@ -12,7 +13,18 @@ export function eventAgent(e: any): string {
 }
 
 export function itemAgent(item: ActivityItem): string {
+  if (item.kind === "thinking") return item.agent;
   return item.kind === "tool" ? eventAgent(item.start || item.end) : eventAgent(item.event);
+}
+
+// Merge thinking entries (from transcripts) into a bundled activity list,
+// keeping everything sorted newest-first by timestamp.
+export function mergeThinking(items: ActivityItem[], thinking: Array<{ agent: string; ts: string; text: string; tokens?: number }>): ActivityItem[] {
+  if (!thinking.length) return items;
+  const thinkItems: ActivityItem[] = thinking.map((t, i) => ({
+    kind: "thinking", id: `think:${t.agent}:${t.ts}:${i}`, type: "thinking", ts: t.ts, agent: t.agent, text: t.text, tokens: t.tokens,
+  }));
+  return [...items, ...thinkItems].sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
 }
 
 // Pairs worker_tool_start/worker_tool_end events into a single "tool" item and
@@ -47,6 +59,7 @@ export function agentTeam(name: string): "planning" | "hive" {
 // user would search on, lowercased. Cheaper and less noisy than JSON.stringify
 // over the whole event/tool payload.
 export function itemHaystack(item: ActivityItem): string {
+  if (item.kind === "thinking") return `thinking ${item.agent} ${item.text}`.toLowerCase();
   const parts: string[] = [item.type];
   const collect = (e: any) => {
     if (!e) return;

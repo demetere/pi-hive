@@ -2,46 +2,108 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── theme tokens (the only hand-authored CSS): variable declarations that back
-   the Tailwind color/shadow tokens, switched at runtime via data-theme. ─── */
+/* ── self-hosted fonts (no runtime network calls) ─────────────────────────────
+   Hanken Grotesk ships as a single variable woff2 covering weights 400–800;
+   DM Mono ships as static per-weight files. Latin subsets only. Files live in
+   ui/web/public/fonts and are committed into the shipped dist bundle. */
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/fonts/hanken-grotesk-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/dm-mono-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/dm-mono-latin-500.woff2") format("woff2");
+}
+
+/* ── theme tokens (the only hand-authored CSS): the "Soft Signal / Dusk" design
+   system's CSS custom properties, switched at runtime via data-theme. These back
+   the Tailwind color/shadow tokens. Model identity is ALWAYS neutral (ink/brand)
+   and never a status color; the cool status vocabulary (run/done/wait/warn/crit)
+   is reserved for live agent status + context-window pressure. ─────────────── */
 @layer base {
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --app-bg: #0a0b10; --panel: #12141c; --border: #1f232e; --hover: #1a1e29; --chip: #191d28;
-    --fg: #e7eaf1; --fg2: #aab2c2; --muted: #69728a;
-    --accent: #7c6cff; --accent-hi: #8f80ff; --accent-fg: #cfc7ff; --accent-soft: #7c6cff1c; --accent-border: #3a3470; --accent-glow: #7c6cff55;
-    --ok: #3ddc97; --ok-soft: #3ddc9714; --ok-border: #2a7a59; --warn: #f59e0b; --warn-soft: #f59e0b14; --err: #ff6b6b;
-    --done: #5b6b86; --done-soft: #5b6b8618;
-    --node-bg: #161922; --node-border: #272c3a; --edge: #2a303d;
-    --graph-bg: radial-gradient(circle at 1px 1px, #1b2030 1px, transparent 0), linear-gradient(180deg, #0d0f16, #0a0b10);
-    --shadow: 0 12px 32px #0007;
+    --bg: #12141A; --surface: #1C1F28; --surface2: #17191F; --raise: #242833; --well: #0F1116;
+    --line: rgba(255,255,255,.07); --line2: rgba(255,255,255,.11);
+    --ink: #EAECEF; --ink-dim: #9AA0AB; --ink-dimmer: #666C78;
+    --brand: #F4B155; --brand-bg: rgba(244,177,85,.14);
+    --run: #4FCFE6; --done: #5FD09A; --wait: #8A93A8; --warn: #ECD15A; --crit: #F47068;
+    --shadow: 0 16px 40px -20px rgba(0,0,0,.8), 0 2px 8px -4px rgba(0,0,0,.5);
+    /* soft tints for status pills/fills (color-mix-equivalent, precomputed for width) */
+    --run-soft: rgba(79,207,230,.15); --done-soft: rgba(95,208,154,.15);
+    --warn-soft: rgba(236,209,90,.15); --crit-soft: rgba(244,112,104,.15);
+    /* panel gradient + graph canvas */
+    --panel-grad: linear-gradient(180deg, var(--surface), var(--surface2));
+    --graph-bg: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--run) 5%, var(--well)), var(--well));
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --app-bg: #f4f5f9; --panel: #ffffff; --border: #e8eaf0; --hover: #f2f3f8; --chip: #eef0f6;
-    --fg: #161a24; --fg2: #525a6b; --muted: #9099aa;
-    --accent: #6c5cff; --accent-hi: #5a48f5; --accent-fg: #5a48f5; --accent-soft: #6c5cff14; --accent-border: #d6d2ff; --accent-glow: #6c5cff33;
-    --ok: #16a34a; --ok-soft: #16a34a10; --ok-border: #bbe6cb; --warn: #d97706; --warn-soft: #d977060e; --err: #e0483b;
-    --done: #8693a8; --done-soft: #8693a818;
-    --node-bg: #ffffff; --node-border: #e4e7ef; --edge: #d6dae4;
-    --graph-bg: radial-gradient(circle at 1px 1px, #e9ebf2 1px, transparent 0), linear-gradient(180deg, #fbfcfe, #f5f6fb);
-    --shadow: 0 8px 24px #1a223010;
+    --bg: #EDEBE4; --surface: #FFFFFF; --surface2: #FAF8F3; --raise: #F1EEE6; --well: #F1EFE8;
+    --line: rgba(28,26,20,.09); --line2: rgba(28,26,20,.14);
+    --ink: #20242B; --ink-dim: #6B7079; --ink-dimmer: #9AA0A8;
+    --brand: #C07C0E; --brand-bg: rgba(192,124,14,.13);
+    --run: #1596B0; --done: #2E9B6C; --wait: #606A7B; --warn: #977E15; --crit: #CF5A52;
+    --shadow: 0 16px 34px -20px rgba(40,38,48,.28), 0 2px 6px -3px rgba(40,38,48,.14);
+    --run-soft: rgba(21,150,176,.14); --done-soft: rgba(46,155,108,.14);
+    --warn-soft: rgba(151,126,21,.14); --crit-soft: rgba(207,90,82,.14);
+    --panel-grad: linear-gradient(180deg, var(--surface), var(--surface2));
+    --graph-bg: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--run) 5%, var(--well)), var(--well));
+  }
+
+  /* Font-family tokens (shared by CSS + SVG text, which does NOT inherit the
+     body font-family reliably — every <text> must name its family explicitly). */
+  :root {
+    --disp: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+    --mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Legacy var aliases → new palette. Both the pre-rewrite hand-authored CSS
+     (raw var() references below) and un-migrated components resolve through
+     these during the reskin; they are removed as each surface is rebuilt. */
+  :root[data-theme] {
+    --app-bg: var(--bg); --panel: var(--surface); --border: var(--line); --hover: var(--raise); --chip: var(--well);
+    --fg: var(--ink); --fg2: var(--ink-dim); --muted: var(--ink-dimmer);
+    --accent: var(--brand); --accent-hi: var(--brand); --accent-fg: var(--brand);
+    --accent-soft: var(--brand-bg); --accent-border: color-mix(in srgb, var(--brand) 45%, var(--line)); --accent-glow: color-mix(in srgb, var(--brand) 40%, transparent);
+    --ok: var(--done); --ok-soft: var(--done-soft); --ok-border: color-mix(in srgb, var(--done) 45%, var(--line));
+    --err: var(--crit);
+    --node-bg: var(--surface); --node-border: var(--line); --edge: var(--line2);
+    --ease: cubic-bezier(.2, .7, .3, 1);
   }
 
   html, body, #root { height: 100%; margin: 0; }
   body {
-    background: var(--app-bg);
-    color: var(--fg);
-    font-family: "Inter", ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
-    font-size: 13px;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+    font-size: 14px;
     line-height: 1.45;
     -webkit-font-smoothing: antialiased;
   }
 
   /* Custom scrollbars (theme-aware; no Tailwind utility equivalent). */
-  ::-webkit-scrollbar { width: 9px; height: 9px; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 9px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--accent-border); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* Reduced motion: one global override kills every keyframe animation
+     (flow / softblink / halo / feedin / dash / gdot*), per the design spec. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; }
+  }
 }
 
 /* ── component primitives ─────────────────────────────────────────────────
@@ -72,20 +134,21 @@
   .kpi-val { @apply text-[26px] font-bold mt-2 mb-0.5 tracking-[-.5px] tabular-nums; }
   .kpi-sub { @apply text-muted text-[11.5px]; }
 
-  /* widgets */
-  .widgets { @apply grid grid-cols-3 gap-3; }
-  .widget { @apply bg-panel border border-border rounded-2xl overflow-hidden shadow-panel flex flex-col; }
-  .widget.span2 { grid-column: span 2; }
-  .widget.hero { @apply h-[440px]; }
-  .w-head { @apply flex items-center gap-2.5 px-4 py-[13px] border-b border-border; }
-  .w-title { @apply font-bold text-[13.5px]; }
-  .w-tools { @apply ml-auto text-muted cursor-pointer flex gap-2 items-center; }
-  .w-tools button { @apply bg-transparent border-0 text-muted cursor-pointer text-[13px] px-1 py-0.5 rounded-md; }
-  .w-tools button:hover { @apply text-fg bg-hover; }
-  .w-legend { @apply ml-auto flex items-center gap-1.5 text-muted text-[11.5px]; }
-  .w-legend .lg { @apply w-[18px] h-[3px] rounded-sm inline-block; }
-  .w-legend .lg.cost { @apply bg-ok; }
-  .w-legend .lg.tok { @apply bg-accent; }
+  /* widgets — floating gradient panels ("Soft Signal / Dusk") */
+  .widgets { @apply grid gap-4; grid-template-columns: 1.9fr 1fr; }
+  .widget { @apply border border-line rounded-[18px] overflow-hidden shadow-panel flex flex-col; background: var(--panel-grad); }
+  .widget.span2 { grid-column: 1 / -1; }
+  .widget.hero { @apply h-[476px]; }
+  .w-head { @apply flex items-center gap-2.5 px-[18px] pt-[15px] pb-[13px]; }
+  .w-title { @apply font-bold text-[14px] tracking-[-.01em]; }
+  .w-tools { @apply ml-auto text-ink-dim cursor-pointer flex gap-2 items-center; }
+  .w-tools button { @apply bg-transparent border-0 text-ink-dim cursor-pointer text-[13px] px-1 py-0.5 rounded-md; }
+  .w-tools button:hover { @apply text-ink bg-well; }
+  .w-legend { @apply ml-auto flex items-center gap-2 text-ink-dim text-[11px]; }
+  .w-legend .lg-item { @apply flex items-center gap-1.5 bg-well rounded-full px-2.5 py-1; }
+  .w-legend .lg { @apply w-3 h-[2.5px] rounded-sm inline-block; }
+  .w-legend .lg.cost { @apply bg-brand; }
+  .w-legend .lg.tok { @apply bg-run; }
 
   .empty { @apply text-muted p-7 text-center; }
   .empty.small { @apply p-3 text-xs; }
@@ -106,24 +169,27 @@
   .mono { @apply tabular-nums; }
   .muted-cell { @apply text-muted; }
 
+  /* Status vocabulary: running=run(cyan), done=done(green), waiting=warn/wait,
+     error=crit. Model identity is never a status color. */
   .dot { @apply w-2 h-2 rounded-full inline-block mr-[7px]; }
-  .dot.running { @apply bg-ok shadow-[0_0_7px_var(--ok)] animate-pulse13; }
-  .dot.live { @apply bg-ok shadow-[0_0_7px_var(--ok)]; }
-  .dot.idle, .dot.done { @apply bg-muted; }
-  .dot.error { @apply bg-err; }
+  .dot.running { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 22%, transparent); @apply animate-softblink; }
+  .dot.live { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 22%, transparent); }
+  .dot.done { background: var(--done); }
+  .dot.idle, .dot.waiting { background: var(--wait); }
+  .dot.error { background: var(--crit); }
   .cdot { @apply w-[9px] h-[9px] rounded-full inline-block mr-2 align-middle; }
 
   .status-tag { @apply text-[10.5px] font-bold px-2 py-0.5 rounded-full uppercase tracking-[.4px]; }
-  .status-tag.running { @apply text-ok bg-ok-soft; }
+  .status-tag.running { color: var(--run); background: var(--run-soft); }
   .status-tag.waiting { @apply text-warn bg-warn-soft; }
-  .status-tag.done { @apply text-done bg-done-soft; }
-  .status-tag.error { @apply text-err bg-[#ff6b6b14]; }
+  .status-tag.done { color: var(--done); background: var(--done-soft); }
+  .status-tag.error { color: var(--crit); background: var(--crit-soft); }
   .status-tag.idle { @apply text-muted bg-chip; }
 
   .del-col { @apply w-14 text-right; }
   .row-del { @apply bg-transparent border-0 cursor-pointer text-xs opacity-0 px-1.5 py-[3px] rounded-md grayscale transition-[opacity] duration-[.12s]; }
   .table tbody tr:hover .row-del { @apply opacity-55; }
-  .row-del:hover { @apply !opacity-100 bg-[#ff6b6b1f] grayscale-0; }
+  .row-del:hover { opacity: 1 !important; background: var(--crit-soft); filter: grayscale(0); }
 
   .toolbar { @apply flex items-center gap-2.5 mb-3; }
   .toolbar select, .toolbar input { @apply bg-panel border border-border text-fg rounded-[9px] px-[11px] py-2 text-[12.5px]; font: inherit; }
@@ -151,92 +217,98 @@
   .topology-switch button:hover { @apply text-fg bg-hover; }
   .topology-switch button.active { @apply text-accent-fg bg-accent-soft shadow-[inset_0_0_0_1px_var(--accent-border)]; }
 
-  .graph-wrap { @apply flex-1 min-h-0 relative overflow-hidden; background: var(--graph-bg); background-size: 24px 24px, 100% 100%; }
-  /* Naming a color token `border` makes Tailwind's bare `border`/`border-*`
-     utilities also emit `stroke: var(--border)`. Since SVG `stroke` inherits,
-     that stray border-colored stroke bleeds onto every <text> and fill-only
-     shape, smudging labels. Neutralize it at the SVG roots; elements that need a
-     real stroke (edges, node box, chart lines) set their own below. */
-  .graph-svg, .chart-svg, .donut { stroke: none; }
+  .graph-wrap { @apply flex-1 min-h-0 relative overflow-hidden m-3 rounded-xl; background: var(--graph-bg); }
+  /* Naming a color token could make Tailwind's bare `border`/`stroke` utilities
+     emit an inherited stroke that smudges <text>. Neutralize at the SVG roots;
+     elements that need a real stroke set their own below. */
+  /* SVG text does not inherit the body font-family — name it at the SVG root as
+     a low-specificity default (element selector, so per-class families still
+     win). Every classed <text> below also sets its own family explicitly. */
+  .graph-svg, .chart-svg, .donut { stroke: none; font-family: var(--disp); }
   .graph-svg text, .chart-svg text, .donut text { stroke: none; }
   .graph-svg { @apply block w-full h-full min-h-[300px]; touch-action: none; }
-  .g-empty { @apply text-muted p-10 text-center; }
+  .g-dotgrid { fill: var(--line); }
+  .g-empty { @apply text-ink-dim p-10 text-center; }
   .graph-controls { @apply absolute top-3 right-3 z-[2] flex flex-col gap-1; }
-  .graph-controls button { @apply w-[30px] h-[30px] rounded-lg border border-border bg-panel text-fg2 cursor-pointer text-[15px] leading-none grid place-items-center shadow-panel; }
-  .graph-controls button:hover { @apply text-fg border-accent-border; }
+  .graph-controls button { @apply w-[30px] h-[30px] rounded-lg border border-line bg-surface text-ink-dim cursor-pointer text-[15px] leading-none grid place-items-center shadow-panel; }
+  .graph-controls button:hover { @apply text-ink; border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
 
-  .g-edge { fill: none; @apply stroke-edge; stroke-width: 1.8; }
-  .g-edge.running { @apply stroke-accent; stroke-dasharray: 6 6; @apply animate-dash; filter: drop-shadow(0 0 4px var(--accent-glow)); }
+  /* Edges: idle static line2; active (running child) animated dashed run flow. */
+  .g-edge { fill: none; stroke: var(--line2); stroke-width: 1.5; }
+  .g-edge.running { stroke: var(--run); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 0.5 7; @apply animate-flow; }
+
+  /* Node card: rounded gradient surface with soft elevation. */
   .g-node { @apply cursor-pointer; outline: none; }
-  .g-node.clickable .g-bg:hover { @apply stroke-accent; }
-  .g-node:focus-visible .g-bg { @apply stroke-accent; filter: drop-shadow(0 0 6px var(--accent-glow)); }
-  .g-bg { @apply fill-[var(--node-bg)] stroke-[var(--node-border)]; stroke-width: 1.2; transition: stroke .2s; }
-  .g-node.running .g-bg { @apply stroke-ok; filter: drop-shadow(0 0 7px #3ddc9744); }
-  .g-node.waiting .g-bg { @apply stroke-warn; filter: drop-shadow(0 0 5px #f59e0b22); }
-  .g-node.done .g-bg { @apply stroke-done; }
-  .g-node.error .g-bg { @apply stroke-err; }
-  .g-dot { @apply fill-muted; }
-  .g-dot.running { @apply fill-ok animate-gdotpulse; transform-box: fill-box; transform-origin: center; }
-  .g-dot.waiting { @apply fill-warn animate-gdotwait; transform-box: fill-box; transform-origin: center; }
-  .g-dot.done { @apply fill-done; }
-  .g-dot.error { @apply fill-err; }
-  .g-dot-halo { @apply fill-ok animate-gdothalo; transform-box: fill-box; transform-origin: center; }
-  .g-title { @apply fill-fg; font-weight: 700; font-size: 12px; }
-  .g-sub { @apply fill-[var(--fg2)]; font-size: 10px; }
-  .g-sub.dim { @apply fill-muted; }
+  .g-bg { fill: var(--surface); stroke: var(--line); stroke-width: 1; transition: stroke .2s; }
+  .g-node.lead .g-bg { stroke: var(--line); }
+  .g-node.orchestrator .g-bg { stroke: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+  .g-node.clickable .g-bg:hover { stroke: color-mix(in srgb, var(--brand) 55%, var(--line)); }
+  .g-node:focus-visible .g-bg { stroke: var(--brand); filter: drop-shadow(0 0 6px color-mix(in srgb, var(--brand) 40%, transparent)); }
+
+  .g-dot.running { fill: var(--run); }
+  .g-dot.waiting, .g-dot.idle { fill: var(--wait); }
+  .g-dot.done { fill: var(--done); }
+  .g-dot.error { fill: var(--crit); }
+  .g-dot-halo { fill: color-mix(in srgb, var(--run) 45%, transparent); @apply animate-halo; transform-box: fill-box; transform-origin: center; }
+
+  .g-id { fill: var(--ink); font-family: var(--disp); font-weight: 700; }
+  .g-cap { fill: var(--ink-dimmer); font-family: var(--mono); letter-spacing: .06em; }
+  .g-val { fill: var(--ink); font-family: var(--mono); font-weight: 500; }
+  .g-badge-bg { fill: var(--well); stroke: var(--line); stroke-width: 1; }
+  .g-badge-tx { fill: var(--ink-dim); font-family: var(--mono); }
+  .g-ctx-track { fill: var(--well); }
+  .g-bar-off { fill: var(--line2); }
+  .g-bar-on { fill: var(--ink); }
+
   .g-collapse { @apply cursor-pointer; }
   .g-collapse-hit { fill: transparent; }
-  .g-collapse circle { @apply fill-chip stroke-[var(--border)]; stroke-width: 1; }
-  .g-collapse text { @apply fill-[var(--fg2)]; font-size: 13px; font-weight: 700; pointer-events: none; }
-  .g-collapse:hover circle { @apply fill-hover stroke-[var(--accent)]; }
+  .g-collapse circle { fill: var(--well); stroke: var(--line); stroke-width: 1; }
+  .g-collapse text { fill: var(--ink-dim); font-family: var(--disp); font-size: 13px; font-weight: 700; pointer-events: none; }
+  .g-collapse:hover circle { fill: var(--raise); stroke: var(--brand); }
 }
 
 /* ── overview: cost/tokens chart ──────────────────────────────────────────── */
 @layer components {
-  .chart-wrap { @apply px-4 py-3.5 flex-1 flex min-h-[260px]; }
+  .chart-wrap { @apply flex-1 flex min-h-[196px] m-3 rounded-xl bg-well p-3; }
   .chart-host { @apply relative w-full flex-1 flex; }
-  .chart-svg { @apply w-full h-full min-h-[240px] block; touch-action: none; }
-  .chart-grid { @apply stroke-[var(--border)]; stroke-width: 1; opacity: .6; }
-  .ax { @apply fill-muted tabular-nums; font-size: 10px; }
-  .ax.tok { @apply fill-accent; opacity: .85; }
-  .ax.cost { @apply fill-ok; opacity: .85; }
-  .ax.x { @apply fill-muted; }
-  .ln { fill: none; stroke-width: 2; }
-  .ln.tok { @apply stroke-accent; }
-  .ln.cost { @apply stroke-ok; }
-  .crosshair { @apply stroke-[var(--fg2)]; stroke-width: 1; stroke-dasharray: 3 3; opacity: .5; }
-  .chart-svg .dot { @apply stroke-[var(--panel)]; stroke-width: 2; }
-  .chart-svg .dot.tok { @apply fill-accent; }
-  .chart-svg .dot.cost { @apply fill-ok; }
-  .chart-tip { @apply absolute top-2.5 pointer-events-none bg-panel border border-border rounded-[9px] px-[11px] py-2 shadow-panel min-w-[120px] z-[2]; transform: translateX(-50%); }
-  .chart-tip .tip-time { @apply text-muted text-[10.5px] mb-[5px] tabular-nums; }
-  .chart-tip .tip-row { @apply flex items-center gap-[7px] text-xs text-fg2; }
-  .chart-tip .tip-row b { @apply ml-auto text-fg tabular-nums; }
+  .chart-svg { @apply w-full h-full min-h-[172px] block; touch-action: none; }
+  .chart-grid { stroke: var(--line); stroke-width: 1; }
+  .ax { fill: var(--ink-dim); font-family: var(--mono); font-size: 10px; @apply tabular-nums; }
+  .ax.tok { fill: var(--run); opacity: .85; }
+  .ax.cost { fill: var(--brand); opacity: .85; }
+  .ax.x { fill: var(--ink-dim); }
+  .ln { fill: none; stroke-width: 2; stroke-linejoin: round; }
+  .ln.tok { stroke: var(--run); }
+  .ln.cost { stroke: var(--brand); }
+  .crosshair { stroke: var(--ink-dim); stroke-width: 1; stroke-dasharray: 3 3; opacity: .5; }
+  .chart-svg .dot { stroke: var(--surface); stroke-width: 2; }
+  .chart-svg .dot.tok { fill: var(--run); }
+  .chart-svg .dot.cost { fill: var(--brand); }
+  .chart-tip { @apply absolute top-2.5 pointer-events-none bg-surface border border-line rounded-[9px] px-[11px] py-2 shadow-panel min-w-[120px] z-[2]; transform: translateX(-50%); }
+  .chart-tip .tip-time { @apply text-ink-dim text-[10.5px] mb-[5px] tabular-nums font-mono; }
+  .chart-tip .tip-row { @apply flex items-center gap-[7px] text-xs text-ink-dim; }
+  .chart-tip .tip-row b { @apply ml-auto text-ink tabular-nums font-mono; }
   .chart-tip .lg { @apply w-3.5 h-[3px] rounded-sm inline-block; }
-  .chart-tip .lg.tok { @apply bg-accent; }
-  .chart-tip .lg.cost { @apply bg-ok; }
+  .chart-tip .lg.tok { background: var(--run); }
+  .chart-tip .lg.cost { background: var(--brand); }
 }
 
 /* ── overview: model mix ──────────────────────────────────────────────────── */
 @layer components {
-  .mix-wrap { @apply px-4 py-3.5 flex flex-col gap-3.5 flex-1; }
-  .donut-row { @apply flex items-center gap-4; }
-  .donut { @apply w-[140px] h-[140px] shrink-0; }
-  .track { fill: none; @apply stroke-chip; stroke-width: 14; }
-  .seg { fill: none; stroke-width: 14; stroke-linecap: butt; transition: stroke-dasharray .5s var(--ease); }
-  .d-big { @apply fill-fg; font-size: 19px; font-weight: 800; text-anchor: middle; }
-  .d-sm { @apply fill-muted; font-size: 10px; text-anchor: middle; }
-  .lg-list { @apply flex flex-col gap-1.5 flex-1; }
-  .lg-row { @apply flex items-center gap-[7px] text-xs text-fg2; }
-  .lg-row b { @apply ml-auto text-fg; }
+  .mix-wrap { @apply flex flex-col flex-1; }
+  .donut-row { @apply flex items-center gap-[18px] px-[18px] pt-3 pb-4; }
+  .donut { flex: none; }
+  .d-big { fill: var(--ink); font-family: var(--disp, "Hanken Grotesk"); font-size: 19px; font-weight: 800; }
+  .d-sm { fill: var(--ink-dim); font-family: var(--mono); font-size: 8px; letter-spacing: .1em; }
+  .lg-list { @apply flex flex-col gap-[9px] flex-1; }
+  .lg-row { @apply flex items-center gap-[9px] text-xs; }
   .lg-dot { @apply w-[9px] h-[9px] rounded-[3px] shrink-0; }
-  .leaders { @apply flex flex-col gap-1 border-t border-border pt-3; }
-  .ld { @apply flex items-center gap-[9px] px-1.5 py-[5px] rounded-lg text-xs; }
-  .ld:hover { @apply bg-hover; }
-  .ld-dot { @apply w-2 h-2 rounded-full shrink-0; }
-  .ld-name { @apply flex-1 overflow-hidden text-ellipsis whitespace-nowrap; }
-  .ld-tok { @apply text-muted tabular-nums; }
-  .ld-cost { @apply font-bold tabular-nums min-w-[48px] text-right; }
+  .leaders-head { @apply px-[18px] py-1.5 border-t border-line font-mono text-[10px] tracking-[.08em] text-ink-dim; }
+  .leaders { @apply flex flex-col gap-[11px] px-[18px] pt-1 pb-4; }
+  .ld-row { @apply flex items-center gap-2 text-xs mb-[5px]; }
+  .ld-row .cdot { @apply mr-0 shrink-0; }
+  .ld-track { @apply h-[5px] rounded-full bg-well overflow-hidden; }
+  .ld-fill { @apply h-full rounded-full min-w-[3px] transition-[width] duration-500; }
 }
 
 /* ── modals + confirm ─────────────────────────────────────────────────────── */
@@ -250,7 +322,7 @@
   .confirm-backdrop { @apply z-[60]; }
   .confirm-card { @apply bg-panel border border-border rounded-2xl p-6 text-center; box-shadow: 0 30px 80px #000a; width: min(420px, 92vw); animation: activityIn .18s cubic-bezier(.2,.7,.3,1); }
   .confirm-icon { @apply w-[46px] h-[46px] rounded-xl grid place-items-center text-xl mx-auto mb-3.5 bg-chip border border-border; }
-  .confirm-icon.danger { @apply bg-[#ff6b6b18] border-err; }
+  .confirm-icon.danger { background: var(--crit-soft); border-color: var(--crit); }
   .confirm-title { @apply m-0 mb-2 text-[17px] font-bold; }
   .confirm-msg { @apply text-fg2 text-[13px] leading-normal mb-5; }
   .confirm-msg b { @apply text-fg; }
@@ -307,10 +379,17 @@
 
 /* ── activity feed ────────────────────────────────────────────────────────── */
 @layer components {
-  .tl-scroll { @apply overflow-auto px-3.5 py-3 flex-1; }
-  .tl-type { @apply text-[9.5px] uppercase tracking-[.5px] text-accent font-bold; }
-  .tl-time { @apply ml-auto text-muted text-[10.5px] whitespace-nowrap; }
-  .tl-text { @apply text-fg2 text-xs mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .tl-scroll { @apply overflow-y-auto overflow-x-hidden px-2 pb-2 flex-1 min-h-0; }
+  /* two-line feed entry (Overview LiveActivity) — mirrors the Activity tab's
+     per-agent color language: a left accent tinted by the agent's identity. */
+  .feed-row { @apply relative px-2.5 py-[7px] rounded-[10px] overflow-hidden; --agent-color: var(--brand); border-left: 3px solid color-mix(in srgb, var(--agent-color) 70%, transparent); }
+  .feed-row::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 32px; background: linear-gradient(90deg, color-mix(in srgb, var(--agent-color) 12%, transparent), transparent); pointer-events: none; }
+  .feed-row:hover { background: color-mix(in srgb, var(--agent-color) 6%, transparent); }
+  .feed-pill { @apply font-mono text-[9px] font-medium rounded-full px-2 py-0.5 whitespace-nowrap; letter-spacing: .05em; }
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tl-type { @apply text-[9.5px] uppercase tracking-[.5px] text-run font-bold; }
+  .tl-time { @apply ml-auto text-ink-dim text-[10.5px] whitespace-nowrap; }
+  .tl-text { @apply text-ink-dim text-xs mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap; }
   .activity-layout { @apply grid gap-3 items-start; grid-template-columns: 310px minmax(0, 1fr); }
   .activity-agents { @apply sticky top-0 min-h-0 overflow-hidden p-2.5 flex flex-col; height: calc(100vh - 154px); max-height: calc(100vh - 154px); }
   .activity-panel-head { @apply shrink-0 flex items-center justify-between gap-2 px-1 pt-0.5 pb-2.5 text-fg2; }
@@ -333,10 +412,16 @@
   .agent-filter-stat small { @apply text-muted text-[9.5px]; }
   .activity-feed { @apply min-w-0; }
   .activity-card-grid { @apply flex flex-col gap-[9px]; }
+  /* Card border is ALWAYS the agent identity color. Success/failure is signalled
+     by a thin status accent (a short bar riding the left border), not by tinting
+     the whole box. */
   .activity-box { @apply relative bg-panel border border-border rounded-[14px] shadow-panel px-3.5 py-3 overflow-hidden animate-activityIn; --agent-color: var(--accent); border-left: 4px solid var(--agent-color); transition: border-color .16s var(--ease), background .16s var(--ease); }
   .activity-box::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 42px; background: linear-gradient(90deg, color-mix(in srgb, var(--agent-color) 16%, transparent), transparent); pointer-events: none; }
-  .activity-box.ok { @apply border-ok-border; border-left-color: var(--agent-color); }
-  .activity-box.err { border-color: #ff6b6b55; border-left-color: var(--err); }
+  /* status accent: a 3px-wide bar over the left edge, colored by outcome */
+  .activity-box.ok::after,
+  .activity-box.err::after { content: ""; position: absolute; left: -4px; top: 10px; bottom: 10px; width: 4px; border-radius: 4px; pointer-events: none; }
+  .activity-box.ok::after { background: var(--done); }
+  .activity-box.err::after { background: var(--crit); }
   .activity-box.compact { @apply shadow-none px-3 py-2.5 rounded-xl min-h-[72px] overflow-visible shrink-0; }
   .live-cards { @apply flex flex-col gap-2.5 items-stretch; }
   .live-cards .activity-event-head { @apply min-h-[18px] cursor-default; line-height: 1.35; }
@@ -347,6 +432,32 @@
   .activity-event-head { @apply w-full flex items-baseline gap-2 border-0 bg-transparent p-0 text-left cursor-pointer relative; color: inherit; font: inherit; }
   .activity-event-head b { @apply text-fg text-[12.5px] overflow-hidden text-ellipsis whitespace-nowrap; }
   .agent-chip { @apply border border-border bg-chip text-fg2 rounded-full px-[7px] py-px text-[10.5px] font-bold whitespace-nowrap; }
+  .outcome { @apply inline-grid place-items-center w-[15px] h-[15px] rounded-full text-[9px] font-bold flex-none; }
+  .outcome.ok { color: var(--done); background: var(--done-soft); }
+  .outcome.err { color: var(--crit); background: var(--crit-soft); }
+  /* agent thinking rows: 2-line preview collapsed, full text expanded */
+  .think-text { @apply text-[12.5px] mt-1.5 leading-relaxed; color: var(--ink-dim); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .think-text.expanded { -webkit-line-clamp: unset; display: block; }
+  .tok-meta { @apply font-mono text-[10px] text-ink-dim whitespace-nowrap flex-none; }
+}
+
+/* ── settings ─────────────────────────────────────────────────────────────── */
+@layer components {
+  .settings { @apply max-w-[860px]; }
+  .settings-card { @apply p-0; }
+  .settings-head { @apply px-[18px] pt-[18px] pb-3 border-b border-line; }
+  .settings-title { @apply m-0 text-[15px] font-bold; }
+  .settings-sub { @apply mt-1.5 mb-0 text-ink-dim text-[12.5px] leading-relaxed max-w-[560px]; }
+  .settings-list { @apply flex flex-col; }
+  .setting-row { @apply flex items-center gap-3 px-[18px] py-3.5 border-b border-line; }
+  .setting-row:last-child { @apply border-b-0; }
+  .setting-meta { @apply min-w-0 flex-1; }
+  .setting-name { @apply flex items-center gap-2 text-[13px] font-semibold text-ink; }
+  .setting-badge { @apply text-[9.5px] font-bold uppercase tracking-[.4px] px-1.5 py-0.5 rounded-full; color: var(--brand); background: var(--brand-bg); }
+  .setting-path { @apply font-mono text-[11px] text-ink-dim mt-1 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .setting-input { @apply w-[220px] flex-none bg-well border border-line text-ink rounded-[9px] px-[11px] py-2 text-[12.5px] outline-none; font: inherit; }
+  .setting-input:focus { border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); box-shadow: 0 0 0 3px var(--brand-bg); }
+  .setting-actions { @apply flex items-center gap-2 flex-none; }
   .expand-mark { @apply text-muted font-extrabold ml-0.5; }
   .activity-summary { @apply whitespace-nowrap relative max-w-[860px]; }
   .activity-detail { @apply mt-2 p-2.5 border border-border rounded-xl bg-chip; }
@@ -390,7 +501,7 @@
   .verdict-pill { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
   .verdict-pill.v-green { @apply text-ok bg-ok-soft; }
   .verdict-pill.v-yellow { @apply text-warn bg-warn-soft; }
-  .verdict-pill.v-red { @apply text-err bg-[#ff6b6b1a]; }
+  .verdict-pill.v-red { @apply text-crit; background: var(--crit-soft); }
   .plans-detail { @apply flex flex-col gap-3.5; }
   .plans-empty { @apply p-10 text-center; }
   .plan-head { @apply px-[18px] py-4; }
@@ -459,8 +570,8 @@
   .md-link { @apply text-accent no-underline; }
   .md-link:hover { @apply underline; }
   .plan-mark { @apply rounded px-0.5; color: inherit; }
-  .plan-mark.comment { background: #f59e0b33; box-shadow: inset 0 -1px 0 #f59e0baa; }
-  .plan-mark.deletion { background: #ff6b6b2e; text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--err); }
+  .plan-mark.comment { background: var(--warn-soft); box-shadow: inset 0 -1px 0 var(--warn); }
+  .plan-mark.deletion { background: var(--crit-soft); text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--err); }
   .plan-mark.looks_good { @apply bg-ok-soft; box-shadow: inset 0 -1px 0 var(--ok); }
   .plan-grid { @apply grid grid-cols-2 gap-3.5; }
   .timeline-card, .comments-card { @apply px-4 py-3.5; }
@@ -493,7 +604,7 @@
   .ci-target { @apply text-[10.5px] text-muted bg-chip px-1.5 py-px rounded-[5px]; }
   .ann-kind { @apply text-[10px] font-extrabold uppercase tracking-[.35px] px-1.5 py-px rounded-full bg-chip text-fg2; }
   .ann-kind.comment { @apply text-warn bg-warn-soft; }
-  .ann-kind.deletion { @apply text-err bg-[#ff6b6b1a]; }
+  .ann-kind.deletion { @apply text-crit; background: var(--crit-soft); }
   .ann-kind.looks_good { @apply text-ok bg-ok-soft; }
   .ci-quote { @apply mt-[7px] pl-2.5 text-muted text-xs whitespace-nowrap overflow-hidden text-ellipsis; border-left: 2px solid var(--border); }
   .ci-body { @apply text-[12.5px] mt-[5px] text-fg2 whitespace-pre-wrap; }

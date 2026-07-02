@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useHive } from "../store";
 import { fmtCost, fmtNum } from "../lib/format";
+import { smooth } from "../lib/agents";
 import type { HiveEvent } from "../types";
 
 interface Pt { t: number; tok: number; cost: number; }
@@ -79,7 +80,8 @@ export default function CostTokensChart() {
     const x = (t: number) => PAD.l + ((t - t0) / (t1 - t0 || 1)) * PLOT_W;
     const yT = (v: number) => PAD.t + PLOT_H - (v / maxTok) * PLOT_H;
     const yC = (v: number) => PAD.t + PLOT_H - (v / maxCost) * PLOT_H;
-    const line = (acc: (p: Pt) => number) => pts.map((p, i) => (i ? "L" : "M") + x(p.t).toFixed(1) + " " + acc(p).toFixed(1)).join(" ");
+    // Quadratic-bezier midpoint smoothing (ported `smooth()`) for calm lines.
+    const line = (acc: (p: Pt) => number) => smooth(pts.map((p) => [x(p.t), acc(p)] as [number, number]));
     const area = (acc: (p: Pt) => number) => line(acc) + ` L ${x(t1).toFixed(1)} ${PAD.t + PLOT_H} L ${x(t0).toFixed(1)} ${PAD.t + PLOT_H} Z`;
     const ticks = [0, 0.25, 0.5, 0.75, 1];
     return { pts, W, H, PLOT_H, t0, t1, maxTok, maxCost, x, yT, yC, line, area, ticks };
@@ -104,8 +106,7 @@ export default function CostTokensChart() {
           <>
             <svg ref={svgRef} viewBox={`0 0 ${geom.W} ${geom.H}`} preserveAspectRatio="none" className="chart-svg" onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
               <defs>
-                <linearGradient id="gTok" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="var(--accent)" stopOpacity=".28" /><stop offset="1" stopColor="var(--accent)" stopOpacity="0" /></linearGradient>
-                <linearGradient id="gCost" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="var(--ok)" stopOpacity=".18" /><stop offset="1" stopColor="var(--ok)" stopOpacity="0" /></linearGradient>
+                <linearGradient id="gTok" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="var(--run)" stopOpacity=".18" /><stop offset="1" stopColor="var(--run)" stopOpacity="0" /></linearGradient>
               </defs>
 
               {geom.ticks.map((f) => {
@@ -125,8 +126,8 @@ export default function CostTokensChart() {
                 return <text key={f} className="ax x" x={x} y={geom.H - 8} textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}>{fmtTime(t)}</text>;
               })}
 
+              {/* tokens: run-colored line + 10% fill; cost: brand line, no fill */}
               <path d={geom.area((p) => geom.yT(p.tok))} fill="url(#gTok)" />
-              <path d={geom.area((p) => geom.yC(p.cost))} fill="url(#gCost)" />
               <path className="ln tok" d={geom.line((p) => geom.yT(p.tok))} />
               <path className="ln cost" d={geom.line((p) => geom.yC(p.cost))} />
 

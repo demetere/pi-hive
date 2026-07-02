@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { useHive } from "../store";
-import { deleteSession, selectSessionScope, confirmAction } from "../store/raw";
+import { deleteSession, selectSessionScope, setActiveTab, confirmAction } from "../store/raw";
 import { useFrozenOrder } from "../hooks/useFrozenOrder";
 import RelTime from "../hooks/RelTime";
 import { absTime, fmtCost, fmtNum, sessionSlug } from "../lib/format";
@@ -9,9 +9,27 @@ import type { SessionView } from "../types";
 type Key = "project" | "first_ts" | "last_ts" | "running" | "event_count" | "tokens" | "cost";
 
 export default function Sessions(props: { search: string }) {
-  const scopedSessions = useHive((s) => s.scopedSessions);
+  const sessions = useHive((s) => s.sessions);
   const scope = useHive((s) => s.scope);
   const liveSet = useHive((s) => s.liveSet);
+  const projectGroups = useHive((s) => s.projectGroups);
+
+  // The Sessions tab lists every session for the CURRENT project (or all
+  // projects at fleet scope). It never collapses to a single row when one
+  // session is drilled into — the active session is highlighted instead, so you
+  // can pick another. Session scope still narrows the OTHER tabs.
+  const listSessions = useMemo<SessionView[]>(() => {
+    if (scope.level === "fleet") return sessions;
+    return sessions.filter((s) => s.project === scope.project);
+  }, [sessions, scope]);
+  const selectedId = scope.level === "session" ? scope.sessionId : "";
+
+  // Derived project name → display label (honors renames from settings).
+  const labelOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const g of projectGroups) m.set(g.name, g.label);
+    return (project: string) => m.get(project) || project;
+  }, [projectGroups]);
 
   const [sortKey, setSortKey] = useState<Key>("last_ts");
   const [dir, setDir] = useState<1 | -1>(-1);
@@ -34,8 +52,14 @@ export default function Sessions(props: { search: string }) {
 
   const filtered = useMemo<SessionView[]>(() => {
     const q = props.search.toLowerCase();
-    return scopedSessions.filter((s) => !q || s.project.toLowerCase().includes(q) || s.session_id.toLowerCase().includes(q) || (s.cwd || "").toLowerCase().includes(q));
-  }, [scopedSessions, props.search]);
+    return listSessions.filter((s) => !q || s.project.toLowerCase().includes(q) || s.session_id.toLowerCase().includes(q) || (s.cwd || "").toLowerCase().includes(q));
+  }, [listSessions, props.search]);
+
+  // Click a session → scope to it AND jump to its Overview.
+  function openSession(id: string) {
+    selectSessionScope(id);
+    setActiveTab("overview");
+  }
 
   const resortKey = sortKey + ":" + dir + "|" + filtered.map((s) => s.session_id).slice().sort().join(",");
   const idOf = useCallback((s: SessionView) => s.session_id, []);
@@ -66,8 +90,8 @@ export default function Sessions(props: { search: string }) {
         </thead>
         <tbody>
           {rows.map((s) => (
-            <tr key={s.session_id} className={scope.level === "session" && (scope as any).sessionId === s.session_id ? "active" : ""} onClick={() => selectSessionScope(s.session_id)}>
-              <td><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{s.project}</b></td>
+            <tr key={s.session_id} className={selectedId === s.session_id ? "active" : ""} onClick={() => openSession(s.session_id)}>
+              <td><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{labelOf(s.project)}</b></td>
               <td className="mono">{sessionSlug(s.session_id)}</td>
               <td className="muted-cell">{absTime(s.first_ts)}</td>
               <td className="num">{s.running}</td>

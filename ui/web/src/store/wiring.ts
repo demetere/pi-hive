@@ -1,8 +1,44 @@
-import { fetchInitialData, openEventStream } from "../api";
+import { fetchInitialData, fetchProjectOverrides, fetchThinking, openEventStream, saveProjectOverride } from "../api";
 import { store } from "./index";
 import { recomputeHeavy, recomputeLive, recomputeScoped } from "./derive";
 import { ingestEvents, ingestSnapshot, purgeLocal, setSelectedSession, tick } from "./raw";
 import { installRouter } from "./router";
+
+// Fetch agent thinking for the sessions currently in scope and merge into the
+// store. Thinking lives in transcripts (not the event stream), so it's polled
+// separately. Bounded to the scoped sessions so a big fleet isn't all fetched.
+let thinkingInFlight = false;
+async function refreshThinking() {
+  if (thinkingInFlight) return;
+  const st = store.getState();
+  const sessions = st.scopedSessions.slice(0, 6); // cap fan-out
+  if (!sessions.length) return;
+  thinkingInFlight = true;
+  try {
+    const results = await Promise.all(sessions.map(async (s) => [s.session_id, await fetchThinking(s.session_id)] as const));
+    const next = new Map(store.getState().thinkingBySession);
+    for (const [id, entries] of results) next.set(id, entries);
+    store.setState({ thinkingBySession: next });
+  } catch { /* transient */ }
+  finally { thinkingInFlight = false; }
+}
+
+// Fetch project display-name overrides and recompute so labels apply everywhere.
+export async function refreshOverrides() {
+  const overrides = await fetchProjectOverrides();
+  const map = new Map<string, string>();
+  for (const o of overrides) map.set(o.cwd, o.label);
+  store.setState({ projectOverrides: map });
+  recomputeLive();
+  recomputeScoped();
+}
+
+// Rename (label set) or reset (label empty) a project by cwd, then refresh.
+export async function saveOverride(cwd: string, label: string): Promise<boolean> {
+  const ok = await saveProjectOverride(cwd, label.trim());
+  if (ok) await refreshOverrides();
+  return ok;
+}
 
 let wired = false;
 let started = false;
@@ -19,6 +55,8 @@ function wire() {
   store.subscribe((s) => s.scope, recomputeScoped);
   store.subscribe((s) => s.selectedSession, recomputeScoped);
   store.subscribe((s) => s.now, recomputeLive);
+  // Re-fetch thinking whenever the scoped session set changes.
+  store.subscribe((s) => s.scopedSessions, () => { void refreshThinking(); });
 }
 
 // Bootstraps initial fetch + the SSE stream + the 1s tick. Idempotent so React
@@ -31,6 +69,9 @@ export function connect(): EventSource | undefined {
 
   tick(); // seed `now`
   setInterval(tick, 1000);
+  // Poll thinking on a relaxed cadence (transcripts change slower than events).
+  setInterval(() => { void refreshThinking(); }, 5000);
+  void refreshOverrides(); // load project display-name overrides once
 
   fetchInitialData().then(({ events, states }) => {
     ingestEvents(events);
