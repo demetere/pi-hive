@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useHive } from "../store";
 import { fmtCost, fmtNum } from "../lib/format";
 import { smooth } from "../lib/agents";
-import type { HiveEvent } from "../types";
+import { cumulativeSeries, seriesTotals } from "../lib/series";
 
 // Downsample a numeric series to N points in [0..1] then map into the 56×24
 // sparkline box (y inverted). Returns smoothed line + closed area paths.
@@ -20,28 +20,6 @@ function sparkPaths(values: number[]): { line: string; area: string } | null {
   ]);
   const line = smooth(pts);
   return { line, area: line + " L 56 24 L 0 24 Z" };
-}
-
-// Cumulative token/cost series from delegation_end events, for KPI sparklines.
-function cumulativeSeries(events: HiveEvent[]): { tok: number[]; cost: number[] } {
-  const evs = [...events].reverse(); // scopedEvents is newest-first
-  const tokByAgent = new Map<string, number>();
-  const costByAgent = new Map<string, number>();
-  const tok: number[] = [], cost: number[] = [];
-  for (const e of evs) {
-    if (e.type !== "delegation_end") continue;
-    const p: any = e.payload || {};
-    const rt = p.runtime || {};
-    const name = rt.name || p.from;
-    if (!name) continue;
-    tokByAgent.set(name, Math.max(tokByAgent.get(name) || 0, Number(rt.inputTokens || 0) + Number(rt.outputTokens || 0)));
-    costByAgent.set(name, Math.max(costByAgent.get(name) || 0, Number(rt.costUsd || p.costUsd || 0)));
-    let sTok = 0, sCost = 0;
-    for (const v of tokByAgent.values()) sTok += v;
-    for (const v of costByAgent.values()) sCost += v;
-    tok.push(sTok); cost.push(sCost);
-  }
-  return { tok, cost };
 }
 
 function Sparkline({ paths, color }: { paths: { line: string; area: string } | null; color: string }) {
@@ -73,21 +51,29 @@ export default function Kpis() {
     return wallSeconds > 0 ? s.tokens / wallSeconds : 0;
   }, [scopedSessions, s.tokens]);
 
+  // Single aggregation (E2): tokens/cost/cache come from the shared series, not
+  // a KPI-local re-derivation. scopedStats.tokens/cost feed the headline; the
+  // sparkline uses the cumulative point series.
   const series = useMemo(() => cumulativeSeries(scopedEvents), [scopedEvents]);
-  const tokSpark = useMemo(() => sparkPaths(series.tok), [series.tok]);
-  const costSpark = useMemo(() => sparkPaths(series.cost), [series.cost]);
+  const totals = useMemo(() => seriesTotals(scopedEvents), [scopedEvents]);
+  const tokSpark = useMemo(() => sparkPaths(series.map((p) => p.tok)), [series]);
+  const costSpark = useMemo(() => sparkPaths(series.map((p) => p.cost)), [series]);
 
+  // Cache tokens are shown as their own figure, never folded into the "tokens"
+  // headline (Decision 2). Fall back to the series when scopedStats lacks it.
+  const cacheTokens = totals.cacheRead + totals.cacheWrite;
   const cards = [
     { label: "RUNNING", unit: "live", value: String(s.running), color: "var(--run)", spark: null },
     { label: "SESSIONS", unit: "now", value: String(s.sessions), color: "var(--ink)", spark: null },
-    { label: "TOKENS", unit: "total", value: fmtNum(s.tokens), color: "var(--ink)", spark: tokSpark },
+    { label: "TOKENS", unit: "in+out", value: fmtNum(s.tokens || totals.tok), color: "var(--ink)", spark: tokSpark },
+    { label: "CACHE", unit: "r+w tok", value: fmtNum(cacheTokens), color: "var(--ink)", spark: null },
     { label: "THROUGHPUT", unit: "tok/s", value: tokSec >= 1000 ? (tokSec / 1000).toFixed(2) + "k" : tokSec.toFixed(1), color: "var(--brand)", spark: tokSpark },
-    { label: "TOTAL COST", unit: "usd", value: fmtCost(s.cost), color: "var(--ink)", spark: costSpark },
+    { label: "TOTAL COST", unit: "usd", value: fmtCost(s.cost || totals.cost), color: "var(--ink)", spark: costSpark },
   ];
   void scope;
 
   return (
-    <div className="grid grid-cols-5 gap-4 mb-[18px] max-[1180px]:grid-cols-2">
+    <div className="grid grid-cols-6 gap-4 mb-[18px] max-[1180px]:grid-cols-2">
       {cards.map((c) => (
         <div
           key={c.label}

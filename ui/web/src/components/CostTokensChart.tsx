@@ -2,37 +2,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useHive } from "../store";
 import { fmtCost, fmtNum } from "../lib/format";
 import { smooth } from "../lib/agents";
+import { cumulativeSeries, rateSeries } from "../lib/series";
 import type { HiveEvent } from "../types";
 
 interface Pt { t: number; tok: number; cost: number; }
 
-// Cumulative cost/token series from the (scope-filtered) event stream.
-function buildSeries(events: HiveEvent[]): Pt[] {
-  const evs = [...events].reverse(); // scopedEvents is newest-first → chronological
-  const pts: Pt[] = [];
-  const tokByAgent = new Map<string, number>();
-  const costByAgent = new Map<string, number>();
-  let lastTok = 0, lastCost = 0;
-  for (const e of evs) {
-    if (e.type !== "delegation_end") continue;
-    const p = e.payload || {};
-    const rt = (p as any).runtime || {};
-    const name = rt.name || (p as any).from;
-    if (!name) continue;
-    const tok = Number(rt.inputTokens || 0) + Number(rt.outputTokens || 0);
-    const cost = Number(rt.costUsd || (p as any).costUsd || 0);
-    tokByAgent.set(name, Math.max(tokByAgent.get(name) || 0, tok));
-    costByAgent.set(name, Math.max(costByAgent.get(name) || 0, cost));
-    let sumTok = 0, sumCost = 0;
-    for (const v of tokByAgent.values()) sumTok += v;
-    for (const v of costByAgent.values()) sumCost += v;
-    lastTok = sumTok; lastCost = sumCost;
-    pts.push({ t: new Date(e.ts).getTime(), tok: sumTok, cost: sumCost });
+// The chart plots either the cumulative totals or the per-minute RATE (E2). The
+// Overview chart is labeled "last 60 min · cost/min · tokens/min", so it uses
+// mode="rate" and the labels now match what is plotted. The Cost tab uses the
+// cumulative view (running totals over the session). Both draw from the single
+// shared aggregation (lib/series).
+function buildSeries(events: HiveEvent[], mode: "cumulative" | "rate", now: number): Pt[] {
+  if (mode === "rate") {
+    return rateSeries(events, 60, now).map((p) => ({ t: p.t, tok: p.tokPerMin, cost: p.costPerMin }));
   }
-  let mTok = 0, mCost = 0;
-  for (const pt of pts) { mTok = Math.max(mTok, pt.tok); mCost = Math.max(mCost, pt.cost); pt.tok = mTok; pt.cost = mCost; }
-  void lastTok; void lastCost;
-  return pts;
+  return cumulativeSeries(events).map((p) => ({ t: p.t, tok: p.tok, cost: p.cost }));
 }
 
 const PAD = { l: 56, r: 56, t: 16, b: 30 };
@@ -50,9 +34,11 @@ function fmtTime(t: number): string {
   return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function CostTokensChart() {
+export default function CostTokensChart({ mode = "cumulative" }: { mode?: "cumulative" | "rate" }) {
   const scopedEvents = useHive((s) => s.scopedEvents);
-  const series = useMemo(() => buildSeries(scopedEvents), [scopedEvents]);
+  const now = useHive((s) => s.now);
+  // For the rate view, bucket against the live clock so the 60-min window slides.
+  const series = useMemo(() => buildSeries(scopedEvents, mode, now || Date.now()), [scopedEvents, mode, now]);
   const [hover, setHover] = useState<{ i: number; px: number } | null>(null);
   const [size, setSize] = useState({ w: 760, h: 240 });
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -143,8 +129,8 @@ export default function CostTokensChart() {
             {hp && hover && (
               <div className="chart-tip" style={{ left: `${(hover.px / geom.W) * 100}%` }}>
                 <div className="tip-time">{fmtTime(hp.t)}</div>
-                <div className="tip-row"><i className="lg tok" />tokens<b>{fmtNum(hp.tok)}</b></div>
-                <div className="tip-row"><i className="lg cost" />cost<b>{fmtCost(hp.cost)}</b></div>
+                <div className="tip-row"><i className="lg tok" />{mode === "rate" ? "tok/min" : "tokens"}<b>{fmtNum(hp.tok)}</b></div>
+                <div className="tip-row"><i className="lg cost" />{mode === "rate" ? "cost/min" : "cost"}<b>{fmtCost(hp.cost)}</b></div>
               </div>
             )}
           </>

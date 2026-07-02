@@ -48,11 +48,28 @@ export function bundleEvents(events: any[]): ActivityItem[] {
   return out.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
 }
 
-// Which configured team an agent belongs to, inferred from its name. Hoisted
-// here so the Activity filter can reuse a single derivation per agent instead of
-// re-running the regexes per item per render.
-export function agentTeam(name: string): "planning" | "hive" {
-  return /\b(plan|planner|planning|reviewer)\b/i.test(name) && /plan/i.test(name) ? "planning" : "hive";
+// Build a name → team map from the stored/versioned topologies (E3). Replaces
+// the old name-regex heuristic: membership is read from the actual configured
+// team trees (planning + hive) for the sessions in scope, so a custom-named
+// agent is classified correctly. Unknown agents default to "hive".
+export function buildAgentTeamMap(snapshots: Array<{ topologies?: any }>): Map<string, "planning" | "hive"> {
+  const map = new Map<string, "planning" | "hive">();
+  const walk = (node: any, team: "planning" | "hive") => {
+    if (!node) return;
+    if (node.name && !map.has(node.name)) map.set(node.name, team);
+    for (const child of node.children || []) walk(child, team);
+  };
+  for (const snap of snapshots) {
+    const t = snap?.topologies;
+    if (!t) continue;
+    for (const teamName of ["planning", "hive"] as const) {
+      const team = t[teamName];
+      if (!team) continue;
+      walk(team.orchestrator, teamName);
+      (team.agents || []).forEach((a: any) => walk(a, teamName));
+    }
+  }
+  return map;
 }
 
 // A cheap, targeted search haystack for an activity item: the real text fields a

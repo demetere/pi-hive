@@ -34,6 +34,8 @@ export interface HiveState {
   // ── raw slice ───────────────────────────────────────────────────────────
   eventMap: Record<string, HiveEvent>;
   snapshots: Record<string, Snapshot>;
+  // Highest events.rowid seen, for lossless SSE reconnect catch-up (E1).
+  lastCursor: number;
   connection: "connecting" | "live" | "reconnecting";
   selectedSession: string;
   activeTab: string;
@@ -70,6 +72,7 @@ const initialStats: ScopeStats = { sessions: 0, live: 0, running: 0, tokens: 0, 
 const initialState: HiveState = {
     eventMap: {},
     snapshots: {},
+    lastCursor: 0,
     connection: "connecting",
     selectedSession: "",
     activeTab: "overview",

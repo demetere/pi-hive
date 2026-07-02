@@ -11,6 +11,7 @@ function NavIcon({ name }: { name: string }) {
       <rect x="2" y="9" width="5" height="5" rx="1.2" /><rect x="9" y="9" width="5" height="5" rx="1.2" />
     </>),
     sessions: (<><rect x="2" y="3" width="12" height="3" rx="1" /><rect x="2" y="10" width="12" height="3" rx="1" /></>),
+    agents: (<><circle cx="8" cy="5" r="2.4" /><path d="M3 13c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5" /></>),
     activity: (<path d="M1 8h3l2-5 3 10 2-5h4" />),
     plans: (<><rect x="3" y="2" width="10" height="12" rx="1.5" /><path d="M6 6h4M6 9h4" /></>),
     cost: (<><circle cx="8" cy="8" r="6" /><path d="M8 5v6M6.4 6.5h2.2M7.4 9.5h2.2" /></>),
@@ -44,6 +45,7 @@ export default function Sidebar() {
   const projectGroups = useHive((s) => s.projectGroups);
   const scopedStats = useHive((s) => s.scopedStats);
   const scopedEvents = useHive((s) => s.scopedEvents);
+  const scopedAgents = useHive((s) => s.scopedAgents);
 
   const scopeValue = scope.level === "fleet" ? "__fleet" : scope.project;
   const live = connection === "live";
@@ -55,6 +57,7 @@ export default function Sidebar() {
   const nav = [
     { id: "overview", label: "Overview", count: "" },
     { id: "sessions", label: "Sessions", count: scopedStats.sessions ? String(scopedStats.sessions) : "" },
+    { id: "agents", label: "Agents", count: scopedAgents.length ? String(scopedAgents.length) : "" },
     { id: "activity", label: "Activity", count: scopedEvents.length ? String(scopedEvents.length) : "" },
     { id: "plans", label: "Plans", count: "" },
     { id: "cost", label: "Cost", count: "" },

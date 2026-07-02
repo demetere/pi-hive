@@ -1,35 +1,34 @@
 import type { HiveEvent, Snapshot } from "../types";
 import { deleteProjectRemote, deleteSessionRemote } from "../api";
-import { flattenTopology } from "./topology";
 import { store, type AgentRef, type ConfirmState, type Scope } from "./index";
 
 // ── ingest ───────────────────────────────────────────────────────────────────
 export function ingestEvents(list: HiveEvent[]) {
   const m = { ...store.getState().eventMap };
   let changed = false;
+  let maxCursor = store.getState().lastCursor;
   for (const e of list) {
     if (!e || !e.event_id) continue;
     if (e.type === "delegation_progress") continue;
+    // Track the global cursor for lossless reconnect catch-up (E1), even for
+    // events already seen (a duplicate still advances our high-water mark).
+    if (typeof e.cursor === "number" && e.cursor > maxCursor) maxCursor = e.cursor;
     if (m[e.event_id]) continue;
     m[e.event_id] = e;
     changed = true;
   }
-  if (changed) store.setState({ eventMap: m });
+  const patch: Partial<{ eventMap: typeof m; lastCursor: number }> = {};
+  if (changed) patch.eventMap = m;
+  if (maxCursor !== store.getState().lastCursor) patch.lastCursor = maxCursor;
+  if (Object.keys(patch).length) store.setState(patch);
 }
 
 export function ingestSnapshot(s: Snapshot) {
   if (!s || !s.session_id) return;
-  // Older snapshots did not record the explicit mode, and server-side backfill
-  // can misclassify legacy root "Orchestrator" as hive even for planning runs.
-  // Prefer the runtime agent names when they clearly match one configured team.
-  if (s.topologies?.hive || s.topologies?.planning) {
-    const runtimeNames = new Set((s.agents || []).map((a) => a.name));
-    const countMatches = (topo: any) => (flattenTopology(topo) || []).reduce((n: number, node: any) => n + (runtimeNames.has(node.name) ? 1 : 0), 0);
-    const hiveMatches = countMatches(s.topologies.hive);
-    const planningMatches = countMatches(s.topologies.planning);
-    if (planningMatches > hiveMatches) s = { ...s, topologies: { ...s.topologies, active: "planning" } };
-    else if (hiveMatches > planningMatches) s = { ...s, topologies: { ...s.topologies, active: "hive" } };
-  }
+  // E3: trust the server's `topologies.active`. Phase C3 slims/normalizes
+  // snapshots and rehydrates the versioned topology the session actually ran
+  // under, so the old client-side active-team guess (name-matching runtime
+  // agents against each team) is obsolete and removed.
   store.setState({ snapshots: { ...store.getState().snapshots, [s.session_id]: s } });
 }
 

@@ -3,7 +3,7 @@ import { useHive } from "../store";
 import { viewAgent } from "../store/raw";
 import RelTime from "../hooks/RelTime";
 import { fmtCost, fmtNum, sessionSlug, shortModel } from "../lib/format";
-import { agentTeam, bundleEvents, itemAgent, itemHaystack, mergeThinking, type ActivityItem } from "../lib/activity";
+import { buildAgentTeamMap, bundleEvents, itemAgent, itemHaystack, mergeThinking, type ActivityItem } from "../lib/activity";
 
 const PAGE = 60;
 
@@ -74,6 +74,15 @@ export default function Activity(props: { search: string }) {
   const scopedAgents = useHive((s) => s.scopedAgents);
   const scopedSessions = useHive((s) => s.scopedSessions);
   const thinkingBySession = useHive((s) => s.thinkingBySession);
+  const snapshots = useHive((s) => s.snapshots);
+
+  // Name → team from the versioned topologies of the in-scope sessions (E3).
+  // Replaces the old name-regex heuristic.
+  const teamByAgent = useMemo(() => {
+    const scoped = scopedSessions.map((s) => snapshots[s.session_id]).filter(Boolean);
+    return buildAgentTeamMap(scoped);
+  }, [scopedSessions, snapshots]);
+  const teamOfAgent = (name: string): "planning" | "hive" => teamByAgent.get(name) || "hive";
 
   const [type, setType] = useState("");
   const [agent, setAgent] = useState("");
@@ -101,7 +110,7 @@ export default function Activity(props: { search: string }) {
     for (const a of scopedAgents) {
       const prev = byName.get(a.name);
       const seconds = sessionSeconds.get(a.session_id) || 0;
-      if (!prev) { byName.set(a.name, { ...a, team: agentTeam(a.name), wallSeconds: seconds, tokSec: seconds ? a.tokens / seconds : 0, sessions: new Set([a.session_id]) }); continue; }
+      if (!prev) { byName.set(a.name, { ...a, team: teamOfAgent(a.name), wallSeconds: seconds, tokSec: seconds ? a.tokens / seconds : 0, sessions: new Set([a.session_id]) }); continue; }
       const firstInSession = !prev.sessions.has(a.session_id);
       prev.tokens += a.tokens;
       prev.cost += a.cost;
@@ -116,7 +125,7 @@ export default function Activity(props: { search: string }) {
       if (!prev.model && a.model) prev.model = a.model;
     }
     return Array.from(byName.values()).sort((a, b) => (roleRank[a.role || "member"] ?? 9) - (roleRank[b.role || "member"] ?? 9) || a.name.localeCompare(b.name));
-  }, [scopedAgents, scopedSessions]);
+  }, [scopedAgents, scopedSessions, teamByAgent]);
 
   const visibleAgents = useMemo(() => team === "all" ? agents : agents.filter((a) => a.team === team), [agents, team]);
   const agentColor = useMemo(() => {
@@ -134,7 +143,7 @@ export default function Activity(props: { search: string }) {
   }, [items]);
 
   // Reuse the team already derived per agent (in the `agents` memo) rather than
-  // re-running the agentTeam regexes for every item inside the filter.
+  // re-running the topology team lookup for every item inside the filter.
   const teamOf = useMemo(() => {
     const m = new Map<string, "planning" | "hive">();
     for (const a of agents) m.set(a.name, a.team);
@@ -155,7 +164,7 @@ export default function Activity(props: { search: string }) {
         (selectedMeta?.role === "orchestrator" && sessionLevel);
       return (!type || item.type === type) &&
         matchesAgent &&
-        (selectedTeam === "all" || (a ? (teamOf.get(a) || agentTeam(a)) === selectedTeam : false) || (selectedTeam === "planning" && participants.has("Orchestrator"))) &&
+        (selectedTeam === "all" || (a ? (teamOf.get(a) || teamOfAgent(a)) === selectedTeam : false) || (selectedTeam === "planning" && participants.has("Orchestrator"))) &&
         (!q || (haystacks.get(item.id) || "").includes(q));
     });
   }, [items, agents, agent, team, type, props.search, haystacks, teamOf]);

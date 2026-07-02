@@ -3,6 +3,7 @@ import type { HiveEvent, Snapshot } from "./types";
 export interface InitialData {
   events: HiveEvent[];
   states: Snapshot[];
+  cursor: number;
 }
 
 // Per-daemon write token (Phase D). Fetched once from the same-origin
@@ -40,10 +41,36 @@ async function jsonOr<T>(request: Promise<Response>, fallback: T): Promise<T> {
 
 export async function fetchInitialData(): Promise<InitialData> {
   const [ev, st] = await Promise.all([
-    jsonOr<{ events: HiveEvent[] }>(fetch("/events"), { events: [] }),
+    jsonOr<{ events: HiveEvent[]; cursor?: number }>(fetch("/events"), { events: [], cursor: 0 }),
     jsonOr<{ states: Snapshot[] }>(fetch("/states"), { states: [] }),
   ]);
-  return { events: ev.events || [], states: st.states || [] };
+  return { events: ev.events || [], states: st.states || [], cursor: Number(ev.cursor || 0) };
+}
+
+// Fetch events newer than a cursor (lossless SSE reconnect catch-up, E1). Pages
+// forward until the server returns fewer than the page size.
+export async function fetchEventsAfter(cursor: number): Promise<{ events: HiveEvent[]; cursor: number }> {
+  const all: HiveEvent[] = [];
+  let after = cursor;
+  let latest = cursor;
+  for (let guard = 0; guard < 100; guard++) {
+    const page = await jsonOr<{ events: HiveEvent[]; cursor?: number }>(
+      fetch(`/events?after=${after}&limit=1000`), { events: [], cursor: latest });
+    const evs = page.events || [];
+    all.push(...evs);
+    latest = Math.max(latest, Number(page.cursor || 0));
+    if (evs.length < 1000) break;
+    const lastCursor = evs[evs.length - 1]?.cursor;
+    if (lastCursor == null || lastCursor <= after) break;
+    after = lastCursor;
+  }
+  return { events: all, cursor: latest };
+}
+
+// Fetch the latest snapshots (reconnect re-sync of snapshot-shaped state, E1).
+export async function fetchStates(): Promise<Snapshot[]> {
+  const data = await jsonOr<{ states: Snapshot[] }>(fetch("/states"), { states: [] });
+  return data.states || [];
 }
 
 export async function deleteSessionRemote(sessionId: string): Promise<boolean> {
@@ -117,11 +144,18 @@ export async function fetchPlanDetail(changeId: string, cwd?: string): Promise<P
   return jsonOr<PlanDetail | null>(fetch(`/plans/${encodeURIComponent(changeId)}${cwdQuery(cwd)}`), null);
 }
 
-export async function fetchPlanFile(changeId: string, path: string, cwd?: string): Promise<string> {
+export interface PlanFileResult { content: string | null; truncated?: boolean; size?: number; error?: boolean; }
+export async function fetchPlanFile(changeId: string, path: string, cwd?: string): Promise<PlanFileResult> {
   const q = new URLSearchParams({ path });
   if (cwd) q.set("cwd", cwd);
-  const data = await jsonOr<{ content: string }>(fetch(`/plans/${encodeURIComponent(changeId)}/file?${q.toString()}`), { content: "" });
-  return data.content || "";
+  try {
+    const res = await fetch(`/plans/${encodeURIComponent(changeId)}/file?${q.toString()}`);
+    if (!res.ok) return { content: null, error: true };
+    const data = await res.json() as { content: string | null; truncated?: boolean; size?: number };
+    return { content: data.content ?? null, truncated: data.truncated, size: data.size };
+  } catch {
+    return { content: null, error: true };
+  }
 }
 
 export async function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }, cwd?: string): Promise<boolean> {

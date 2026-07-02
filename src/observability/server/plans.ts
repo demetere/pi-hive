@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, statSync, writeFileSync } from "node:fs";
 import { PROJECT_CWD } from "./config";
 import { sessionSummaries } from "./runtime";
 import { randomUUID } from "node:crypto";
@@ -90,13 +90,18 @@ export function planDetail(cwd: string, changeId: string) {
 }
 
 // Read one artifact's markdown, path-guarded to the change folder. Returns null
-// on traversal or unreadable file.
-export function planFile(cwd: string, changeId: string, relPath: string): { path: string; content: string } | null {
+// on traversal or unreadable file. An oversized artifact returns
+// {content: null, truncated: true, size} instead of "" so the UI can show
+// "document too large" with the path rather than an empty document (E5).
+const MAX_ARTIFACT_BYTES = 512_000;
+export function planFile(cwd: string, changeId: string, relPath: string): { path: string; content: string | null; truncated?: boolean; size?: number } | null {
   if (!changeExists(cwd, changeId)) return null;
   const abs = resolveArtifact(cwd, changeId, relPath);
   if (!abs) return null;
-  const content = readIfSmall(abs, 512_000);
-  return { path: relPath, content };
+  let size = 0;
+  try { size = statSync(abs).size; } catch { return null; }
+  if (size > MAX_ARTIFACT_BYTES) return { path: relPath, content: null, truncated: true, size };
+  return { path: relPath, content: readIfSmall(abs, MAX_ARTIFACT_BYTES), size };
 }
 
 // ── UI writes (same-origin-guarded at the endpoint) ─────────────────────────

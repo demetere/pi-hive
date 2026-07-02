@@ -137,6 +137,8 @@ export default function Plans(props: { search: string }) {
   const [detail, setDetail] = useState<PlanDetail | null>(null);
   const [artifact, setArtifact] = useState<string>("");
   const [fileBody, setFileBody] = useState<string>("");
+  // E5: surface an oversized/errored artifact instead of rendering it blank.
+  const [fileNotice, setFileNotice] = useState<string>("");
   const [loading, setLoading] = useState(false);
 
   const [cFile, setCFile] = useState<string>("");
@@ -171,11 +173,20 @@ export default function Plans(props: { search: string }) {
     const first = arts.includes("proposal.md") ? "proposal.md" : arts[0] || "";
     setArtifact(first);
     if (first) {
-      const body = await fetchPlanFile(changeId, first, cwd);
+      const res = await fetchPlanFile(changeId, first, cwd);
       if (token !== loadToken.current) return;
-      setFileBody(body);
-    } else setFileBody("");
+      applyFileResult(res, first);
+    } else { setFileBody(""); setFileNotice(""); }
   }, [cwd]);
+
+  function applyFileResult(res: Awaited<ReturnType<typeof fetchPlanFile>>, name: string) {
+    if (res.error) { setFileBody(""); setFileNotice(`Could not load ${name}.`); return; }
+    if (res.truncated) {
+      const mb = ((res.size || 0) / 1_000_000).toFixed(1);
+      setFileBody(""); setFileNotice(`${name} is too large to display (${mb} MB).`); return;
+    }
+    setFileBody(res.content || ""); setFileNotice("");
+  }
 
   async function selectPlan(changeId: string) {
     setSelected(changeId);
@@ -187,9 +198,9 @@ export default function Plans(props: { search: string }) {
     const token = ++loadToken.current;
     setArtifact(name);
     setSelectedText(""); setAnnText(""); setSelectionBox(null);
-    const body = await fetchPlanFile(selected, name, cwd);
+    const res = await fetchPlanFile(selected, name, cwd);
     if (token !== loadToken.current) return;
-    setFileBody(body);
+    applyFileResult(res, name);
   }
 
   function captureSelection() {
@@ -370,7 +381,9 @@ export default function Plans(props: { search: string }) {
                   )) : <span className="empty-inline">No artifacts written yet.</span>}
                 </div>
                 <div className="artifact-review-shell">
-                  {artifact ? (
+                  {fileNotice ? (
+                    <div className="empty">{fileNotice}</div>
+                  ) : artifact ? (
                     <div className="artifact-body" ref={artifactEl} onMouseUp={captureSelection}>{renderedBody}</div>
                   ) : <div className="empty">Nothing to display.</div>}
                   <aside className="artifact-rail">

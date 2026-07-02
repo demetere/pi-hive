@@ -1,4 +1,4 @@
-import { fetchInitialData, fetchProjectOverrides, fetchThinking, openEventStream, saveProjectOverride } from "../api";
+import { fetchEventsAfter, fetchInitialData, fetchProjectOverrides, fetchStates, fetchThinking, openEventStream, saveProjectOverride } from "../api";
 import { store } from "./index";
 import { recomputeHeavy, recomputeLive, recomputeScoped } from "./derive";
 import { ingestEvents, ingestSnapshot, purgeLocal, setSelectedSession, tick } from "./raw";
@@ -73,9 +73,12 @@ export function connect(): EventSource | undefined {
   setInterval(() => { void refreshThinking(); }, 5000);
   void refreshOverrides(); // load project display-name overrides once
 
-  fetchInitialData().then(({ events, states }) => {
+  fetchInitialData().then(({ events, states, cursor }) => {
     ingestEvents(events);
     for (const snap of states) ingestSnapshot(snap);
+    // Seed the cursor high-water mark even if the recent-events page didn't
+    // include the very latest rowid, so reconnect catch-up starts correctly.
+    if (cursor > store.getState().lastCursor) store.setState({ lastCursor: cursor });
     // Only auto-select the newest session when the URL didn't already pin one
     // (i.e. we're not on a /session/... deep link).
     if (!store.getState().selectedSession && store.getState().scope.level !== "session") {
@@ -90,8 +93,15 @@ export function connect(): EventSource | undefined {
   // connection stays down past the grace window, so a momentary drop (or the
   // server's 15s heartbeat gap) doesn't flicker the badge.
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let hadConnection = false;
   es.addEventListener("open", () => {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+    // On a RE-connect (not the first open), catch up on the exact gap using the
+    // global cursor (E1): fetch every event after our high-water mark plus fresh
+    // snapshots, then flip to live. This heals stuck "running/waiting" agents and
+    // never loses events during a disconnect — no refetch-the-world.
+    if (hadConnection) void resyncAfterReconnect();
+    hadConnection = true;
     store.setState({ connection: "live" });
   });
   es.addEventListener("error", () => {
@@ -107,6 +117,22 @@ export function connect(): EventSource | undefined {
     try { const { session_ids } = JSON.parse((e as MessageEvent).data); purgeLocal(session_ids || []); reconcileAfterDelete(session_ids || []); } catch { /* */ }
   });
   return es;
+}
+
+// Lossless SSE catch-up after a reconnect (E1). Fetch the exact gap since our
+// last-seen cursor plus the current snapshots, then ingest. Best-effort: any
+// failure leaves the live stream to carry on.
+let resyncInFlight = false;
+async function resyncAfterReconnect() {
+  if (resyncInFlight) return;
+  resyncInFlight = true;
+  try {
+    const cursor = store.getState().lastCursor;
+    const [{ events }, states] = await Promise.all([fetchEventsAfter(cursor), fetchStates()]);
+    if (events.length) ingestEvents(events);
+    for (const snap of states) ingestSnapshot(snap);
+  } catch { /* transient; the live stream continues */ }
+  finally { resyncInFlight = false; }
 }
 
 // After a remote delete broadcast, drop stale scope/selection.

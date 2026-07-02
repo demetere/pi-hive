@@ -14,7 +14,10 @@ import type {
 
 export type AgentStatus = TelemetryAgentStatus;
 export type HiveEventType = HiveTelemetryEventType;
-export type HiveEvent = HiveTelemetryEvent<Record<string, any>> & { type: HiveEventType | string };
+// `cursor` is the daemon's global events.rowid, present on SQL-served events and
+// SSE frames (Phase B5). The store tracks the max seen cursor for lossless SSE
+// reconnect catch-up (E1).
+export type HiveEvent = HiveTelemetryEvent<Record<string, any>> & { type: HiveEventType | string; cursor?: number };
 export type Topology = HiveTopology;
 export type TeamTopologies = HiveTeamTopologies;
 export type { TopologyNode };

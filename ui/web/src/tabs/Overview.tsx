@@ -117,7 +117,7 @@ export default function Overview() {
             </span>
           }
         >
-          <CostTokensChart />
+          <CostTokensChart mode="rate" />
         </Widget>
 
         <Widget title="Model Mix">

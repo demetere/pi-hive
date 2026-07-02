@@ -10,19 +10,40 @@ const R = 42, C = 2 * Math.PI * R, GAP = 3;
 export default function ModelMix() {
   const scopedAgents = useHive((s) => s.scopedAgents);
 
+  const scopedEvents = useHive((s) => s.scopedEvents);
+  // Actual model per agent from delegation_end.models (A3) — the real model the
+  // provider ran, resolving a config-declared "inherit" to something concrete
+  // (E4). Falls back to the config model when no delegation recorded one.
+  const actualModelByAgent = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of scopedEvents) {
+      if (e.type !== "delegation_end") continue;
+      const p: any = e.payload || {};
+      const name = p.runtime?.name || p.from;
+      const models: string[] = Array.isArray(p.models) ? p.models : [];
+      if (name && models.length) m.set(name, models[models.length - 1]);
+    }
+    return m;
+  }, [scopedEvents]);
+
   const data = useMemo(() => {
     const byModel = new Map<string, number>();
     const byAgent = new Map<string, { name: string; model?: string; color: string; tok: number }>();
     let agentCount = 0;
+    const resolveModel = (a: { name: string; model?: string }) => {
+      const actual = actualModelByAgent.get(a.name);
+      const raw = actual || (a.model && a.model !== "inherit" ? a.model : "");
+      return raw ? shortModel(raw) : "";
+    };
     for (const a of scopedAgents) {
-      agentCount++;
       const tok = a.tokens;
-      if (tok) byModel.set(shortModel(a.model), (byModel.get(shortModel(a.model)) || 0) + tok);
-      if (tok) {
-        const cur = byAgent.get(a.name) || { name: a.name, model: a.model, color: a.color || "var(--brand)", tok: 0 };
-        cur.tok += tok;
-        byAgent.set(a.name, cur);
-      }
+      if (!tok) continue; // donut counts only token-bearing agents (E4)
+      agentCount++;
+      const model = resolveModel(a);
+      if (model) byModel.set(model, (byModel.get(model) || 0) + tok);
+      const cur = byAgent.get(a.name) || { name: a.name, model: a.model, color: a.color || "var(--brand)", tok: 0 };
+      cur.tok += tok;
+      byAgent.set(a.name, cur);
     }
     const total = Array.from(byModel.values()).reduce((a, b) => a + b, 0) || 1;
     const segments = Array.from(byModel.entries())
