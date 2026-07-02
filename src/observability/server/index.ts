@@ -7,6 +7,8 @@ import {
   allSnapshots,
   deleteProject,
   deleteSessions,
+  listModels,
+  listTopologies,
   maxEventCursor,
   queryDelegations,
   queryEvents,
@@ -17,6 +19,7 @@ import {
   sessionSummaries,
   sourcePaths,
   startTelemetryRuntime,
+  topologyDetail,
 } from "./runtime";
 import { addApproval, addComment, listPlans, planDetail, planFile, resolveProjectCwd } from "./plans";
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
@@ -155,6 +158,22 @@ Bun.serve({
     }
     if (url.pathname === "/states") return json({ states: allSnapshots() });
     if (url.pathname === "/sessions") return json({ sessions: sessionSummaries() });
+
+    // Versioned topology (Phase C). List versions for a project, or fetch one
+    // reassembled tree by hash. /models is the capability lookup for the dial.
+    if (url.pathname === "/topologies") {
+      const cwd = url.searchParams.get("cwd") || undefined;
+      return json({ topologies: listTopologies(cwd) });
+    }
+    const topoMatch = url.pathname.match(/^\/topologies\/([^/]+)$/);
+    if (topoMatch) {
+      const detail = topologyDetail(decodeURIComponent(topoMatch[1]));
+      return detail ? json(detail) : json({ error: "not found" }, 404);
+    }
+    if (url.pathname === "/models") {
+      const all = url.searchParams.get("all") === "1" || url.searchParams.get("all") === "true";
+      return json({ models: listModels(all) });
+    }
 
     // Plan store (read). All scoped to a known project cwd (?cwd=..., defaults
     // to the boot project); an unknown cwd is rejected so a caller cannot read

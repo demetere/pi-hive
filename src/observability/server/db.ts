@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DB_PATH } from "./config";
@@ -158,6 +159,66 @@ CREATE TABLE IF NOT EXISTS ingest_sources (
   offset INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- Versioned topology (Phase C). One immutable row per unique team configuration,
+-- keyed by content hash; sessions reference the hash they ran under.
+CREATE TABLE IF NOT EXISTS topology_versions (
+  hash          TEXT PRIMARY KEY,
+  cwd           TEXT NOT NULL,
+  topology_json TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_topology_versions_cwd ON topology_versions(cwd, last_seen_at);
+
+-- The same topology exploded into queryable tree rows (Decision 13). Derived 1:1
+-- from topology_json at insert time; immutable like its parent version.
+CREATE TABLE IF NOT EXISTS topology_nodes (
+  topology_hash   TEXT NOT NULL,
+  team            TEXT NOT NULL,
+  node_id         INTEGER NOT NULL,
+  parent_id       INTEGER,
+  name            TEXT NOT NULL,
+  role            TEXT,
+  agent_type      TEXT,
+  model           TEXT,
+  thinking        TEXT,
+  thinking_levels TEXT,
+  color           TEXT,
+  group_name      TEXT,
+  tools_json      TEXT,
+  domain_json     TEXT,
+  stages_json     TEXT,
+  commit_allowed  INTEGER NOT NULL DEFAULT 0,
+  routing_tags_json TEXT,
+  consult_when    TEXT,
+  responsibilities_json TEXT,
+  PRIMARY KEY (topology_hash, team, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_topology_nodes_name ON topology_nodes(topology_hash, name);
+
+-- SDK-sourced model capabilities, CONTENT-VERSIONED (Decision 13 / A10). Each
+-- distinct capability set (reasoning + thinking_levels + pricing + context) for a
+-- (provider, model_id) is an immutable row keyed by model_hash, so a provider
+-- pricing/capability change mints a NEW row instead of overwriting history. A
+-- delegation can reference the exact model_hash it ran under. Note: historical
+-- COST never re-derives from here — it is frozen per-delegation (Decision 10);
+-- this table is faithful reference/capability history, not the cost source.
+CREATE TABLE IF NOT EXISTS model_versions (
+  model_hash      TEXT PRIMARY KEY,
+  provider        TEXT NOT NULL,
+  model_id        TEXT NOT NULL,
+  name            TEXT,
+  api             TEXT,
+  reasoning       INTEGER NOT NULL DEFAULT 0,
+  thinking_levels TEXT NOT NULL,
+  context_window  INTEGER,
+  max_tokens      INTEGER,
+  cost_input REAL, cost_output REAL, cost_cache_read REAL, cost_cache_write REAL,
+  first_seen_at   TEXT NOT NULL,
+  last_seen_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_versions_model ON model_versions(provider, model_id, last_seen_at);
 `);
 
 // Per-project display-name overrides, keyed by working directory. Lets the user
@@ -572,6 +633,190 @@ export function pruneOlderThan(cutoffIso: string): { events: number; sessions: n
   // legacy DBs created without it.
   try { db.run(`PRAGMA incremental_vacuum`); } catch { /* legacy DB: skip vacuum */ }
   return { events, sessions: sessionsToDelete.length };
+}
+
+// ── Versioned topology + models (Phase C) ─────────────────────────────────────
+
+const upsertTopologyVersionStmt = db.query(`
+  INSERT INTO topology_versions (hash, cwd, topology_json, first_seen_at, last_seen_at)
+  VALUES ($hash, $cwd, $topology_json, $ts, $ts)
+  ON CONFLICT(hash) DO UPDATE SET
+    last_seen_at = CASE WHEN excluded.last_seen_at > topology_versions.last_seen_at THEN excluded.last_seen_at ELSE topology_versions.last_seen_at END
+`);
+
+const insertTopologyNodeStmt = db.query(`
+  INSERT OR IGNORE INTO topology_nodes
+    (topology_hash, team, node_id, parent_id, name, role, agent_type, model, thinking, thinking_levels,
+     color, group_name, tools_json, domain_json, stages_json, commit_allowed, routing_tags_json, consult_when, responsibilities_json)
+  VALUES
+    ($topology_hash, $team, $node_id, $parent_id, $name, $role, $agent_type, $model, $thinking, $thinking_levels,
+     $color, $group_name, $tools_json, $domain_json, $stages_json, $commit_allowed, $routing_tags_json, $consult_when, $responsibilities_json)
+`);
+
+const updateNodeThinkingLevelsStmt = db.query(`
+  UPDATE topology_nodes SET thinking_levels = $thinking_levels
+  WHERE topology_hash = $topology_hash AND name = $name AND (thinking_levels IS NULL OR thinking_levels = '')
+`);
+
+export function topologyVersionExists(hash: string): boolean {
+  return !!(db.query(`SELECT 1 FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }) as any);
+}
+
+export interface TopologyNodeRow {
+  topologyHash: string; team: string; nodeId: number; parentId: number | null; name: string;
+  role?: string; agentType?: string; model?: string; thinking?: string; thinkingLevels?: string[];
+  color?: string; group?: string; tools?: string; domain?: string[]; stages?: string[];
+  commitAllowed?: boolean; routingTags?: string[]; consultWhen?: string; responsibilities?: string;
+}
+
+// Insert a version (idempotent by hash) and, only on first insert, explode its
+// nodes. Callers pass the node rows already derived from the canonical JSON.
+export function upsertTopologyVersion(input: { hash: string; cwd: string; topologyJson: string; ts: string; nodes: TopologyNodeRow[] }): void {
+  const wasNew = !topologyVersionExists(input.hash);
+  upsertTopologyVersionStmt.run({ $hash: input.hash, $cwd: input.cwd, $topology_json: input.topologyJson, $ts: input.ts });
+  if (!wasNew) return;
+  for (const n of input.nodes) {
+    insertTopologyNodeStmt.run({
+      $topology_hash: n.topologyHash, $team: n.team, $node_id: n.nodeId, $parent_id: n.parentId,
+      $name: n.name, $role: n.role ?? null, $agent_type: n.agentType ?? null, $model: n.model ?? null,
+      $thinking: n.thinking ?? null, $thinking_levels: n.thinkingLevels ? JSON.stringify(n.thinkingLevels) : null,
+      $color: n.color ?? null, $group_name: n.group ?? null, $tools_json: n.tools ?? null,
+      $domain_json: n.domain ? JSON.stringify(n.domain) : null, $stages_json: n.stages ? JSON.stringify(n.stages) : null,
+      $commit_allowed: n.commitAllowed ? 1 : 0, $routing_tags_json: n.routingTags ? JSON.stringify(n.routingTags) : null,
+      $consult_when: n.consultWhen ?? null, $responsibilities_json: n.responsibilities ? JSON.stringify(n.responsibilities) : null,
+    });
+  }
+}
+
+// Fill in the thinking_levels sidecar for a node once authoritative levels
+// arrive (delegation_start / model_catalog). Does not touch the hash (Decision 13).
+export function fillNodeThinkingLevels(hash: string, name: string, levels: string[]): void {
+  if (!levels?.length) return;
+  updateNodeThinkingLevelsStmt.run({ $topology_hash: hash, $name: name, $thinking_levels: JSON.stringify(levels) });
+}
+
+function parseJsonMaybe(value: unknown): any {
+  if (typeof value !== "string" || !value) return undefined;
+  try { return JSON.parse(value); } catch { return undefined; }
+}
+
+function topologyNodeRow(r: any): TopologyNodeRow {
+  return {
+    topologyHash: r.topology_hash, team: r.team, nodeId: r.node_id, parentId: r.parent_id,
+    name: r.name, role: r.role || undefined, agentType: r.agent_type || undefined, model: r.model || undefined,
+    thinking: r.thinking || undefined, thinkingLevels: parseJsonMaybe(r.thinking_levels),
+    color: r.color || undefined, group: r.group_name || undefined, tools: r.tools_json || undefined,
+    domain: parseJsonMaybe(r.domain_json), stages: parseJsonMaybe(r.stages_json),
+    commitAllowed: !!r.commit_allowed, routingTags: parseJsonMaybe(r.routing_tags_json),
+    consultWhen: r.consult_when || undefined, responsibilities: parseJsonMaybe(r.responsibilities_json),
+  };
+}
+
+export function topologyNodes(hash: string): TopologyNodeRow[] {
+  const rows = db.query(`SELECT * FROM topology_nodes WHERE topology_hash = $hash ORDER BY team, node_id`).all({ $hash: hash }) as any[];
+  return rows.map(topologyNodeRow);
+}
+
+export function listTopologies(cwd?: string): Array<{ hash: string; firstSeenAt: string; lastSeenAt: string; sessionCount: number }> {
+  const params: any = {};
+  const where = cwd ? `WHERE v.cwd = $cwd` : "";
+  if (cwd) params.$cwd = cwd;
+  const rows = db.query(`
+    SELECT v.hash, v.first_seen_at, v.last_seen_at,
+      (SELECT COUNT(*) FROM sessions s WHERE s.topology_hash = v.hash) AS session_count
+    FROM topology_versions v ${where}
+    ORDER BY v.first_seen_at ASC
+  `).all(params) as any[];
+  return rows.map((r) => ({ hash: r.hash, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, sessionCount: Number(r.session_count || 0) }));
+}
+
+export function topologyVersion(hash: string): { hash: string; cwd: string; topologyJson: string; firstSeenAt: string; lastSeenAt: string } | null {
+  const r = db.query(`SELECT * FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }) as any;
+  return r ? { hash: r.hash, cwd: r.cwd, topologyJson: r.topology_json, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at } : null;
+}
+
+// States that still carry embedded topologies (pre-slim). Used by the C4 backfill.
+export function statesWithEmbeddedTopologies(): Array<{ sessionId: string; cwd?: string; updatedAt: string; stateJson: string }> {
+  const rows = db.query(`SELECT session_id, cwd, updated_at, state_json FROM states`).all() as any[];
+  return rows.map((r) => ({ sessionId: r.session_id, cwd: r.cwd || undefined, updatedAt: r.updated_at, stateJson: r.state_json }));
+}
+
+export function rewriteStateJson(sessionId: string, stateJson: string): void {
+  db.run(`UPDATE states SET state_json = $json WHERE session_id = $id`, { $json: stateJson, $id: sessionId } as any);
+}
+
+export function stampSessionTopology(sessionId: string, hash: string): void {
+  db.run(`UPDATE sessions SET topology_hash = $hash WHERE session_id = $id AND (topology_hash IS NULL OR topology_hash != $hash)`, { $hash: hash, $id: sessionId } as any);
+}
+
+const insertModelVersionStmt = db.query(`
+  INSERT INTO model_versions (model_hash, provider, model_id, name, api, reasoning, thinking_levels,
+    context_window, max_tokens, cost_input, cost_output, cost_cache_read, cost_cache_write, first_seen_at, last_seen_at)
+  VALUES ($model_hash, $provider, $model_id, $name, $api, $reasoning, $thinking_levels,
+    $context_window, $max_tokens, $cost_input, $cost_output, $cost_cache_read, $cost_cache_write, $ts, $ts)
+  ON CONFLICT(model_hash) DO UPDATE SET
+    last_seen_at = CASE WHEN excluded.last_seen_at > model_versions.last_seen_at THEN excluded.last_seen_at ELSE model_versions.last_seen_at END
+`);
+
+export interface ModelInput {
+  provider: string; modelId: string; name?: string; api?: string; reasoning: boolean; thinkingLevels: string[];
+  contextWindow?: number; maxTokens?: number; costRates?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+}
+
+// Content-address a model's capability set so a distinct (levels+pricing+context)
+// is its own immutable version. Cost rates are part of the identity — a price
+// change mints a new row rather than overwriting history.
+export function modelHash(input: ModelInput): string {
+  const canonical = JSON.stringify({
+    provider: input.provider, modelId: input.modelId, api: input.api ?? null, reasoning: !!input.reasoning,
+    thinkingLevels: input.thinkingLevels || [],
+    contextWindow: input.contextWindow ?? null, maxTokens: input.maxTokens ?? null,
+    cost: {
+      input: input.costRates?.input ?? null, output: input.costRates?.output ?? null,
+      cacheRead: input.costRates?.cacheRead ?? null, cacheWrite: input.costRates?.cacheWrite ?? null,
+    },
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+// Record a model capability version (idempotent by content hash). Returns the
+// hash so callers (e.g. a delegation) can reference the exact version seen.
+export function upsertModel(input: ModelInput, ts: string): string {
+  const hash = modelHash(input);
+  insertModelVersionStmt.run({
+    $model_hash: hash, $provider: input.provider, $model_id: input.modelId, $name: input.name ?? null, $api: input.api ?? null,
+    $reasoning: input.reasoning ? 1 : 0, $thinking_levels: JSON.stringify(input.thinkingLevels || []),
+    $context_window: input.contextWindow ?? null, $max_tokens: input.maxTokens ?? null,
+    $cost_input: input.costRates?.input ?? null, $cost_output: input.costRates?.output ?? null,
+    $cost_cache_read: input.costRates?.cacheRead ?? null, $cost_cache_write: input.costRates?.cacheWrite ?? null, $ts: ts,
+  });
+  return hash;
+}
+
+function modelRow(r: any) {
+  return {
+    modelHash: r.model_hash, provider: r.provider, modelId: r.model_id, name: r.name || undefined, api: r.api || undefined,
+    reasoning: !!r.reasoning, thinkingLevels: parseJsonMaybe(r.thinking_levels) || [],
+    contextWindow: r.context_window || undefined, maxTokens: r.max_tokens || undefined,
+    costRates: { input: r.cost_input, output: r.cost_output, cacheRead: r.cost_cache_read, cacheWrite: r.cost_cache_write },
+    firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at,
+  };
+}
+
+// Latest capability version per (provider, model_id) — the current answer for
+// the UI's capability lookup (thinking dial). Pass allVersions=true for history.
+export function listModels(allVersions = false): any[] {
+  if (allVersions) {
+    const rows = db.query(`SELECT * FROM model_versions ORDER BY provider, model_id, last_seen_at DESC`).all() as any[];
+    return rows.map(modelRow);
+  }
+  const rows = db.query(`
+    SELECT mv.* FROM model_versions mv
+    JOIN (SELECT provider, model_id, MAX(last_seen_at) AS mx FROM model_versions GROUP BY provider, model_id) latest
+      ON mv.provider = latest.provider AND mv.model_id = latest.model_id AND mv.last_seen_at = latest.mx
+    ORDER BY mv.provider, mv.model_id
+  `).all() as any[];
+  return rows.map(modelRow);
 }
 
 // ── Plan-store typed tables (verdicts / approvals / comments) ────────────────

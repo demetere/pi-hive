@@ -30,7 +30,17 @@ import {
   updateSessionStats,
   upsertSession,
   upsertState,
+  upsertTopologyVersion,
+  stampSessionTopology,
+  fillNodeThinkingLevels,
+  upsertModel,
+  topologyVersion,
+  topologyNodes,
+  statesWithEmbeddedTopologies,
+  rewriteStateJson,
+  type TopologyNodeRow,
 } from "./db";
+import { canonicalTopologyJson, explodeTopology, topologyHash } from "./topology-hash";
 import { broadcastEvent, broadcastEventWithId } from "./sse";
 import type { Source } from "./types";
 
@@ -47,7 +57,7 @@ export function sourcePaths(): string[] {
 
 // Cursor-ordered event reads, SQL-backed and paginated (B5). No in-memory
 // events array remains; callers pass a cursor to page forward.
-export { queryEvents, recentEvents, queryDelegations, queryToolCalls, maxEventCursor } from "./db";
+export { queryEvents, recentEvents, queryDelegations, queryToolCalls, maxEventCursor, listTopologies, listModels } from "./db";
 
 export function allSnapshots(): HiveStateSnapshot[] {
   return Array.from(snapshots.values()).map(enrichSnapshotTopologies);
@@ -199,17 +209,59 @@ function enrichSnapshotTopologies(snapshot: HiveStateSnapshot): HiveStateSnapsho
   return topologies ? { ...snapshot, topologies } : snapshot;
 }
 
+// Derive topology_nodes rows from the enriched topologies (Phase C). The
+// preorder walk (explodeTopology) fixes node_id/parent_id; identity/config
+// fields come straight off the node.
+function topologyNodeRows(hash: string, topologies: HiveStateSnapshot["topologies"]): TopologyNodeRow[] {
+  return explodeTopology(topologies).map(({ team, nodeId, parentId, node }) => ({
+    topologyHash: hash, team, nodeId, parentId, name: node.name,
+    role: node.role, agentType: node.agentType, model: node.model, thinking: node.thinking,
+    thinkingLevels: node.thinkingLevels, color: node.color, group: node.group, tools: node.tools,
+    domain: node.domain, stages: node.stages, commitAllowed: node.commit === true,
+    routingTags: node.routingTags, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
+  }));
+}
+
+// Content-address the enriched topologies and version them (C3). Idempotent by
+// hash; on first sight of a hash the tree is exploded into topology_nodes.
+// Returns the hash so the caller can stamp the session and slim the snapshot.
+function versionTopology(snapshot: HiveStateSnapshot): string | undefined {
+  if (!snapshot.topologies || !snapshot.cwd) return undefined;
+  const hash = topologyHash(snapshot.topologies);
+  upsertTopologyVersion({
+    hash, cwd: snapshot.cwd, topologyJson: canonicalTopologyJson(snapshot.topologies),
+    ts: snapshot.updated_at, nodes: topologyNodeRows(hash, snapshot.topologies),
+  });
+  // Fill the thinking_levels sidecar from any runtime nodes that carry SDK
+  // levels (A10) — an UPDATE that doesn't touch the hash.
+  for (const agent of snapshot.agents || []) {
+    if (agent.name && Array.isArray(agent.thinkingLevels) && agent.thinkingLevels.length) {
+      fillNodeThinkingLevels(hash, agent.name, agent.thinkingLevels);
+    }
+  }
+  return hash;
+}
+
 function addSnapshot(snapshot: HiveStateSnapshot) {
   if (!snapshot || !snapshot.session_id) return;
   snapshot.updated_at ||= new Date().toISOString();
   snapshot = enrichSnapshotTopologies(snapshot);
   snapshots.set(snapshot.session_id, snapshot);
+  const topologyHashValue = versionTopology(snapshot);
+  if (topologyHashValue) (snapshot as any).topology_hash = topologyHashValue;
   // Authoritative token/cost totals: sum across ALL agents (never Math.max —
   // that was the bug at runtime.ts:293). The main session and in-flight agents
   // are included via the snapshot's agents list (A5).
   const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
   const sum = (pick: (a: HiveStateSnapshot["agents"] extends (infer T)[] ? T : never) => number) =>
     agents.reduce((total, agent) => total + (pick(agent as any) || 0), 0);
+  // Slim the persisted state: store runtime counters + topology_hash instead of
+  // the embedded topologies (C3). Read-time rehydration joins topology_versions,
+  // so rendering always uses the version the session actually ran under (this
+  // fixes the drift bug) and current config changes mint a new version rather
+  // than mutating history. The hot-cache `snapshots` map keeps the full form.
+  const slim: HiveStateSnapshot = { ...snapshot };
+  if (topologyHashValue) { delete slim.topologies; delete slim.topology; (slim as any).topology_hash = topologyHashValue; }
   db.transaction(() => {
     upsertState.run({
       $session_id: snapshot.session_id,
@@ -217,7 +269,7 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
       $cwd: snapshot.cwd || null,
       $session_dir: snapshot.session_dir || null,
       $telemetry_log: snapshot.telemetry_log || null,
-      $state_json: JSON.stringify(snapshot),
+      $state_json: JSON.stringify(slim),
     });
     ensureSession.run({
       $session_id: snapshot.session_id,
@@ -233,12 +285,13 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
       $cache_read_tokens: sum((a) => Number(a.cacheReadTokens)),
       $cache_write_tokens: sum((a) => Number(a.cacheWriteTokens)),
       $cost_usd: sum((a) => Number(a.costUsd)),
-      $topology_hash: (snapshot as any).topology_hash || null,
+      $topology_hash: topologyHashValue || null,
       $updated_at: snapshot.updated_at,
       $cwd: snapshot.cwd || null,
       $session_dir: snapshot.session_dir || null,
       $telemetry_log: snapshot.telemetry_log || null,
     });
+    if (topologyHashValue) stampSessionTopology(snapshot.session_id, topologyHashValue);
   })();
   broadcastEvent("hive_state", snapshot);
 }
@@ -365,12 +418,100 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
         agent: event.actor, text: p.text, truncated: typeof p.text === "string" && p.text.length >= 8000, ts: event.ts,
       });
       break;
+    case "model_catalog":
+      // Upsert the SDK-sourced model capabilities into the models table (A10/C3).
+      for (const model of Array.isArray(p.models) ? p.models : []) {
+        if (!model?.provider || !model?.modelId) continue;
+        upsertModel({
+          provider: String(model.provider), modelId: String(model.modelId), name: model.name, api: model.api,
+          reasoning: !!model.reasoning, thinkingLevels: Array.isArray(model.thinkingLevels) ? model.thinkingLevels.map(String) : [],
+          contextWindow: Number(model.contextWindow) || undefined, maxTokens: Number(model.maxTokens) || undefined, costRates: model.costRates,
+        }, event.ts);
+      }
+      break;
   }
+}
+
+// Reassemble a versioned topology's nested tree from topology_nodes (C5). Each
+// team is rebuilt from its flat preorder rows via parent_id adjacency.
+export function topologyDetail(hash: string): any {
+  const version = topologyVersion(hash);
+  if (!version) return null;
+  const rows = topologyNodes(hash);
+  const buildTeam = (team: string) => {
+    const teamRows = rows.filter((r) => r.team === team);
+    const byId = new Map<number, any>();
+    for (const r of teamRows) {
+      byId.set(r.nodeId, {
+        name: r.name, role: r.role, agentType: r.agentType, model: r.model, thinking: r.thinking,
+        thinkingLevels: r.thinkingLevels, color: r.color, group: r.group, tools: r.tools,
+        domain: r.domain, stages: r.stages, commit: r.commitAllowed, routingTags: r.routingTags,
+        consultWhen: r.consultWhen, responsibilities: r.responsibilities, children: [] as any[],
+      });
+    }
+    let root: any;
+    for (const r of teamRows) {
+      const node = byId.get(r.nodeId);
+      if (r.parentId == null) root = root || node;
+      else byId.get(r.parentId)?.children.push(node);
+    }
+    // If there was no single root (no orchestrator), return the top-level nodes.
+    const roots = teamRows.filter((r) => r.parentId == null).map((r) => byId.get(r.nodeId));
+    return roots.length === 1 ? { orchestrator: roots[0], agents: roots[0].children } : { agents: roots };
+  };
+  return {
+    hash: version.hash,
+    cwd: version.cwd,
+    firstSeenAt: version.firstSeenAt,
+    lastSeenAt: version.lastSeenAt,
+    planning: buildTeam("planning"),
+    hive: buildTeam("hive"),
+    canonicalJson: version.topologyJson,
+  };
 }
 
 function resumeIngestSources() {
   // Rehydrate the hot snapshot cache from SQL; events stay in SQL (paginated).
-  for (const snapshot of loadPersistedStates()) snapshots.set(snapshot.session_id, enrichSnapshotTopologies(snapshot));
+  // Slim rows (topology_hash, no embedded topologies) are re-hydrated by joining
+  // topology_versions so the UI still renders the session's true topology (C3).
+  for (const snapshot of loadPersistedStates()) {
+    snapshots.set(snapshot.session_id, enrichSnapshotTopologies(rehydrateSnapshotTopology(snapshot)));
+  }
+  // One-time backfill of any pre-Phase-C states that still embed topologies (C4).
+  backfillTopologies();
+}
+
+// Rehydrate a slim persisted snapshot: if it carries a topology_hash but no
+// embedded topologies, reconstruct them from the versioned tree (C3).
+function rehydrateSnapshotTopology(snapshot: HiveStateSnapshot): HiveStateSnapshot {
+  const hash = (snapshot as any).topology_hash;
+  if (!hash || snapshot.topologies) return snapshot;
+  const detail = topologyDetail(hash);
+  if (!detail) return snapshot;
+  const active: "hive" | "planning" = detail.hive?.orchestrator || (detail.hive?.agents?.length) ? "hive" : "planning";
+  return { ...snapshot, topologies: { active, hive: detail.hive, planning: detail.planning } };
+}
+
+// One-time boot migration: version every pre-Phase-C states row that still
+// embeds topologies, then rewrite it slim (C4). Idempotent — a row without
+// embedded topologies is skipped; hash-idempotency prevents duplicate versions.
+function backfillTopologies() {
+  for (const row of statesWithEmbeddedTopologies()) {
+    let snap: HiveStateSnapshot;
+    try { snap = JSON.parse(row.stateJson) as HiveStateSnapshot; } catch { continue; }
+    if (!snap.topologies || !snap.cwd) continue; // already slim or unversionable
+    const hash = topologyHash(snap.topologies);
+    upsertTopologyVersion({
+      hash, cwd: snap.cwd, topologyJson: canonicalTopologyJson(snap.topologies),
+      ts: row.updatedAt, nodes: topologyNodeRows(hash, snap.topologies),
+    });
+    stampSessionTopology(row.sessionId, hash);
+    const slim: HiveStateSnapshot = { ...snap };
+    delete slim.topologies; delete slim.topology; (slim as any).topology_hash = hash;
+    rewriteStateJson(row.sessionId, JSON.stringify(slim));
+    // Refresh the hot cache with the rehydrated full form.
+    snapshots.set(row.sessionId, enrichSnapshotTopologies(rehydrateSnapshotTopology(slim)));
+  }
 }
 
 export function sessionSummaries(): TelemetrySessionSummary[] {
