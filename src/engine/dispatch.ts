@@ -100,47 +100,21 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
+  // TOK/S baselines (J8/Decision 4): record the lifetime token counts at the
+  // moment this run starts so the UI can divide the *per-run* delta by the
+  // *per-run* elapsedMs — not lifetime tokens by per-run elapsed. Reset here,
+  // alongside elapsedMs, so both refer to the same run window.
+  runtime.runStartInputTokens = runtime.inputTokens;
+  runtime.runStartOutputTokens = runtime.outputTokens;
   state.activeRuns++;
-  logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
-  emitHiveEvent(state, "delegation_start", {
-    from: caller,
-    to: runtime.config.name,
-    task,
-    fresh,
-    model,
-    tools,
-    thinking,
-    // Authoritative per-model thinking levels, captured once the session
-    // resolves below and stamped on the runtime (A10). Present from the second
-    // run onward; the topology_nodes sidecar fills in as it arrives.
-    thinkingLevels: runtime.thinkingLevels,
-    runtime: runtimeSummary(runtime),
-  }, caller);
-  publishRuntimeUpdate(state);
-  writeHiveStateSnapshot(state);
 
-  // Every nesting level shares one process and one state.runtimes Map now, so
-  // a nested delegation already mutates the same AgentRuntime the top-level
-  // status modal reads directly — no cross-process mirroring needed. This
-  // timer keeps elapsedMs ticking and polls the live context-window fill via
-  // runtime.session (assigned once createAgentSession resolves below) — the
-  // same underlying data ctx.getContextUsage() exposes for the top-level
-  // session's own TUI footer, now readable per-worker since it's in-process.
-  runtime.timer = setInterval(() => {
-    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-    // percent is null right after compaction until a fresh assistant response
-    // provides usage data again — keep the last known value rather than
-    // flashing to 0 during that transient window.
-    const usage = runtime.session?.getContextUsage?.();
-    if (usage?.percent != null) runtime.contextPct = usage.percent;
-    publishRuntimeUpdate(state);
-    writeHiveStateSnapshot(state);
-  }, 1000);
-  runtime.timer.unref?.();
-
+  // Resolve the model + build tools + CREATE the worker session up front, before
+  // emitting delegation_start. This is the J4/Decision-5 reorder: the session is
+  // the only authoritative source of getAvailableThinkingLevels(), so it must
+  // exist before the event that carries thinkingLevels — otherwise a fresh
+  // agent's first run emits undefined levels (the old "second run onward" bug).
   const resolvedModel = resolveModel(ctx, model);
   if (!resolvedModel) {
-    if (runtime.timer) clearInterval(runtime.timer);
     runtime.status = "error";
     state.activeRuns = Math.max(0, state.activeRuns - 1);
     return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
@@ -175,6 +149,43 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     if (Array.isArray(levels) && levels.length) runtime.thinkingLevels = levels.map(String);
   } catch { /* capability probe is best-effort */ }
 
+  logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
+  emitHiveEvent(state, "delegation_start", {
+    from: caller,
+    to: runtime.config.name,
+    task,
+    fresh,
+    model,
+    tools,
+    thinking,
+    // Authoritative per-model thinking levels, captured from the session created
+    // above (A10). Now populated on the FIRST run too (J4); the topology_nodes
+    // sidecar fills in from this.
+    thinkingLevels: runtime.thinkingLevels,
+    runtime: runtimeSummary(runtime),
+  }, caller);
+  publishRuntimeUpdate(state);
+  writeHiveStateSnapshot(state);
+
+  // Every nesting level shares one process and one state.runtimes Map now, so
+  // a nested delegation already mutates the same AgentRuntime the top-level
+  // status modal reads directly — no cross-process mirroring needed. This
+  // timer keeps elapsedMs ticking and polls the live context-window fill via
+  // runtime.session (assigned above) — the same underlying data
+  // ctx.getContextUsage() exposes for the top-level session's own TUI footer,
+  // now readable per-worker since it's in-process.
+  runtime.timer = setInterval(() => {
+    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
+    // percent is null right after compaction until a fresh assistant response
+    // provides usage data again — keep the last known value rather than
+    // flashing to 0 during that transient window.
+    const usage = runtime.session?.getContextUsage?.();
+    if (usage?.percent != null) runtime.contextPct = usage.percent;
+    publishRuntimeUpdate(state);
+    writeHiveStateSnapshot(state);
+  }, 1000);
+  runtime.timer.unref?.();
+
   // Distinct actual models seen across this run's assistant messages (A3).
   const modelsSeen = new Set<string>();
   let lastStopReason: string | undefined;
@@ -196,21 +207,25 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
       const toolName = event.toolName || event.name || "unknown";
       runtime.lastWork = `tool: ${toolName}`;
       if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
+      const argsJson = safeJson(event.args ?? {});
       emitHiveEvent(state, "worker_tool_start", {
         agent: runtime.config.name,
         toolName,
         toolCallId: event.toolCallId,
-        args: truncateMiddle(safeJson(event.args ?? {}), 500),
+        args: truncateMiddle(argsJson, 500),
+        truncated: argsJson.length > 500,
       }, runtime.config.name);
     } else if (event.type === "tool_execution_end") {
       const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
       if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
+      const resultText = textOfResult(event.result);
       emitHiveEvent(state, "worker_tool_end", {
         agent: runtime.config.name,
         toolName: event.toolName || event.name || "unknown",
         toolCallId: event.toolCallId,
         isError: event.isError === true,
-        resultPreview: truncateMiddle(textOfResult(event.result), 500),
+        resultPreview: truncateMiddle(resultText, 500),
+        truncated: resultText.length > 500,
         durationMs: startedAt != null ? Date.now() - startedAt : undefined,
       }, runtime.config.name);
     } else if (event.type === "auto_retry_start") {
@@ -343,6 +358,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   logRecord(state, completion);
   emitHiveEvent(state, "delegation_end", {
     ...completion,
+    truncated: output.length > 2_000,
     exitCode,
     stopReason: lastStopReason,
     errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,

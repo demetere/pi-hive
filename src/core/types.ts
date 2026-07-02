@@ -177,6 +177,10 @@ export interface AgentRuntime {
   sessionFile: string;
   // SDK-reported thinking levels for the runtime's effective model (A10).
   thinkingLevels?: string[];
+  // Lifetime token counts captured at the start of the current run (J8). The UI
+  // subtracts these from the live totals to get per-run tokens for TOK/S.
+  runStartInputTokens?: number;
+  runStartOutputTokens?: number;
   startedAt?: number;
   timer?: ReturnType<typeof setInterval>;
   session?: any;

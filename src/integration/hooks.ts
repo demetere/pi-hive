@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
-import { configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
+import { clip, configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
@@ -12,12 +12,30 @@ import { applyMode, captureNormalTools, installHeader, updateWidget } from "../u
 import { installHiveFooter, registerFooterHooks } from "../ui/tui/footer";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
-import { emitHiveEvent } from "../engine/observability";
+import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   registerFooterHooks(pi, state);
+
+  // toolCallId → startedAt for the orchestrator's own tool calls, so
+  // orchestrator_tool_end can carry durationMs the same way workers do (J5).
+  // Bounded by in-flight calls: entries are deleted on tool_result.
+  const orchestratorToolStartedAt = new Map<string, number>();
+
+  // Debounced snapshot write so orchestrator-only conversations (no delegations)
+  // still reach hive-state.json (J5). Delegations trigger their own snapshot in
+  // dispatch.ts; this covers turns where the orchestrator works alone.
+  let orchestratorSnapshotTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleOrchestratorSnapshot = () => {
+    if (orchestratorSnapshotTimer) return;
+    orchestratorSnapshotTimer = setTimeout(() => {
+      orchestratorSnapshotTimer = undefined;
+      try { writeHiveStateSnapshot(state); } catch { /* best-effort */ }
+    }, 2000);
+    orchestratorSnapshotTimer.unref?.();
+  };
 
   pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
     // Enforcement (domain + agent-type policy) runs in plan AND hive mode; only
@@ -27,24 +45,40 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     // session's own tool calls; worker tool calls are emitted from dispatch.ts.
     const orch = state.orchestratorRuntime;
     if (orch) orch.toolCount++;
+    if (event.toolCallId) orchestratorToolStartedAt.set(event.toolCallId, Date.now());
+    const argsJson = safeJson(event.args ?? {});
     emitHiveEvent(state, "orchestrator_tool_start", {
       agent: "Orchestrator",
       toolName: event.toolName || event.name || "unknown",
       toolCallId: event.toolCallId,
-      args: truncateMiddle(safeJson(event.args ?? {}), 500),
+      args: truncateMiddle(argsJson, 500),
+      truncated: argsJson.length > 500,
     }, "Orchestrator");
     return enforceDomainForTool(state, event, ctx);
   });
 
   pi.on("tool_result", async (event: any) => {
     if (state.mode === "normal") return;
+    const startedAt = event.toolCallId ? orchestratorToolStartedAt.get(event.toolCallId) : undefined;
+    if (event.toolCallId) orchestratorToolStartedAt.delete(event.toolCallId);
+    const resultText = textOfResult(event.result);
     emitHiveEvent(state, "orchestrator_tool_end", {
       agent: "Orchestrator",
       toolName: event.toolName || event.name || "unknown",
       toolCallId: event.toolCallId,
       isError: event.isError === true,
-      resultPreview: truncateMiddle(textOfResult(event.result), 500),
+      resultPreview: truncateMiddle(resultText, 500),
+      truncated: resultText.length > 500,
+      durationMs: startedAt != null ? Date.now() - startedAt : undefined,
     }, "Orchestrator");
+  });
+
+  // J3: re-emit the model catalog when the main model changes mid-session, so
+  // `inherit` workers aren't left described by a stale catalog. Gated off in
+  // normal mode (the extension does nothing there). The DB upsert is idempotent.
+  pi.on("model_select", async (_event: any, ctx: ExtensionContext) => {
+    if (state.mode === "normal") return;
+    try { emitModelCatalog(state, (ctx as any).modelRegistry); } catch { /* best-effort */ }
   });
 
   pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
@@ -122,12 +156,17 @@ ${catalog}`,
       orch.cacheReadTokens += u.cacheRead;
       orch.cacheWriteTokens += u.cacheWrite;
       orch.costUsd += u.cost;
+      // J5: persist a snapshot so a delegation-free conversation's orchestrator
+      // usage still lands in hive-state.json. Debounced to avoid a write per
+      // message during a burst.
+      scheduleOrchestratorSnapshot();
     }
     const text = textFromMessage(message).trim();
     if (!text) return;
     const from = role === "user" ? "User" : role === "assistant" ? "Orchestrator" : role;
     logRecord(state, { from, type: role, message: text });
-    emitHiveEvent(state, role === "user" ? "user_message" : "assistant_message", { text: text.slice(0, 8000) }, from);
+    const clipped = clip(text, 8000);
+    emitHiveEvent(state, role === "user" ? "user_message" : "assistant_message", { text: clipped.text, truncated: clipped.truncated }, from);
   });
 
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {

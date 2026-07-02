@@ -104,6 +104,10 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     model: runtime.config.model,
     thinking: runtime.config.thinking,
     thinkingLevels: runtime.thinkingLevels,
+    // Per-run token baselines for TOK/S (J8): the UI reads (live − baseline)
+    // over elapsedMs so the rate reflects the current run, not lifetime.
+    runStartInputTokens: runtime.runStartInputTokens,
+    runStartOutputTokens: runtime.runStartOutputTokens,
   };
 }
 

@@ -255,6 +255,26 @@ CREATE INDEX IF NOT EXISTS idx_plan_approvals_cwd ON plan_approvals(cwd, change_
 CREATE INDEX IF NOT EXISTS idx_plan_comments_cwd ON plan_comments(cwd, change_id, created_at);
 `);
 
+// J2: one-time backfill of plan-table cwd from the owning session. Legacy plan_*
+// rows (written before B1's cwd column) have NULL cwd and until now relied on the
+// NULL-wildcard read that was only meant to bridge one release. Where a row's
+// session_id matches a known session, copy that session's cwd so the row becomes
+// project-scoped properly. Idempotent: rows already scoped, or with no matching
+// session (plans created outside a session), are untouched and keep the wildcard.
+// Exported so the double-boot / synthetic-row test can drive it directly.
+export function backfillPlanCwd(): void {
+  for (const table of ["plan_verdicts", "plan_approvals", "plan_comments"] as const) {
+    db.run(`
+      UPDATE ${table}
+      SET cwd = (SELECT s.cwd FROM sessions s WHERE s.session_id = ${table}.session_id)
+      WHERE cwd IS NULL
+        AND session_id IS NOT NULL
+        AND EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id AND s.cwd IS NOT NULL)
+    `);
+  }
+}
+backfillPlanCwd();
+
 export const insertEvent = db.query(`
   INSERT OR IGNORE INTO events
     (event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json)
@@ -619,7 +639,7 @@ export function knownCwds(): string[] {
 
 // ── Prune (B6): explicit, age-based cleanup on demand ─────────────────────────
 
-export function pruneOlderThan(cutoffIso: string): { events: number; sessions: number } {
+export function pruneOlderThan(cutoffIso: string): { events: number; sessions: number; sessionIds: string[] } {
   let events = 0;
   const sessionsToDelete: string[] = [];
   const tx = db.transaction(() => {
@@ -639,7 +659,7 @@ export function pruneOlderThan(cutoffIso: string): { events: number; sessions: n
   // Reclaim space where auto_vacuum=INCREMENTAL is enabled (new DBs); a no-op on
   // legacy DBs created without it.
   try { db.run(`PRAGMA incremental_vacuum`); } catch { /* legacy DB: skip vacuum */ }
-  return { events, sessions: sessionsToDelete.length };
+  return { events, sessions: sessionsToDelete.length, sessionIds: sessionsToDelete };
 }
 
 // ── Versioned topology + models (Phase C) ─────────────────────────────────────

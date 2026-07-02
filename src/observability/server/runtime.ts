@@ -11,6 +11,7 @@ import {
   dbEventRow,
   dbSessionRowFromEvent,
   deleteSessionRows,
+  pruneOlderThan,
   ensureSession,
   getIngestOffset,
   insertEvent,
@@ -415,7 +416,12 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
     case "assistant_message":
       materializeMessage({
         eventId: event.event_id, sessionId, cwd: event.cwd, role: event.type === "user_message" ? "user" : "assistant",
-        agent: event.actor, text: p.text, truncated: typeof p.text === "string" && p.text.length >= 8000, ts: event.ts,
+        agent: event.actor,
+        text: p.text,
+        // Prefer the source-stamped flag (J6); fall back to the length heuristic
+        // for legacy events emitted before the flag existed.
+        truncated: typeof p.truncated === "boolean" ? p.truncated : (typeof p.text === "string" && p.text.length >= 8000),
+        ts: event.ts,
       });
       break;
     case "model_catalog":
@@ -575,6 +581,30 @@ export function deleteSessions(ids: string[]): number {
 
   broadcastEvent("hive_delete", { session_ids: Array.from(idSet) });
   return idSet.size;
+}
+
+// Age-based prune (J1). Trims events older than the cutoff across all sessions
+// and removes any session whose entire history predates it. The DB prune already
+// deletes rows + projections; here we additionally evict the hot snapshot cache,
+// unwatch source files, prune the registry, and broadcast the removal so live
+// dashboards drop the gone sessions — the same runtime cleanup deleteSessions
+// does, applied to the whole-stale set.
+export function pruneTelemetry(cutoffIso: string): { events: number; sessions: number } {
+  const { events, sessionIds } = pruneOlderThan(cutoffIso);
+  const idSet = new Set(sessionIds.filter(Boolean));
+  if (idSet.size) {
+    for (const id of idSet) snapshots.delete(id);
+    for (const [abs, source] of Array.from(sources.entries())) {
+      const sid = source.meta?.session_id;
+      if (sid && idSet.has(sid)) {
+        try { fs.unwatchFile(abs); fs.unwatchFile(source.statePath); } catch { /* noop */ }
+        sources.delete(abs);
+      }
+    }
+    pruneRegistry(idSet);
+    broadcastEvent("hive_delete", { session_ids: Array.from(idSet) });
+  }
+  return { events, sessions: idSet.size };
 }
 
 export function deleteProject(name: string): number {

@@ -124,12 +124,50 @@ test("ingest offsets persist and resume (B4)", () => {
   expect(db.getIngestOffset("/tmp/log.jsonl")).toBe(8192);
 });
 
-test("prune removes sessions fully older than the cutoff and heals (B6)", () => {
+test("plan-table cwd is backfilled from the owning session (J2)", () => {
+  // Legacy row: has a session_id but NULL cwd (written before B1's cwd column).
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "bf", session_id: "bf-sess", ts: "2026-07-01T06:00:00.000Z", cwd: "/backfilled", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.insertPlanComment({ id: "pc-legacy2", changeId: "bf-change", author: "a", body: "legacy row", sessionId: "bf-sess", createdAt: "2026-07-01T06:01:00.000Z" });
+  // Orphan row: session_id points nowhere — must stay NULL (wildcard-visible).
+  db.insertPlanComment({ id: "pc-orphan", changeId: "bf-change", author: "b", body: "orphan row", sessionId: "no-such-sess", createdAt: "2026-07-01T06:02:00.000Z" });
+  // Before backfill the legacy row has NULL cwd, so it leaks into an UNRELATED
+  // project's scoped read via the NULL-wildcard — the exact cross-project bleed
+  // the backfill fixes.
+  expect(db.listComments("bf-change", "/other").some((c) => c.id === "pc-legacy2")).toBe(true);
+
+  db.backfillPlanCwd();
+
+  // After backfill the legacy row is scoped to its session's cwd: it no longer
+  // leaks into /other, but is visible under /backfilled. The orphan keeps NULL
+  // cwd and stays wildcard-visible everywhere.
+  expect(db.listComments("bf-change", "/other").some((c) => c.id === "pc-legacy2")).toBe(false);
+  const scoped = db.listComments("bf-change", "/backfilled");
+  expect(scoped.some((c) => c.id === "pc-legacy2")).toBe(true);
+  expect(scoped.some((c) => c.id === "pc-orphan")).toBe(true); // NULL-wildcard still applies
+  expect(db.listComments("bf-change", "/other").some((c) => c.id === "pc-orphan")).toBe(true);
+  // Idempotent: a second backfill changes nothing.
+  db.backfillPlanCwd();
+  expect(db.listComments("bf-change", "/backfilled").filter((c) => c.id === "pc-legacy2").length).toBe(1);
+});
+
+test("prune removes sessions fully older than the cutoff and shrinks projections (B6/J1)", () => {
   db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "old", session_id: "old-sess", ts: "2020-01-01T00:00:00.000Z", cwd: "/old", type: "session_start", actor: "System", pid: 1, payload: {} }));
   insertEvent({ event_id: "old-ev", session_id: "old-sess", seq: 0, ts: "2020-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/old", payload: {} });
-  const before = db.querySessionSummaries().some((s) => s.session_id === "old-sess");
-  expect(before).toBe(true);
+  // Populate every projection with pre-cutoff rows so we can assert they shrink.
+  db.materializeDelegationStart({ eventId: "old-d-s", sessionId: "old-sess", cwd: "/old", agent: "Coder", parent: "Orchestrator", startedAt: "2020-01-01T00:00:00.000Z", model: "anthropic/x" });
+  db.materializeDelegationEnd({ eventId: "old-d-e", sessionId: "old-sess", cwd: "/old", agent: "Coder", parent: "Orchestrator", endedAt: "2020-01-01T00:01:00.000Z", durationMs: 60000, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, status: "done", stopReason: "toolUse", model: "anthropic/x" });
+  db.materializeToolStart({ eventId: "old-t-s", sessionId: "old-sess", cwd: "/old", agent: "Coder", toolName: "read_file", toolCallId: "old-tc", argsPreview: "{}", startedAt: "2020-01-01T00:00:30.000Z" });
+  db.materializeToolEnd({ sessionId: "old-sess", toolCallId: "old-tc", resultPreview: "ok", isError: false, endedAt: "2020-01-01T00:00:32.000Z", durationMs: 2000 });
+  db.materializeMessage({ eventId: "old-m", sessionId: "old-sess", cwd: "/old", role: "user", agent: "User", text: "hi", truncated: false, ts: "2020-01-01T00:00:00.000Z" });
+  expect(db.querySessionSummaries().some((s) => s.session_id === "old-sess")).toBe(true);
+  expect(db.queryDelegations({ session: "old-sess" }).length).toBe(1);
+  expect(db.queryToolCalls({ session: "old-sess" }).length).toBe(1);
+
   const result = db.pruneOlderThan("2021-01-01T00:00:00.000Z");
   expect(result.sessions).toBeGreaterThanOrEqual(1);
+  expect(result.sessionIds).toContain("old-sess");
   expect(db.querySessionSummaries().some((s) => s.session_id === "old-sess")).toBe(false);
+  // All projections for the pruned session are gone.
+  expect(db.queryDelegations({ session: "old-sess" }).length).toBe(0);
+  expect(db.queryToolCalls({ session: "old-sess" }).length).toBe(0);
 });

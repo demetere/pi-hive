@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import type { HiveState } from "../core/types";
 import { applyMode, cycleMode } from "../ui/tui/widget";
 import { renderHiveDoctor } from "../engine/doctor";
-import { ensureDashboard, stopDashboard } from "../engine/dashboard";
+import { dashboardUrl, ensureDashboard, readDaemonToken, stopDashboard } from "../engine/dashboard";
 import { changeExists, hasTasks, isReadyToExecute, listChangeIds, readTasks } from "../engine/plan-store";
 import { truncateMiddle } from "../core/utils";
 
@@ -125,6 +125,34 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
     handler: async (_args: string, ctx: ExtensionContext) => {
       const killed = await stopDashboard(state);
       if (ctx.hasUI) ctx.ui.notify(killed.length ? `Stopped pi-hive telemetry dashboard (${killed.join(", ")})` : "No pi-hive telemetry dashboard was running.", "info");
+    },
+  });
+
+  pi.registerCommand("hive-observe-prune", {
+    description: "Prune telemetry older than <days> from the global dashboard (e.g. /hive-observe-prune 30)",
+    handler: async (args: string, ctx: ExtensionContext) => {
+      const days = Number(String(args || "").trim());
+      if (!Number.isFinite(days) || days < 0) {
+        if (ctx.hasUI) ctx.ui.notify("Usage: /hive-observe-prune <days> (a non-negative number of days to retain).", "error");
+        return;
+      }
+      try {
+        // Goes through the daemon's auth-gated POST /prune using the shared
+        // token file (Decision 2) — the same endpoint the Settings tab calls.
+        const res = await fetch(`${dashboardUrl()}/prune`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${readDaemonToken() || ""}` },
+          body: JSON.stringify({ olderThanDays: days }),
+        });
+        if (!res.ok) {
+          if (ctx.hasUI) ctx.ui.notify(`Prune failed (${res.status}). Is the dashboard running? Try /hive-observe.`, "error");
+          return;
+        }
+        const body = await res.json() as { events: number; sessions: number };
+        if (ctx.hasUI) ctx.ui.notify(`Pruned ${body.events} events and ${body.sessions} sessions older than ${days} day(s).`, "info");
+      } catch (error: any) {
+        if (ctx.hasUI) ctx.ui.notify(`Prune failed: ${error?.message || error}. Is the dashboard running?`, "error");
+      }
     },
   });
 }

@@ -62,6 +62,14 @@ export function truncateMiddle(text: string, max: number): string {
   return `${text.slice(0, head)}\n\n... [truncated] ...\n\n${text.slice(text.length - tail)}`;
 }
 
+// Clip to a head slice and report whether clipping happened, so callers can
+// stamp a machine-readable `truncated` flag on the telemetry payload (J6) rather
+// than having downstream code re-infer truncation from a length threshold.
+export function clip(text: string, max: number): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  return { text: text.slice(0, max), truncated: true };
+}
+
 export function tailLines(text: string, limit: number): string {
   const lines = text.split("\n").filter(Boolean);
   return lines.slice(Math.max(0, lines.length - limit)).join("\n");

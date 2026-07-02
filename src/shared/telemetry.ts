@@ -108,6 +108,10 @@ export interface TelemetryAgentRuntime {
   model?: string;
   thinking?: string;
   thinkingLevels?: string[];
+  // Lifetime token counts at the start of the current run — the baseline the UI
+  // subtracts to compute per-run TOK/S (J8).
+  runStartInputTokens?: number;
+  runStartOutputTokens?: number;
 }
 
 export interface HiveStateSnapshot {

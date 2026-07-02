@@ -10,6 +10,7 @@ import {
   listModels,
   listTopologies,
   maxEventCursor,
+  pruneTelemetry,
   queryDelegations,
   queryEvents,
   queryToolCalls,
@@ -52,9 +53,27 @@ Bun.serve({
   async fetch(req: Request) {
     const url = new URL(req.url);
 
-    if (req.method === "POST") {
+    // Method-based write gate (J7/Decision 3): every request whose method is not
+    // a safe read (GET/HEAD) is a mutation and must clear same-origin + the
+    // bearer token exactly once, here, before any routing. This closes the hole
+    // where a future PUT/PATCH endpoint would land outside a per-route check.
+    const isWrite = req.method !== "GET" && req.method !== "HEAD";
+    if (isWrite) {
       if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
       if (!isAuthorizedWrite(req, DAEMON_TOKEN)) return json({ error: "unauthorized" }, 401);
+    }
+
+    if (req.method === "POST") {
+      // POST /prune  { olderThanDays }  — explicit age-based cleanup (J1).
+      if (url.pathname === "/prune") {
+        let body: any = {};
+        try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
+        const days = Number(body.olderThanDays);
+        if (!Number.isFinite(days) || days < 0) return json({ error: "olderThanDays must be a non-negative number" }, 400);
+        const cutoff = new Date(Date.now() - days * 86400_000).toISOString();
+        const result = pruneTelemetry(cutoff);
+        return json({ ok: true, ...result, cutoff });
+      }
       // POST /plans/:changeId/comments  and  POST /plans/:changeId/approval
       const commentMatch = url.pathname.match(/^\/plans\/([^/]+)\/comments$/);
       const approvalMatch = url.pathname.match(/^\/plans\/([^/]+)\/approval$/);
@@ -82,8 +101,6 @@ Bun.serve({
     }
 
     if (req.method === "DELETE") {
-      if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
-      if (!isAuthorizedWrite(req, DAEMON_TOKEN)) return json({ error: "unauthorized" }, 401);
       // DELETE /sessions/:id  — purge one session's telemetry.
       const sessionMatch = url.pathname.match(/^\/sessions\/(.+)$/);
       if (sessionMatch) {
