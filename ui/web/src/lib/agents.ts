@@ -32,25 +32,30 @@ export function ctxColor(pct: number): string {
   return pct > 85 ? "var(--crit)" : pct > 60 ? "var(--warn)" : "var(--ink-dim)";
 }
 
-// Per-model reasoning-effort scale. Cheaper/faster models expose fewer steps.
-// Keyed on the short model name (last path segment, lowercased).
-export function thinkScale(model?: string): string[] {
-  const m = shortModel(model).toLowerCase();
-  if (m.includes("opus")) return ["off", "low", "med", "high", "max"];
-  if (m.includes("sonnet")) return ["off", "low", "med", "high"];
-  if (m.includes("haiku")) return ["off", "low"];
-  return ["off", "low"];
+// Canonical reasoning-effort ordering used across pi models
+// (["off","minimal","low","medium","high","xhigh"]). We don't have each model's
+// exact supported subset in telemetry, so the dial is built on this full scale
+// and the agent's actual `thinking` value selects the level — which reads
+// correctly for any model (gpt, gemini, claude, …) rather than assuming a fixed
+// per-family scale. Normalizes common aliases (med→medium, max→xhigh).
+export const THINK_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+function normLevel(v: string | undefined): string {
+  if (!v) return "off";
+  const t = v.trim().toLowerCase();
+  const alias: Record<string, string> = { med: "medium", max: "xhigh", maximum: "xhigh", none: "off", mid: "medium" };
+  return alias[t] || t;
 }
 
-// A free-form `thinking` string (e.g. "high", "medium", "off") → an index into
-// the model's scale. Unknown/empty → 0 (off).
-export function thinkLevel(model: string | undefined, thinking: string | undefined): number {
-  const scale = thinkScale(model);
-  if (!thinking) return 0;
-  const t = thinking.trim().toLowerCase();
-  const aliases: Record<string, string> = { medium: "med", maximum: "max", none: "off", minimal: "low" };
-  const norm = aliases[t] || t;
-  const i = scale.indexOf(norm);
+// The dial always shows the full canonical scale (so bar heights are consistent
+// across models); the level fills up to the agent's current effort.
+export function thinkScale(_model?: string): string[] {
+  return [...THINK_ORDER];
+}
+
+// A free-form `thinking` string → index into the canonical scale. Unknown → 0.
+export function thinkLevel(_model: string | undefined, thinking: string | undefined): number {
+  const i = THINK_ORDER.indexOf(normLevel(thinking) as (typeof THINK_ORDER)[number]);
   return i >= 0 ? i : 0;
 }
 
@@ -60,9 +65,9 @@ export interface ThinkBar { w: number; h: number; on: boolean; }
 export function thinkBars(model: string | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
   const scale = thinkScale(model);
   const n = scale.length;
-  const boxW = tier === "lead" ? 25 : 14;
-  const gap = tier === "lead" ? 2 : 1.3;
-  const barW = Math.max(2, (boxW - gap * (n - 1)) / n);
+  const boxW = tier === "lead" ? 34 : 20;
+  const gap = tier === "lead" ? 2 : 1.2;
+  const barW = Math.max(1.6, (boxW - gap * (n - 1)) / n);
   const maxH = tier === "lead" ? 9 : 7;
   const minH = tier === "lead" ? 3.5 : 2.5;
   const denom = n - 1 || 1;
@@ -73,8 +78,8 @@ export function thinkBars(model: string | undefined, level: number, tier: "lead"
   }));
 }
 
-export function thinkName(model: string | undefined, level: number): string {
-  return thinkScale(model)[level] || "off";
+export function thinkName(_model: string | undefined, level: number): string {
+  return THINK_ORDER[level] || "off";
 }
 
 // Single-letter neutral model badge, e.g. "opus" → "O". Never color-coded.

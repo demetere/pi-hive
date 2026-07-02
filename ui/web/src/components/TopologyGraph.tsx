@@ -243,7 +243,7 @@ function EdgeLine(props: { link: any; ox: number; sessionId: string; inactiveTea
 // left→right; filled up to the current level. Rendered inside the node card.
 function ThinkDial({ x, y, model, level, tier }: { x: number; y: number; model?: string; level: number; tier: "lead" | "worker" }) {
   const bars = thinkBars(model, level, tier);
-  const gap = tier === "lead" ? 2 : 1.3;
+  const gap = tier === "lead" ? 2 : 1.2;
   const maxH = tier === "lead" ? 9 : 7;
   let cx = x;
   return (
@@ -349,11 +349,13 @@ function Node(props: {
       <text className="g-cap" x={W - 12} y="63" textAnchor="end" style={{ fontSize: 7 }}>TOTAL</text>
       <text className="g-val" x={W - 12} y="78" textAnchor="end" style={{ fontSize: 10.5 }}>{fmtNum(tokens)}</text>
 
+      {/* collapse toggle rides the bottom-center edge, between the card and its
+          children — clear of the TOTAL/TOK-S/THINK stats. */}
       {hasKids && (
-        <g className="g-collapse" transform={`translate(${W - 26},${H - 24})`}
+        <g className="g-collapse" transform={`translate(${W / 2 - 8},${H - 8})`}
            onClick={(ev) => { ev.stopPropagation(); props.onToggle(data.name, hasKids); }}
            onPointerDown={(ev) => ev.stopPropagation()}>
-          <rect className="g-collapse-hit" x="-2" y="-2" width="22" height="22" rx="6" />
+          <rect className="g-collapse-hit" x="-4" y="-4" width="24" height="24" rx="8" />
           <circle r="8" cx="8" cy="8" />
           <text x="8" y="12" textAnchor="middle">{props.collapsed ? "+" : "−"}</text>
         </g>
