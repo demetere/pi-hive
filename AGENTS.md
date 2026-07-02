@@ -29,6 +29,10 @@ The extension must stay safe to install globally: it should do nothing unless th
 - Do not send telemetry to third-party services.
 - Keep Bun-specific code isolated to dashboard/server paths so the core extension can load even when Bun is unavailable.
 
+## Policy enforcement limits (accepted risk)
+
+- The bash policy classifies mutations by matching known commands (`rm`, `mv`, `git restore`, `find -delete`, `dd of=`, `rsync`, …). File changes made *through* a general-purpose interpreter — `node -e`, `python -c`, `sh script.sh`, `npm run <script>` — are **statically unpoliceable**: the enforcer cannot see writes hidden inside interpreted code. This is a known, accepted limit, stated in the worker operating-contract prompt so agents treat it as a trust boundary, not a loophole. Do not rely on the bash classifier to contain a hostile interpreter invocation.
+
 ## Repository hygiene
 
 - Do not commit `node_modules/`, `.tgz` package artifacts, runtime sessions, logs, or local telemetry databases.

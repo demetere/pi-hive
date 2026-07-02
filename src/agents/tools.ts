@@ -14,7 +14,7 @@ import {
 import { routeAgents } from "../engine/routing";
 import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
-import { currentChangeId } from "../engine/session";
+import { currentAgentName, currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
 import { approveGate, changeExists, createChange, listChangeIds, readPlanMeta, toChangeId } from "../engine/plan-store";
 
@@ -295,6 +295,16 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
         const p = params as { phase: string; changeId?: string; actor?: string; summary?: string };
+        // Approval authority (G5): only the visible main session (human-driven)
+        // may approve gates. A worker lead has this tool via TYPE_SCOPED_TOOL_NAMES
+        // but must not approve its own gates — reject when an ALS agent context is
+        // present (i.e. the caller is a delegated worker, not the main session).
+        const caller = currentAgentName();
+        const mainName = state.config?.orchestrator?.name;
+        const isMainSession = caller === "Orchestrator" || (!!mainName && caller === mainName);
+        if (!isMainSession) {
+          return { content: [{ type: "text", text: `${caller} may not approve planning gates. Only the main session (human-driven) approves gates; ask the user to approve in chat.` }], details: { ok: false, reason: "worker cannot approve" } };
+        }
         const changeId = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
         if (!changeId) {
           return { content: [{ type: "text", text: "No active change-id. Select or create a change first, or pass changeId." }], details: { ok: false } };
@@ -305,7 +315,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         }
         try {
           const meta = await approveGate(ctx.cwd, changeId, p.phase);
-          emitHiveEvent(state, "plan_approval", { changeId, phase: p.phase, approvedBy: "chat", actor: p.actor, summary: p.summary, nextPhase: meta.phase, status: meta.status }, callerName);
+          emitHiveEvent(state, "plan_approval", { changeId, phase: p.phase, approvedBy: "main", actor: p.actor, summary: p.summary, nextPhase: meta.phase, status: meta.status }, callerName);
           const ready = meta.status === "ready" ? " Change is ready for /hive-execute." : ` Next phase: ${meta.phase}.`;
           return { content: [{ type: "text", text: `Approved gate "${p.phase}" for change "${changeId}".${ready}` }], details: { ok: true, changeId, phase: p.phase, meta } };
         } catch (error) {

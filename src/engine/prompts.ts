@@ -33,6 +33,15 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
       break;
     }
   }
+  // Interpreter limitation (G1): file mutations run through a general-purpose
+  // interpreter (node -e, python -c, sh script.sh, npm run …) cannot be
+  // statically classified by the bash policy, so the domain/commit guards do NOT
+  // see them. Do not use interpreters to route around your write boundary — stay
+  // within your domain via edit/write and the named shell commands the policy
+  // recognizes. This is an explicit trust boundary, not a loophole.
+  if (type === "coder" || type === "tester") {
+    lines.push("Note: file changes made *through* an interpreter (`node -e`, `python -c`, `sh script.sh`, `npm run …`) are not visible to the domain enforcer. Do not use them to write outside your domain — use edit/write, which are enforced.");
+  }
   return lines.join("\n");
 }
 

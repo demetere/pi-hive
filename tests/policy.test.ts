@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classify } from "../src/engine/file-class.ts";
 import { checkPlannerStages, checkTypePolicy } from "../src/engine/policy.ts";
-import { enforceDomainForTool, isCommitCommand } from "../src/engine/domain.ts";
+import { bashMutationKind, enforceDomainForTool, isCommitCommand } from "../src/engine/domain.ts";
 import { runAsAgent } from "../src/engine/session.ts";
 import { buildOperatingContract } from "../src/engine/prompts.ts";
 import type { AgentRuntime, AgentType, HiveState, PlanStage } from "../src/core/types.ts";
@@ -26,9 +26,11 @@ function stateWith(runtimes: AgentRuntime[]): HiveState {
 
 // ── File classifier ────────────────────────────────────────────────────────
 
-test("classify resolves language-agnostic classes with tasks before spec/docs", () => {
-  assert.equal(classify(".pi/hive/plans/add-auth/tasks.md"), "tasks"); // tasks beats spec
-  assert.equal(classify("docs/tasks.md"), "tasks");                    // tasks beats docs
+test("classify resolves language-agnostic classes with spec before tasks/docs", () => {
+  // Decision 6 / G3: everything under the plan store is spec-class, incl. tasks.md,
+  // so an approved plan's task list is not coder-mutable by type policy.
+  assert.equal(classify(".pi/hive/plans/add-auth/tasks.md"), "spec"); // spec beats tasks in the plan store
+  assert.equal(classify("docs/tasks.md"), "tasks");                    // generic tasks.md OUTSIDE plans stays tasks
   assert.equal(classify(".pi/hive/plans/add-auth/proposal.md"), "spec");
   assert.equal(classify(".pi/hive/plans/add-auth/design.md"), "spec");
   assert.equal(classify("openspec/changes/x/proposal.md"), "spec");
@@ -129,6 +131,54 @@ test("isCommitCommand blocks publish/history creation, allows local ops", () => 
   // Not commit: word-boundary aware.
   assert.equal(isCommitCommand("git commit-graph write"), false);
   assert.equal(isCommitCommand("cat src/commit-helper.ts"), false);
+});
+
+test("isCommitCommand closes the parsing bypasses (G2)", () => {
+  // git global flags before the subcommand.
+  assert.equal(isCommitCommand("git -C /repo commit -m x"), true);
+  assert.equal(isCommitCommand("git -c user.name=x commit -m y"), true);
+  assert.equal(isCommitCommand("git --git-dir=/r/.git commit"), true);
+  assert.equal(isCommitCommand("git -C /repo -c a=b push"), true);
+  // command / env wrappers.
+  assert.equal(isCommitCommand("command git commit"), true);
+  assert.equal(isCommitCommand("env GIT_AUTHOR_NAME=x git commit"), true);
+  // bash -c "<str>" / sh -c recursion.
+  assert.equal(isCommitCommand('bash -c "git commit -m nested"'), true);
+  assert.equal(isCommitCommand("sh -c 'git push'"), true);
+  // Command substitution backstop.
+  assert.equal(isCommitCommand("echo $(git commit -m x)"), true);
+  // Still not commit: a -C flag pointing at a helper, no commit subcommand.
+  assert.equal(isCommitCommand("git -C /repo status"), false);
+});
+
+test("bashMutationKind classifies the previously-missed mutators (G1)", () => {
+  assert.equal(bashMutationKind("find . -name '*.tmp' -delete"), "delete");
+  assert.equal(bashMutationKind("git clean -fd"), "delete");
+  assert.equal(bashMutationKind("git restore src/app.ts"), "delete");
+  assert.equal(bashMutationKind("git checkout -- src/app.ts"), "delete");
+  assert.equal(bashMutationKind("dd if=/dev/zero of=out.bin bs=1M count=1"), "upsert");
+  assert.equal(bashMutationKind("rsync -a src/ dst/"), "upsert");
+  assert.equal(bashMutationKind("install -m 0755 bin/x /usr/local/bin/x"), "upsert");
+  assert.equal(bashMutationKind("awk -i inplace '{print}' file.txt"), "upsert");
+  // Read-only stays read.
+  assert.equal(bashMutationKind("git status"), "read");
+  assert.equal(bashMutationKind("find . -name '*.ts'"), "read");
+  assert.equal(bashMutationKind("cat file.txt"), "read");
+});
+
+test("file-class: plans/**/tasks.md is spec, not coder-writable tasks (G3)", () => {
+  // Decision 6: everything under the plan store is spec-class.
+  assert.equal(classify(".pi/hive/plans/add-auth/tasks.md"), "spec");
+  assert.equal(classify(".pi/hive/plans/add-auth/design.md"), "spec");
+  // A generic tasks.md OUTSIDE the plan store is still coder-writable tasks.
+  assert.equal(classify("docs/tasks.md"), "tasks");
+  assert.equal(classify("todo.md"), "tasks");
+});
+
+test("enforce: coder upsert on plans/**/tasks.md is denied by type policy (G3)", () => {
+  const state = stateWith([runtime("Coder", { agentType: "coder", domain: codeDomain })]);
+  const reason = block(state, "Coder", { toolName: "write", input: { path: ".pi/hive/plans/x/tasks.md" } });
+  assert.match(reason || "", /class=spec/);
 });
 
 // ── Both layers via enforceDomainForTool ───────────────────────────────────

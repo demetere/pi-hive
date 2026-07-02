@@ -132,8 +132,20 @@ export function extractBashPathTokens(command: string): string[] {
 }
 
 export function bashMutationKind(command: string): "delete" | "upsert" | "read" {
+  // Deletions. `find ... -delete`, `git clean` (removes untracked files), and
+  // the destructive git working-tree resets (`restore`, `checkout --`) join the
+  // classic rm/rmdir. NOTE: interpreters (node -e, python -c, sh x.sh, npm run)
+  // remain statically unpoliceable — documented as an accepted risk (G1).
   if (/\brm\b|\brmdir\b/.test(command)) return "delete";
-  if (/\b(mv|cp|touch|mkdir|chmod|chown|ln|truncate)\b|>>?|\bsed\s+-i\b|\bperl\s+-pi\b|\btee\b/.test(command)) return "upsert";
+  if (/\bfind\b[^\n]*\s-delete\b/.test(command)) return "delete";
+  if (/\bgit\s+clean\b/.test(command)) return "delete";
+  if (/\bgit\s+(restore|checkout)\b[^\n]*\s--(\s|$)/.test(command)) return "delete";
+  if (/\bgit\s+restore\b/.test(command)) return "delete";
+  // Upserts (create/overwrite). Adds dd of=, rsync, install, and awk -i inplace
+  // to the classic set; redirections and in-place editors stay.
+  if (/\b(mv|cp|touch|mkdir|chmod|chown|ln|truncate|rsync|install)\b|>>?|\bsed\s+-i\b|\bperl\s+-pi\b|\btee\b/.test(command)) return "upsert";
+  if (/\bdd\b[^\n]*\bof=/.test(command)) return "upsert";
+  if (/\bawk\b[^\n]*\s-i(\s|$)|\bawk\b[^\n]*inplace/.test(command)) return "upsert";
   return "read";
 }
 
@@ -151,31 +163,62 @@ export function isCommitCommand(command: string): boolean {
   // statement-by-statement; each statement's head token is what we classify.
   const statements = command.split(/(?:&&|\|\||;|\||\n)/);
   for (const statement of statements) {
-    const trimmed = statement.trim();
-    if (!trimmed) continue;
-    const tokens = trimmed.split(/\s+/);
-    const head = tokens[0];
-    const sub = tokens[1] || "";
-    // Bare git aliases that publish/create history.
-    if (/^(gc|gcm|gca|gp|gpf|gcam)$/.test(head)) return true;
-    if (head === "git") {
-      // `git commit` (incl. commit-graph guard), push, tag (create), am (apply).
-      if (sub === "commit") return true;
-      if (sub === "push") return true;
-      if (sub === "tag") return true;
-      if (sub === "am") return true;
-    }
-    if (head === "gh") {
-      // gh pr merge, gh release create.
-      if (sub === "pr" && /\bmerge\b/.test(trimmed)) return true;
-      if (sub === "release" && /\bcreate\b/.test(trimmed)) return true;
-    }
-    // Package publishes.
-    if (/^(npm|pnpm|yarn|bun)$/.test(head) && sub === "publish") return true;
-    // Release runners.
-    if ((head === "just" || head === "make") && /\brelease\b/.test(sub)) return true;
-    if (head === "npm" && sub === "run" && /\brelease\b/.test(tokens[2] || "")) return true;
+    if (statementIsCommit(statement)) return true;
   }
+  // Backstop: catch a commit hidden in a command substitution ($(...) / `...`)
+  // that the separator split above wouldn't surface as its own statement.
+  if (/(?:\$\(|`)[^)`]*\bgit\b(?:\s+-[Cc]\s+\S+|\s+-c\s+\S+|\s+--git-dir=\S+)*\s+commit\b/.test(command)) return true;
+  return false;
+}
+
+// Strip leading `env [VAR=val ...]` and `command` wrappers, and unwrap
+// `bash -c "<str>"` / `sh -c "<str>"` by recursing into the quoted string, then
+// classify the remaining head token.
+function statementIsCommit(statement: string): boolean {
+  let trimmed = statement.trim();
+  if (!trimmed) return false;
+
+  // Unwrap bash -c "<str>" / sh -c '<str>' — recurse into the inner command.
+  const shcMatch = trimmed.match(/^(?:command\s+)?(?:ba|z|da)?sh\s+-c\s+(['"])([\s\S]*)\1\s*$/);
+  if (shcMatch) return isCommitCommand(shcMatch[2]);
+
+  const tokens = trimmed.split(/\s+/);
+  let i = 0;
+  // Skip `command` / `env [VAR=val]...` prefixes.
+  while (i < tokens.length) {
+    if (tokens[i] === "command") { i++; continue; }
+    if (tokens[i] === "env") { i++; while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++; continue; }
+    break;
+  }
+  const head = tokens[i] || "";
+  const rest = tokens.slice(i + 1);
+
+  // Bare git aliases that publish/create history.
+  if (/^(gc|gcm|gca|gp|gpf|gcam)$/.test(head)) return true;
+  if (head === "git") {
+    // Skip git global flags before the subcommand: -C <dir>, -c <k=v>,
+    // --git-dir=…, --work-tree=…, -c/--namespace etc.
+    let j = 0;
+    while (j < rest.length) {
+      const tok = rest[j];
+      if (tok === "-C" || tok === "-c" || tok === "--namespace") { j += 2; continue; }
+      if (tok.startsWith("--git-dir=") || tok.startsWith("--work-tree=") || tok.startsWith("-c=")) { j++; continue; }
+      if (tok.startsWith("-")) { j++; continue; }
+      break;
+    }
+    const sub = rest[j] || "";
+    if (sub === "commit" || sub === "push" || sub === "tag" || sub === "am") return true;
+  }
+  if (head === "gh") {
+    const sub = rest[0] || "";
+    if (sub === "pr" && rest.includes("merge")) return true;
+    if (sub === "release" && rest.includes("create")) return true;
+  }
+  // Package publishes.
+  if (/^(npm|pnpm|yarn|bun)$/.test(head) && rest[0] === "publish") return true;
+  // Release runners.
+  if ((head === "just" || head === "make") && /\brelease\b/.test(rest[0] || "")) return true;
+  if (head === "npm" && rest[0] === "run" && /\brelease\b/.test(rest[1] || "")) return true;
   return false;
 }
 
@@ -200,7 +243,12 @@ function enforceTypePolicyForPath(runtime: AgentRuntime, ctx: ExtensionContext, 
 }
 
 export function enforceDomainForTool(state: HiveState, event: any, ctx: ExtensionContext): { block: true; reason: string } | undefined {
-  const runtime = state.runtimes.get(currentAgentName().toLowerCase());
+  // Use runtimeForCaller so the main session ("Orchestrator") resolves to its
+  // configured runtime instead of silently no-oping (G4). Zero behavior change
+  // today (the main session has no file/bash tools in plan/hive mode) — this
+  // removes the trap where a future main-session file tool would bypass domain
+  // enforcement.
+  const runtime = runtimeForCaller(state, currentAgentName());
   if (!runtime) return undefined;
 
   const toolName = String(event.toolName || "");
