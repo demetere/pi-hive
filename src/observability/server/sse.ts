@@ -3,8 +3,9 @@ import type { Subscriber } from "./types";
 export const encoder = new TextEncoder();
 export const subscribers = new Set<Subscriber>();
 
-export function eventFrame(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+export function eventFrame(event: string, data: unknown, id?: number): string {
+  const idLine = id != null ? `id: ${id}\n` : "";
+  return `${idLine}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 export function broadcastFrame(frame: string): void {
@@ -16,6 +17,12 @@ export function broadcastFrame(frame: string): void {
 
 export function broadcastEvent(event: string, data: unknown): void {
   broadcastFrame(eventFrame(event, data));
+}
+
+// Broadcast an event frame carrying its global cursor as the SSE `id:` — clients
+// track it to request an exact, lossless catch-up (?after=<id>) on reconnect (B5).
+export function broadcastEventWithId(event: string, data: unknown, id: number): void {
+  broadcastFrame(eventFrame(event, data, id));
 }
 
 export function broadcastPing(): void {

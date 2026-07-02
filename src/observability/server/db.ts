@@ -5,9 +5,14 @@ import { DB_PATH } from "./config";
 import type { HiveStateSnapshot, HiveTelemetryEvent } from "../../shared/telemetry";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const isNewDb = !fs.existsSync(DB_PATH) || fs.statSync(DB_PATH).size === 0;
 export const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 5000");
+// Enable incremental auto-vacuum on fresh DBs so the prune action (B6) can
+// reclaim space via PRAGMA incremental_vacuum. Legacy DBs keep their existing
+// vacuum mode (switching would require a full rewrite) and skip vacuuming.
+if (isNewDb) db.run("PRAGMA auto_vacuum = INCREMENTAL");
 db.run(`
 CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT PRIMARY KEY,
@@ -18,7 +23,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   state_file TEXT,
   first_ts TEXT,
   last_ts TEXT,
-  event_count INTEGER NOT NULL DEFAULT 0
+  event_count INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  topology_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
   event_id TEXT PRIMARY KEY,
@@ -35,6 +46,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_hive_events_session_seq ON events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_hive_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_hive_events_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_hive_events_session_ts ON events(session_id, ts, seq);
 CREATE TABLE IF NOT EXISTS states (
   session_id TEXT PRIMARY KEY,
   updated_at TEXT NOT NULL,
@@ -53,9 +65,11 @@ CREATE TABLE IF NOT EXISTS plan_verdicts (
   concerns_json TEXT,
   blockers_json TEXT,
   session_id    TEXT,
+  cwd           TEXT,
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_verdicts_change ON plan_verdicts(change_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_plan_verdicts_cwd ON plan_verdicts(cwd, change_id, created_at);
 CREATE TABLE IF NOT EXISTS plan_approvals (
   id           TEXT PRIMARY KEY,
   change_id    TEXT NOT NULL,
@@ -64,9 +78,11 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
   actor        TEXT,
   summary      TEXT,
   session_id   TEXT,
+  cwd          TEXT,
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_change ON plan_approvals(change_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_plan_approvals_cwd ON plan_approvals(cwd, change_id, created_at);
 CREATE TABLE IF NOT EXISTS plan_comments (
   id           TEXT PRIMARY KEY,
   change_id    TEXT NOT NULL,
@@ -77,9 +93,71 @@ CREATE TABLE IF NOT EXISTS plan_comments (
   annotation_type TEXT,
   original_text TEXT,
   session_id   TEXT,
+  cwd          TEXT,
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_comments_change ON plan_comments(change_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_plan_comments_cwd ON plan_comments(cwd, change_id, created_at);
+
+-- Typed projections of hot entities, materialized idempotently at ingest
+-- (event_id as row id). The raw events table stays the append-only audit log.
+CREATE TABLE IF NOT EXISTS delegations (
+  event_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  cwd TEXT,
+  agent TEXT,
+  parent TEXT,
+  started_at TEXT,
+  ended_at TEXT,
+  duration_ms INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  status TEXT,
+  stop_reason TEXT,
+  model TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_delegations_session ON delegations(session_id, ended_at);
+CREATE INDEX IF NOT EXISTS idx_delegations_cwd ON delegations(cwd, ended_at);
+CREATE TABLE IF NOT EXISTS tool_calls (
+  event_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  cwd TEXT,
+  agent TEXT,
+  tool_name TEXT,
+  tool_call_id TEXT,
+  args_preview TEXT,
+  result_preview TEXT,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  ended_at TEXT,
+  duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, started_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_unique ON tool_calls(session_id, tool_call_id);
+CREATE TABLE IF NOT EXISTS messages (
+  event_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  cwd TEXT,
+  role TEXT,
+  agent TEXT,
+  text TEXT,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  ts TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, ts);
+
+-- Incremental-ingest byte offsets so boot resumes each JSONL where it left off
+-- instead of replaying from 0 (B4). Persisted in the same transaction as the
+-- batch it covers.
+CREATE TABLE IF NOT EXISTS ingest_sources (
+  path TEXT PRIMARY KEY,
+  session_id TEXT,
+  offset INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `);
 
 // Per-project display-name overrides, keyed by working directory. Lets the user
@@ -93,9 +171,22 @@ CREATE TABLE IF NOT EXISTS project_overrides (
 )
 `);
 
-// Lightweight migrations for existing local dashboard DBs.
+// Lightweight migrations for existing local dashboard DBs. Each ALTER is a
+// no-op (throws, caught) once the column exists, so re-running on every boot is
+// idempotent.
 try { db.run(`ALTER TABLE plan_comments ADD COLUMN annotation_type TEXT`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE plan_comments ADD COLUMN original_text TEXT`); } catch { /* column already exists */ }
+// B1: project-scope the plan tables.
+try { db.run(`ALTER TABLE plan_verdicts ADD COLUMN cwd TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE plan_approvals ADD COLUMN cwd TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE plan_comments ADD COLUMN cwd TEXT`); } catch { /* column already exists */ }
+// B2: authoritative token/cost/topology columns on sessions.
+try { db.run(`ALTER TABLE sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN topology_hash TEXT`); } catch { /* column already exists */ }
 
 export const insertEvent = db.query(`
   INSERT OR IGNORE INTO events
@@ -104,6 +195,10 @@ export const insertEvent = db.query(`
     ($event_id, $session_id, $seq, $ts, $type, $actor, $pid, $cwd, $telemetry_log, $payload_json)
 `);
 
+// Per-event session upsert. event_count uses arithmetic (+1) instead of the old
+// correlated (SELECT COUNT(*) …) subquery — the latter made boot replay of a
+// long JSONL quadratic. Callers MUST run this only for genuinely new events
+// (behind the INSERT-OR-IGNORE dup check) so the increment stays accurate.
 export const upsertSession = db.query(`
   INSERT INTO sessions
     (session_id, cwd, session_dir, telemetry_log, conversation_log, state_file, first_ts, last_ts, event_count)
@@ -117,7 +212,35 @@ export const upsertSession = db.query(`
     state_file = COALESCE(excluded.state_file, sessions.state_file),
     first_ts = CASE WHEN sessions.first_ts IS NULL OR excluded.first_ts < sessions.first_ts THEN excluded.first_ts ELSE sessions.first_ts END,
     last_ts = CASE WHEN sessions.last_ts IS NULL OR excluded.last_ts > sessions.last_ts THEN excluded.last_ts ELSE sessions.last_ts END,
-    event_count = (SELECT COUNT(*) FROM events WHERE session_id = excluded.session_id)
+    event_count = sessions.event_count + 1
+`);
+
+// Authoritative token/cost totals for a session, summed across all its agents
+// from the latest state snapshot (B2). Kept separate from the per-event upsert
+// so counters reflect the snapshot's ground truth, not per-event guesses. Never
+// inserts a bare row — a session always exists via the event path first; this
+// only updates an existing row (no-op if the session hasn't been seen yet).
+export const updateSessionStats = db.query(`
+  UPDATE sessions SET
+    input_tokens = $input_tokens,
+    output_tokens = $output_tokens,
+    cache_read_tokens = $cache_read_tokens,
+    cache_write_tokens = $cache_write_tokens,
+    cost_usd = $cost_usd,
+    topology_hash = COALESCE($topology_hash, topology_hash),
+    last_ts = CASE WHEN last_ts IS NULL OR $updated_at > last_ts THEN $updated_at ELSE last_ts END,
+    cwd = COALESCE(cwd, $cwd),
+    session_dir = COALESCE(session_dir, $session_dir),
+    telemetry_log = COALESCE(telemetry_log, $telemetry_log)
+  WHERE session_id = $session_id
+`);
+
+// Ensure a session row exists (used before updateSessionStats when a snapshot
+// arrives before any event). Bumps timestamps but not event_count.
+export const ensureSession = db.query(`
+  INSERT INTO sessions (session_id, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count)
+  VALUES ($session_id, $cwd, $session_dir, $telemetry_log, $ts, $ts, 0)
+  ON CONFLICT(session_id) DO NOTHING
 `);
 
 export const upsertState = db.query(`
@@ -134,6 +257,10 @@ export const upsertState = db.query(`
 const deleteEventsStmt = db.query(`DELETE FROM events WHERE session_id = $id`);
 const deleteStateStmt = db.query(`DELETE FROM states WHERE session_id = $id`);
 const deleteSessionStmt = db.query(`DELETE FROM sessions WHERE session_id = $id`);
+const deleteDelegationsStmt = db.query(`DELETE FROM delegations WHERE session_id = $id`);
+const deleteToolCallsStmt = db.query(`DELETE FROM tool_calls WHERE session_id = $id`);
+const deleteMessagesStmt = db.query(`DELETE FROM messages WHERE session_id = $id`);
+const deleteIngestSourcesStmt = db.query(`DELETE FROM ingest_sources WHERE session_id = $id`);
 
 export function dbEventRow(event: HiveTelemetryEvent) {
   return {
@@ -179,14 +306,51 @@ export function rowToEvent(row: any): HiveTelemetryEvent {
   };
 }
 
-export function loadPersistedEvents(limit: number): HiveTelemetryEvent[] {
-  const eventRows = db.query(`
-    SELECT event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json
-    FROM events
-    ORDER BY ts DESC
-    LIMIT $limit
-  `).all({ $limit: limit }) as any[];
-  return eventRows.map(rowToEvent).reverse();
+// The events table's rowid is a global monotonic cursor: it doubles as the SSE
+// resume token, so reconnect catch-up is exact (B5). rowToEvent enriches with
+// it when present.
+function rowToEventWithCursor(row: any): HiveTelemetryEvent & { cursor: number } {
+  return { ...rowToEvent(row), cursor: Number(row.rowid) };
+}
+
+const EVENT_COLS = `rowid, event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json`;
+
+// Paginated, cursor-ordered event reads (B5). Replaces the boot-time
+// load-everything-into-memory path. `after` is an events.rowid; results are
+// ordered by rowid so the cursor is stable across restarts.
+export interface EventQuery { session?: string; cwd?: string; type?: string; after?: number; limit?: number; }
+
+export function queryEvents(q: EventQuery): Array<HiveTelemetryEvent & { cursor: number }> {
+  const where: string[] = [];
+  const params: any = {};
+  if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
+  if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
+  if (q.cwd) { where.push(`cwd = $cwd`); params.$cwd = q.cwd; }
+  if (q.type) { where.push(`type = $type`); params.$type = q.type; }
+  const limit = Math.min(Math.max(1, q.limit || 1000), 5000);
+  params.$limit = limit;
+  const rows = db.query(
+    `SELECT ${EVENT_COLS} FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ASC LIMIT $limit`,
+  ).all(params) as any[];
+  return rows.map(rowToEventWithCursor);
+}
+
+// The most recent N events by cursor (initial page load, newest first re-sorted
+// ascending for the client's append model).
+export function recentEvents(limit: number, filter: { session?: string; cwd?: string } = {}): Array<HiveTelemetryEvent & { cursor: number }> {
+  const where: string[] = [];
+  const params: any = { $limit: Math.min(Math.max(1, limit), 5000) };
+  if (filter.session) { where.push(`session_id = $session`); params.$session = filter.session; }
+  if (filter.cwd) { where.push(`cwd = $cwd`); params.$cwd = filter.cwd; }
+  const rows = db.query(
+    `SELECT ${EVENT_COLS} FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid DESC LIMIT $limit`,
+  ).all(params) as any[];
+  return rows.map(rowToEventWithCursor).reverse();
+}
+
+export function maxEventCursor(): number {
+  const row = db.query(`SELECT MAX(rowid) AS m FROM events`).get() as any;
+  return Number(row?.m || 0);
 }
 
 export function loadPersistedStates(): HiveStateSnapshot[] {
@@ -206,33 +370,231 @@ export function deleteSessionRows(ids: string[]): void {
     for (const id of list) {
       deleteEventsStmt.run({ $id: id });
       deleteStateStmt.run({ $id: id });
+      deleteDelegationsStmt.run({ $id: id });
+      deleteToolCallsStmt.run({ $id: id });
+      deleteMessagesStmt.run({ $id: id });
+      deleteIngestSourcesStmt.run({ $id: id });
       deleteSessionStmt.run({ $id: id });
     }
   });
   tx(ids);
 }
 
+// ── Incremental-ingest offsets (B4) ──────────────────────────────────────────
+
+const upsertIngestSourceStmt = db.query(`
+  INSERT INTO ingest_sources (path, session_id, offset, updated_at)
+  VALUES ($path, $session_id, $offset, $updated_at)
+  ON CONFLICT(path) DO UPDATE SET
+    session_id = COALESCE(excluded.session_id, ingest_sources.session_id),
+    offset = excluded.offset,
+    updated_at = excluded.updated_at
+`);
+
+export function getIngestOffset(sourcePath: string): number {
+  const row = db.query(`SELECT offset FROM ingest_sources WHERE path = $path`).get({ $path: sourcePath }) as any;
+  return Number(row?.offset || 0);
+}
+
+export function setIngestOffset(sourcePath: string, offset: number, sessionId: string | undefined, updatedAt: string): void {
+  upsertIngestSourceStmt.run({ $path: sourcePath, $session_id: sessionId ?? null, $offset: offset, $updated_at: updatedAt });
+}
+
+// ── Typed projections: delegations / tool_calls / messages (B3) ───────────────
+
+const insertDelegationStartStmt = db.query(`
+  INSERT INTO delegations (event_id, session_id, cwd, agent, parent, started_at, model)
+  VALUES ($event_id, $session_id, $cwd, $agent, $parent, $started_at, $model)
+  ON CONFLICT(event_id) DO NOTHING
+`);
+
+// A delegation_end is a distinct event_id from its start, so end completes the
+// row keyed by (session_id, agent, latest open start). We match on the most
+// recent start row for the agent that has no ended_at yet.
+const completeDelegationStmt = db.query(`
+  UPDATE delegations SET
+    ended_at = $ended_at,
+    duration_ms = $duration_ms,
+    input_tokens = $input_tokens,
+    output_tokens = $output_tokens,
+    cache_read_tokens = $cache_read_tokens,
+    cache_write_tokens = $cache_write_tokens,
+    cost_usd = $cost_usd,
+    status = $status,
+    stop_reason = $stop_reason,
+    parent = COALESCE($parent, parent),
+    model = COALESCE($model, model)
+  WHERE event_id = (
+    SELECT event_id FROM delegations
+    WHERE session_id = $session_id AND agent = $agent AND ended_at IS NULL
+    ORDER BY started_at DESC LIMIT 1
+  )
+`);
+
+// Fallback: a delegation_end with no matching open start (start lost/pruned)
+// inserts a standalone completed row keyed by its own event_id.
+const insertDelegationEndStmt = db.query(`
+  INSERT INTO delegations
+    (event_id, session_id, cwd, agent, parent, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, status, stop_reason, model)
+  VALUES
+    ($event_id, $session_id, $cwd, $agent, $parent, $ended_at, $duration_ms, $input_tokens, $output_tokens, $cache_read_tokens, $cache_write_tokens, $cost_usd, $status, $stop_reason, $model)
+  ON CONFLICT(event_id) DO NOTHING
+`);
+
+const insertToolStartStmt = db.query(`
+  INSERT INTO tool_calls (event_id, session_id, cwd, agent, tool_name, tool_call_id, args_preview, started_at)
+  VALUES ($event_id, $session_id, $cwd, $agent, $tool_name, $tool_call_id, $args_preview, $started_at)
+  ON CONFLICT(event_id) DO NOTHING
+`);
+
+const completeToolStmt = db.query(`
+  UPDATE tool_calls SET
+    result_preview = $result_preview,
+    is_error = $is_error,
+    ended_at = $ended_at,
+    duration_ms = COALESCE($duration_ms, duration_ms)
+  WHERE session_id = $session_id AND tool_call_id = $tool_call_id
+`);
+
+const insertMessageStmt = db.query(`
+  INSERT INTO messages (event_id, session_id, cwd, role, agent, text, truncated, ts)
+  VALUES ($event_id, $session_id, $cwd, $role, $agent, $text, $truncated, $ts)
+  ON CONFLICT(event_id) DO NOTHING
+`);
+
+export function materializeDelegationStart(input: { eventId: string; sessionId: string; cwd?: string; agent?: string; parent?: string; startedAt: string; model?: string }): void {
+  insertDelegationStartStmt.run({
+    $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null,
+    $agent: input.agent ?? null, $parent: input.parent ?? null, $started_at: input.startedAt, $model: input.model ?? null,
+  });
+}
+
+export function materializeDelegationEnd(input: {
+  eventId: string; sessionId: string; cwd?: string; agent?: string; parent?: string; endedAt: string; durationMs?: number;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number; status?: string; stopReason?: string; model?: string;
+}): void {
+  const params = {
+    $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null, $agent: input.agent ?? null,
+    $parent: input.parent ?? null, $ended_at: input.endedAt, $duration_ms: input.durationMs ?? null,
+    $input_tokens: input.inputTokens, $output_tokens: input.outputTokens,
+    $cache_read_tokens: input.cacheReadTokens, $cache_write_tokens: input.cacheWriteTokens,
+    $cost_usd: input.costUsd, $status: input.status ?? null, $stop_reason: input.stopReason ?? null, $model: input.model ?? null,
+  };
+  const res = completeDelegationStmt.run(params);
+  if (res.changes === 0) insertDelegationEndStmt.run(params);
+}
+
+export function materializeToolStart(input: { eventId: string; sessionId: string; cwd?: string; agent?: string; toolName?: string; toolCallId?: string; argsPreview?: string; startedAt: string }): void {
+  insertToolStartStmt.run({
+    $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null, $agent: input.agent ?? null,
+    $tool_name: input.toolName ?? null, $tool_call_id: input.toolCallId ?? null, $args_preview: input.argsPreview ?? null, $started_at: input.startedAt,
+  });
+}
+
+export function materializeToolEnd(input: { sessionId: string; toolCallId?: string; resultPreview?: string; isError: boolean; endedAt: string; durationMs?: number }): void {
+  if (!input.toolCallId) return;
+  completeToolStmt.run({
+    $session_id: input.sessionId, $tool_call_id: input.toolCallId, $result_preview: input.resultPreview ?? null,
+    $is_error: input.isError ? 1 : 0, $ended_at: input.endedAt, $duration_ms: input.durationMs ?? null,
+  });
+}
+
+export function materializeMessage(input: { eventId: string; sessionId: string; cwd?: string; role?: string; agent?: string; text?: string; truncated: boolean; ts: string }): void {
+  insertMessageStmt.run({
+    $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null, $role: input.role ?? null,
+    $agent: input.agent ?? null, $text: input.text ?? null, $truncated: input.truncated ? 1 : 0, $ts: input.ts,
+  });
+}
+
+export function queryDelegations(q: { session?: string; cwd?: string; after?: number; limit?: number }): any[] {
+  const where: string[] = ["ended_at IS NOT NULL"];
+  const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
+  if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
+  if (q.cwd) { where.push(`cwd = $cwd`); params.$cwd = q.cwd; }
+  const rows = db.query(`SELECT rowid, * FROM delegations WHERE ${where.join(" AND ")} ORDER BY rowid ASC LIMIT $limit`).all(params) as any[];
+  return rows.map((r) => ({
+    cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, parent: r.parent,
+    startedAt: r.started_at, endedAt: r.ended_at, durationMs: r.duration_ms,
+    inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens,
+    costUsd: r.cost_usd, status: r.status, stopReason: r.stop_reason, model: r.model,
+  }));
+}
+
+export function queryToolCalls(q: { session?: string; after?: number; limit?: number }): any[] {
+  const where: string[] = [];
+  const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
+  if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
+  if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
+  const rows = db.query(`SELECT rowid, * FROM tool_calls ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ASC LIMIT $limit`).all(params) as any[];
+  return rows.map((r) => ({
+    cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, toolName: r.tool_name, toolCallId: r.tool_call_id,
+    argsPreview: r.args_preview, resultPreview: r.result_preview, isError: !!r.is_error, startedAt: r.started_at, endedAt: r.ended_at, durationMs: r.duration_ms,
+  }));
+}
+
+// ── SQL-backed session summaries (B2) ─────────────────────────────────────────
+
+export function querySessionSummaries(): any[] {
+  const rows = db.query(`
+    SELECT session_id, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count,
+           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, topology_hash
+    FROM sessions
+    ORDER BY last_ts DESC
+  `).all() as any[];
+  return rows;
+}
+
+export function knownCwds(): string[] {
+  const rows = db.query(`SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL`).all() as any[];
+  return rows.map((r) => r.cwd);
+}
+
+// ── Prune (B6): explicit, age-based cleanup on demand ─────────────────────────
+
+export function pruneOlderThan(cutoffIso: string): { events: number; sessions: number } {
+  let events = 0;
+  const sessionsToDelete: string[] = [];
+  const tx = db.transaction(() => {
+    // Sessions whose entire history predates the cutoff are removed outright.
+    const staleSessions = db.query(`SELECT session_id FROM sessions WHERE last_ts IS NOT NULL AND last_ts < $cutoff`).all({ $cutoff: cutoffIso }) as any[];
+    for (const s of staleSessions) sessionsToDelete.push(s.session_id);
+    // Older events in still-active sessions are trimmed with their projections.
+    const before = db.query(`SELECT COUNT(*) AS n FROM events WHERE ts < $cutoff`).get({ $cutoff: cutoffIso }) as any;
+    events = Number(before?.n || 0);
+    db.run(`DELETE FROM delegations WHERE ended_at IS NOT NULL AND ended_at < $cutoff`, { $cutoff: cutoffIso } as any);
+    db.run(`DELETE FROM tool_calls WHERE started_at IS NOT NULL AND started_at < $cutoff`, { $cutoff: cutoffIso } as any);
+    db.run(`DELETE FROM messages WHERE ts IS NOT NULL AND ts < $cutoff`, { $cutoff: cutoffIso } as any);
+    db.run(`DELETE FROM events WHERE ts < $cutoff`, { $cutoff: cutoffIso } as any);
+  });
+  tx();
+  if (sessionsToDelete.length) deleteSessionRows(sessionsToDelete);
+  // Reclaim space where auto_vacuum=INCREMENTAL is enabled (new DBs); a no-op on
+  // legacy DBs created without it.
+  try { db.run(`PRAGMA incremental_vacuum`); } catch { /* legacy DB: skip vacuum */ }
+  return { events, sessions: sessionsToDelete.length };
+}
+
 // ── Plan-store typed tables (verdicts / approvals / comments) ────────────────
 
 const insertPlanVerdictStmt = db.query(`
   INSERT OR IGNORE INTO plan_verdicts
-    (id, change_id, reviewer, verdict, summary, evidence_json, concerns_json, blockers_json, session_id, created_at)
+    (id, change_id, reviewer, verdict, summary, evidence_json, concerns_json, blockers_json, session_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $reviewer, $verdict, $summary, $evidence_json, $concerns_json, $blockers_json, $session_id, $created_at)
+    ($id, $change_id, $reviewer, $verdict, $summary, $evidence_json, $concerns_json, $blockers_json, $session_id, $cwd, $created_at)
 `);
 
 const insertPlanApprovalStmt = db.query(`
   INSERT OR IGNORE INTO plan_approvals
-    (id, change_id, phase, approved_by, actor, summary, session_id, created_at)
+    (id, change_id, phase, approved_by, actor, summary, session_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $phase, $approved_by, $actor, $summary, $session_id, $created_at)
+    ($id, $change_id, $phase, $approved_by, $actor, $summary, $session_id, $cwd, $created_at)
 `);
 
 const insertPlanCommentStmt = db.query(`
   INSERT OR IGNORE INTO plan_comments
-    (id, change_id, file, anchor, author, body, annotation_type, original_text, session_id, created_at)
+    (id, change_id, file, anchor, author, body, annotation_type, original_text, session_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $file, $anchor, $author, $body, $annotation_type, $original_text, $session_id, $created_at)
+    ($id, $change_id, $file, $anchor, $author, $body, $annotation_type, $original_text, $session_id, $cwd, $created_at)
 `);
 
 function jsonArray(value: unknown): string {
@@ -249,6 +611,7 @@ export interface PlanVerdictInput {
   concerns?: unknown;
   blockers?: unknown;
   sessionId?: string;
+  cwd?: string;
   createdAt: string;
 }
 
@@ -263,6 +626,7 @@ export function insertPlanVerdict(input: PlanVerdictInput): void {
     $concerns_json: jsonArray(input.concerns),
     $blockers_json: jsonArray(input.blockers),
     $session_id: input.sessionId ?? null,
+    $cwd: input.cwd ?? null,
     $created_at: input.createdAt,
   });
 }
@@ -275,6 +639,7 @@ export interface PlanApprovalInput {
   actor?: string;
   summary?: string;
   sessionId?: string;
+  cwd?: string;
   createdAt: string;
 }
 
@@ -287,6 +652,7 @@ export function insertPlanApproval(input: PlanApprovalInput): void {
     $actor: input.actor ?? null,
     $summary: input.summary ?? null,
     $session_id: input.sessionId ?? null,
+    $cwd: input.cwd ?? null,
     $created_at: input.createdAt,
   });
 }
@@ -301,6 +667,7 @@ export interface PlanCommentInput {
   annotationType?: string;
   originalText?: string;
   sessionId?: string;
+  cwd?: string;
   createdAt: string;
 }
 
@@ -315,6 +682,7 @@ export function insertPlanComment(input: PlanCommentInput): void {
     $annotation_type: input.annotationType ?? null,
     $original_text: input.originalText ?? null,
     $session_id: input.sessionId ?? null,
+    $cwd: input.cwd ?? null,
     $created_at: input.createdAt,
   });
 }
@@ -343,18 +711,30 @@ function verdictRow(row: any) {
   };
 }
 
-export function listVerdicts(changeId: string) {
-  const rows = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id ORDER BY created_at ASC`).all({ $id: changeId }) as any[];
+// Plan reads are project-scoped by cwd (B1). NULL cwd is treated as a wildcard
+// for one release so pre-migration rows (which have no cwd) stay visible. Pass
+// cwd = undefined to read across all projects (legacy behavior).
+function cwdFilter(cwd: string | undefined, params: any): string {
+  if (!cwd) return "";
+  params.$cwd = cwd;
+  return ` AND (cwd = $cwd OR cwd IS NULL)`;
+}
+
+export function listVerdicts(changeId: string, cwd?: string) {
+  const params: any = { $id: changeId };
+  const rows = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
   return rows.map(verdictRow);
 }
 
-export function latestVerdict(changeId: string) {
-  const row = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id ORDER BY created_at DESC LIMIT 1`).get({ $id: changeId }) as any;
+export function latestVerdict(changeId: string, cwd?: string) {
+  const params: any = { $id: changeId };
+  const row = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at DESC LIMIT 1`).get(params) as any;
   return row ? verdictRow(row) : null;
 }
 
-export function listApprovals(changeId: string) {
-  const rows = db.query(`SELECT * FROM plan_approvals WHERE change_id = $id ORDER BY created_at ASC`).all({ $id: changeId }) as any[];
+export function listApprovals(changeId: string, cwd?: string) {
+  const params: any = { $id: changeId };
+  const rows = db.query(`SELECT * FROM plan_approvals WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
   return rows.map((row) => ({
     id: row.id,
     changeId: row.change_id,
@@ -367,8 +747,9 @@ export function listApprovals(changeId: string) {
   }));
 }
 
-export function listComments(changeId: string) {
-  const rows = db.query(`SELECT * FROM plan_comments WHERE change_id = $id ORDER BY created_at ASC`).all({ $id: changeId }) as any[];
+export function listComments(changeId: string, cwd?: string) {
+  const params: any = { $id: changeId };
+  const rows = db.query(`SELECT * FROM plan_comments WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
   return rows.map((row) => ({
     id: row.id,
     changeId: row.change_id,

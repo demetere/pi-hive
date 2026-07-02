@@ -10,4 +10,3 @@ export const DB_PATH = process.env.HIVE_TELEMETRY_DB || path.join(HIVE_GLOBAL_DI
 export const CONVERSATION_LOG = process.env.HIVE_CONVERSATION_LOG || "";
 export const BOOT_SESSION_ID = process.env.HIVE_SESSION_ID || "global";
 export const PROJECT_CWD = process.env.HIVE_PROJECT_CWD || process.cwd();
-export const MAX_EVENTS = 20_000;

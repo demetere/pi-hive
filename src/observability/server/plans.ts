@@ -65,7 +65,7 @@ export function listPlans(cwd: string): PlanSummary[] {
       owner: meta.owner,
       sessionId: meta.sessionId,
       artifacts: listArtifacts(cwd, changeId),
-      latestVerdict: latestVerdict(changeId),
+      latestVerdict: latestVerdict(changeId, cwd),
     };
   });
 }
@@ -83,9 +83,9 @@ export function planDetail(cwd: string, changeId: string) {
     phase,
     gates,
     artifacts: listArtifacts(cwd, changeId),
-    verdicts: listVerdicts(changeId),
-    approvals: listApprovals(changeId),
-    comments: listComments(changeId),
+    verdicts: listVerdicts(changeId, cwd),
+    approvals: listApprovals(changeId, cwd),
+    comments: listComments(changeId, cwd),
   };
 }
 
@@ -115,7 +115,7 @@ export function addComment(cwd: string, changeId: string, body: { file?: string;
   const annotationType = body.annotationType ? String(body.annotationType) : undefined;
   const originalText = body.originalText ? String(body.originalText) : undefined;
   const createdAt = new Date().toISOString();
-  insertPlanComment({ id, changeId, file, anchor, author, body: text, annotationType, originalText, createdAt });
+  insertPlanComment({ id, changeId, file, anchor, author, body: text, annotationType, originalText, cwd, createdAt });
   enqueueDashboardAction(cwd, changeId, { type: "plan_comment", id, changeId, file, anchor, body: text, annotationType, originalText });
   return { ok: true, id };
 }
@@ -166,6 +166,7 @@ export function addApproval(cwd: string, changeId: string, body: { phase?: strin
       approvedBy: "ui",
       actor: body.actor ? String(body.actor) : undefined,
       summary: body.summary ? String(body.summary) : undefined,
+      cwd,
       createdAt,
     });
     if (nextMeta.advanced) enqueueDashboardAction(cwd, changeId, { type: "plan_approval", id, changeId, phase, nextPhase: nextMeta.phase, status: nextMeta.status });

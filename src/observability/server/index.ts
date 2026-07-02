@@ -4,11 +4,15 @@ import { BOOT_SESSION_ID, CONVERSATION_LOG, DB_PATH, HOST, PORT, REGISTRY_PATH }
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
 import type { Subscriber } from "./types";
 import {
-  allEvents,
   allSnapshots,
   deleteProject,
   deleteSessions,
+  maxEventCursor,
+  queryDelegations,
+  queryEvents,
+  queryToolCalls,
   readAgentLog,
+  recentEvents,
   recentThinking,
   sessionSummaries,
   sourcePaths,
@@ -115,12 +119,40 @@ Bun.serve({
       mode: "global",
       boot_session_id: BOOT_SESSION_ID,
       sessions: sessionSummaries().length,
-      events: allEvents().length,
+      events: maxEventCursor(),
+      cursor: maxEventCursor(),
       registry: REGISTRY_PATH,
       db: DB_PATH,
       sources: sourcePaths(),
     });
-    if (url.pathname === "/events") return json({ events: allEvents() });
+    // Paginated, cursor-ordered event feed (B5). `?after=<cursor>` returns only
+    // newer events (lossless SSE catch-up); no more single 20k-event body.
+    // Omitting `after` returns the most recent `limit` events (initial load).
+    if (url.pathname === "/events") {
+      const session = url.searchParams.get("session") || undefined;
+      const cwd = url.searchParams.get("cwd") || undefined;
+      const type = url.searchParams.get("type") || undefined;
+      const limit = Number(url.searchParams.get("limit") || 1000);
+      const afterParam = url.searchParams.get("after");
+      const events = afterParam != null || type
+        ? queryEvents({ session, cwd, type, after: afterParam != null ? Number(afterParam) : undefined, limit })
+        : recentEvents(limit, { session, cwd });
+      return json({ events, cursor: maxEventCursor() });
+    }
+    // Single source for cost/token series (E2) and per-session tool detail.
+    if (url.pathname === "/delegations") {
+      const session = url.searchParams.get("session") || undefined;
+      const cwd = url.searchParams.get("cwd") || undefined;
+      const after = url.searchParams.get("after");
+      const limit = Number(url.searchParams.get("limit") || 1000);
+      return json({ delegations: queryDelegations({ session, cwd, after: after != null ? Number(after) : undefined, limit }) });
+    }
+    if (url.pathname === "/tool-calls") {
+      const session = url.searchParams.get("session") || undefined;
+      const after = url.searchParams.get("after");
+      const limit = Number(url.searchParams.get("limit") || 1000);
+      return json({ toolCalls: queryToolCalls({ session, after: after != null ? Number(after) : undefined, limit }) });
+    }
     if (url.pathname === "/states") return json({ states: allSnapshots() });
     if (url.pathname === "/sessions") return json({ sessions: sessionSummaries() });
 
@@ -151,7 +183,7 @@ Bun.serve({
         start(controller) {
           sub = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH })));
+          controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH, cursor: maxEventCursor() })));
         },
         cancel() { if (sub) subscribers.delete(sub); },
       }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" } });

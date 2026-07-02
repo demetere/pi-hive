@@ -5,35 +5,49 @@ import { projectName } from "../../shared/project";
 import { loadConfig } from "../../core/config";
 import type { AgentConfig, HiveTeam } from "../../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
-import { BOOT_SESSION_ID, CONVERSATION_LOG, MAX_EVENTS, PROJECT_CWD, REGISTRY_PATH, SINGLE_LOG_PATH } from "./config";
+import { BOOT_SESSION_ID, CONVERSATION_LOG, PROJECT_CWD, REGISTRY_PATH, SINGLE_LOG_PATH } from "./config";
 import {
+  db,
   dbEventRow,
   dbSessionRowFromEvent,
   deleteSessionRows,
+  ensureSession,
+  getIngestOffset,
   insertEvent,
   insertPlanApproval,
   insertPlanComment,
   insertPlanVerdict,
-  loadPersistedEvents,
   loadPersistedStates,
+  materializeDelegationEnd,
+  materializeDelegationStart,
+  materializeMessage,
+  materializeToolEnd,
+  materializeToolStart,
+  maxEventCursor,
+  querySessionSummaries,
+  recentEvents,
+  setIngestOffset,
+  updateSessionStats,
   upsertSession,
   upsertState,
 } from "./db";
-import { broadcastEvent } from "./sse";
+import { broadcastEvent, broadcastEventWithId } from "./sse";
 import type { Source } from "./types";
 
 const sources = new Map<string, Source>();
+// Hot cache: latest snapshot per session, for contextPct/lastWork ephemera and
+// per-session lookups (agentLogPath/recentThinking). Nothing the UI renders as
+// history lives only here — SQL is the source of truth (Decision 5).
 const snapshots = new Map<string, HiveStateSnapshot>();
-let events: HiveTelemetryEvent[] = [];
 let started = false;
 
 export function sourcePaths(): string[] {
   return Array.from(sources.keys());
 }
 
-export function allEvents(): HiveTelemetryEvent[] {
-  return events;
-}
+// Cursor-ordered event reads, SQL-backed and paginated (B5). No in-memory
+// events array remains; callers pass a cursor to page forward.
+export { queryEvents, recentEvents, queryDelegations, queryToolCalls, maxEventCursor } from "./db";
 
 export function allSnapshots(): HiveStateSnapshot[] {
   return Array.from(snapshots.values()).map(enrichSnapshotTopologies);
@@ -48,7 +62,9 @@ export function addSource(logPath: string, meta: TelemetryRegistryRow = {}) {
     return;
   }
   const statePath = path.resolve(meta.state_file || path.join(path.dirname(abs), "hive-state.json"));
-  sources.set(abs, { logPath: abs, offset: 0, meta, statePath, stateMtimeMs: 0 });
+  // Resume from the persisted byte offset (B4) so boot re-reads only new bytes
+  // instead of replaying the whole JSONL. INSERT OR IGNORE heals any overlap.
+  sources.set(abs, { logPath: abs, offset: getIngestOffset(abs), meta, statePath, stateMtimeMs: 0 });
   try {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.closeSync(fs.openSync(abs, "a"));
@@ -80,18 +96,37 @@ export function readSource(logPath: string) {
   const source = sources.get(path.resolve(logPath));
   if (!source || !fs.existsSync(source.logPath)) return;
   const stat = fs.statSync(source.logPath);
+  // Truncation/rewrite (offset past EOF) resets to 0; INSERT OR IGNORE heals the
+  // re-read idempotently.
   if (stat.size < source.offset) source.offset = 0;
   if (stat.size === source.offset) return;
   const fd = fs.openSync(source.logPath, "r");
+  let endOffset = source.offset;
   try {
     const len = stat.size - source.offset;
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, source.offset);
-    source.offset = stat.size;
+    endOffset = stat.size;
+    const parsed: HiveTelemetryEvent[] = [];
     for (const line of buf.toString("utf8").split("\n")) {
       if (!line.trim()) continue;
-      try { addEvent(enrichEvent(JSON.parse(line), source)); } catch { /* ignore partial/corrupt lines */ }
+      try { parsed.push(enrichEvent(JSON.parse(line), source)); } catch { /* ignore partial/corrupt lines */ }
     }
+    // One transaction per batch: all event writes + projections + the offset
+    // advance commit or roll back together (B4). This makes boot O(new bytes)
+    // and cuts per-event fsync on bursts. New events are collected for SSE and
+    // broadcast after the transaction commits.
+    const fresh: Array<{ event: HiveTelemetryEvent; cursor: number }> = [];
+    const sessionId = source.meta?.session_id;
+    db.transaction(() => {
+      for (const event of parsed) {
+        const res = ingestEvent(event);
+        if (res) fresh.push(res);
+      }
+      setIngestOffset(source.logPath, endOffset, sessionId, new Date().toISOString());
+    })();
+    source.offset = endOffset;
+    for (const { event, cursor } of fresh) broadcastEventWithId("hive", event, cursor);
   } finally {
     fs.closeSync(fd);
   }
@@ -169,23 +204,42 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
   snapshot.updated_at ||= new Date().toISOString();
   snapshot = enrichSnapshotTopologies(snapshot);
   snapshots.set(snapshot.session_id, snapshot);
-  upsertState.run({
-    $session_id: snapshot.session_id,
-    $updated_at: snapshot.updated_at,
-    $cwd: snapshot.cwd || null,
-    $session_dir: snapshot.session_dir || null,
-    $telemetry_log: snapshot.telemetry_log || null,
-    $state_json: JSON.stringify(snapshot),
-  });
-  upsertSession.run({
-    $session_id: snapshot.session_id,
-    $cwd: snapshot.cwd || null,
-    $session_dir: snapshot.session_dir || null,
-    $telemetry_log: snapshot.telemetry_log || null,
-    $conversation_log: snapshot.conversation_log || null,
-    $state_file: snapshot.session_dir ? path.join(snapshot.session_dir, "hive-state.json") : null,
-    $ts: snapshot.updated_at,
-  });
+  // Authoritative token/cost totals: sum across ALL agents (never Math.max —
+  // that was the bug at runtime.ts:293). The main session and in-flight agents
+  // are included via the snapshot's agents list (A5).
+  const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
+  const sum = (pick: (a: HiveStateSnapshot["agents"] extends (infer T)[] ? T : never) => number) =>
+    agents.reduce((total, agent) => total + (pick(agent as any) || 0), 0);
+  db.transaction(() => {
+    upsertState.run({
+      $session_id: snapshot.session_id,
+      $updated_at: snapshot.updated_at,
+      $cwd: snapshot.cwd || null,
+      $session_dir: snapshot.session_dir || null,
+      $telemetry_log: snapshot.telemetry_log || null,
+      $state_json: JSON.stringify(snapshot),
+    });
+    ensureSession.run({
+      $session_id: snapshot.session_id,
+      $cwd: snapshot.cwd || null,
+      $session_dir: snapshot.session_dir || null,
+      $telemetry_log: snapshot.telemetry_log || null,
+      $ts: snapshot.updated_at,
+    });
+    updateSessionStats.run({
+      $session_id: snapshot.session_id,
+      $input_tokens: sum((a) => Number(a.inputTokens)),
+      $output_tokens: sum((a) => Number(a.outputTokens)),
+      $cache_read_tokens: sum((a) => Number(a.cacheReadTokens)),
+      $cache_write_tokens: sum((a) => Number(a.cacheWriteTokens)),
+      $cost_usd: sum((a) => Number(a.costUsd)),
+      $topology_hash: (snapshot as any).topology_hash || null,
+      $updated_at: snapshot.updated_at,
+      $cwd: snapshot.cwd || null,
+      $session_dir: snapshot.session_dir || null,
+      $telemetry_log: snapshot.telemetry_log || null,
+    });
+  })();
   broadcastEvent("hive_state", snapshot);
 }
 
@@ -216,6 +270,7 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
       concerns: payload.concerns,
       blockers: payload.blockers,
       sessionId: event.session_id,
+      cwd: event.cwd,
       createdAt: event.ts,
     });
   } else if (event.type === "plan_approval") {
@@ -227,6 +282,7 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
       actor: payload.actor ? String(payload.actor) : (event.actor || undefined),
       summary: payload.summary ? String(payload.summary) : undefined,
       sessionId: event.session_id,
+      cwd: event.cwd,
       createdAt: event.ts,
     });
   } else if (event.type === "plan_comment") {
@@ -240,89 +296,106 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
       annotationType: payload.annotationType ? String(payload.annotationType) : undefined,
       originalText: payload.originalText ? String(payload.originalText) : undefined,
       sessionId: event.session_id,
+      cwd: event.cwd,
       createdAt: event.ts,
     });
   }
 }
 
-function addEvent(event: HiveTelemetryEvent) {
-  if (!event || !event.event_id) return;
+// Ingest one event into SQL. Called INSIDE a batch transaction (readSource).
+// Returns the event + its global cursor (events.rowid) when it is genuinely new
+// (so the caller can broadcast it post-commit), or null when it is a duplicate
+// or a filtered type. No in-memory events array remains (Decision 5).
+function ingestEvent(event: HiveTelemetryEvent): { event: HiveTelemetryEvent; cursor: number } | null {
+  if (!event || !event.event_id) return null;
   // Progress is volatile node state, not durable history. Older logs may contain
   // delegation_progress rows; ignore them so event counts/lists stay meaningful.
-  if (event.type === "delegation_progress") return;
-  if (events.some((existing) => existing.event_id === event.event_id)) return;
+  // Filtered uniformly here so the boot-resurface variant dies too (B4).
+  if (event.type === "delegation_progress") return null;
   const result = insertEvent.run(dbEventRow(event));
+  if (result.changes === 0) return null; // duplicate (INSERT OR IGNORE)
   upsertSession.run(dbSessionRowFromEvent(event));
-  if (result.changes === 0) return;
   materializePlanEvent(event);
-  events.push(event);
-  events.sort((a, b) => String(a.ts).localeCompare(String(b.ts)) || String(a.session_id).localeCompare(String(b.session_id)) || Number(a.seq || 0) - Number(b.seq || 0));
-  if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
-  broadcastEvent("hive", event);
+  materializeTypedEvent(event);
+  return { event, cursor: Number(result.lastInsertRowid) };
 }
 
-function loadDbIntoMemory() {
-  events = loadPersistedEvents(MAX_EVENTS);
+// Materialize hot entities (delegations / tool_calls / messages) from their
+// source events (B3). Idempotent via event_id PK / tool_call_id uniqueness.
+function materializeTypedEvent(event: HiveTelemetryEvent) {
+  const p = (event.payload || {}) as any;
+  const sessionId = event.session_id || "unknown";
+  switch (event.type) {
+    case "delegation_start":
+      materializeDelegationStart({
+        eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.to, parent: p.from, startedAt: event.ts, model: p.model,
+      });
+      break;
+    case "delegation_end": {
+      const rt = p.runtime || {};
+      materializeDelegationEnd({
+        eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.from, parent: p.to, endedAt: event.ts,
+        durationMs: Number(p.elapsedMs) || undefined,
+        inputTokens: Number(rt.inputTokens ?? p.inputTokens ?? 0),
+        outputTokens: Number(rt.outputTokens ?? p.outputTokens ?? 0),
+        cacheReadTokens: Number(rt.cacheReadTokens ?? 0),
+        cacheWriteTokens: Number(rt.cacheWriteTokens ?? 0),
+        costUsd: Number(rt.costUsd ?? p.costUsd ?? 0),
+        status: p.type, stopReason: p.stopReason,
+        model: Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model,
+      });
+      break;
+    }
+    case "worker_tool_start":
+    case "orchestrator_tool_start":
+      materializeToolStart({
+        eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.agent, toolName: p.toolName, toolCallId: p.toolCallId, argsPreview: p.args, startedAt: event.ts,
+      });
+      break;
+    case "worker_tool_end":
+    case "orchestrator_tool_end":
+      materializeToolEnd({
+        sessionId, toolCallId: p.toolCallId, resultPreview: p.resultPreview, isError: p.isError === true, endedAt: event.ts, durationMs: Number(p.durationMs) || undefined,
+      });
+      break;
+    case "user_message":
+    case "assistant_message":
+      materializeMessage({
+        eventId: event.event_id, sessionId, cwd: event.cwd, role: event.type === "user_message" ? "user" : "assistant",
+        agent: event.actor, text: p.text, truncated: typeof p.text === "string" && p.text.length >= 8000, ts: event.ts,
+      });
+      break;
+  }
+}
+
+function resumeIngestSources() {
+  // Rehydrate the hot snapshot cache from SQL; events stay in SQL (paginated).
   for (const snapshot of loadPersistedStates()) snapshots.set(snapshot.session_id, enrichSnapshotTopologies(snapshot));
 }
 
 export function sessionSummaries(): TelemetrySessionSummary[] {
-  const byId = new Map<string, TelemetrySessionSummary>();
-  for (const event of events) {
-    const id = event.session_id || "unknown";
-    const current = byId.get(id) || {
-      session_id: id,
-      cwd: event.cwd,
-      session_dir: event.session_dir,
-      telemetry_log: event.telemetry_log,
-      first_ts: event.ts,
-      last_ts: event.ts,
-      event_count: 0,
-      running: 0,
-      tokens: 0,
-      cost: 0,
-    };
-    current.cwd ||= event.cwd;
-    current.session_dir ||= event.session_dir;
-    current.telemetry_log ||= event.telemetry_log;
-    current.first_ts = current.first_ts && current.first_ts < event.ts ? current.first_ts : event.ts;
-    current.last_ts = current.last_ts && current.last_ts > event.ts ? current.last_ts : event.ts;
-    current.event_count++;
-    const rt = (event.payload as any)?.runtime;
-    if (rt) {
-      current.tokens = Math.max(current.tokens, Number(rt.inputTokens || 0) + Number(rt.outputTokens || 0));
-      current.cost = Math.max(current.cost, Number(rt.costUsd || 0));
-    }
-    byId.set(id, current);
-  }
-  for (const snapshot of snapshots.values()) {
-    const id = snapshot.session_id;
-    const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
-    const tokens = agents.reduce((sum, agent) => sum + Number(agent.inputTokens || 0) + Number(agent.outputTokens || 0), 0);
-    const cost = agents.reduce((sum, agent) => sum + Number(agent.costUsd || 0), 0);
+  // SQL-backed (B2). Live running-agent counts come from the hot snapshot cache.
+  const rows = querySessionSummaries();
+  return rows.map((row) => {
+    const snap = snapshots.get(row.session_id);
+    const agents = snap && Array.isArray(snap.agents) ? snap.agents : [];
     const running = agents.filter((agent) => agent.status === "running").length;
-    const current = byId.get(id) || {
-      session_id: id,
-      cwd: snapshot.cwd,
-      session_dir: snapshot.session_dir,
-      telemetry_log: snapshot.telemetry_log,
-      first_ts: snapshot.updated_at,
-      last_ts: snapshot.updated_at,
-      event_count: 0,
-      running: 0,
-      tokens: 0,
-      cost: 0,
+    return {
+      session_id: row.session_id,
+      cwd: row.cwd || undefined,
+      session_dir: row.session_dir || undefined,
+      telemetry_log: row.telemetry_log || undefined,
+      first_ts: row.first_ts || undefined,
+      last_ts: row.last_ts || undefined,
+      event_count: Number(row.event_count || 0),
+      running,
+      tokens: Number(row.input_tokens || 0) + Number(row.output_tokens || 0),
+      cacheReadTokens: Number(row.cache_read_tokens || 0),
+      cacheWriteTokens: Number(row.cache_write_tokens || 0),
+      cost: Number(row.cost_usd || 0),
+      topologyHash: row.topology_hash || undefined,
     };
-    current.cwd ||= snapshot.cwd;
-    current.session_dir ||= snapshot.session_dir;
-    current.telemetry_log ||= snapshot.telemetry_log;
-    current.last_ts = !current.last_ts || current.last_ts < snapshot.updated_at ? snapshot.updated_at : current.last_ts;
-    current.running = Math.max(current.running || 0, running);
-    current.tokens = Math.max(current.tokens || 0, tokens);
-    current.cost = Math.max(current.cost || 0, cost);
-    byId.set(id, current);
-  }
-  return Array.from(byId.values()).sort((a, b) => String(b.last_ts).localeCompare(String(a.last_ts)));
+  });
 }
 
 // Rewrite the global registry file, dropping any rows for the given session ids.
@@ -348,7 +421,6 @@ export function deleteSessions(ids: string[]): number {
   if (!idSet.size) return 0;
   deleteSessionRows(Array.from(idSet));
 
-  events = events.filter((e) => !idSet.has(e.session_id));
   for (const id of idSet) snapshots.delete(id);
 
   for (const [abs, source] of Array.from(sources.entries())) {
@@ -470,7 +542,7 @@ export function readAgentLog(sessionId: string, agent: string, offset: number, r
 export function startTelemetryRuntime() {
   if (started) return;
   started = true;
-  loadDbIntoMemory();
+  resumeIngestSources();
   readRegistry();
   if (SINGLE_LOG_PATH) addSource(SINGLE_LOG_PATH, { cwd: PROJECT_CWD, conversation_log: CONVERSATION_LOG, session_id: BOOT_SESSION_ID });
   fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true });
