@@ -61,20 +61,21 @@ export function thinkLevel(_model: string | undefined, thinking: string | undefi
 
 export interface ThinkBar { w: number; h: number; on: boolean; }
 
-// Ascending-height bar dial, filled up to `level`. `tier` sets bar geometry.
-export function thinkBars(model: string | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
-  const scale = thinkScale(model);
-  const n = scale.length;
+// Ascending-height bar dial. Bars represent the ACTIVE effort levels only
+// (minimal…xhigh) — "off" (level 0) fills nothing, so the dial is all-gray when
+// an agent isn't thinking. A bar for level i (1-indexed) is on when level >= i.
+export function thinkBars(_model: string | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
+  const n = THINK_ORDER.length - 1; // exclude "off"
   const boxW = tier === "lead" ? 34 : 20;
   const gap = tier === "lead" ? 2 : 1.2;
   const barW = Math.max(1.6, (boxW - gap * (n - 1)) / n);
   const maxH = tier === "lead" ? 9 : 7;
   const minH = tier === "lead" ? 3.5 : 2.5;
   const denom = n - 1 || 1;
-  return scale.map((_, i) => ({
+  return Array.from({ length: n }, (_, k) => ({
     w: +barW.toFixed(1),
-    h: +(minH + (maxH - minH) * (i / denom)).toFixed(1),
-    on: i <= level,
+    h: +(minH + (maxH - minH) * (k / denom)).toFixed(1),
+    on: level >= k + 1, // bar k represents level k+1 (minimal=1 … xhigh=5)
   }));
 }
 
