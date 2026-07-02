@@ -82,6 +82,17 @@ CREATE TABLE IF NOT EXISTS plan_comments (
 CREATE INDEX IF NOT EXISTS idx_plan_comments_change ON plan_comments(change_id, created_at);
 `);
 
+// Per-project display-name overrides, keyed by working directory. Lets the user
+// rename a project in the dashboard without touching the derived-from-cwd name
+// used internally for grouping/scope.
+db.run(`
+CREATE TABLE IF NOT EXISTS project_overrides (
+  cwd TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  updated_at TEXT
+)
+`);
+
 // Lightweight migrations for existing local dashboard DBs.
 try { db.run(`ALTER TABLE plan_comments ADD COLUMN annotation_type TEXT`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE plan_comments ADD COLUMN original_text TEXT`); } catch { /* column already exists */ }
@@ -370,4 +381,26 @@ export function listComments(changeId: string) {
     sessionId: row.session_id || undefined,
     createdAt: row.created_at,
   }));
+}
+
+// ── project display-name overrides ───────────────────────────────────────────
+
+const upsertProjectOverrideStmt = db.query(`
+  INSERT INTO project_overrides (cwd, label, updated_at)
+  VALUES ($cwd, $label, $updated_at)
+  ON CONFLICT(cwd) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
+`);
+const deleteProjectOverrideStmt = db.query(`DELETE FROM project_overrides WHERE cwd = $cwd`);
+
+export function listProjectOverrides(): Array<{ cwd: string; label: string; updatedAt?: string }> {
+  const rows = db.query(`SELECT cwd, label, updated_at FROM project_overrides`).all() as any[];
+  return rows.map((r) => ({ cwd: r.cwd, label: r.label, updatedAt: r.updated_at || undefined }));
+}
+
+export function setProjectOverride(cwd: string, label: string, updatedAt: string) {
+  upsertProjectOverrideStmt.run({ $cwd: cwd, $label: label, $updated_at: updatedAt });
+}
+
+export function clearProjectOverride(cwd: string) {
+  deleteProjectOverrideStmt.run({ $cwd: cwd });
 }

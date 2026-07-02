@@ -9,11 +9,13 @@ import {
   deleteProject,
   deleteSessions,
   readAgentLog,
+  recentThinking,
   sessionSummaries,
   sourcePaths,
   startTelemetryRuntime,
 } from "./runtime";
 import { addApproval, addComment, listPlans, planDetail, planFile, resolveProjectCwd } from "./plans";
+import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -57,6 +59,17 @@ Bun.serve({
         const result = commentMatch ? addComment(cwd, changeId, body) : addApproval(cwd, changeId, body);
         return json(result, result.ok ? 200 : 400);
       }
+      // POST /project-overrides  { cwd, label } — rename a project's display name.
+      if (url.pathname === "/project-overrides") {
+        let body: any = {};
+        try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
+        const cwd = String(body.cwd || "").trim();
+        const label = String(body.label || "").trim();
+        if (!cwd) return json({ error: "cwd required" }, 400);
+        if (!label) { clearProjectOverride(cwd); return json({ ok: true, cleared: true }); }
+        setProjectOverride(cwd, label.slice(0, 120), new Date().toISOString());
+        return json({ ok: true, cwd, label });
+      }
       return json({ error: "not found" }, 404);
     }
 
@@ -80,7 +93,7 @@ Bun.serve({
     }
 
     if (url.pathname === "/") return dashboardHtml();
-    if (url.pathname.startsWith("/assets/") || url.pathname === "/favicon.ico") {
+    if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/fonts/") || url.pathname === "/favicon.ico") {
       const asset = dashboardFile(url.pathname);
       if (asset) return asset;
     }
@@ -151,6 +164,12 @@ Bun.serve({
       const runId = url.searchParams.get("run") || "";
       return json(readAgentLog(sessionId, agent, offset, runId));
     }
+    if (url.pathname === "/thinking") {
+      const sessionId = url.searchParams.get("session") || "";
+      if (!sessionId) return json({ thinking: [] });
+      return json({ thinking: recentThinking(sessionId) });
+    }
+    if (url.pathname === "/project-overrides") return json({ overrides: listProjectOverrides() });
 
     return json({ error: "not found" }, 404);
   },

@@ -83,7 +83,7 @@ export function parseAgentLog(file: string, fromOffset = 0): { entries: any[]; o
           parts.push(part);
         }
       }
-      if (parts.length) entries.push({ kind: "message", role, parts, ts: o.timestamp });
+      if (parts.length) entries.push({ kind: "message", role, parts, ts: o.timestamp, usage: m.usage });
     }
   } finally {
     fs.closeSync(fd);

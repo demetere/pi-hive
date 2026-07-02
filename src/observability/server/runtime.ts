@@ -402,6 +402,39 @@ function parseMainConversationLog(file: string, fromOffset = 0): { entries: any[
   return { entries, offset: stat.size, size: stat.size };
 }
 
+// Thinking/reasoning entries live only in per-agent transcripts, not the event
+// stream. Collect the recent ones across a session's agents so the Activity feed
+// can interleave "thinking" as first-class activity. Bounded per agent + overall
+// so a huge fleet can't flood the response.
+export interface ThinkingEntry { agent: string; ts: string; text: string; tokens: number; }
+export function recentThinking(sessionId: string, perAgent = 12, overall = 200): ThinkingEntry[] {
+  const snap = snapshots.get(sessionId);
+  if (!snap || !Array.isArray(snap.agents)) return [];
+  const out: ThinkingEntry[] = [];
+  for (const a of snap.agents) {
+    const file = a?.sessionFile;
+    if (!file || !fs.existsSync(file)) continue;
+    let parsed;
+    try { parsed = parseAgentLog(file, 0); } catch { continue; }
+    const think: ThinkingEntry[] = [];
+    for (const e of parsed.entries) {
+      if (e.kind !== "message" || !Array.isArray(e.parts)) continue;
+      // Tokens this generation added — prefer the reasoning count, else output.
+      const u = (e as any).usage || {};
+      const tokens = Number(u.reasoning || 0) || Number(u.output || 0) || 0;
+      for (const p of e.parts) {
+        if (p.type === "thinking" && p.text && p.text.trim()) {
+          think.push({ agent: a.name, ts: e.ts || "", text: p.text.trim(), tokens });
+        }
+      }
+    }
+    // keep only the most recent few per agent
+    for (const t of think.slice(-perAgent)) out.push(t);
+  }
+  out.sort((x, y) => String(y.ts).localeCompare(String(x.ts)));
+  return out.slice(0, overall);
+}
+
 export function readAgentLog(sessionId: string, agent: string, offset: number, runId: string): any {
   const { file: currentFile, status, main } = agentLogPath(sessionId, agent);
   if (!currentFile) return { entries: [], offset: 0, size: 0, status: status || "unknown", exists: false, runs: [] };
