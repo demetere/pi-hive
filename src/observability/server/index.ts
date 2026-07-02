@@ -1,6 +1,6 @@
-import { isSameOriginRequest, isSameOriginWrite } from "../security";
+import { isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
-import { BOOT_SESSION_ID, CONVERSATION_LOG, DB_PATH, HOST, PORT, REGISTRY_PATH } from "./config";
+import { BOOT_SESSION_ID, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST, PORT, REGISTRY_PATH } from "./config";
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
 import type { Subscriber } from "./types";
 import {
@@ -54,6 +54,7 @@ Bun.serve({
 
     if (req.method === "POST") {
       if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
+      if (!isAuthorizedWrite(req, DAEMON_TOKEN)) return json({ error: "unauthorized" }, 401);
       // POST /plans/:changeId/comments  and  POST /plans/:changeId/approval
       const commentMatch = url.pathname.match(/^\/plans\/([^/]+)\/comments$/);
       const approvalMatch = url.pathname.match(/^\/plans\/([^/]+)\/approval$/);
@@ -82,6 +83,7 @@ Bun.serve({
 
     if (req.method === "DELETE") {
       if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
+      if (!isAuthorizedWrite(req, DAEMON_TOKEN)) return json({ error: "unauthorized" }, 401);
       // DELETE /sessions/:id  — purge one session's telemetry.
       const sessionMatch = url.pathname.match(/^\/sessions\/(.+)$/);
       if (sessionMatch) {
@@ -116,6 +118,11 @@ Bun.serve({
     }
 
     if (!isSameOriginRequest(req, url)) return json({ error: "cross-origin read blocked" }, 403);
+
+    // Same-origin bootstrap: hand the write token to the app (Phase D). Safe as
+    // a same-origin GET — the token never appears in a URL or in cached HTML.
+    // The browser attaches it as the Bearer header on POST/DELETE.
+    if (url.pathname === "/bootstrap.json") return json({ token: DAEMON_TOKEN || null });
 
     if (url.pathname === "/health") return json({
       ok: true,

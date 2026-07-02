@@ -1,10 +1,35 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import type { HiveState } from "../core/types";
 import { hiveTelemetryRegistryPath, hiveTelemetryServerPidPath } from "./observability";
 import { killProcess, spawnManaged } from "./process";
+
+// Per-daemon bearer token for dashboard writes (Phase D). Minted at spawn,
+// persisted 0600 to the registry dir, and required on every non-GET request.
+// Rotated on each restart (new spawn = new token). Local-only binding stays;
+// same-origin is kept as belt-and-braces.
+export function daemonTokenPath(): string {
+  return join(dirname(hiveTelemetryRegistryPath()), "daemon-token");
+}
+
+function mintDaemonToken(): string {
+  // 256 bits of entropy as hex, without relying on Buffer types (tsconfig sets
+  // types:[]). Two v4 UUIDs stripped of dashes = 64 hex chars.
+  const token = (randomUUID() + randomUUID()).replace(/-/g, "");
+  const path = daemonTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  return token;
+}
+
+// A session adopting an already-running daemon reads the token file to reach the
+// running daemon (no protocol change needed).
+export function readDaemonToken(): string | undefined {
+  try { return readFileSync(daemonTokenPath(), "utf8").trim() || undefined; } catch { return undefined; }
+}
 
 // Control plane for the telemetry dashboard. The dashboard is a SHARED, GLOBAL
 // daemon: one Bun.serve() process reads the machine-wide registry + SQLite under
@@ -80,6 +105,7 @@ function spawnDashboard(state: HiveState, ctx: ExtensionContext, extensionRoot: 
   if (!existsSync(path)) return { ok: false, error: `missing observability server: ${path}` };
   const host = dashboardHost();
   const port = dashboardPort();
+  const token = mintDaemonToken();
   const { proc } = spawnManaged("bun", [path], {
     cwd: ctx.cwd,
     detached: true,
@@ -88,6 +114,7 @@ function spawnDashboard(state: HiveState, ctx: ExtensionContext, extensionRoot: 
       ...process.env,
       HIVE_TELEMETRY_PORT: String(port),
       HIVE_TELEMETRY_HOST: host,
+      HIVE_TELEMETRY_TOKEN: token,
       HIVE_TELEMETRY_LOG: state.session.observabilityLog,
       // Honor an explicit registry override (tests, custom setups); otherwise
       // the machine-wide global registry.

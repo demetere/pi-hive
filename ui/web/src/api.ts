@@ -5,6 +5,29 @@ export interface InitialData {
   states: Snapshot[];
 }
 
+// Per-daemon write token (Phase D). Fetched once from the same-origin
+// /bootstrap.json and attached as a Bearer header on every POST/DELETE. Cached
+// so repeated writes don't refetch; the promise dedupes concurrent first calls.
+let tokenPromise: Promise<string | null> | null = null;
+function daemonToken(): Promise<string | null> {
+  if (!tokenPromise) {
+    tokenPromise = fetch("/bootstrap.json")
+      .then((r) => (r.ok ? r.json() : { token: null }))
+      .then((b: { token: string | null }) => b.token)
+      .catch(() => null);
+  }
+  return tokenPromise;
+}
+
+// fetch() for a mutating request: attaches the write token. Returns the Response
+// so callers can surface {ok, error} (see E5).
+export async function writeFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const token = await daemonToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  return fetch(input, { ...init, headers });
+}
+
 async function jsonOr<T>(request: Promise<Response>, fallback: T): Promise<T> {
   try {
     const response = await request;
@@ -25,7 +48,7 @@ export async function fetchInitialData(): Promise<InitialData> {
 
 export async function deleteSessionRemote(sessionId: string): Promise<boolean> {
   try {
-    const res = await fetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    const res = await writeFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
     return res.ok;
   } catch {
     return false;
@@ -34,7 +57,7 @@ export async function deleteSessionRemote(sessionId: string): Promise<boolean> {
 
 export async function deleteProjectRemote(project: string): Promise<boolean> {
   try {
-    const res = await fetch(`/projects/${encodeURIComponent(project)}`, { method: "DELETE" });
+    const res = await writeFetch(`/projects/${encodeURIComponent(project)}`, { method: "DELETE" });
     return res.ok;
   } catch {
     return false;
@@ -63,7 +86,7 @@ export async function fetchProjectOverrides(): Promise<ProjectOverride[]> {
 // Set (label non-empty) or clear (label empty) a project's override by cwd.
 export async function saveProjectOverride(cwd: string, label: string): Promise<boolean> {
   try {
-    const res = await fetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, label }) });
+    const res = await writeFetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, label }) });
     return res.ok;
   } catch { return false; }
 }
@@ -103,14 +126,14 @@ export async function fetchPlanFile(changeId: string, path: string, cwd?: string
 
 export async function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }, cwd?: string): Promise<boolean> {
   try {
-    const res = await fetch(`/plans/${encodeURIComponent(changeId)}/comments${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const res = await writeFetch(`/plans/${encodeURIComponent(changeId)}/comments${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return res.ok;
   } catch { return false; }
 }
 
 export async function postPlanApproval(changeId: string, body: { phase: string; actor?: string; summary?: string }, cwd?: string): Promise<boolean> {
   try {
-    const res = await fetch(`/plans/${encodeURIComponent(changeId)}/approval${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const res = await writeFetch(`/plans/${encodeURIComponent(changeId)}/approval${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return res.ok;
   } catch { return false; }
 }
