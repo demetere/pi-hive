@@ -64,6 +64,13 @@ export interface HiveState {
   scopedEvents: HiveEvent[];
   scopedStats: ScopeStats;
   scopedAgents: ScopeAgent[];
+  // Distinct-by-name counts over scopedAgents. scopedAgents holds one row per
+  // (session, agent) so the Agents table can show per-session rows; but a team
+  // is the same roster regardless of how many sessions ran it, so any "N agents /
+  // M teams" figure must collapse by name — otherwise a project with the same
+  // topology across K sessions reports K× the real count.
+  scopedAgentCount: number;
+  scopedTeamCount: number;
   scopeTitle: ScopeTitle;
   eventStatus: Map<string, Map<string, string>>;
   // Agent thinking/reasoning by session (fetched from transcripts, not events).
@@ -135,6 +142,8 @@ const initialState: HiveState = {
     scopedEvents: [],
     scopedStats: initialStats,
     scopedAgents: [],
+    scopedAgentCount: 0,
+    scopedTeamCount: 0,
     scopeTitle: { title: "Overview", crumbs: ["Overview"], live: 0 },
     eventStatus: new Map(),
     thinkingBySession: new Map(),

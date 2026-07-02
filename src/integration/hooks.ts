@@ -58,9 +58,12 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   });
 
   pi.on("tool_result", async (event: any) => {
-    if (state.mode === "normal") return;
+    // Always release the start-time entry, even when we bail below — otherwise a
+    // mode flip to normal between tool_call and tool_result strands the key
+    // forever (M-misc leak).
     const startedAt = event.toolCallId ? orchestratorToolStartedAt.get(event.toolCallId) : undefined;
     if (event.toolCallId) orchestratorToolStartedAt.delete(event.toolCallId);
+    if (state.mode === "normal") return;
     const resultText = textOfResult(event.result);
     emitHiveEvent(state, "orchestrator_tool_end", {
       agent: "Orchestrator",
@@ -76,9 +79,14 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // J3: re-emit the model catalog when the main model changes mid-session, so
   // `inherit` workers aren't left described by a stale catalog. Gated off in
   // normal mode (the extension does nothing there). The DB upsert is idempotent.
-  pi.on("model_select", async (_event: any, ctx: ExtensionContext) => {
+  pi.on("model_select", async (event: any, ctx: ExtensionContext) => {
     if (state.mode === "normal") return;
-    try { emitModelCatalog(state, (ctx as any).modelRegistry); } catch { /* best-effort */ }
+    // The event carries the newly-selected model; pass it through so the catalog
+    // covers what `inherit` workers now resolve to, even if it isn't config-
+    // declared (M1). Fall back to ctx.model if the event shape lacks it.
+    const m = event?.model || (ctx as any).model;
+    const effectiveModel = m?.provider && m?.id ? `${m.provider}/${m.id}` : undefined;
+    try { emitModelCatalog(state, (ctx as any).modelRegistry, effectiveModel); } catch { /* best-effort */ }
   });
 
   pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {

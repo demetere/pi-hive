@@ -96,10 +96,10 @@ export async function refreshOverrides() {
 
 // Rename (label set) or reset (label empty) a project by cwd, then refresh.
 export async function saveOverride(cwd: string, label: string): Promise<boolean> {
-  const ok = await saveProjectOverride(cwd, label.trim());
-  if (ok) { await refreshOverrides(); pushToast("success", label.trim() ? "Project renamed." : "Project name reset."); }
-  else pushToast("error", "Failed to save project name — is the dashboard still running?");
-  return ok;
+  const res = await saveProjectOverride(cwd, label.trim());
+  if (res.ok) { await refreshOverrides(); pushToast("success", label.trim() ? "Project renamed." : "Project name reset."); }
+  else pushToast("error", res.error || "Failed to save project name — is the dashboard still running?");
+  return res.ok;
 }
 
 let wired = false;
@@ -166,6 +166,12 @@ export function connect(): EventSource | undefined {
   let hadConnection = false;
   es.addEventListener("open", () => {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+    // Each connection attempt gets a generation stamp. Only the resync launched
+    // for the CURRENT generation may flip to "live" — so a drop mid-resync (which
+    // bumps the generation and sets "reconnecting") or a second reconnect whose
+    // resync short-circuits on the in-flight guard cannot overwrite a legitimate
+    // "reconnecting"/"syncing" state (M6).
+    const gen = ++connectionGen;
     // On a RE-connect (not the first open), catch up on the exact gap using the
     // global cursor (E1): fetch every event after our high-water mark plus fresh
     // snapshots, THEN flip to live. This heals stuck "running/waiting" agents and
@@ -174,13 +180,25 @@ export function connect(): EventSource | undefined {
     // "live" over stale data during the async catch-up window.
     if (hadConnection) {
       store.setState({ connection: "syncing" });
-      void resyncAfterReconnect().finally(() => store.setState({ connection: "live" }));
+      void resyncAfterReconnect().then((ran) => {
+        // Only the resync that actually performed the catch-up may declare "live",
+        // and only if no newer connection attempt superseded it (M6). A resync
+        // that short-circuited because an earlier one is still in flight returns
+        // false and does nothing — that earlier resync owns the live flip.
+        if (ran && gen === connectionGen) store.setState({ connection: "live" });
+      });
     } else {
       store.setState({ connection: "live" });
     }
     hadConnection = true;
   });
   es.addEventListener("error", () => {
+    // EventSource fires `error` on transient blips even while the socket stays up
+    // (and on the heartbeat gap). Only a genuine drop (readyState CLOSED, or
+    // CONNECTING while it auto-reconnects) invalidates an in-flight resync's claim
+    // to "live" (M6) — a spurious error over a still-OPEN stream must not cancel a
+    // healthy resync's live flip (there'd be no follow-up `open` to recover it).
+    if (es.readyState !== EventSource.OPEN) connectionGen++;
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
@@ -199,8 +217,13 @@ export function connect(): EventSource | undefined {
 // last-seen cursor plus the current snapshots, then ingest. Best-effort: any
 // failure leaves the live stream to carry on.
 let resyncInFlight = false;
-async function resyncAfterReconnect() {
-  if (resyncInFlight) return;
+// Monotonic connection-attempt stamp; guards which resync may declare "live" (M6).
+let connectionGen = 0;
+// Returns true when it actually ran the catch-up, false when it short-circuited
+// because an earlier resync is still in flight (so the caller must NOT flip to
+// "live" — the in-flight resync will when it finishes).
+async function resyncAfterReconnect(): Promise<boolean> {
+  if (resyncInFlight) return false;
   resyncInFlight = true;
   try {
     const cursor = store.getState().lastCursor;
@@ -210,6 +233,7 @@ async function resyncAfterReconnect() {
     void refreshSessionSummaries(); // event counts may have advanced during the gap
   } catch { /* transient; the live stream continues */ }
   finally { resyncInFlight = false; }
+  return true;
 }
 
 // After a remote delete broadcast, drop stale scope/selection.

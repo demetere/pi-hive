@@ -85,10 +85,9 @@ export async function fetchStates(): Promise<Snapshot[]> {
 
 // Page a whole session's event history for replay (F1). SQL-backed, cursor
 // ordered; onProgress reports the running count so the UI can show a loader.
-// `events` is filtered (delegation_progress dropped to keep replay light);
-// `fetchedTotal` is the RAW count actually paged from the DB — the like-for-like
-// baseline to compare against the server's sessions.event_count for pruned-
-// history detection (I4), which counts progress rows too.
+// The server drops delegation_progress at ingest (runtime.ts) and never stores
+// or counts them, so what we page is exactly what sessions.event_count reflects —
+// `fetchedTotal` is the like-for-like baseline for pruned-history detection (I4).
 export async function fetchSessionEvents(
   sessionId: string,
   onProgress?: (n: number) => void,
@@ -101,7 +100,7 @@ export async function fetchSessionEvents(
       fetch(`/events?session=${encodeURIComponent(sessionId)}&after=${after}&limit=1000`), { events: [] });
     const raw = page.events || [];
     fetchedTotal += raw.length;
-    all.push(...raw.filter((e) => e.type !== "delegation_progress"));
+    all.push(...raw);
     onProgress?.(all.length);
     if (raw.length < 1000) break;
     const last = raw[raw.length - 1]?.cursor;
@@ -161,6 +160,22 @@ export async function fetchTopologyDetail(hash: string): Promise<TopologyDetail 
   return jsonOr<TopologyDetail | null>(fetch(`/topologies/${encodeURIComponent(hash)}`), null);
 }
 
+// Uniform result for mutating helpers so callers can surface a real status/error
+// (401 vs network vs 500) in a toast, not just a generic failure (M7a).
+export interface WriteResult { ok: boolean; status: number; error?: string; }
+
+// Run a mutating request and normalize it to WriteResult. `label` names the
+// action for the fallback error text ("comment failed (401)").
+async function writeResult(label: string, req: Promise<Response>): Promise<WriteResult> {
+  try {
+    const res = await req;
+    if (!res.ok) return { ok: false, status: res.status, error: `${label} failed (${res.status})` };
+    return { ok: true, status: res.status };
+  } catch (e: any) {
+    return { ok: false, status: 0, error: e?.message || "network error" };
+  }
+}
+
 // Prune telemetry older than N days via the daemon (K1 Settings action / J1).
 export async function pruneTelemetryRemote(olderThanDays: number): Promise<{ ok: boolean; status: number; events?: number; sessions?: number; error?: string }> {
   try {
@@ -173,22 +188,12 @@ export async function pruneTelemetryRemote(olderThanDays: number): Promise<{ ok:
   }
 }
 
-export async function deleteSessionRemote(sessionId: string): Promise<boolean> {
-  try {
-    const res = await writeFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-    return res.ok;
-  } catch {
-    return false;
-  }
+export function deleteSessionRemote(sessionId: string): Promise<WriteResult> {
+  return writeResult("delete session", writeFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }));
 }
 
-export async function deleteProjectRemote(project: string): Promise<boolean> {
-  try {
-    const res = await writeFetch(`/projects/${encodeURIComponent(project)}`, { method: "DELETE" });
-    return res.ok;
-  } catch {
-    return false;
-  }
+export function deleteProjectRemote(project: string): Promise<WriteResult> {
+  return writeResult("delete project", writeFetch(`/projects/${encodeURIComponent(project)}`, { method: "DELETE" }));
 }
 
 export function openEventStream(): EventSource {
@@ -211,11 +216,8 @@ export async function fetchProjectOverrides(): Promise<ProjectOverride[]> {
   return data.overrides || [];
 }
 // Set (label non-empty) or clear (label empty) a project's override by cwd.
-export async function saveProjectOverride(cwd: string, label: string): Promise<boolean> {
-  try {
-    const res = await writeFetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, label }) });
-    return res.ok;
-  } catch { return false; }
+export function saveProjectOverride(cwd: string, label: string): Promise<WriteResult> {
+  return writeResult("save project name", writeFetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, label }) }));
 }
 
 // ── Plan store ───────────────────────────────────────────────────────────────
@@ -258,16 +260,10 @@ export async function fetchPlanFile(changeId: string, path: string, cwd?: string
   }
 }
 
-export async function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }, cwd?: string): Promise<boolean> {
-  try {
-    const res = await writeFetch(`/plans/${encodeURIComponent(changeId)}/comments${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    return res.ok;
-  } catch { return false; }
+export function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }, cwd?: string): Promise<WriteResult> {
+  return writeResult("comment", writeFetch(`/plans/${encodeURIComponent(changeId)}/comments${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
 }
 
-export async function postPlanApproval(changeId: string, body: { phase: string; actor?: string; summary?: string }, cwd?: string): Promise<boolean> {
-  try {
-    const res = await writeFetch(`/plans/${encodeURIComponent(changeId)}/approval${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    return res.ok;
-  } catch { return false; }
+export function postPlanApproval(changeId: string, body: { phase: string; actor?: string; summary?: string }, cwd?: string): Promise<WriteResult> {
+  return writeResult("approval", writeFetch(`/plans/${encodeURIComponent(changeId)}/approval${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
 }

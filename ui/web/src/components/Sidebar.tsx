@@ -45,7 +45,7 @@ export default function Sidebar() {
   const projectGroups = useHive((s) => s.projectGroups);
   const scopedStats = useHive((s) => s.scopedStats);
   const scopedEvents = useHive((s) => s.scopedEvents);
-  const scopedAgents = useHive((s) => s.scopedAgents);
+  const scopedAgentCount = useHive((s) => s.scopedAgentCount);
 
   const scopeValue = scope.level === "fleet" ? "__fleet" : scope.project;
   const live = connection === "live";
@@ -57,7 +57,7 @@ export default function Sidebar() {
   const nav = [
     { id: "overview", label: "Overview", count: "" },
     { id: "sessions", label: "Sessions", count: scopedStats.sessions ? String(scopedStats.sessions) : "" },
-    { id: "agents", label: "Agents", count: scopedAgents.length ? String(scopedAgents.length) : "" },
+    { id: "agents", label: "Agents", count: scopedAgentCount ? String(scopedAgentCount) : "" },
     { id: "activity", label: "Activity", count: scopedEvents.length ? String(scopedEvents.length) : "" },
     { id: "plans", label: "Plans", count: "" },
     { id: "cost", label: "Cost", count: "" },

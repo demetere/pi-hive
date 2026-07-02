@@ -176,9 +176,14 @@ function configuredModels(state: HiveState): string[] {
 // references, sourced from the SDK ModelRegistry (A10). Best-effort: if the
 // registry is unavailable the per-worker getAvailableThinkingLevels() path
 // (dispatch.ts) still supplies authoritative levels incrementally.
-export function emitModelCatalog(state: HiveState, registry: any) {
+export function emitModelCatalog(state: HiveState, registry: any, effectiveModel?: string) {
   if (!state.session || state.mode === "normal" || !registry?.getAll) return;
   const wanted = new Set(configuredModels(state));
+  // Include the session's current effective model (M1): `inherit` workers resolve
+  // to it, so after a mid-session model switch the catalog must describe it even
+  // when it isn't config-declared — otherwise those workers stay on an
+  // undescribed model. `configuredModels` deliberately skips "inherit".
+  if (effectiveModel && effectiveModel !== "inherit") wanted.add(effectiveModel);
   if (!wanted.size) return;
   let all: any[] = [];
   try { all = registry.getAll() || []; } catch { return; }

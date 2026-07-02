@@ -49,16 +49,23 @@ export default function Overview() {
     () => (replaying ? replay.events.slice(0, replay.cursor + 1) : undefined),
     [replaying, replay.events, replay.cursor],
   );
+  // replayTopoSource reads topologyByHash + the session summary via getState().
+  // Subscribe to both here so the memo recomputes when a late ensureTopologyDetail
+  // fetch resolves — otherwise the graph is stuck on the live fallback tree until
+  // the user scrubs (M3).
+  const replayHash = useHive((s) => (replaying ? s.sessionSummaries.get(replay.sessionId)?.topologyHash : undefined));
+  const replayDetail = useHive((s) => (replayHash ? s.topologyByHash.get(replayHash) : undefined));
   const replaySource = useMemo(
     () => (replaySlice ? replayTopoSource(replaySlice) : undefined),
-    [replaySlice],
+    [replaySlice, replayHash, replayDetail],
   );
   const replayTs = replaying ? replay.events[replay.cursor]?.ts : undefined;
 
   const topoTitle = scope.level === "session" ? "Session topology" : "Agent Topology";
 
-  const teamCount = scopedAgents.filter((a) => a.role === "lead").length;
-  const topoMeta = `${teamCount} teams · ${scopedAgents.length} agents`;
+  const teamCount = useHive((s) => s.scopedTeamCount);
+  const agentCount = useHive((s) => s.scopedAgentCount);
+  const topoMeta = `${teamCount} teams · ${agentCount} agents`;
 
   // First-run / empty state: no session has produced telemetry yet. Show a calm
   // in-language signature rather than a wall of empty panels.
@@ -143,7 +150,7 @@ export default function Overview() {
                 </span>
           }
         >
-          <LiveActivity limit={40} events={replaySlice} />
+          <LiveActivity limit={40} events={replaySlice} replayTs={replaying ? replayTs : undefined} replayStatus={replaying ? replaySource?.agents : undefined} />
         </Widget>
 
         <Widget

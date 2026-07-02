@@ -51,8 +51,27 @@ export async function loadOlderEvents(): Promise<number> {
   if (!Number.isFinite(anchor)) return 0;
   loadingOlder = true;
   try {
-    const opts = scope.level === "session" ? { session: scope.sessionId } : {};
-    const older = await fetchEventsBefore(anchor, opts);
+    // Scope the backfill so we don't page in out-of-scope events (which count as
+    // n>0 and advance the anchor while visibly loading nothing). Session scope →
+    // that session. Project scope → the project's cwd(s): a project can span more
+    // than one working dir sharing a basename, and the server's /events filter
+    // takes a single cwd — so pass the one cwd when unambiguous, otherwise fetch
+    // wider and filter to the project's cwd set client-side before ingesting.
+    // Fleet scope → unfiltered.
+    const projectCwds = scope.level === "project"
+      ? Array.from(new Set(st.sessions.filter((s) => s.project === scope.project && s.cwd).map((s) => s.cwd as string)))
+      : [];
+    let opts: { session?: string; cwd?: string } = {};
+    if (scope.level === "session") opts = { session: scope.sessionId };
+    else if (scope.level === "project" && projectCwds.length === 1) opts = { cwd: projectCwds[0] };
+    let older = await fetchEventsBefore(anchor, opts);
+    // Multi-cwd (or cwd-less) project: the server couldn't scope by a single cwd,
+    // so drop anything outside the project's cwd set here — never ingest fleet-
+    // wide events under a project scope.
+    if (scope.level === "project" && projectCwds.length !== 1) {
+      const inScope = new Set(projectCwds);
+      older = older.filter((e) => e.cwd != null && inScope.has(e.cwd));
+    }
     const before = Object.keys(store.getState().eventMap).length;
     if (older.length) ingestEvents(older);
     return Object.keys(store.getState().eventMap).length - before;
@@ -75,7 +94,8 @@ export function purgeLocal(ids: string[]) {
 
 // ── delete actions ───────────────────────────────────────────────────────────
 export async function deleteSession(sessionId: string): Promise<boolean> {
-  if (!await deleteSessionRemote(sessionId)) { pushToast("error", "Failed to delete session — is the dashboard still running?"); return false; }
+  const res = await deleteSessionRemote(sessionId);
+  if (!res.ok) { pushToast("error", res.error || "Failed to delete session — is the dashboard still running?"); return false; }
   purgeLocal([sessionId]);
   reconcileScopeAfterDelete([sessionId]);
   pushToast("success", "Session telemetry deleted.");
@@ -84,7 +104,8 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
 
 export async function deleteProject(project: string): Promise<boolean> {
   const ids = store.getState().sessions.filter((s) => s.project === project).map((s) => s.session_id);
-  if (!await deleteProjectRemote(project)) { pushToast("error", "Failed to delete project — is the dashboard still running?"); return false; }
+  const res = await deleteProjectRemote(project);
+  if (!res.ok) { pushToast("error", res.error || "Failed to delete project — is the dashboard still running?"); return false; }
   purgeLocal(ids);
   reconcileScopeAfterDelete(ids);
   pushToast("success", `Deleted ${ids.length} session${ids.length === 1 ? "" : "s"} from ${project}.`);

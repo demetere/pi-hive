@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -92,4 +92,48 @@ test("dispatchAgent totals equal getSessionStats exactly — no message_end/agen
   assert.equal(worker.cacheReadTokens, 380);
   assert.equal(worker.cacheWriteTokens, 8);
   assert.equal(worker.costUsd, 0.072);
+});
+
+// M8a: the FIRST run's delegation_start must already carry thinkingLevels +
+// the effective model. This is the J4/Decision-5 reorder — the worker session is
+// created (and getAvailableThinkingLevels() probed) BEFORE delegation_start is
+// emitted, so a fresh agent no longer emits undefined levels on run 1.
+function readEmittedEvents(logPath: string): any[] {
+  const raw = readFileSync(logPath, "utf8").trim();
+  if (!raw) return [];
+  return raw.split("\n").map((l: string) => JSON.parse(l));
+}
+
+test("first-run delegation_start carries thinkingLevels + effective model (J4/M8a)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-firstrun-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+  const create: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 } }) })) as any;
+
+  // runCount starts at 0 → this is the agent's FIRST run.
+  assert.equal(worker.runCount, 0);
+  await dispatchAgent(state, "Builder", "build the thing", ctx, false, create);
+
+  const events = readEmittedEvents(obsLog);
+  const starts = events.filter((e) => e.type === "delegation_start");
+  assert.ok(starts.length >= 1, "expected a delegation_start event");
+  const first = starts[0];
+  // Populated on run 1 — the scripted session's getAvailableThinkingLevels().
+  assert.deepEqual(first.payload.thinkingLevels, ["off", "low", "high"]);
+  // The effective model is present (not undefined) on the very first run.
+  assert.equal(first.payload.model, "test/model");
 });

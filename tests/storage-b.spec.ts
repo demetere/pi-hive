@@ -80,6 +80,9 @@ test("queryDelegations/queryToolCalls honor the after cursor (I1)", () => {
   const dPage1 = db.queryDelegations({ session: "sPag", limit: 2 });
   expect(dPage1.length).toBe(2);
   const dPage2 = db.queryDelegations({ session: "sPag", after: dPage1[dPage1.length - 1].cursor, limit: 2 });
+  // Page 2 must be NON-EMPTY (M8f): the 3rd row. An over-filtering regression that
+  // returned nothing after the cursor would otherwise pass every-cursor vacuously.
+  expect(dPage2.length).toBe(1);
   expect(dPage2.every((r) => r.cursor > dPage1[dPage1.length - 1].cursor)).toBe(true);
   const dOverlap = dPage1.filter((a) => dPage2.some((b) => b.cursor === a.cursor));
   expect(dOverlap.length).toBe(0);
@@ -87,6 +90,7 @@ test("queryDelegations/queryToolCalls honor the after cursor (I1)", () => {
   const tPage1 = db.queryToolCalls({ session: "sPag", limit: 2 });
   expect(tPage1.length).toBe(2);
   const tPage2 = db.queryToolCalls({ session: "sPag", after: tPage1[tPage1.length - 1].cursor, limit: 2 });
+  expect(tPage2.length).toBe(1);
   expect(tPage2.every((r) => r.cursor > tPage1[tPage1.length - 1].cursor)).toBe(true);
 });
 
@@ -161,17 +165,20 @@ test("prune removes sessions fully older than the cutoff and shrinks projections
   db.materializeToolStart({ eventId: "old-t-s", sessionId: "old-sess", cwd: "/old", agent: "Coder", toolName: "read_file", toolCallId: "old-tc", argsPreview: "{}", startedAt: "2020-01-01T00:00:30.000Z" });
   db.materializeToolEnd({ sessionId: "old-sess", toolCallId: "old-tc", resultPreview: "ok", isError: false, endedAt: "2020-01-01T00:00:32.000Z", durationMs: 2000 });
   db.materializeMessage({ eventId: "old-m", sessionId: "old-sess", cwd: "/old", role: "user", agent: "User", text: "hi", truncated: false, ts: "2020-01-01T00:00:00.000Z" });
+  const messageCount = () => (db.db.query(`SELECT COUNT(*) AS n FROM messages WHERE session_id = 'old-sess'`).get() as any).n;
   expect(db.querySessionSummaries().some((s) => s.session_id === "old-sess")).toBe(true);
   expect(db.queryDelegations({ session: "old-sess" }).length).toBe(1);
   expect(db.queryToolCalls({ session: "old-sess" }).length).toBe(1);
+  expect(messageCount()).toBe(1);
 
   const result = db.pruneOlderThan("2021-01-01T00:00:00.000Z");
   expect(result.sessions).toBeGreaterThanOrEqual(1);
   expect(result.sessionIds).toContain("old-sess");
   expect(db.querySessionSummaries().some((s) => s.session_id === "old-sess")).toBe(false);
-  // All projections for the pruned session are gone.
+  // All projections for the pruned session are gone — including messages (M8e).
   expect(db.queryDelegations({ session: "old-sess" }).length).toBe(0);
   expect(db.queryToolCalls({ session: "old-sess" }).length).toBe(0);
+  expect(messageCount()).toBe(0);
 });
 
 test("cursors are stable and gapless across a DB reopen (L5)", () => {

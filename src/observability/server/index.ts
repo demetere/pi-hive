@@ -1,4 +1,4 @@
-import { isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite } from "../security";
+import { isSameOriginRequest, writeGateResponse } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
 import { BOOT_SESSION_ID, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST, PORT, REGISTRY_PATH } from "./config";
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
@@ -53,15 +53,12 @@ Bun.serve({
   async fetch(req: Request) {
     const url = new URL(req.url);
 
-    // Method-based write gate (J7/Decision 3): every request whose method is not
-    // a safe read (GET/HEAD) is a mutation and must clear same-origin + the
-    // bearer token exactly once, here, before any routing. This closes the hole
-    // where a future PUT/PATCH endpoint would land outside a per-route check.
-    const isWrite = req.method !== "GET" && req.method !== "HEAD";
-    if (isWrite) {
-      if (!isSameOriginWrite(req, url)) return json({ error: "cross-origin write blocked" }, 403);
-      if (!isAuthorizedWrite(req, DAEMON_TOKEN)) return json({ error: "unauthorized" }, 401);
-    }
+    // Method-based write gate (J7/Decision 3), in one testable helper (M8c): any
+    // method other than GET/HEAD must clear same-origin + the bearer token, once,
+    // before any routing — closing the hole where a future PUT/PATCH endpoint
+    // would land outside a per-route check.
+    const gated = writeGateResponse(req, url, DAEMON_TOKEN, (error, status) => json({ error }, status));
+    if (gated) return gated;
 
     if (req.method === "POST") {
       // POST /prune  { olderThanDays }  — explicit age-based cleanup (J1).

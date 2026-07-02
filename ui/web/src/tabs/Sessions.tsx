@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useHive } from "../store";
 import { deleteSession, selectSessionScope, setActiveTab, confirmAction } from "../store/raw";
@@ -128,15 +128,15 @@ export default function Sessions(props: { search: string }) {
             const prevHash = prev ? hashOf(prev) : undefined;
             const showDivider = !!prev && !!hash && !!prevHash && hash !== prevHash && prev.cwd === s.cwd && !!s.cwd;
             return (
-            <>
+            <Fragment key={s.session_id}>
             {showDivider && (
-              <tr key={`div-${s.session_id}`} className="topo-divider" aria-hidden="true">
+              <tr className="topo-divider" aria-hidden="true">
                 <td colSpan={9} style={{ padding: "2px 10px" }}>
                   <span className="text-[10px] text-wait italic">◇ topology changed</span>
                 </td>
               </tr>
             )}
-            <tr key={s.session_id} className={selectedId === s.session_id ? "active" : ""} onClick={() => openSession(s.session_id)}>
+            <tr className={selectedId === s.session_id ? "active" : ""} onClick={() => openSession(s.session_id)}>
               <td><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{labelOf(s.project)}</b></td>
               <td className="mono">
                 {sessionSlug(s.session_id)}
@@ -160,7 +160,7 @@ export default function Sessions(props: { search: string }) {
                 <button className="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
               </td>
             </tr>
-            </>
+            </Fragment>
             );
           })}
         </tbody>

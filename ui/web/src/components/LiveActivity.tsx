@@ -4,7 +4,7 @@ import { fmtCost, fmtNum } from "../lib/format";
 import { hhmmss, statusColorVar, statusKey } from "../lib/agents";
 import { bundleEvents, itemAgent, mergeThinking, type ActivityItem as LiveItem } from "../lib/activity";
 import type { ScopeAgent } from "../store";
-import type { HiveEvent } from "../types";
+import type { AgentRuntime, HiveEvent } from "../types";
 
 type Kind = "DELEGATE" | "TOOL" | "MSG" | "DONE" | "ERROR" | "THINK";
 
@@ -98,27 +98,44 @@ function metaOf(item: LiveItem): string {
   }
 }
 
-export default function LiveActivity(props: { limit?: number; events?: HiveEvent[] }) {
+export default function LiveActivity(props: {
+  limit?: number;
+  events?: HiveEvent[];
+  // Replay (M4): when replaying, `replayTs` is the cursor timestamp so we can
+  // clip the live-polled thinking feed to the playhead, and `replayStatus` is
+  // the replay-derived status map (from the same slice) so status dots reflect
+  // the rewound state rather than the live roster.
+  replayTs?: string;
+  replayStatus?: Map<string, AgentRuntime>;
+}) {
   const scopedEventsLive = useHive((s) => s.scopedEvents);
   const scopedAgents = useHive((s) => s.scopedAgents);
   const scopedSessions = useHive((s) => s.scopedSessions);
   const thinkingBySession = useHive((s) => s.thinkingBySession);
   // Replay (K5) passes its own event slice; live SSE never mutates it.
   const scopedEvents = props.events ?? scopedEventsLive;
+  const replayTs = props.replayTs;
+  const replayStatus = props.replayStatus;
 
-  // Single roster: id → model/status, shared with the topology graph.
+  // Single roster: id → model/status, shared with the topology graph. In replay
+  // mode the status dot comes from the replay-derived map (statusFor); the roster
+  // still supplies identity colour.
   const roster = useMemo(() => {
     const m = new Map<string, ScopeAgent>();
     for (const a of scopedAgents) if (!m.has(a.name)) m.set(a.name, a);
     return m;
   }, [scopedAgents]);
 
-  // Thinking entries for the sessions in scope, merged into the feed by time.
+  // Thinking entries for the sessions in scope, merged into the feed by time. In
+  // replay mode, clip to the cursor timestamp so future thinking never leaks in.
   const thinking = useMemo(() => {
     const out: Array<{ agent: string; ts: string; text: string }> = [];
-    for (const s of scopedSessions) for (const t of thinkingBySession.get(s.session_id) || []) out.push(t);
+    for (const s of scopedSessions) for (const t of thinkingBySession.get(s.session_id) || []) {
+      if (replayTs && t.ts > replayTs) continue;
+      out.push(t);
+    }
     return out;
-  }, [scopedSessions, thinkingBySession]);
+  }, [scopedSessions, thinkingBySession, replayTs]);
 
   const items = useMemo(
     () => mergeThinking(bundleEvents(scopedEvents), thinking).slice(0, props.limit ?? 40),
@@ -144,8 +161,10 @@ export default function LiveActivity(props: { limit?: number; events?: HiveEvent
         const agent = roster.get(agentId);
         const kind = kindOf(item);
         const kc = KIND_COLOR[kind];
-        const sk = statusKey(agent?.status);
-        const dotColor = statusColorVar(agent?.status);
+        // Status dot: replay-derived status when rewound, else the live roster.
+        const status = replayStatus ? replayStatus.get(agentId)?.status : agent?.status;
+        const sk = statusKey(status);
+        const dotColor = statusColorVar(status);
         const msg = messageOf(item);
         const meta = metaOf(item);
         const truncated = isTruncated(item);

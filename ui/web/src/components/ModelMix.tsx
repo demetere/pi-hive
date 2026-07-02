@@ -9,6 +9,10 @@ const R = 42, C = 2 * Math.PI * R, GAP = 3;
 
 export default function ModelMix() {
   const scopedAgents = useHive((s) => s.scopedAgents);
+  // The one canonical distinct-agent count, shared with the Overview header and
+  // Sidebar badge so all three headline "N agents" figures agree (the donut's
+  // token-only byAgent.size would otherwise undercount idle/zero-token agents).
+  const scopedAgentCount = useHive((s) => s.scopedAgentCount);
 
   const scopedEvents = useHive((s) => s.scopedEvents);
   // Actual model per agent from delegation_end.models (A3) — the real model the
@@ -29,7 +33,6 @@ export default function ModelMix() {
   const data = useMemo(() => {
     const byModel = new Map<string, number>();
     const byAgent = new Map<string, { name: string; model?: string; color: string; tok: number }>();
-    let agentCount = 0;
     const resolveModel = (a: { name: string; model?: string }) => {
       const actual = actualModelByAgent.get(a.name);
       const raw = actual || (a.model && a.model !== "inherit" ? a.model : "");
@@ -38,7 +41,6 @@ export default function ModelMix() {
     for (const a of scopedAgents) {
       const tok = a.tokens;
       if (!tok) continue; // donut counts only token-bearing agents (E4)
-      agentCount++;
       const model = resolveModel(a);
       if (model) byModel.set(model, (byModel.get(model) || 0) + tok);
       const cur = byAgent.get(a.name) || { name: a.name, model: a.model, color: a.color || "var(--brand)", tok: 0 };
@@ -51,7 +53,7 @@ export default function ModelMix() {
       .map(([model, v], i) => ({ model, frac: v / total, pct: Math.round((v / total) * 100), color: RAMP[i % RAMP.length] }));
     const leaders = Array.from(byAgent.values()).sort((a, b) => b.tok - a.tok).slice(0, 5);
     const topTok = leaders[0]?.tok || 1;
-    return { total, segments, leaders, agentCount, topTok };
+    return { total, segments, leaders, topTok };
   }, [scopedAgents, actualModelByAgent]);
 
   if (!(data.total > 1 || data.leaders.length)) {
@@ -78,7 +80,7 @@ export default function ModelMix() {
                 strokeLinecap="round" strokeDasharray={a.dash} strokeDashoffset={a.offset} />
             ))}
           </g>
-          <text x="52" y="48" textAnchor="middle" className="d-big">{data.agentCount}</text>
+          <text x="52" y="48" textAnchor="middle" className="d-big">{scopedAgentCount}</text>
           <text x="52" y="62" textAnchor="middle" className="d-sm">AGENTS</text>
         </svg>
         <div className="lg-list">

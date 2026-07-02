@@ -188,6 +188,19 @@ export function recomputeScoped() {
   }
 
   const scopedAgents = computeScopedAgents(scopedSessions);
+  // Collapse per-(session,agent) rows to distinct names for any headline count
+  // (donut "N AGENTS", "M teams · N agents", Agents tab badge). Without this a
+  // project shows K× its real roster, one copy per session that ran it.
+  const distinctNames = new Set<string>();
+  const teamNames = new Set<string>();
+  for (const a of scopedAgents) {
+    const n = a.name.trim().toLowerCase();
+    if (!n) continue;
+    distinctNames.add(n);
+    if (a.role === "lead") teamNames.add(n);
+  }
+  const scopedAgentCount = distinctNames.size;
+  const scopedTeamCount = teamNames.size;
 
   // Display label for the scoped project (override its derived name if set).
   const labelFor = (project: string) => {
@@ -207,7 +220,7 @@ export function recomputeScoped() {
     scopeTitle = { title: pl, crumbs: ["Overview", pl, sessionSlug(scope.sessionId)], live: scopedStats.live, session: sess };
   }
 
-  store.setState({ scopedSessions, scopedEvents, scopedStats, currentSession, scopedAgents, scopeTitle });
+  store.setState({ scopedSessions, scopedEvents, scopedStats, currentSession, scopedAgents, scopedAgentCount, scopedTeamCount, scopeTitle });
 }
 
 function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {

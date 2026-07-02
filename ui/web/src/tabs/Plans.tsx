@@ -235,18 +235,18 @@ export default function Plans(props: { search: string }) {
   async function submitComment() {
     if (!cBody.trim() || !selected) return;
     setSubmitting(true);
-    const ok = await postPlanComment(selected, { file: cFile || undefined, anchor: cAnchor.trim() || undefined, body: cBody.trim() }, cwd);
+    const res = await postPlanComment(selected, { file: cFile || undefined, anchor: cAnchor.trim() || undefined, body: cBody.trim() }, cwd);
     setSubmitting(false);
-    if (ok) { setCBody(""); setCAnchor(""); await loadDetail(selected); pushToast("success", "Comment posted."); }
-    else pushToast("error", "Failed to post comment — is the dashboard still running?");
+    if (res.ok) { setCBody(""); setCAnchor(""); await loadDetail(selected); pushToast("success", "Comment posted."); }
+    else pushToast("error", res.error || "Failed to post comment — is the dashboard still running?");
   }
 
   async function approveGate(phase: string) {
     if (!selected) return;
     const summary = exportReviewFeedback();
-    const ok = await postPlanApproval(selected, { phase, summary: summary || undefined }, cwd);
-    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); await loadPlans(); pushToast("success", `Approved ${phase} gate.`); }
-    else pushToast("error", `Failed to approve ${phase} gate — is the dashboard still running?`);
+    const res = await postPlanApproval(selected, { phase, summary: summary || undefined }, cwd);
+    if (res.ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); await loadPlans(); pushToast("success", `Approved ${phase} gate.`); }
+    else pushToast("error", res.error || `Failed to approve ${phase} gate — is the dashboard still running?`);
   }
 
   function exportReviewFeedback(extra = reviewNote.trim()): string {
@@ -273,19 +273,24 @@ export default function Plans(props: { search: string }) {
     if (!general && !anns.length) return;
     setSubmitting(true);
     let ok = true;
-    if (general) ok = await postPlanComment(selected, { body: general, author: "dashboard" }, cwd) && ok;
+    let firstError = "";
+    const post = async (body: Parameters<typeof postPlanComment>[1]) => {
+      const res = await postPlanComment(selected, body, cwd);
+      if (!res.ok) { ok = false; if (!firstError && res.error) firstError = res.error; }
+    };
+    if (general) await post({ body: general, author: "dashboard" });
     for (const ann of anns) {
-      ok = await postPlanComment(selected, {
+      await post({
         file: ann.artifact,
         author: "dashboard",
         body: ann.text || (ann.type === "DELETION" ? "Remove this section from the plan." : "Looks good."),
         annotationType: ann.type,
         originalText: ann.originalText,
-      }, cwd) && ok;
+      });
     }
     setSubmitting(false);
     if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); pushToast("success", "Review feedback sent."); }
-    else pushToast("error", "Failed to send review feedback — some comments may not have posted.");
+    else pushToast("error", firstError ? `Failed to send review feedback — ${firstError}` : "Failed to send review feedback — some comments may not have posted.");
   }
 
   // Refetch the list whenever the scoped project cwd changes (and on mount).

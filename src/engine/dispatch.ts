@@ -101,6 +101,18 @@ export async function dispatchAgent(
     try { archivePriorRun(runtime.sessionFile); } catch { /* noop */ }
   }
 
+  // Resolve the model FIRST, before mutating any per-run state. This is the
+  // J4/Decision-5 reorder (the session is the only authoritative source of
+  // getAvailableThinkingLevels(), so it must exist before delegation_start), and
+  // it also means an unresolvable model aborts cleanly: no run-start field —
+  // runCount, startedAt, elapsedMs, the token baselines — is touched for a run
+  // that never happens (M-misc), so the previous run's stats stay intact.
+  const resolvedModel = resolveModel(ctx, model);
+  if (!resolvedModel) {
+    runtime.status = "error";
+    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
+  }
+
   runtime.status = "running";
   runtime.task = task;
   runtime.lastWork = task;
@@ -108,25 +120,12 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
-  // TOK/S baselines (J8/Decision 4): record the lifetime token counts at the
-  // moment this run starts so the UI can divide the *per-run* delta by the
-  // *per-run* elapsedMs — not lifetime tokens by per-run elapsed. Reset here,
-  // alongside elapsedMs, so both refer to the same run window.
+  state.activeRuns++;
+  // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
+  // divides the *per-run* delta by *per-run* elapsedMs — not lifetime tokens by
+  // per-run elapsed.
   runtime.runStartInputTokens = runtime.inputTokens;
   runtime.runStartOutputTokens = runtime.outputTokens;
-  state.activeRuns++;
-
-  // Resolve the model + build tools + CREATE the worker session up front, before
-  // emitting delegation_start. This is the J4/Decision-5 reorder: the session is
-  // the only authoritative source of getAvailableThinkingLevels(), so it must
-  // exist before the event that carries thinkingLevels — otherwise a fresh
-  // agent's first run emits undefined levels (the old "second run onward" bug).
-  const resolvedModel = resolveModel(ctx, model);
-  if (!resolvedModel) {
-    runtime.status = "error";
-    state.activeRuns = Math.max(0, state.activeRuns - 1);
-    return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
-  }
 
   const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
   // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
