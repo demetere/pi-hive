@@ -1,6 +1,9 @@
 import { fetchSessionEvents } from "../api";
 import { store, type ReplayState } from "./index";
-import type { HiveEvent } from "../types";
+import { ensureTopologyDetail } from "./wiring";
+import { buildEventStatus } from "./status";
+import type { AgentRuntime, HiveEvent } from "../types";
+import type { TopoSource } from "../components/TopologyGraph";
 
 // Replay controller (Phase F). A self-contained slice: entering replay pages the
 // whole session history into a local buffer; the scrubber moves `cursor` over
@@ -20,6 +23,10 @@ function stopTimer() {
 export async function enterReplay(sessionId: string) {
   stopTimer();
   setReplay({ active: true, sessionId, events: [], loading: true, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false, historyStartsAt: "" });
+  // Prefetch the session's versioned topology (K5) so the replayed graph renders
+  // the tree it actually ran under, not the live current-session tree.
+  const topoHash = store.getState().sessionSummaries.get(sessionId)?.topologyHash;
+  if (topoHash) void ensureTopologyDetail(topoHash);
   const { events, fetchedTotal } = await fetchSessionEvents(sessionId, (n) => setReplay({ loadedCount: n }));
   // Guard against a session switch mid-load.
   if (store.getState().replay.sessionId !== sessionId) return;
@@ -79,9 +86,27 @@ export function pauseReplay() {
   setReplay({ playing: false });
 }
 
-// The event slice up to (and including) the current cursor — what every replayed
-// derivation (status/feed/chart) consumes.
-export function replayedEvents(): HiveEvent[] {
-  const { events, cursor } = store.getState().replay;
-  return events.slice(0, cursor + 1);
+// Build the TopoSource the Overview's TopologyGraph renders during replay (K5):
+// the session's versioned topology tree (fetched by hash into the store cache)
+// plus an agents map whose statuses are derived purely from events[0..cursor].
+// Pure over the replay slice + the cached topology detail; returns undefined
+// until the topology detail has loaded.
+export function replayTopoSource(slice: HiveEvent[]): TopoSource | undefined {
+  const st = store.getState();
+  const sessionId = st.replay.sessionId;
+  const hash = st.sessionSummaries.get(sessionId)?.topologyHash;
+  const detail = hash ? st.topologyByHash.get(hash) : undefined;
+  const statusBySession = buildEventStatus(slice);
+  const statuses = statusBySession.get(sessionId) || new Map<string, string>();
+  const agents = new Map<string, AgentRuntime>();
+  for (const [name, status] of statuses) agents.set(name, { name, status } as AgentRuntime);
+  // Prefer the versioned tree; if the detail hasn't loaded, fall back to the live
+  // session's topology so the graph still renders (statuses still from replay).
+  if (detail) {
+    const active: "hive" | "planning" = detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning";
+    return { session_id: sessionId, topologies: { active, hive: detail.hive, planning: detail.planning } as any, agents };
+  }
+  const live = st.sessionsById.get(sessionId);
+  if (live) return { session_id: sessionId, topology: live.topology, topologies: live.topologies, agents };
+  return undefined;
 }

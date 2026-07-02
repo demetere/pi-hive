@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import Kpis from "../components/Kpis";
 import Widget from "../components/WidgetModal";
 import LiveActivity from "../components/LiveActivity";
@@ -6,6 +6,8 @@ import CostTokensChart from "../components/CostTokensChart";
 import ModelMix from "../components/ModelMix";
 import Replay from "../components/Replay";
 import { useHive } from "../store";
+import { replayTopoSource } from "../store/replay";
+import { absTime } from "../lib/format";
 
 // The topology graph pulls in d3-hierarchy; code-split it so that dependency
 // only loads when the Overview tab (the sole consumer) actually renders.
@@ -37,6 +39,21 @@ export default function Overview() {
   const currentSession = useHive((s) => s.currentSession);
   const scopedAgents = useHive((s) => s.scopedAgents);
   const scope = useHive((s) => s.scope);
+  const replay = useHive((s) => s.replay);
+
+  // K5: when replay is active on THIS session's Overview, the topology/feed/chart
+  // all render from the replay slice (events[0..cursor]); the Replay component
+  // below becomes the transport. SSE keeps updating the live slice underneath.
+  const replaying = replay.active && scope.level === "session" && replay.sessionId === scope.sessionId;
+  const replaySlice = useMemo(
+    () => (replaying ? replay.events.slice(0, replay.cursor + 1) : undefined),
+    [replaying, replay.events, replay.cursor],
+  );
+  const replaySource = useMemo(
+    () => (replaySlice ? replayTopoSource(replaySlice) : undefined),
+    [replaySlice],
+  );
+  const replayTs = replaying ? replay.events[replay.cursor]?.ts : undefined;
 
   const topoTitle = scope.level === "session" ? "Session topology" : "Agent Topology";
 
@@ -74,9 +91,17 @@ export default function Overview() {
   return (
     <>
       <Kpis />
-      {/* Session replay (Phase F): available on a single-session detail. It re-
-          derives status/feed/totals over a slice of the session's event history;
-          live mode is a separate store slice and is unaffected. */}
+      {/* Persistent replay banner (K5). Present whenever replay drives this
+          Overview, naming the session and the current cursor timestamp. */}
+      {replaying && (
+        <div className="mb-2 flex items-center gap-2 rounded-lg border border-wait/40 bg-well px-3 py-2 text-[12px] text-wait">
+          <span className="w-[7px] h-[7px] rounded-full bg-wait animate-softblink" />
+          <b>Replaying</b> session {scope.sessionId.slice(0, 8)} — {replayTs ? absTime(replayTs) : "…"}
+          <span className="text-ink-dimmer">· event {replay.cursor + 1} / {replay.events.length}</span>
+        </div>
+      )}
+      {/* Session replay (Phase F/K5): the transport controls. When engaged it
+          drives the topology/feed/chart above; the live slice is untouched. */}
       {scope.level === "session" && (
         <div className="mb-[18px]">
           <Replay sessionId={scope.sessionId} />
@@ -95,11 +120,14 @@ export default function Overview() {
                 <button className={topologyView === "hive" ? "active" : ""} onClick={() => setTopologyView("hive")}>Hive</button>
                 <button className={topologyView === "planning" ? "active" : ""} onClick={() => setTopologyView("planning")}>Planning</button>
               </div>
-              {currentSession?.live ? <b>live</b>
+              {replaying ? <b className="text-wait">replay</b>
+                : currentSession?.live ? <b>live</b>
                 : currentSession?.topologies?.active === topologyView ? <b>active</b> : null}
             </div>
             <Suspense fallback={<div className="g-empty">Loading topology…</div>}>
-              <TopologyGraph kind={topologyView} />
+              {replaying
+                ? <TopologyGraph kind={topologyView} source={replaySource} statusMode="snapshot" />
+                : <TopologyGraph kind={topologyView} />}
             </Suspense>
           </div>
         </Widget>
@@ -108,12 +136,14 @@ export default function Overview() {
           title="Activity"
           className="hero"
           headExtra={
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-run">
-              <span className="w-[6px] h-[6px] rounded-full bg-run animate-softblink-fast" />streaming
-            </span>
+            replaying
+              ? <span className="text-[11px] font-medium text-wait">replay</span>
+              : <span className="flex items-center gap-1.5 text-[11px] font-medium text-run">
+                  <span className="w-[6px] h-[6px] rounded-full bg-run animate-softblink-fast" />streaming
+                </span>
           }
         >
-          <LiveActivity limit={40} />
+          <LiveActivity limit={40} events={replaySlice} />
         </Widget>
 
         <Widget
@@ -126,7 +156,7 @@ export default function Overview() {
             </span>
           }
         >
-          <CostTokensChart mode="rate" />
+          <CostTokensChart mode="rate" events={replaySlice} />
         </Widget>
 
         <Widget title="Model Mix">

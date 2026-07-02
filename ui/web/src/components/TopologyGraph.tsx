@@ -5,7 +5,7 @@ import { useHive } from "../store";
 import { viewAgent } from "../store/raw";
 import { usePanZoom } from "../hooks/usePanZoom";
 import { fmtNum, clip } from "../lib/format";
-import { ctxColor, modelTag, statusKey, thinkBars, thinkLevel, thinkName, tokPerSec } from "../lib/agents";
+import { ctxColor, modelTag, resolveDialLevels, statusKey, thinkBars, thinkLevel, thinkName, tokPerSec } from "../lib/agents";
 
 const NODE_H = 92;
 // Card width adapts to content so full agent names + model tags fit without
@@ -71,8 +71,28 @@ function edgePath(l: { source: HierarchyPointNode<TopologyNode>; target: Hierarc
   return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
 }
 
-export default function TopologyGraph(props: { kind?: TopologyKind }) {
-  const session = useHive((s) => s.currentSession);
+// A session-like object TopologyGraph can render. `currentSession` from the
+// store is one; a replay slice (K5) or a versioned-topology modal (K2) can build
+// another. When statusMode is "none" every node reads idle (historical view).
+export interface TopoSource {
+  session_id?: string;
+  topology?: Topology;
+  topologies?: SessionView["topologies"];
+  agents?: Map<string, AgentRuntime>;
+}
+
+// live     — subscribe to the live event-status store (default).
+// snapshot — use only the statuses on the passed source.agents (replay, K5): the
+//            source is the same session id as a live one, so we must NOT read the
+//            live event-status store or current statuses would leak in.
+// none     — every node reads idle (historical version view, K2 modal).
+export type TopoStatusMode = "live" | "snapshot" | "none";
+
+export default function TopologyGraph(props: { kind?: TopologyKind; source?: TopoSource; statusMode?: TopoStatusMode }) {
+  const liveSession = useHive((s) => s.currentSession);
+  // Prefer an explicit source (replay/modal); fall back to the live session.
+  const session = (props.source ?? liveSession) as (SessionView & TopoSource) | undefined;
+  const statusMode = props.statusMode ?? "live";
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const svgRef = useRef<SVGSVGElement | null>(null);
   const { view, setView, grabbing, handlers } = usePanZoom(svgRef);
@@ -207,7 +227,7 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
           <rect x="0" y="0" width="100%" height="100%" fill="url(#topo-dots)" />
           <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
             {layout.links.map((l) => (
-              <EdgeLine key={l.target.data.name} link={l} ox={layout.ox} sessionId={session?.session_id || ""} inactiveTeam={inactiveTeam} snapStatus={agentsMap.get(l.target.data.name)?.status} />
+              <EdgeLine key={l.target.data.name} link={l} ox={layout.ox} sessionId={session?.session_id || ""} statusMode={statusMode} inactiveTeam={inactiveTeam} snapStatus={agentsMap.get(l.target.data.name)?.status} />
             ))}
             {layout.nodes.map((n) => (
               <Node
@@ -216,6 +236,7 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
                 ox={layout.ox}
                 nodeW={layout.nodeW}
                 sessionId={session?.session_id || ""}
+                statusMode={statusMode}
                 inactiveTeam={inactiveTeam}
                 rt={agentsMap.get(n.data.name)}
                 collapsed={collapsed.has(n.data.name)}
@@ -231,14 +252,17 @@ export default function TopologyGraph(props: { kind?: TopologyKind }) {
 
 // Each edge/node subscribes to its own agent status so a status change repaints
 // just that element — positions (from the memoized layout) stay untouched.
-function useStatus(sessionId: string, name: string, inactiveTeam: boolean, snapStatus?: string): string {
-  const evStatus = useHive((s) => s.eventStatus.get(sessionId)?.get(name));
-  if (inactiveTeam) return "idle";
+// statusMode: "live" reads the live event-status store; "snapshot" uses only the
+// passed snapStatus (replay/historical, so live status can't leak); "none" idle.
+function useStatus(sessionId: string, name: string, inactiveTeam: boolean, snapStatus?: string, statusMode: TopoStatusMode = "live"): string {
+  const evStatus = useHive((s) => (statusMode === "live" ? s.eventStatus.get(sessionId)?.get(name) : undefined));
+  if (inactiveTeam || statusMode === "none") return "idle";
+  if (statusMode === "snapshot") return snapStatus || "idle";
   return evStatus || snapStatus || "idle";
 }
 
-function EdgeLine(props: { link: any; ox: number; sessionId: string; inactiveTeam: boolean; snapStatus?: string }) {
-  const status = useStatus(props.sessionId, props.link.target.data.name, props.inactiveTeam, props.snapStatus);
+function EdgeLine(props: { link: any; ox: number; sessionId: string; inactiveTeam: boolean; snapStatus?: string; statusMode?: TopoStatusMode }) {
+  const status = useStatus(props.sessionId, props.link.target.data.name, props.inactiveTeam, props.snapStatus, props.statusMode);
   return <path className={`g-edge ${status === "running" ? "running" : ""}`} d={edgePath(props.link, props.ox)} />;
 }
 
@@ -261,13 +285,16 @@ function ThinkDial({ x, y, levels, level, tier }: { x: number; y: number; levels
 
 function Node(props: {
   node: HierarchyPointNode<TopologyNode>; ox: number; nodeW: number; sessionId: string; inactiveTeam: boolean;
-  rt?: AgentRuntime; collapsed: boolean; onToggle: (name: string, hasKids: boolean) => void;
+  rt?: AgentRuntime; collapsed: boolean; onToggle: (name: string, hasKids: boolean) => void; statusMode?: TopoStatusMode;
 }) {
   const { node, ox, rt } = props;
   const data = node.data;
   // Hooks run unconditionally (rules-of-hooks); the synthetic branch below reads
   // status but ignores it.
-  const status = useStatus(props.sessionId, data.name, props.inactiveTeam, rt?.status);
+  const status = useStatus(props.sessionId, data.name, props.inactiveTeam, rt?.status, props.statusMode);
+  // Model-capability lookup for the dial's fallback (K3). Read here so hook order
+  // stays stable across the synthetic early-return below.
+  const modelLevels = useHive((s) => s.modelLevels);
 
   // A synthetic grouping root (no real orchestrator) renders as a plain,
   // non-interactive group header — no CTX/TOK-S stats, not clickable (E4).
@@ -292,7 +319,10 @@ function Node(props: {
   const model = data.model || rt?.model;
   const ctxPct = Math.max(0, Math.min(100, Math.round(rt?.contextPct ?? 0)));
   const level = thinkLevel(model, rt?.thinking);
-  const tps = tokPerSec(rt?.inputTokens, rt?.outputTokens, rt?.elapsedMs);
+  // Dial level resolution (K3/Decision 6): node sidecar → rt sidecar → /models
+  // lookup by effective model → undefined (plain text, no invented ladder).
+  const resolvedLevels = resolveDialLevels((data as any).thinkingLevels, rt?.thinkingLevels, model, modelLevels);
+  const tps = tokPerSec(rt?.inputTokens, rt?.outputTokens, rt?.elapsedMs, rt?.runStartInputTokens, rt?.runStartOutputTokens);
 
   const openLog = () => {
     if (props.sessionId) viewAgent({ sessionId: props.sessionId, name: data.name, color: data.color, status, model });
@@ -358,8 +388,13 @@ function Node(props: {
 
       {/* Row 3: THINK dial · TOK/S · TOTAL */}
       <text className="g-cap" x="12" y="63" style={{ fontSize: 7 }}>THINK</text>
-      <ThinkDial x={12} y={66} levels={(data as any).thinkingLevels || rt?.thinkingLevels} level={level} tier={tier} />
-      <text className="g-cap" x="12" y="84" style={{ fontSize: 6.5 }}>{thinkName(model, level).toUpperCase()}</text>
+      {resolvedLevels && resolvedLevels.length
+        ? <ThinkDial x={12} y={66} levels={resolvedLevels} level={level} tier={tier} />
+        // K3: unknown capabilities → plain text of the chosen level, no ladder.
+        : <text className="g-val" x="12" y="75" style={{ fontSize: 9 }}>{thinkName(model, level).toUpperCase()}</text>}
+      {resolvedLevels && resolvedLevels.length
+        ? <text className="g-cap" x="12" y="84" style={{ fontSize: 6.5 }}>{thinkName(model, level).toUpperCase()}</text>
+        : null}
 
       <text className="g-cap" x={W / 2} y="63" textAnchor="middle" style={{ fontSize: 7 }}>TOK/S</text>
       <text className="g-val" x={W / 2} y="78" textAnchor="middle" style={{ fontSize: 10.5 }}>{tps ? Math.round(tps) : "—"}</text>

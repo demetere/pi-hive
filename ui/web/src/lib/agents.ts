@@ -47,17 +47,18 @@ function normLevel(v: string | undefined): string {
   return alias[t] || t;
 }
 
-// The levels the dial should show. When the node carries SDK-reported supported
-// levels (thinkingLevels sidecar, A10/E4), the dial shows exactly those — no
-// invented ladder. Otherwise it falls back to the full canonical scale so bar
-// heights stay consistent across models with unknown capabilities.
+// The levels the dial should show. When the (already-resolved) supported levels
+// are known — node sidecar, or a /models lookup by effective model (K3) — the
+// dial shows exactly those, in canonical order, no invented ladder. When they
+// are NOT known, this returns [] so the caller renders the chosen level as plain
+// text instead of fabricating a full 6-level scale (Decision 6).
 export function thinkScale(supportedLevels?: string[]): string[] {
   if (supportedLevels && supportedLevels.length) {
     const set = new Set(supportedLevels.map((l) => normLevel(l)));
     const ordered = THINK_ORDER.filter((l) => set.has(l));
     if (ordered.length) return ordered;
   }
-  return [...THINK_ORDER];
+  return [];
 }
 
 // A free-form `thinking` string → index into the canonical scale. Unknown → 0.
@@ -75,6 +76,8 @@ export interface ThinkBar { w: number; h: number; on: boolean; }
 // shows exactly that many bars (minus "off"); otherwise the full canonical scale.
 export function thinkBars(supportedLevels: string[] | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
   const scale = thinkScale(supportedLevels);
+  // Unknown capabilities → no bars; the caller renders the level as plain text.
+  if (!scale.length) return [];
   const n = Math.max(1, scale.filter((l) => l !== "off").length); // exclude "off"
   const boxW = tier === "lead" ? 34 : 20;
   const gap = tier === "lead" ? 2 : 1.2;
@@ -91,6 +94,30 @@ export function thinkBars(supportedLevels: string[] | undefined, level: number, 
 
 export function thinkName(_model: string | undefined, level: number): string {
   return THINK_ORDER[level] || "off";
+}
+
+// Resolve the supported thinking levels for the dial (K3/Decision 6), in order:
+//   1. the node's own thinkingLevels sidecar (from the topology / delegation),
+//   2. the runtime's thinkingLevels sidecar (from the live snapshot),
+//   3. a /models lookup by the effective model string (full "provider/id" or
+//      bare id, lowercased — the two keys refreshModels indexes),
+//   4. undefined → the caller renders the chosen level as plain text.
+// Never fabricates a ladder.
+export function resolveDialLevels(
+  nodeLevels: string[] | undefined,
+  rtLevels: string[] | undefined,
+  model: string | undefined,
+  modelLevels?: Map<string, string[]>,
+): string[] | undefined {
+  if (nodeLevels && nodeLevels.length) return nodeLevels;
+  if (rtLevels && rtLevels.length) return rtLevels;
+  if (model && modelLevels) {
+    const raw = model.trim().toLowerCase();
+    const bare = raw.includes("/") ? raw.slice(raw.indexOf("/") + 1) : raw;
+    const hit = modelLevels.get(raw) || modelLevels.get(bare);
+    if (hit && hit.length) return hit;
+  }
+  return undefined;
 }
 
 // Single-letter neutral model badge, e.g. "opus" → "O". Never color-coded.
@@ -116,10 +143,25 @@ export function modelTag(model?: string): string {
   return raw;
 }
 
-// Derived per-agent throughput. No live rate is stored, so approximate from
-// cumulative tokens over elapsed wall time. Returns null when unknowable/idle.
-export function tokPerSec(inputTokens = 0, outputTokens = 0, elapsedMs?: number): number | null {
-  const tokens = (inputTokens || 0) + (outputTokens || 0);
+// Per-run throughput (K4/Decision 4). elapsedMs resets each run in dispatch.ts,
+// so the rate must divide the tokens produced DURING this run — the live totals
+// minus the run-start baselines (J8) — by that same per-run elapsed. Falls back
+// to lifetime totals only when no baseline was recorded (pre-J8 snapshots), so a
+// re-run agent's rate is no longer inflated by prior runs' tokens. Returns null
+// when unknowable/idle.
+export function tokPerSec(
+  inputTokens = 0,
+  outputTokens = 0,
+  elapsedMs?: number,
+  runStartInputTokens?: number,
+  runStartOutputTokens?: number,
+): number | null {
+  const lifetime = (inputTokens || 0) + (outputTokens || 0);
+  const baseline = (runStartInputTokens || 0) + (runStartOutputTokens || 0);
+  // Guard against a baseline above the live total (snapshot ordering skew).
+  const tokens = runStartInputTokens != null || runStartOutputTokens != null
+    ? Math.max(0, lifetime - baseline)
+    : lifetime;
   if (!tokens || !elapsedMs || elapsedMs <= 0) return null;
   return tokens / (elapsedMs / 1000);
 }

@@ -1,5 +1,5 @@
 import type { HiveEvent, Snapshot } from "../types";
-import { deleteProjectRemote, deleteSessionRemote } from "../api";
+import { deleteProjectRemote, deleteSessionRemote, fetchEventsBefore } from "../api";
 import { store, type AgentRef, type ConfirmState, type Scope } from "./index";
 
 // ── ingest ───────────────────────────────────────────────────────────────────
@@ -32,6 +32,35 @@ export function ingestSnapshot(s: Snapshot) {
   store.setState({ snapshots: { ...store.getState().snapshots, [s.session_id]: s } });
 }
 
+// Load one older page of events (K7). Anchors on the lowest cursor currently in
+// the scoped set (or all events at fleet scope) and fetches the page before it.
+// Returns the number of NEW events ingested (0 = reached the beginning). Bounded
+// to a single page per call — no unbounded backfill.
+let loadingOlder = false;
+export async function loadOlderEvents(): Promise<number> {
+  if (loadingOlder) return 0;
+  const st = store.getState();
+  const scope = st.scope;
+  const pool = scope.level === "fleet" ? st.allEvents
+    : scope.level === "project" ? st.allEvents.filter((e) => st.sessionsById.get(e.session_id)?.project === scope.project)
+    : st.allEvents.filter((e) => e.session_id === scope.sessionId);
+  // Lowest cursor in scope is the anchor. Events without a cursor (unlikely for
+  // SQL-served rows) are ignored for the anchor.
+  let anchor = Infinity;
+  for (const e of pool) if (typeof e.cursor === "number" && e.cursor < anchor) anchor = e.cursor;
+  if (!Number.isFinite(anchor)) return 0;
+  loadingOlder = true;
+  try {
+    const opts = scope.level === "session" ? { session: scope.sessionId } : {};
+    const older = await fetchEventsBefore(anchor, opts);
+    const before = Object.keys(store.getState().eventMap).length;
+    if (older.length) ingestEvents(older);
+    return Object.keys(store.getState().eventMap).length - before;
+  } finally {
+    loadingOlder = false;
+  }
+}
+
 // Drop a set of sessions from local caches (after a server-side delete or when
 // the server broadcasts a hive_delete to other clients).
 export function purgeLocal(ids: string[]) {
@@ -46,17 +75,19 @@ export function purgeLocal(ids: string[]) {
 
 // ── delete actions ───────────────────────────────────────────────────────────
 export async function deleteSession(sessionId: string): Promise<boolean> {
-  if (!await deleteSessionRemote(sessionId)) return false;
+  if (!await deleteSessionRemote(sessionId)) { pushToast("error", "Failed to delete session — is the dashboard still running?"); return false; }
   purgeLocal([sessionId]);
   reconcileScopeAfterDelete([sessionId]);
+  pushToast("success", "Session telemetry deleted.");
   return true;
 }
 
 export async function deleteProject(project: string): Promise<boolean> {
   const ids = store.getState().sessions.filter((s) => s.project === project).map((s) => s.session_id);
-  if (!await deleteProjectRemote(project)) return false;
+  if (!await deleteProjectRemote(project)) { pushToast("error", "Failed to delete project — is the dashboard still running?"); return false; }
   purgeLocal(ids);
   reconcileScopeAfterDelete(ids);
+  pushToast("success", `Deleted ${ids.length} session${ids.length === 1 ? "" : "s"} from ${project}.`);
   return true;
 }
 
@@ -101,5 +132,17 @@ export function closeAgent() { store.setState({ openAgent: null }); }
 
 export function confirmAction(opts: NonNullable<ConfirmState>) { store.setState({ confirm: opts }); }
 export function clearConfirm() { store.setState({ confirm: null }); }
+
+// ── toasts (K1) ───────────────────────────────────────────────────────────────
+let toastSeq = 0;
+export function pushToast(kind: "success" | "error" | "info", message: string) {
+  const id = ++toastSeq;
+  store.setState({ toasts: [...store.getState().toasts, { id, kind, message }] });
+  // Errors linger longer so a failure isn't missed; success/info are brief.
+  setTimeout(() => dismissToast(id), kind === "error" ? 6000 : 3500);
+}
+export function dismissToast(id: number) {
+  store.setState({ toasts: store.getState().toasts.filter((t) => t.id !== id) });
+}
 
 export function tick() { store.setState({ now: Date.now() }); }

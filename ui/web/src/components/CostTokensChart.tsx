@@ -34,11 +34,14 @@ function fmtTime(t: number): string {
   return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function CostTokensChart({ mode = "cumulative" }: { mode?: "cumulative" | "rate" }) {
+export default function CostTokensChart({ mode = "cumulative", events }: { mode?: "cumulative" | "rate"; events?: HiveEvent[] }) {
   const scopedEvents = useHive((s) => s.scopedEvents);
   const now = useHive((s) => s.now);
+  // When an explicit event set is passed (replay, K5), chart that instead of the
+  // live scoped events; live SSE updates never touch the replay slice.
+  const source = events ?? scopedEvents;
   // For the rate view, bucket against the live clock so the 60-min window slides.
-  const series = useMemo(() => buildSeries(scopedEvents, mode, now || Date.now()), [scopedEvents, mode, now]);
+  const series = useMemo(() => buildSeries(source, mode, now || Date.now()), [source, mode, now]);
   const [hover, setHover] = useState<{ i: number; px: number } | null>(null);
   const [size, setSize] = useState({ w: 760, h: 240 });
   const svgRef = useRef<SVGSVGElement | null>(null);

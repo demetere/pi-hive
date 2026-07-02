@@ -161,8 +161,9 @@ Bun.serve({
       const type = url.searchParams.get("type") || undefined;
       const limit = Number(url.searchParams.get("limit") || 1000);
       const afterParam = url.searchParams.get("after");
-      const events = afterParam != null || type
-        ? queryEvents({ session, cwd, type, after: afterParam != null ? Number(afterParam) : undefined, limit })
+      const beforeParam = url.searchParams.get("before");
+      const events = afterParam != null || beforeParam != null || type
+        ? queryEvents({ session, cwd, type, after: afterParam != null ? Number(afterParam) : undefined, before: beforeParam != null ? Number(beforeParam) : undefined, limit })
         : recentEvents(limit, { session, cwd });
       return json({ events, cursor: maxEventCursor() });
     }

@@ -1,10 +1,16 @@
-import { useCallback, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useHive } from "../store";
 import { deleteSession, selectSessionScope, setActiveTab, confirmAction } from "../store/raw";
+import { ensureTopologyDetail } from "../store/wiring";
 import { useFrozenOrder } from "../hooks/useFrozenOrder";
 import RelTime from "../hooks/RelTime";
 import { absTime, fmtCost, fmtNum, sessionSlug } from "../lib/format";
 import type { SessionView } from "../types";
+
+// Lazy like Overview does, so the d3-hierarchy chunk only loads when the
+// topology-version modal is actually opened (keeps the code-split intact).
+const TopologyGraph = lazy(() => import("../components/TopologyGraph"));
 
 type Key = "project" | "first_ts" | "last_ts" | "running" | "event_count" | "tokens" | "cost";
 
@@ -13,6 +19,29 @@ export default function Sessions(props: { search: string }) {
   const scope = useHive((s) => s.scope);
   const liveSet = useHive((s) => s.liveSet);
   const projectGroups = useHive((s) => s.projectGroups);
+  const sessionSummaries = useHive((s) => s.sessionSummaries);
+  const topologiesByCwd = useHive((s) => s.topologiesByCwd);
+  // The topology whose versioned tree is open in the modal (K2), or null.
+  const [openTopoHash, setOpenTopoHash] = useState<string | null>(null);
+
+  // Server-authoritative topology hash for a session (K2).
+  const hashOf = useCallback((s: SessionView): string | undefined => sessionSummaries.get(s.session_id)?.topologyHash, [sessionSummaries]);
+  // "vN" rank of a hash within its cwd — the 1-based index of the version by
+  // first_seen_at (topologiesByCwd is already ordered that way). undefined if the
+  // versions for that cwd aren't loaded yet or the hash isn't among them.
+  const versionRankOf = useCallback((s: SessionView): number | undefined => {
+    const hash = hashOf(s);
+    if (!hash || !s.cwd) return undefined;
+    const versions = topologiesByCwd.get(s.cwd);
+    if (!versions) return undefined;
+    const idx = versions.findIndex((v) => v.hash === hash);
+    return idx >= 0 ? idx + 1 : undefined;
+  }, [hashOf, topologiesByCwd]);
+
+  function openTopology(hash: string) {
+    void ensureTopologyDetail(hash);
+    setOpenTopoHash(hash);
+  }
 
   // The Sessions tab lists every session for the CURRENT project (or all
   // projects at fleet scope). It never collapses to a single row when one
@@ -89,10 +118,38 @@ export default function Sessions(props: { search: string }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((s) => (
+          {rows.map((s, i) => {
+            const rank = versionRankOf(s);
+            const hash = hashOf(s);
+            // "topology changed" divider between adjacent rows in the SAME cwd
+            // whose topology hash differs (K2). Only meaningful when both hashes
+            // are known and the rows belong to the same project working dir.
+            const prev = rows[i - 1];
+            const prevHash = prev ? hashOf(prev) : undefined;
+            const showDivider = !!prev && !!hash && !!prevHash && hash !== prevHash && prev.cwd === s.cwd && !!s.cwd;
+            return (
+            <>
+            {showDivider && (
+              <tr key={`div-${s.session_id}`} className="topo-divider" aria-hidden="true">
+                <td colSpan={9} style={{ padding: "2px 10px" }}>
+                  <span className="text-[10px] text-wait italic">◇ topology changed</span>
+                </td>
+              </tr>
+            )}
             <tr key={s.session_id} className={selectedId === s.session_id ? "active" : ""} onClick={() => openSession(s.session_id)}>
               <td><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{labelOf(s.project)}</b></td>
-              <td className="mono">{sessionSlug(s.session_id)}</td>
+              <td className="mono">
+                {sessionSlug(s.session_id)}
+                {rank != null && hash && (
+                  <button
+                    className="ml-1.5 inline-flex items-center rounded-full bg-well border border-line px-1.5 py-[1px] text-[9px] text-ink-dim hover:text-ink hover:border-brand"
+                    title="View this session's topology version"
+                    onClick={(e) => { e.stopPropagation(); openTopology(hash); }}
+                  >
+                    topology v{rank}
+                  </button>
+                )}
+              </td>
               <td className="muted-cell">{absTime(s.first_ts)}</td>
               <td className="num">{s.running}</td>
               <td className="num">{s.event_count}</td>
@@ -103,10 +160,40 @@ export default function Sessions(props: { search: string }) {
                 <button className="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
               </td>
             </tr>
-          ))}
+            </>
+            );
+          })}
         </tbody>
       </table>
       {!rows.length && <div className="empty">No sessions match.</div>}
+      {openTopoHash && <TopologyVersionModal hash={openTopoHash} onClose={() => setOpenTopoHash(null)} />}
     </div>
+  );
+}
+
+// K2: modal showing one session's versioned topology tree, reusing TopologyGraph
+// with live statuses off (this is a historical version, not a running session).
+function TopologyVersionModal({ hash, onClose }: { hash: string; onClose: () => void }) {
+  const detail = useHive((s) => s.topologyByHash.get(hash));
+  // Reassemble the reassembled tree into the TopoSource TopologyGraph consumes.
+  const source = useMemo(() => {
+    if (!detail) return undefined;
+    const active: "hive" | "planning" = detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning";
+    return { session_id: "", topologies: { active, hive: detail.hive, planning: detail.planning } as any, agents: new Map() };
+  }, [detail]);
+  return createPortal(
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="rounded-xl border border-line bg-panel p-4 w-[80vw] h-[80vh] max-w-[1100px] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-2 flex-none">
+          <b className="text-[13px]">Topology version <span className="font-mono text-ink-dim">{hash.slice(0, 10)}</span></b>
+          <button className="text-ink-dim text-[12px] hover:text-ink" onClick={onClose}>✕ close</button>
+        </div>
+        <div className="flex-1 min-h-0">
+          {!detail || !source ? <div className="empty">Loading topology…</div>
+            : <Suspense fallback={<div className="g-empty">Loading topology…</div>}><TopologyGraph source={source} statusMode="none" /></Suspense>}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

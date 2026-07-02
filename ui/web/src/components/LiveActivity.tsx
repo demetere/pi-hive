@@ -4,6 +4,7 @@ import { fmtCost, fmtNum } from "../lib/format";
 import { hhmmss, statusColorVar, statusKey } from "../lib/agents";
 import { bundleEvents, itemAgent, mergeThinking, type ActivityItem as LiveItem } from "../lib/activity";
 import type { ScopeAgent } from "../store";
+import type { HiveEvent } from "../types";
 
 type Kind = "DELEGATE" | "TOOL" | "MSG" | "DONE" | "ERROR" | "THINK";
 
@@ -28,6 +29,7 @@ function kindOf(item: LiveItem): Kind {
     case "delegation_start": return "DELEGATE";
     case "delegation_end": return p.type === "error" || p.isError ? "ERROR" : "DONE";
     case "error": return "ERROR";
+    case "worker_retry": return "ERROR";
     case "assistant_message":
     case "user_message": return "MSG";
     default: return p.isError ? "ERROR" : "MSG";
@@ -50,8 +52,22 @@ function messageOf(item: LiveItem): string {
     case "assistant_message":
     case "user_message": return p.text || "";
     case "error": return p.message || "error";
+    // worker_retry carries attempt/maxAttempts/errorMessage (K6). The "start"
+    // phase is the informative one; the "end" phase just reports success.
+    case "worker_retry":
+      return p.phase === "end"
+        ? (p.success ? "retry succeeded" : "retry failed")
+        : `retry ${p.attempt ?? "?"}/${p.maxAttempts ?? "?"}${p.errorMessage ? ` — ${p.errorMessage}` : ""}`;
     default: return typeof p.text === "string" ? p.text : e.type;
   }
+}
+
+// Whether an item's payload was clipped at source (J6) — drives a "… truncated"
+// affordance so a reader knows the preview is partial.
+function isTruncated(item: LiveItem): boolean {
+  if (item.kind === "tool") return (item.end || item.start)?.payload?.truncated === true;
+  if (item.kind === "event") return item.event?.payload?.truncated === true;
+  return false;
 }
 
 // Right-aligned line-2 metadata: delegation target, token delta, duration, retry.
@@ -75,16 +91,20 @@ function metaOf(item: LiveItem): string {
       if (p.costUsd) return fmtCost(p.costUsd);
       return p.elapsedMs ? `${Math.round(p.elapsedMs / 1000)}s` : "";
     }
-    case "error": return p.retry ? `retry ${p.retry}` : "";
+    // worker_retry meta shows the attempt counter (K6). The dead `p.retry` read
+    // on `error` events is gone — retries arrive as their own worker_retry event.
+    case "worker_retry": return p.attempt != null ? `attempt ${p.attempt}/${p.maxAttempts ?? "?"}` : "";
     default: return "";
   }
 }
 
-export default function LiveActivity(props: { limit?: number }) {
-  const scopedEvents = useHive((s) => s.scopedEvents);
+export default function LiveActivity(props: { limit?: number; events?: HiveEvent[] }) {
+  const scopedEventsLive = useHive((s) => s.scopedEvents);
   const scopedAgents = useHive((s) => s.scopedAgents);
   const scopedSessions = useHive((s) => s.scopedSessions);
   const thinkingBySession = useHive((s) => s.thinkingBySession);
+  // Replay (K5) passes its own event slice; live SSE never mutates it.
+  const scopedEvents = props.events ?? scopedEventsLive;
 
   // Single roster: id → model/status, shared with the topology graph.
   const roster = useMemo(() => {
@@ -105,10 +125,20 @@ export default function LiveActivity(props: { limit?: number }) {
     [scopedEvents, thinking, props.limit],
   );
 
+  // The thinking feed is polled for at most 6 sessions (fan-out cap in wiring).
+  // Surface that at fleet scale so a reader knows thinking is partial.
+  const THINKING_SESSION_CAP = 6;
+  const thinkingCapped = scopedSessions.length > THINKING_SESSION_CAP;
+
   if (!items.length) return <div className="tl-scroll"><div className="empty">No activity yet.</div></div>;
 
   return (
     <div className="tl-scroll">
+      {thinkingCapped && (
+        <div className="text-[10px] text-ink-dimmer italic px-2 py-1">
+          Showing agent thinking for the {THINKING_SESSION_CAP} most-recent sessions in scope.
+        </div>
+      )}
       {items.map((item) => {
         const agentId = itemAgent(item) || "—";
         const agent = roster.get(agentId);
@@ -118,6 +148,7 @@ export default function LiveActivity(props: { limit?: number }) {
         const dotColor = statusColorVar(agent?.status);
         const msg = messageOf(item);
         const meta = metaOf(item);
+        const truncated = isTruncated(item);
         // Identity color drives the row's left border (real agents only; else neutral).
         const agentColor = agent?.color || "var(--ink-dimmer)";
         return (
@@ -134,7 +165,10 @@ export default function LiveActivity(props: { limit?: number }) {
               <span className="feed-pill flex-none" style={{ color: kc, background: `color-mix(in srgb, ${kc} 15%, transparent)` }}>{kind}</span>
             </div>
             <div className="flex gap-2 mt-1 pl-[23px]">
-              <span className="text-[11.5px] text-ink leading-[1.4] flex-1 min-w-0 line-clamp-2">{msg}</span>
+              <span className="text-[11.5px] text-ink leading-[1.4] flex-1 min-w-0 line-clamp-2">
+                {msg}
+                {truncated && <span className="text-ink-dimmer italic" title="Preview was truncated at source"> … truncated</span>}
+              </span>
               {meta && <span className="font-mono text-[10px] text-ink-dim flex-none whitespace-nowrap">{meta}</span>}
             </div>
           </div>

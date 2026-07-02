@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHive } from "../store";
-import { saveOverride } from "../store/wiring";
+import { pruneTelemetry, saveOverride } from "../store/wiring";
+import { confirmAction } from "../store/raw";
 
 // Settings: rename projects (persisted in the telemetry DB, keyed by cwd).
 // Future settings can be added as additional sections below.
@@ -15,6 +16,8 @@ export default function Settings() {
   // Local edit buffer per group key so typing doesn't fight the store.
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>("");
+  const [pruneDays, setPruneDays] = useState<string>("30");
+  const [pruning, setPruning] = useState(false);
 
   // Seed the draft from current labels when the group set changes.
   useEffect(() => {
@@ -45,6 +48,21 @@ export default function Settings() {
     setBusy(key);
     await saveOverride(cwd, label);
     setBusy("");
+  }
+
+  function requestPrune() {
+    const days = Number(pruneDays.trim());
+    if (!Number.isFinite(days) || days < 0) return;
+    confirmAction({
+      title: "Prune telemetry history?",
+      message: <>This permanently deletes all telemetry older than <b>{days} day{days === 1 ? "" : "s"}</b> across every project — events, delegations, tool calls, and any session whose entire history predates the cutoff. Project logs on disk are not touched.</>,
+      confirmLabel: "Prune history",
+      danger: true,
+      onConfirm: async () => {
+        setPruning(true);
+        try { await pruneTelemetry(days); } finally { setPruning(false); }
+      },
+    });
   }
 
   return (
@@ -91,6 +109,36 @@ export default function Settings() {
             })}
           </div>
         )}
+      </section>
+
+      <section className="tab-card settings-card">
+        <div className="settings-head">
+          <div>
+            <h2 className="settings-title">Prune history</h2>
+            <p className="settings-sub">Delete telemetry older than a chosen age across all projects. This frees space in the local dashboard database and cannot be undone.</p>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div className="setting-meta">
+            <div className="setting-name">Retain the last</div>
+            <div className="setting-path">Older events are removed; sessions entirely older than this are dropped.</div>
+          </div>
+          <input
+            className="setting-input"
+            type="number"
+            min={0}
+            value={pruneDays}
+            onChange={(e) => setPruneDays(e.target.value)}
+            aria-label="Days of telemetry to retain"
+            style={{ maxWidth: 120 }}
+          />
+          <div className="setting-actions">
+            <span className="setting-path">day{pruneDays.trim() === "1" ? "" : "s"}</span>
+            <button className="btn sm danger" disabled={pruning || !(Number(pruneDays) >= 0)} onClick={requestPrune}>
+              {pruning ? "Pruning…" : "Prune…"}
+            </button>
+          </div>
+        </div>
       </section>
     </div>
   );

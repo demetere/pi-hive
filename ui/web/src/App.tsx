@@ -10,6 +10,7 @@ import Plans from "./tabs/Plans";
 import Settings from "./tabs/Settings";
 import AgentLog from "./components/AgentLog";
 import ConfirmModal from "./components/ConfirmModal";
+import Toast from "./components/Toast";
 import { useHive } from "./store";
 import { selectProject, setActiveTab } from "./store/raw";
 import { connect } from "./store/wiring";
@@ -86,6 +87,7 @@ export default function App() {
       </div>
       <AgentLog />
       <ConfirmModal />
+      <Toast />
     </div>
   );
 }

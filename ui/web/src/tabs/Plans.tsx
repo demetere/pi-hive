@@ -5,6 +5,7 @@ import {
   type PlanApproval, type PlanComment, type PlanDetail, type PlanSummary, type PlanVerdict,
 } from "../api";
 import { useHive } from "../store";
+import { pushToast } from "../store/raw";
 import RelTime from "../hooks/RelTime";
 import { absTime } from "../lib/format";
 
@@ -236,14 +237,16 @@ export default function Plans(props: { search: string }) {
     setSubmitting(true);
     const ok = await postPlanComment(selected, { file: cFile || undefined, anchor: cAnchor.trim() || undefined, body: cBody.trim() }, cwd);
     setSubmitting(false);
-    if (ok) { setCBody(""); setCAnchor(""); await loadDetail(selected); }
+    if (ok) { setCBody(""); setCAnchor(""); await loadDetail(selected); pushToast("success", "Comment posted."); }
+    else pushToast("error", "Failed to post comment — is the dashboard still running?");
   }
 
   async function approveGate(phase: string) {
     if (!selected) return;
     const summary = exportReviewFeedback();
     const ok = await postPlanApproval(selected, { phase, summary: summary || undefined }, cwd);
-    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); await loadPlans(); }
+    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); await loadPlans(); pushToast("success", `Approved ${phase} gate.`); }
+    else pushToast("error", `Failed to approve ${phase} gate — is the dashboard still running?`);
   }
 
   function exportReviewFeedback(extra = reviewNote.trim()): string {
@@ -281,7 +284,8 @@ export default function Plans(props: { search: string }) {
       }, cwd) && ok;
     }
     setSubmitting(false);
-    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); }
+    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected); pushToast("success", "Review feedback sent."); }
+    else pushToast("error", "Failed to send review feedback — some comments may not have posted.");
   }
 
   // Refetch the list whenever the scoped project cwd changes (and on mount).

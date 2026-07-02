@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useHive } from "../store";
-import { viewAgent } from "../store/raw";
+import { loadOlderEvents, pushToast, viewAgent } from "../store/raw";
 import RelTime from "../hooks/RelTime";
 import { fmtCost, fmtNum, sessionSlug, shortModel } from "../lib/format";
 import { buildAgentTeamMap, bundleEvents, itemAgent, itemHaystack, mergeThinking, type ActivityItem } from "../lib/activity";
@@ -46,6 +46,9 @@ function itemTitle(item: ActivityItem): string {
     case "user_message": return "User message";
     case "assistant_message": return `${e.actor || "assistant"} message`;
     case "error": return p.message || "Error";
+    case "worker_retry": return p.phase === "end"
+      ? `${p.agent || "worker"} retry ${p.success ? "succeeded" : "failed"}`
+      : `${p.agent || "worker"} retry ${p.attempt ?? "?"}/${p.maxAttempts ?? "?"}`;
     default: return e.type;
   }
 }
@@ -66,8 +69,17 @@ function itemSummary(item: ActivityItem): string {
     case "delegation_start": return p.task || "";
     case "delegation_end": return `${p.message || ""}${p.elapsedMs ? ` · ${Math.round((p.elapsedMs || 0) / 1000)}s` : ""}${p.costUsd != null ? ` · ${fmtCost(p.costUsd)}` : ""}`;
     case "user_message": case "assistant_message": return p.text || "";
+    case "worker_retry": return p.errorMessage || "";
     default: return typeof p.text === "string" ? p.text : "";
   }
+}
+
+// Whether an item's payload was clipped at source (J6) — feeds the "… truncated"
+// affordance so the reader knows the preview is partial.
+function itemTruncated(item: ActivityItem): boolean {
+  if (item.kind === "tool") return (item.end || item.start)?.payload?.truncated === true;
+  if (item.kind === "event") return item.event?.payload?.truncated === true;
+  return false;
 }
 export default function Activity(props: { search: string }) {
   const scopedEvents = useHive((s) => s.scopedEvents);
@@ -89,6 +101,7 @@ export default function Activity(props: { search: string }) {
   const [team, setTeam] = useState<"all" | "planning" | "hive">("all");
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState<Set<string>>(new Set());
+  const [loadingOlder, setLoadingOlder] = useState(false);
 
   const thinking = useMemo(() => {
     const out: Array<{ agent: string; ts: string; text: string }> = [];
@@ -150,6 +163,20 @@ export default function Activity(props: { search: string }) {
     return m;
   }, [agents]);
 
+  // Names that stand in for "the orchestrator" when matching feed participants
+  // (K6/Decision 8): the actual orchestrator-role agent names from the topology,
+  // plus the literal "Orchestrator" telemetry actor its own events are tagged
+  // with. Replaces the bare participants.has("Orchestrator") heuristic.
+  const orchestratorNames = useMemo(() => {
+    const s = new Set<string>(["Orchestrator"]);
+    for (const a of agents) if (a.role === "orchestrator") s.add(a.name);
+    return s;
+  }, [agents]);
+  const hasOrchestrator = (participants: Set<string>) => {
+    for (const n of orchestratorNames) if (participants.has(n)) return true;
+    return false;
+  };
+
   const filtered = useMemo(() => {
     const q = props.search.toLowerCase();
     const selectedAgent = agent;
@@ -160,14 +187,14 @@ export default function Activity(props: { search: string }) {
       const participants = itemParticipants(item);
       const sessionLevel = item.kind === "event" && ["session_start", "user_message", "assistant_message"].includes(item.event.type);
       const matchesAgent = !selectedAgent || participants.has(selectedAgent) ||
-        (selectedMeta?.team === "planning" && selectedMeta?.role === "orchestrator" && participants.has("Orchestrator")) ||
+        (selectedMeta?.team === "planning" && selectedMeta?.role === "orchestrator" && hasOrchestrator(participants)) ||
         (selectedMeta?.role === "orchestrator" && sessionLevel);
       return (!type || item.type === type) &&
         matchesAgent &&
-        (selectedTeam === "all" || (a ? (teamOf.get(a) || teamOfAgent(a)) === selectedTeam : false) || (selectedTeam === "planning" && participants.has("Orchestrator"))) &&
+        (selectedTeam === "all" || (a ? (teamOf.get(a) || teamOfAgent(a)) === selectedTeam : false) || (selectedTeam === "planning" && hasOrchestrator(participants))) &&
         (!q || (haystacks.get(item.id) || "").includes(q));
     });
-  }, [items, agents, agent, team, type, props.search, haystacks, teamOf]);
+  }, [items, agents, agent, team, type, props.search, haystacks, teamOf, orchestratorNames]);
 
   const total = filtered.length;
   const pages = Math.max(1, Math.ceil(total / PAGE));
@@ -217,6 +244,24 @@ export default function Activity(props: { search: string }) {
           <div className="pager">
             <button className="btn pill" disabled={clampedPage <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Newer</button>
             <button className="btn pill" disabled={clampedPage >= pages - 1} onClick={() => setPage((p) => p + 1)}>Older</button>
+            {/* K7: on the last loaded page, page OLDER events in from the server
+                on demand (bounded, one page per click) rather than pre-loading
+                the whole history. */}
+            <button
+              className="btn pill"
+              disabled={loadingOlder || clampedPage < pages - 1}
+              title="Fetch older events from the dashboard database"
+              onClick={async () => {
+                setLoadingOlder(true);
+                try {
+                  const n = await loadOlderEvents();
+                  if (n > 0) setPage((p) => p + 1);
+                  else pushToast("info", "No older events — you've reached the beginning.");
+                } finally { setLoadingOlder(false); }
+              }}
+            >
+              {loadingOlder ? "Loading…" : "Load older"}
+            </button>
           </div>
         </div>
         <div className="activity-card-grid">
@@ -230,6 +275,7 @@ export default function Activity(props: { search: string }) {
               const errored = item.kind === "tool" ? item.end?.payload?.isError : raw?.payload?.isError || raw?.type === "error";
               const succeeded = !errored && item.kind === "tool" && !!item.end;
               const summary = itemSummary(item);
+              const truncated = itemTruncated(item);
               return (
                 <article key={item.id} className={`activity-box ${errored ? "err" : succeeded ? "ok" : ""}`} style={{ "--agent-color": color } as React.CSSProperties}>
                   <button className="activity-event-head" onClick={() => toggle(item.id)}>
@@ -242,7 +288,12 @@ export default function Activity(props: { search: string }) {
                     <span className="tl-time"><RelTime ts={item.ts} /></span>
                     <span className="expand-mark">{expanded ? "−" : "+"}</span>
                   </button>
-                  {summary && !isThinking && <div className="tl-text activity-summary">{summary}</div>}
+                  {summary && !isThinking && (
+                    <div className="tl-text activity-summary">
+                      {summary}
+                      {truncated && <span className="text-ink-dimmer italic" title="Preview was truncated at source"> … truncated</span>}
+                    </div>
+                  )}
                   {isThinking && (
                     <div className={`think-text ${expanded ? "expanded" : ""}`}>{item.text.replace(/\*\*/g, "").trim()}</div>
                   )}

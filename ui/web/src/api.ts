@@ -67,6 +67,16 @@ export async function fetchEventsAfter(cursor: number): Promise<{ events: HiveEv
   return { events: all, cursor: latest };
 }
 
+// Fetch one page of events OLDER than a cursor (K7 "load older"). Single bounded
+// page; the caller loops if it wants more. Empty when the anchor is the oldest.
+export async function fetchEventsBefore(cursor: number, opts: { session?: string; cwd?: string; limit?: number } = {}): Promise<HiveEvent[]> {
+  const q = new URLSearchParams({ before: String(cursor), limit: String(opts.limit ?? 500) });
+  if (opts.session) q.set("session", opts.session);
+  if (opts.cwd) q.set("cwd", opts.cwd);
+  const page = await jsonOr<{ events: HiveEvent[] }>(fetch(`/events?${q.toString()}`), { events: [] });
+  return page.events || [];
+}
+
 // Fetch the latest snapshots (reconnect re-sync of snapshot-shaped state, E1).
 export async function fetchStates(): Promise<Snapshot[]> {
   const data = await jsonOr<{ states: Snapshot[] }>(fetch("/states"), { states: [] });
@@ -116,6 +126,51 @@ export interface SessionSummary {
 export async function fetchSessionSummaries(): Promise<SessionSummary[]> {
   const data = await jsonOr<{ sessions: SessionSummary[] }>(fetch("/sessions"), { sessions: [] });
   return data.sessions || [];
+}
+
+// Model capability lookup (GET /models). Feeds the thinking dial's fallback:
+// when a node lacks its own thinkingLevels sidecar, we look the effective model
+// up here for its SDK-reported levels (K3/Decision 6) instead of inventing a
+// full 6-level ladder.
+export interface ModelInfo {
+  provider: string;
+  modelId: string;
+  name?: string;
+  reasoning: boolean;
+  thinkingLevels: string[];
+}
+export async function fetchModels(): Promise<ModelInfo[]> {
+  const data = await jsonOr<{ models: ModelInfo[] }>(fetch("/models"), { models: [] });
+  return data.models || [];
+}
+
+// Versioned topology surface (K2). A cwd's distinct topology versions ordered by
+// first_seen_at (rank = "v1", "v2", …); and one reassembled tree by hash.
+export interface TopologyVersionSummary { hash: string; firstSeenAt: string; lastSeenAt: string; sessionCount: number; }
+export async function fetchTopologies(cwd?: string): Promise<TopologyVersionSummary[]> {
+  const data = await jsonOr<{ topologies: TopologyVersionSummary[] }>(fetch(`/topologies${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`), { topologies: [] });
+  return data.topologies || [];
+}
+export interface TopologyDetail {
+  hash: string; cwd: string; firstSeenAt: string; lastSeenAt: string;
+  planning?: { orchestrator?: any; agents: any[] };
+  hive?: { orchestrator?: any; agents: any[] };
+  canonicalJson?: string;
+}
+export async function fetchTopologyDetail(hash: string): Promise<TopologyDetail | null> {
+  return jsonOr<TopologyDetail | null>(fetch(`/topologies/${encodeURIComponent(hash)}`), null);
+}
+
+// Prune telemetry older than N days via the daemon (K1 Settings action / J1).
+export async function pruneTelemetryRemote(olderThanDays: number): Promise<{ ok: boolean; status: number; events?: number; sessions?: number; error?: string }> {
+  try {
+    const res = await writeFetch("/prune", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ olderThanDays }) });
+    if (!res.ok) return { ok: false, status: res.status, error: `prune failed (${res.status})` };
+    const body = await res.json() as { events: number; sessions: number };
+    return { ok: true, status: res.status, events: body.events, sessions: body.sessions };
+  } catch (e: any) {
+    return { ok: false, status: 0, error: e?.message || "network error" };
+  }
 }
 
 export async function deleteSessionRemote(sessionId: string): Promise<boolean> {

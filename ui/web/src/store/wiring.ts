@@ -1,7 +1,7 @@
-import { fetchEventsAfter, fetchInitialData, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, openEventStream, saveProjectOverride } from "../api";
+import { fetchEventsAfter, fetchInitialData, fetchModels, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, fetchTopologies, fetchTopologyDetail, openEventStream, pruneTelemetryRemote, saveProjectOverride } from "../api";
 import { store } from "./index";
 import { recomputeHeavy, recomputeLive, recomputeScoped } from "./derive";
-import { ingestEvents, ingestSnapshot, purgeLocal, setSelectedSession, tick } from "./raw";
+import { ingestEvents, ingestSnapshot, purgeLocal, pushToast, setSelectedSession, tick } from "./raw";
 import { installRouter } from "./router";
 
 // Fetch agent thinking for the sessions currently in scope and merge into the
@@ -33,6 +33,57 @@ export async function refreshSessionSummaries() {
   store.setState({ sessionSummaries: map });
 }
 
+// Fetch model capabilities once (K3). Build a lookup keyed by both the full
+// "provider/modelId" and the bare modelId (lowercased) so a node's effective
+// model string resolves whichever form it carries. Feeds the dial's fallback.
+export async function refreshModels() {
+  const models = await fetchModels();
+  const map = new Map<string, string[]>();
+  for (const m of models) {
+    const levels = Array.isArray(m.thinkingLevels) ? m.thinkingLevels : [];
+    if (!levels.length) continue;
+    const id = String(m.modelId || "").toLowerCase();
+    const full = `${String(m.provider || "").toLowerCase()}/${id}`;
+    if (id) map.set(id, levels);
+    if (full !== "/") map.set(full, levels);
+  }
+  store.setState({ modelLevels: map });
+}
+
+// Fetch the versioned topology list for a cwd into the store cache (K2). Skips
+// the fetch if already cached (versions are immutable; new ones arrive via a new
+// hash on the session summary, which triggers a refresh).
+export async function refreshTopologies(cwd: string) {
+  if (!cwd || store.getState().topologiesByCwd.has(cwd)) return;
+  const list = await fetchTopologies(cwd);
+  const next = new Map(store.getState().topologiesByCwd);
+  next.set(cwd, list);
+  store.setState({ topologiesByCwd: next });
+}
+
+// Fetch and cache one reassembled topology tree by hash (K2/K5). Idempotent.
+export async function ensureTopologyDetail(hash: string) {
+  if (!hash || store.getState().topologyByHash.has(hash)) return;
+  const detail = await fetchTopologyDetail(hash);
+  if (!detail) return;
+  const next = new Map(store.getState().topologyByHash);
+  next.set(hash, detail);
+  store.setState({ topologyByHash: next });
+}
+
+// Prune telemetry older than N days via the daemon (K1 Settings action).
+export async function pruneTelemetry(olderThanDays: number): Promise<boolean> {
+  const res = await pruneTelemetryRemote(olderThanDays);
+  if (res.ok) {
+    pushToast("success", `Pruned ${res.events ?? 0} events and ${res.sessions ?? 0} session${res.sessions === 1 ? "" : "s"}.`);
+    // Refresh authoritative counts + summaries so the UI reflects the smaller DB.
+    await refreshSessionSummaries();
+    return true;
+  }
+  pushToast("error", res.error || "Prune failed — is the dashboard still running?");
+  return false;
+}
+
 // Fetch project display-name overrides and recompute so labels apply everywhere.
 export async function refreshOverrides() {
   const overrides = await fetchProjectOverrides();
@@ -46,7 +97,8 @@ export async function refreshOverrides() {
 // Rename (label set) or reset (label empty) a project by cwd, then refresh.
 export async function saveOverride(cwd: string, label: string): Promise<boolean> {
   const ok = await saveProjectOverride(cwd, label.trim());
-  if (ok) await refreshOverrides();
+  if (ok) { await refreshOverrides(); pushToast("success", label.trim() ? "Project renamed." : "Project name reset."); }
+  else pushToast("error", "Failed to save project name — is the dashboard still running?");
   return ok;
 }
 
@@ -67,6 +119,12 @@ function wire() {
   store.subscribe((s) => s.now, recomputeLive);
   // Re-fetch thinking whenever the scoped session set changes.
   store.subscribe((s) => s.scopedSessions, () => { void refreshThinking(); });
+  // Prime the versioned-topology cache for the cwds in scope (K2), so version
+  // chips render without a per-chip fetch. Cached per cwd, so this is cheap.
+  store.subscribe((s) => s.scopedSessions, (sessions) => {
+    const cwds = new Set(sessions.map((x) => x.cwd).filter((c): c is string => !!c));
+    for (const cwd of cwds) void refreshTopologies(cwd);
+  });
 }
 
 // Bootstraps initial fetch + the SSE stream + the 1s tick. Idempotent so React
@@ -83,6 +141,7 @@ export function connect(): EventSource | undefined {
   setInterval(() => { void refreshThinking(); }, 5000);
   void refreshOverrides(); // load project display-name overrides once
   void refreshSessionSummaries(); // load server-authoritative event counts
+  void refreshModels(); // load model capabilities for the thinking dial (K3)
 
   fetchInitialData().then(({ events, states, cursor }) => {
     ingestEvents(events);
@@ -109,11 +168,17 @@ export function connect(): EventSource | undefined {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
     // On a RE-connect (not the first open), catch up on the exact gap using the
     // global cursor (E1): fetch every event after our high-water mark plus fresh
-    // snapshots, then flip to live. This heals stuck "running/waiting" agents and
-    // never loses events during a disconnect — no refetch-the-world.
-    if (hadConnection) void resyncAfterReconnect();
+    // snapshots, THEN flip to live. This heals stuck "running/waiting" agents and
+    // never loses events during a disconnect — no refetch-the-world. Hold
+    // "syncing" until the gap-fetch resolves (K7) so the badge doesn't claim
+    // "live" over stale data during the async catch-up window.
+    if (hadConnection) {
+      store.setState({ connection: "syncing" });
+      void resyncAfterReconnect().finally(() => store.setState({ connection: "live" }));
+    } else {
+      store.setState({ connection: "live" });
+    }
     hadConnection = true;
-    store.setState({ connection: "live" });
   });
   es.addEventListener("error", () => {
     if (reconnectTimer) return;

@@ -3,7 +3,7 @@ import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { HiveEvent, ProjectGroup, SessionView, Snapshot } from "../types";
-import type { SessionSummary } from "../api";
+import type { SessionSummary, TopologyDetail, TopologyVersionSummary } from "../api";
 
 // ── scope: fleet (all projects) | project (one project, its sessions
 // aggregated) | session (one session detail). The tabs render within whatever
@@ -37,13 +37,14 @@ export interface HiveState {
   snapshots: Record<string, Snapshot>;
   // Highest events.rowid seen, for lossless SSE reconnect catch-up (E1).
   lastCursor: number;
-  connection: "connecting" | "live" | "reconnecting";
+  connection: "connecting" | "live" | "reconnecting" | "syncing";
   selectedSession: string;
   activeTab: string;
   scope: Scope;
   theme: "dark" | "light";
   openAgent: AgentRef | null;
   confirm: ConfirmState;
+  toasts: Toast[];
   now: number;
 
   // ── derived slice (rebuilt by the recompute orchestrators) ───────────────
@@ -69,6 +70,13 @@ export interface HiveState {
   thinkingBySession: Map<string, ThinkingEntry[]>;
   // Per-project display-name overrides, keyed by cwd (from settings, DB-backed).
   projectOverrides: Map<string, string>;
+  // SDK-reported thinking levels per model (GET /models), keyed by a normalized
+  // model string — the dial's fallback when a node lacks its own sidecar (K3).
+  modelLevels: Map<string, string[]>;
+  // Versioned-topology surface (K2): per-cwd version list (ordered v1..vN by
+  // first_seen_at) and a hash→reassembled-tree cache filled on demand.
+  topologiesByCwd: Map<string, TopologyVersionSummary[]>;
+  topologyByHash: Map<string, TopologyDetail>;
 
   // ── replay slice (Phase F) — a SEPARATE store slice; no SSE frame mutates it,
   // so live mode is untouched. Populated only when the user enters Replay on a
@@ -95,6 +103,10 @@ export interface ReplayState {
 
 export interface ThinkingEntry { agent: string; ts: string; text: string; tokens?: number; }
 
+// Transient toast notifications (K1/Decision 7). Every mutating flow pushes one
+// on success/failure; a single <Toast> renders the stack. Auto-dismissed.
+export interface Toast { id: number; kind: "success" | "error" | "info"; message: string; }
+
 const initialStats: ScopeStats = { sessions: 0, live: 0, running: 0, tokens: 0, cost: 0 };
 
 const initialState: HiveState = {
@@ -108,6 +120,7 @@ const initialState: HiveState = {
     theme: ((typeof localStorage !== "undefined" && localStorage.getItem("hive-theme")) as "dark" | "light") || "dark",
     openAgent: null,
     confirm: null,
+    toasts: [],
     now: 0,
 
     allEvents: [],
@@ -126,6 +139,9 @@ const initialState: HiveState = {
     eventStatus: new Map(),
     thinkingBySession: new Map(),
     projectOverrides: new Map(),
+    modelLevels: new Map(),
+    topologiesByCwd: new Map(),
+    topologyByHash: new Map(),
     replay: { active: false, sessionId: "", events: [], loading: false, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false, historyStartsAt: "" },
 };
 

@@ -405,20 +405,26 @@ const EVENT_COLS = `rowid, event_id, session_id, seq, ts, type, actor, pid, cwd,
 // Paginated, cursor-ordered event reads (B5). Replaces the boot-time
 // load-everything-into-memory path. `after` is an events.rowid; results are
 // ordered by rowid so the cursor is stable across restarts.
-export interface EventQuery { session?: string; cwd?: string; type?: string; after?: number; limit?: number; }
+export interface EventQuery { session?: string; cwd?: string; type?: string; after?: number; before?: number; limit?: number; }
 
 export function queryEvents(q: EventQuery): Array<HiveTelemetryEvent & { cursor: number }> {
   const where: string[] = [];
   const params: any = {};
   if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
+  // `before` pages BACKWARD (older events, K7): take the highest rowids below the
+  // anchor by ordering DESC + LIMIT, then re-sort ascending so the returned page
+  // is chronological like every other read. Bounded by the same limit clamp.
+  if (q.before != null) { where.push(`rowid < $before`); params.$before = q.before; }
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
   if (q.cwd) { where.push(`cwd = $cwd`); params.$cwd = q.cwd; }
   if (q.type) { where.push(`type = $type`); params.$type = q.type; }
   const limit = Math.min(Math.max(1, q.limit || 1000), 5000);
   params.$limit = limit;
+  const order = q.before != null ? "DESC" : "ASC";
   const rows = db.query(
-    `SELECT ${EVENT_COLS} FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ASC LIMIT $limit`,
+    `SELECT ${EVENT_COLS} FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ${order} LIMIT $limit`,
   ).all(params) as any[];
+  if (q.before != null) rows.reverse(); // return chronological regardless of paging direction
   return rows.map(rowToEventWithCursor);
 }
 
