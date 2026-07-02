@@ -70,7 +70,6 @@ CREATE TABLE IF NOT EXISTS plan_verdicts (
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_verdicts_change ON plan_verdicts(change_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_plan_verdicts_cwd ON plan_verdicts(cwd, change_id, created_at);
 CREATE TABLE IF NOT EXISTS plan_approvals (
   id           TEXT PRIMARY KEY,
   change_id    TEXT NOT NULL,
@@ -83,7 +82,6 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_change ON plan_approvals(change_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_plan_approvals_cwd ON plan_approvals(cwd, change_id, created_at);
 CREATE TABLE IF NOT EXISTS plan_comments (
   id           TEXT PRIMARY KEY,
   change_id    TEXT NOT NULL,
@@ -98,7 +96,6 @@ CREATE TABLE IF NOT EXISTS plan_comments (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_comments_change ON plan_comments(change_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_plan_comments_cwd ON plan_comments(cwd, change_id, created_at);
 
 -- Typed projections of hot entities, materialized idempotently at ingest
 -- (event_id as row id). The raw events table stays the append-only audit log.
@@ -248,6 +245,15 @@ try { db.run(`ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER NOT NULL
 try { db.run(`ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN topology_hash TEXT`); } catch { /* column already exists */ }
+
+// The cwd composite indexes are created HERE, after the ALTER TABLE migrations
+// above — on a legacy DB the plan_* tables predate the cwd column, so an index
+// referencing cwd inside the CREATE-block would fail ("no such column: cwd").
+db.run(`
+CREATE INDEX IF NOT EXISTS idx_plan_verdicts_cwd ON plan_verdicts(cwd, change_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_plan_approvals_cwd ON plan_approvals(cwd, change_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_plan_comments_cwd ON plan_comments(cwd, change_id, created_at);
+`);
 
 export const insertEvent = db.query(`
   INSERT OR IGNORE INTO events
