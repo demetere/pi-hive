@@ -227,12 +227,16 @@ export function startHiveTelemetrySession(state: HiveState, cwd: string) {
   if (!state.session || state.mode === "normal" || state.telemetryRegistered) return;
   state.telemetryRegistered = true;
   registerHiveTelemetrySession(state, cwd);
+  // Phase 2.3: do NOT embed the full topology tree here. It was redundant with
+  // topology_versions — the snapshot written immediately below is hashed,
+  // versioned, and stamped onto the session by the daemon (runtime.ts), and no
+  // consumer reads session_start.payload.topology. Keeping it duplicated the
+  // whole tree on every session and drifted from the canonical hashed copy.
   emitHiveEvent(state, "session_start", {
     cwd,
     sessionDir: state.session.sessionDir,
     conversationLog: state.session.conversationLog,
     observabilityLog: state.session.observabilityLog,
-    topology: hiveTopology(state),
   }, "System");
   writeHiveStateSnapshot(state);
 }

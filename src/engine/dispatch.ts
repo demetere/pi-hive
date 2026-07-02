@@ -126,6 +126,11 @@ export async function dispatchAgent(
   // per-run elapsed.
   runtime.runStartInputTokens = runtime.inputTokens;
   runtime.runStartOutputTokens = runtime.outputTokens;
+  // Full baselines so delegation_end can emit per-run deltas for every token
+  // dimension + cost (Decision 1), not just the two TOK/S needs.
+  runtime.runStartCacheReadTokens = runtime.cacheReadTokens;
+  runtime.runStartCacheWriteTokens = runtime.cacheWriteTokens;
+  runtime.runStartCostUsd = runtime.costUsd;
 
   const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
   // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
@@ -370,6 +375,19 @@ export async function dispatchAgent(
     elapsedMs: runtime.elapsedMs,
   };
   logRecord(state, completion);
+  // Per-run deltas (Decision 1): runtime.* now hold session-lifetime aggregates
+  // (overwritten from getSessionStats above), so a re-run agent's runtime would
+  // make SUM() over delegations double-count. Subtract the run-start baseline so
+  // each delegation_end row records only what THIS run consumed. Clamp at 0 in
+  // case the SDK's lifetime total ever regresses across a compaction.
+  const nonneg = (n: number) => (Number.isFinite(n) && n > 0 ? n : 0);
+  const delta = {
+    inputTokens: nonneg(runtime.inputTokens - (runtime.runStartInputTokens ?? 0)),
+    outputTokens: nonneg(runtime.outputTokens - (runtime.runStartOutputTokens ?? 0)),
+    cacheReadTokens: nonneg(runtime.cacheReadTokens - (runtime.runStartCacheReadTokens ?? 0)),
+    cacheWriteTokens: nonneg(runtime.cacheWriteTokens - (runtime.runStartCacheWriteTokens ?? 0)),
+    costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
+  };
   emitHiveEvent(state, "delegation_end", {
     ...completion,
     truncated: output.length > 2_000,
@@ -377,6 +395,10 @@ export async function dispatchAgent(
     stopReason: lastStopReason,
     errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
     models: [...modelsSeen],
+    // Schema marker so the materializer stores per-run deltas and the dashboard
+    // never sums these rows with legacy cumulative ones (delegationsSchema=1).
+    delegationsSchema: 1,
+    delta,
     runtime: runtimeSummary(runtime),
   }, runtime.config.name);
   // Surface delegation failures as the now-live `error` telemetry event (A3).

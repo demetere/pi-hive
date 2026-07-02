@@ -94,6 +94,58 @@ test("dispatchAgent totals equal getSessionStats exactly — no message_end/agen
   assert.equal(worker.costUsd, 0.072);
 });
 
+// Decision 1: delegation_end must carry PER-RUN deltas + delegationsSchema=1.
+// getSessionStats() returns session-LIFETIME aggregates, so a re-run agent's
+// runtime holds cumulative totals; the emitted delta must subtract the run-start
+// baseline so SUM() over delegation rows never double-counts.
+test("delegation_end emits per-run deltas against the run-start baseline (Decision 1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-delta-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+
+  // Run 1: lifetime stats after this run = 100/40/... The delegation_end delta
+  // for run 1 equals the full lifetime (baseline was 0).
+  const create1: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 100, output: 40, cacheRead: 10, cacheWrite: 5, cost: 0.10 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run one", ctx, false, create1);
+  assert.equal(worker.inputTokens, 100); // runtime now holds lifetime totals
+
+  // Run 2: lifetime stats grow to 260/95/... The delta must be run-2-only:
+  // 160/55/15/5/0.15 — NOT the cumulative 260/95.
+  const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 260, output: 95, cacheRead: 25, cacheWrite: 10, cost: 0.25 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run two", ctx, false, create2);
+
+  const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
+  assert.equal(ends.length, 2, "expected a delegation_end per run");
+  const run1 = ends[0].payload, run2 = ends[1].payload;
+  // Both rows are marked as delta-schema so aggregation excludes legacy rows.
+  assert.equal(run1.delegationsSchema, 1);
+  assert.equal(run2.delegationsSchema, 1);
+  // Run 1 delta = full lifetime (baseline 0).
+  assert.deepEqual(run1.delta, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 10, cacheWriteTokens: 5, costUsd: 0.10 });
+  // Run 2 delta = lifetime growth only (260-100, 95-40, 25-10, 10-5, 0.25-0.10).
+  assert.equal(run2.delta.inputTokens, 160);
+  assert.equal(run2.delta.outputTokens, 55);
+  assert.equal(run2.delta.cacheReadTokens, 15);
+  assert.equal(run2.delta.cacheWriteTokens, 5);
+  assert.ok(Math.abs(run2.delta.costUsd - 0.15) < 1e-9, `run2 cost delta ${run2.delta.costUsd} ≈ 0.15`);
+  // The lifetime runtime summary still rides along for live display / TOK/S.
+  assert.equal(run2.runtime.inputTokens, 260);
+});
+
 // M8a: the FIRST run's delegation_start must already carry thinkingLevels +
 // the effective model. This is the J4/Decision-5 reorder — the worker session is
 // created (and getAvailableThinkingLevels() probed) BEFORE delegation_start is

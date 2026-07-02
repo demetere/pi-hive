@@ -24,7 +24,6 @@ import {
   loadPersistedStates,
   materializeDelegationEnd,
   materializeDelegationStart,
-  materializeMessage,
   materializeToolEnd,
   materializeToolStart,
   maxEventCursor,
@@ -265,7 +264,17 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
   // fixes the drift bug) and current config changes mint a new version rather
   // than mutating history. The hot-cache `snapshots` map keeps the full form.
   const slim: HiveStateSnapshot = { ...snapshot };
-  if (topologyHashValue) { delete slim.topologies; delete slim.topology; (slim as any).topology_hash = topologyHashValue; }
+  if (topologyHashValue) {
+    // Phase 2.4: persist which team was ACTIVE (the session's mode at snapshot
+    // time) before dropping the embedded topologies. A topology_hash is shared
+    // across sessions and both modes, so rehydration can't recover the active
+    // team from the hash alone — it must read this stored flag rather than the
+    // old "hive if the hive team is non-empty" guess (which was wrong in plan
+    // mode whenever the hive team was also configured).
+    const activeTeam = snapshot.topologies?.active;
+    delete slim.topologies; delete slim.topology; (slim as any).topology_hash = topologyHashValue;
+    if (activeTeam) (slim as any).active_team = activeTeam;
+  }
   db.transaction(() => {
     upsertState.run({
       $session_id: snapshot.session_id,
@@ -390,14 +399,21 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
       break;
     case "delegation_end": {
       const rt = p.runtime || {};
+      // Decision 1: a delegation_end carrying delegationsSchema=1 stamps PER-RUN
+      // deltas from p.delta; the row records only what this run consumed. Legacy
+      // events (no delta block) fall back to the cumulative runtime aggregates and
+      // are stored as schema_version 0 so they are never summed with the deltas.
+      const d = p.delta;
+      const isDelta = Number(p.delegationsSchema) >= 1 && d && typeof d === "object";
       materializeDelegationEnd({
         eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.from, parent: p.to, endedAt: event.ts,
         durationMs: Number(p.elapsedMs) || undefined,
-        inputTokens: Number(rt.inputTokens ?? p.inputTokens ?? 0),
-        outputTokens: Number(rt.outputTokens ?? p.outputTokens ?? 0),
-        cacheReadTokens: Number(rt.cacheReadTokens ?? 0),
-        cacheWriteTokens: Number(rt.cacheWriteTokens ?? 0),
-        costUsd: Number(rt.costUsd ?? p.costUsd ?? 0),
+        inputTokens: Number((isDelta ? d.inputTokens : rt.inputTokens ?? p.inputTokens) ?? 0),
+        outputTokens: Number((isDelta ? d.outputTokens : rt.outputTokens ?? p.outputTokens) ?? 0),
+        cacheReadTokens: Number((isDelta ? d.cacheReadTokens : rt.cacheReadTokens) ?? 0),
+        cacheWriteTokens: Number((isDelta ? d.cacheWriteTokens : rt.cacheWriteTokens) ?? 0),
+        costUsd: Number((isDelta ? d.costUsd : rt.costUsd ?? p.costUsd) ?? 0),
+        schemaVersion: isDelta ? 1 : 0,
         status: p.type, stopReason: p.stopReason,
         model: Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model,
       });
@@ -415,18 +431,9 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
         sessionId, toolCallId: p.toolCallId, resultPreview: p.resultPreview, isError: p.isError === true, endedAt: event.ts, durationMs: Number(p.durationMs) || undefined,
       });
       break;
-    case "user_message":
-    case "assistant_message":
-      materializeMessage({
-        eventId: event.event_id, sessionId, cwd: event.cwd, role: event.type === "user_message" ? "user" : "assistant",
-        agent: event.actor,
-        text: p.text,
-        // Prefer the source-stamped flag (J6); fall back to the length heuristic
-        // for legacy events emitted before the flag existed.
-        truncated: typeof p.truncated === "boolean" ? p.truncated : (typeof p.text === "string" && p.text.length >= 8000),
-        ts: event.ts,
-      });
-      break;
+    // Decision (Phase 2.2): the `messages` typed table was dropped — nothing read
+    // it. The raw user_message/assistant_message events remain in `events`, so
+    // message history is still queryable/backfillable from there if ever needed.
     case "model_catalog":
       // Upsert the SDK-sourced model capabilities into the models table (A10/C3).
       for (const model of Array.isArray(p.models) ? p.models : []) {
@@ -497,7 +504,11 @@ function rehydrateSnapshotTopology(snapshot: HiveStateSnapshot): HiveStateSnapsh
   if (!hash || snapshot.topologies) return snapshot;
   const detail = topologyDetail(hash);
   if (!detail) return snapshot;
-  const active: "hive" | "planning" = detail.hive?.orchestrator || (detail.hive?.agents?.length) ? "hive" : "planning";
+  // Phase 2.4: read the persisted active team; only fall back to the structural
+  // guess for legacy slim rows written before active_team was stored.
+  const stored = (snapshot as any).active_team as "hive" | "planning" | undefined;
+  const active: "hive" | "planning" = stored
+    ?? (detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning");
   return { ...snapshot, topologies: { active, hive: detail.hive, planning: detail.planning } };
 }
 

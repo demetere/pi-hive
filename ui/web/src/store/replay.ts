@@ -103,7 +103,12 @@ export function replayTopoSource(slice: HiveEvent[]): TopoSource | undefined {
   // Prefer the versioned tree; if the detail hasn't loaded, fall back to the live
   // session's topology so the graph still renders (statuses still from replay).
   if (detail) {
-    const active: "hive" | "planning" = detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning";
+    // Prefer the session's persisted active team (Phase 2.4) — the server now
+    // stores it on the snapshot rather than re-guessing from tree shape. Fall
+    // back to the structural guess only when the live snapshot isn't loaded.
+    const liveActive = st.sessionsById.get(sessionId)?.topologies?.active;
+    const active: "hive" | "planning" = liveActive
+      ?? (detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning");
     return { session_id: sessionId, topologies: { active, hive: detail.hive, planning: detail.planning } as any, agents };
   }
   const live = st.sessionsById.get(sessionId);

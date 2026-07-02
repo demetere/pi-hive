@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   state_file TEXT,
   first_ts TEXT,
   last_ts TEXT,
+  -- "events ever ingested" for this session — a monotonic counter bumped +1 per
+  -- ingest. It is NOT decremented by prune, and replay's pruned-history check
+  -- relies on that: a fetched-count shortfall vs this value means older events
+  -- were trimmed. Do not repurpose it as a live/remaining-rows count.
   event_count INTEGER NOT NULL DEFAULT 0,
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -47,7 +51,6 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_hive_events_session_seq ON events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_hive_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_hive_events_type ON events(type);
-CREATE INDEX IF NOT EXISTS idx_hive_events_session_ts ON events(session_id, ts, seq);
 -- cwd-filtered paging (queryEvents/recentEvents) orders by rowid; a plain cwd
 -- index carries rowid as its implicit trailing key, so the WHERE seek and the
 -- ORDER BY rowid are both served without scanning the whole table.
@@ -119,7 +122,10 @@ CREATE TABLE IF NOT EXISTS delegations (
   cost_usd REAL NOT NULL DEFAULT 0,
   status TEXT,
   stop_reason TEXT,
-  model TEXT
+  model TEXT,
+  -- 0 = legacy cumulative (session-lifetime) token/cost values; 1 = per-run
+  -- deltas (Decision 1). Never SUM across the two: aggregations filter >= 1.
+  schema_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_delegations_session ON delegations(session_id, ended_at);
 CREATE INDEX IF NOT EXISTS idx_delegations_cwd ON delegations(cwd, ended_at);
@@ -139,17 +145,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_unique ON tool_calls(session_id, tool_call_id);
-CREATE TABLE IF NOT EXISTS messages (
-  event_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  cwd TEXT,
-  role TEXT,
-  agent TEXT,
-  text TEXT,
-  truncated INTEGER NOT NULL DEFAULT 0,
-  ts TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, ts);
+-- The messages typed table was dropped in Phase 2.2 (nothing read it). Raw
+-- user_message/assistant_message rows still live in the events table, so message
+-- history remains queryable/backfillable from there.
 
 -- Incremental-ingest byte offsets so boot resumes each JSONL where it left off
 -- instead of replaying from 0 (B4). Persisted in the same transaction as the
@@ -249,6 +247,16 @@ try { db.run(`ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER NOT NULL
 try { db.run(`ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN topology_hash TEXT`); } catch { /* column already exists */ }
+// Decision 1: delegations token/cost columns became PER-RUN DELTAS. Legacy rows
+// written before this migration hold session-lifetime CUMULATIVE values, so they
+// must never be summed alongside deltas. schema_version defaults to 0 (legacy);
+// the delta producer stamps 1. Every aggregation of delegation token/cost rows
+// MUST filter `schema_version >= 1`.
+try { db.run(`ALTER TABLE delegations ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+// Phase 2.5: drop the unused (session_id, ts, seq) events index — no query
+// orders by (session_id, ts); session-filtered reads order by rowid and are
+// served by idx_hive_events_session_seq. Dropping frees write/space overhead.
+try { db.run(`DROP INDEX IF EXISTS idx_hive_events_session_ts`); } catch { /* best-effort */ }
 
 // The cwd composite indexes are created HERE, after the ALTER TABLE migrations
 // above — on a legacy DB the plan_* tables predate the cwd column, so an index
@@ -350,7 +358,6 @@ const deleteStateStmt = db.query(`DELETE FROM states WHERE session_id = $id`);
 const deleteSessionStmt = db.query(`DELETE FROM sessions WHERE session_id = $id`);
 const deleteDelegationsStmt = db.query(`DELETE FROM delegations WHERE session_id = $id`);
 const deleteToolCallsStmt = db.query(`DELETE FROM tool_calls WHERE session_id = $id`);
-const deleteMessagesStmt = db.query(`DELETE FROM messages WHERE session_id = $id`);
 const deleteIngestSourcesStmt = db.query(`DELETE FROM ingest_sources WHERE session_id = $id`);
 
 export function dbEventRow(event: HiveTelemetryEvent) {
@@ -469,7 +476,6 @@ export function deleteSessionRows(ids: string[]): void {
       deleteStateStmt.run({ $id: id });
       deleteDelegationsStmt.run({ $id: id });
       deleteToolCallsStmt.run({ $id: id });
-      deleteMessagesStmt.run({ $id: id });
       deleteIngestSourcesStmt.run({ $id: id });
       deleteSessionStmt.run({ $id: id });
     }
@@ -497,7 +503,7 @@ export function setIngestOffset(sourcePath: string, offset: number, sessionId: s
   upsertIngestSourceStmt.run({ $path: sourcePath, $session_id: sessionId ?? null, $offset: offset, $updated_at: updatedAt });
 }
 
-// ── Typed projections: delegations / tool_calls / messages (B3) ───────────────
+// ── Typed projections: delegations / tool_calls (B3) ──────────────────────────
 
 const insertDelegationStartStmt = db.query(`
   INSERT INTO delegations (event_id, session_id, cwd, agent, parent, started_at, model)
@@ -517,6 +523,7 @@ const completeDelegationStmt = db.query(`
     cache_read_tokens = $cache_read_tokens,
     cache_write_tokens = $cache_write_tokens,
     cost_usd = $cost_usd,
+    schema_version = $schema_version,
     status = $status,
     stop_reason = $stop_reason,
     parent = COALESCE($parent, parent),
@@ -532,9 +539,9 @@ const completeDelegationStmt = db.query(`
 // inserts a standalone completed row keyed by its own event_id.
 const insertDelegationEndStmt = db.query(`
   INSERT INTO delegations
-    (event_id, session_id, cwd, agent, parent, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, status, stop_reason, model)
+    (event_id, session_id, cwd, agent, parent, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, schema_version, status, stop_reason, model)
   VALUES
-    ($event_id, $session_id, $cwd, $agent, $parent, $ended_at, $duration_ms, $input_tokens, $output_tokens, $cache_read_tokens, $cache_write_tokens, $cost_usd, $status, $stop_reason, $model)
+    ($event_id, $session_id, $cwd, $agent, $parent, $ended_at, $duration_ms, $input_tokens, $output_tokens, $cache_read_tokens, $cache_write_tokens, $cost_usd, $schema_version, $status, $stop_reason, $model)
   ON CONFLICT(event_id) DO NOTHING
 `);
 
@@ -553,12 +560,6 @@ const completeToolStmt = db.query(`
   WHERE session_id = $session_id AND tool_call_id = $tool_call_id
 `);
 
-const insertMessageStmt = db.query(`
-  INSERT INTO messages (event_id, session_id, cwd, role, agent, text, truncated, ts)
-  VALUES ($event_id, $session_id, $cwd, $role, $agent, $text, $truncated, $ts)
-  ON CONFLICT(event_id) DO NOTHING
-`);
-
 export function materializeDelegationStart(input: { eventId: string; sessionId: string; cwd?: string; agent?: string; parent?: string; startedAt: string; model?: string }): void {
   insertDelegationStartStmt.run({
     $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null,
@@ -568,14 +569,17 @@ export function materializeDelegationStart(input: { eventId: string; sessionId: 
 
 export function materializeDelegationEnd(input: {
   eventId: string; sessionId: string; cwd?: string; agent?: string; parent?: string; endedAt: string; durationMs?: number;
-  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number; status?: string; stopReason?: string; model?: string;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number;
+  // 0 = legacy cumulative, 1 = per-run delta (Decision 1). Producer stamps this.
+  schemaVersion: number; status?: string; stopReason?: string; model?: string;
 }): void {
   const params = {
     $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null, $agent: input.agent ?? null,
     $parent: input.parent ?? null, $ended_at: input.endedAt, $duration_ms: input.durationMs ?? null,
     $input_tokens: input.inputTokens, $output_tokens: input.outputTokens,
     $cache_read_tokens: input.cacheReadTokens, $cache_write_tokens: input.cacheWriteTokens,
-    $cost_usd: input.costUsd, $status: input.status ?? null, $stop_reason: input.stopReason ?? null, $model: input.model ?? null,
+    $cost_usd: input.costUsd, $schema_version: input.schemaVersion,
+    $status: input.status ?? null, $stop_reason: input.stopReason ?? null, $model: input.model ?? null,
   };
   const res = completeDelegationStmt.run(params);
   if (res.changes === 0) insertDelegationEndStmt.run(params);
@@ -596,25 +600,22 @@ export function materializeToolEnd(input: { sessionId: string; toolCallId?: stri
   });
 }
 
-export function materializeMessage(input: { eventId: string; sessionId: string; cwd?: string; role?: string; agent?: string; text?: string; truncated: boolean; ts: string }): void {
-  insertMessageStmt.run({
-    $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null, $role: input.role ?? null,
-    $agent: input.agent ?? null, $text: input.text ?? null, $truncated: input.truncated ? 1 : 0, $ts: input.ts,
-  });
-}
-
-export function queryDelegations(q: { session?: string; cwd?: string; after?: number; limit?: number }): any[] {
+export function queryDelegations(q: { session?: string; cwd?: string; after?: number; limit?: number; deltasOnly?: boolean }): any[] {
   const where: string[] = ["ended_at IS NOT NULL"];
   const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
   if (q.cwd) { where.push(`cwd = $cwd`); params.$cwd = q.cwd; }
   if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
+  // Decision 1: token/cost aggregation MUST pass deltasOnly so legacy cumulative
+  // rows (schema_version 0, session-lifetime values) are never summed with the
+  // per-run deltas (schema_version 1). Row-level reads (Activity feed) omit it.
+  if (q.deltasOnly) where.push(`schema_version >= 1`);
   const rows = db.query(`SELECT rowid, * FROM delegations WHERE ${where.join(" AND ")} ORDER BY rowid ASC LIMIT $limit`).all(params) as any[];
   return rows.map((r) => ({
     cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, parent: r.parent,
     startedAt: r.started_at, endedAt: r.ended_at, durationMs: r.duration_ms,
     inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens,
-    costUsd: r.cost_usd, status: r.status, stopReason: r.stop_reason, model: r.model,
+    costUsd: r.cost_usd, schemaVersion: r.schema_version ?? 0, status: r.status, stopReason: r.stop_reason, model: r.model,
   }));
 }
 
@@ -676,9 +677,8 @@ export function storageBreakdown(cwds: string[] | undefined, cutoffIso?: string)
 
   // Content bytes = event payloads + the text-heavy projection columns.
   const eventsAgg = one(`SELECT COUNT(*) AS n, COALESCE(SUM(length(payload_json)),0) AS b FROM events WHERE ${cwdWhere}`);
-  const msgBytes = Number(one(`SELECT COALESCE(SUM(length(COALESCE(text,''))),0) AS b FROM messages WHERE ${cwdWhere}`).b || 0);
   const toolBytes = Number(one(`SELECT COALESCE(SUM(length(COALESCE(args_preview,'')) + length(COALESCE(result_preview,''))),0) AS b FROM tool_calls WHERE ${cwdWhere}`).b || 0);
-  const bytes = Number(eventsAgg.b || 0) + msgBytes + toolBytes;
+  const bytes = Number(eventsAgg.b || 0) + toolBytes;
   const events = Number(eventsAgg.n || 0);
   const sessions = Number(one(`SELECT COUNT(*) AS n FROM sessions WHERE ${cwdWhere}`).n || 0);
 
@@ -687,9 +687,8 @@ export function storageBreakdown(cwds: string[] | undefined, cutoffIso?: string)
   if (cutoffIso) {
     // Events (and their payload bytes) older than the cutoff are trimmed.
     const rem = one(`SELECT COUNT(*) AS n, COALESCE(SUM(length(payload_json)),0) AS b FROM events WHERE ${cwdWhere} AND ts < $cutoff`, { $cutoff: cutoffIso });
-    const remMsg = Number(one(`SELECT COALESCE(SUM(length(COALESCE(text,''))),0) AS b FROM messages WHERE ${cwdWhere} AND ts IS NOT NULL AND ts < $cutoff`, { $cutoff: cutoffIso }).b || 0);
     const remTool = Number(one(`SELECT COALESCE(SUM(length(COALESCE(args_preview,'')) + length(COALESCE(result_preview,''))),0) AS b FROM tool_calls WHERE ${cwdWhere} AND started_at IS NOT NULL AND started_at < $cutoff`, { $cutoff: cutoffIso }).b || 0);
-    const removeBytes = Number(rem.b || 0) + remMsg + remTool;
+    const removeBytes = Number(rem.b || 0) + remTool;
     const removeEvents = Number(rem.n || 0);
     const removeSessions = Number(one(`SELECT COUNT(*) AS n FROM sessions WHERE ${cwdWhere} AND last_ts IS NOT NULL AND last_ts < $cutoff`, { $cutoff: cutoffIso }).n || 0);
     out.prune = {
@@ -715,7 +714,6 @@ export function pruneOlderThan(cutoffIso: string): { events: number; sessions: n
     events = Number(before?.n || 0);
     db.run(`DELETE FROM delegations WHERE ended_at IS NOT NULL AND ended_at < $cutoff`, { $cutoff: cutoffIso } as any);
     db.run(`DELETE FROM tool_calls WHERE started_at IS NOT NULL AND started_at < $cutoff`, { $cutoff: cutoffIso } as any);
-    db.run(`DELETE FROM messages WHERE ts IS NOT NULL AND ts < $cutoff`, { $cutoff: cutoffIso } as any);
     db.run(`DELETE FROM events WHERE ts < $cutoff`, { $cutoff: cutoffIso } as any);
   });
   tx();

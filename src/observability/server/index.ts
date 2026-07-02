@@ -171,7 +171,10 @@ Bun.serve({
       const cwd = url.searchParams.get("cwd") || undefined;
       const after = url.searchParams.get("after");
       const limit = Number(url.searchParams.get("limit") || 1000);
-      return json({ delegations: queryDelegations({ session, cwd, after: after != null ? Number(after) : undefined, limit }) });
+      // deltasOnly=1: exclude legacy cumulative rows so cost/token SUMs are safe
+      // (Decision 1). The Activity feed omits it to see every delegation row.
+      const deltasOnly = url.searchParams.get("deltasOnly") === "1";
+      return json({ delegations: queryDelegations({ session, cwd, after: after != null ? Number(after) : undefined, limit, deltasOnly }) });
     }
     if (url.pathname === "/tool-calls") {
       const session = url.searchParams.get("session") || undefined;

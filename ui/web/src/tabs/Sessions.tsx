@@ -187,6 +187,11 @@ function TopologyVersionModal({ hash, onClose }: { hash: string; onClose: () => 
   // Reassemble the reassembled tree into the TopoSource TopologyGraph consumes.
   const source = useMemo(() => {
     if (!detail) return undefined;
+    // The version modal renders a topology HASH, not a session — a hash is shared
+    // across sessions and both modes, so there is no single authoritative active
+    // team here (unlike the live/replay paths, which read the persisted flag in
+    // Phase 2.4). The structural guess just picks which team to foreground; both
+    // trees are available in the graph regardless.
     const active: "hive" | "planning" = detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning";
     return { session_id: "", topologies: { active, hive: detail.hive, planning: detail.planning } as any, agents: new Map() };
   }, [detail]);
