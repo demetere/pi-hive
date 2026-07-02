@@ -21,7 +21,7 @@ function computeAllEvents(eventMap: Record<string, HiveEvent>): HiveEvent[] {
   return arr;
 }
 
-function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>): SessionView[] {
+function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, { cwd?: string; first_ts?: string; last_ts?: string; event_count?: number; tokens?: number; cost?: number }>): SessionView[] {
   const present = new Set<string>();
 
   const ensure = (id: string, cwd?: string, ts?: string): SessionView => {
@@ -65,6 +65,23 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
     const agents = snap.agents || [];
     v.tokens = agents.reduce((s: number, a: any) => s + (a.inputTokens || 0) + (a.outputTokens || 0), 0);
     v.cost = agents.reduce((s: number, a: any) => s + (a.costUsd || 0), 0);
+  }
+
+  // Union with the server-authoritative session list (Phase 3.4): a session whose
+  // events fell outside the ~1000-row loaded window (and which has no live
+  // snapshot) would otherwise be invisible in the sidebar/session list. Seed a
+  // minimal row from its summary so it still appears; its authoritative
+  // tokens/cost/event_count come straight from the DB. Skipped once real
+  // events/snapshots arrive for it (ensure() already created the richer row).
+  for (const [id, sum] of summaries) {
+    if (sessionStore.has(id) && present.has(id)) continue;
+    const v = ensure(id, sum.cwd, sum.last_ts || sum.first_ts);
+    if (!v.cwd && sum.cwd) { v.cwd = sum.cwd; v.project = projectName(sum.cwd); }
+    if (sum.first_ts && (!v.first_ts || sum.first_ts < v.first_ts)) v.first_ts = sum.first_ts;
+    if (sum.last_ts && sum.last_ts > v.last_ts) v.last_ts = sum.last_ts;
+    if (!v.event_count && sum.event_count) v.event_count = sum.event_count;
+    if (!v.tokens && sum.tokens) v.tokens = sum.tokens;
+    if (!v.cost && sum.cost) v.cost = sum.cost;
   }
 
   // history backstop (never under-report vs the persisted log)
@@ -117,7 +134,7 @@ export function recomputeHeavy() {
   const allEvents = computeAllEvents(s.eventMap);
   historyBySession = buildHistoryBySession(allEvents);
   const eventStatus = buildEventStatus(allEvents);
-  const sessions = computeSessions(allEvents, s.snapshots, eventStatus);
+  const sessions = computeSessions(allEvents, s.snapshots, eventStatus, s.sessionSummaries);
   const sessionsById = new Map<string, SessionView>();
   for (const sess of sessions) sessionsById.set(sess.session_id, sess);
   store.setState({ allEvents, eventStatus, sessions, sessionsById });
@@ -169,6 +186,9 @@ export function recomputeScoped() {
 
   const ids = new Set(scopedSessions.map((x) => x.session_id));
   const scopedEvents = [...s.allEvents].filter((e) => ids.has(e.session_id)).reverse();
+  // Typed delegation deltas for the scoped sessions (Phase 3.1) — feeds the
+  // cost/token history + CACHE, untruncated by the raw event window.
+  const scopedDelegations = s.delegations.filter((d) => ids.has(d.sessionId));
 
   const scopedStats: ScopeStats = {
     sessions: scopedSessions.length,
@@ -220,7 +240,7 @@ export function recomputeScoped() {
     scopeTitle = { title: pl, crumbs: ["Overview", pl, sessionSlug(scope.sessionId)], live: scopedStats.live, session: sess };
   }
 
-  store.setState({ scopedSessions, scopedEvents, scopedStats, currentSession, scopedAgents, scopedAgentCount, scopedTeamCount, scopeTitle });
+  store.setState({ scopedSessions, scopedEvents, scopedDelegations, scopedStats, currentSession, scopedAgents, scopedAgentCount, scopedTeamCount, scopeTitle });
 }
 
 function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {

@@ -36,7 +36,7 @@ export default function Kpis() {
   const scope = useHive((s) => s.scope);
   const scopedStats = useHive((s) => s.scopedStats);
   const scopedSessions = useHive((s) => s.scopedSessions);
-  const scopedEvents = useHive((s) => s.scopedEvents);
+  const scopedDelegations = useHive((s) => s.scopedDelegations);
 
   const s = scopedStats;
 
@@ -51,20 +51,24 @@ export default function Kpis() {
     return wallSeconds > 0 ? s.tokens / wallSeconds : 0;
   }, [scopedSessions, s.tokens]);
 
-  // Single aggregation (E2): tokens/cost/cache come from the shared series, not
-  // a KPI-local re-derivation. scopedStats.tokens/cost feed the headline; the
-  // sparkline uses the cumulative point series.
-  const series = useMemo(() => cumulativeSeries(scopedEvents), [scopedEvents]);
-  const totals = useMemo(() => seriesTotals(scopedEvents), [scopedEvents]);
+  // Single aggregation (E2/Phase 3.1): tokens/cost/cache come from the typed
+  // delegation deltas — untruncated, unlike the old raw-event window. scopedStats
+  // .tokens/cost still feed the headline (live snapshot sum); the sparkline +
+  // CACHE read the delta series, so CACHE and TOKENS share one authoritative
+  // source instead of one snapshot / one truncated window (the old bug).
+  const series = useMemo(() => cumulativeSeries(scopedDelegations), [scopedDelegations]);
+  const totals = useMemo(() => seriesTotals(scopedDelegations), [scopedDelegations]);
   const tokSpark = useMemo(() => sparkPaths(series.map((p) => p.tok)), [series]);
   const costSpark = useMemo(() => sparkPaths(series.map((p) => p.cost)), [series]);
 
   // Cache tokens are shown as their own figure, never folded into the "tokens"
-  // headline (Decision 2). Fall back to the series when scopedStats lacks it.
+  // headline (Decision 2).
   const cacheTokens = totals.cacheRead + totals.cacheWrite;
   const cards = [
     { label: "RUNNING", unit: "live", value: String(s.running), color: "var(--run)", spark: null },
-    { label: "SESSIONS", unit: "now", value: String(s.sessions), color: "var(--ink)", spark: null },
+    // "total" not "now": this counts every session in scope, including long-dead
+    // ones — the live subset is the RUNNING/live figures, not this (Phase 3.4).
+    { label: "SESSIONS", unit: "total", value: String(s.sessions), color: "var(--ink)", spark: null },
     { label: "TOKENS", unit: "in+out", value: fmtNum(s.tokens || totals.tok), color: "var(--ink)", spark: tokSpark },
     { label: "CACHE", unit: "r+w tok", value: fmtNum(cacheTokens), color: "var(--ink)", spark: null },
     { label: "THROUGHPUT", unit: "tok/s", value: tokSec >= 1000 ? (tokSec / 1000).toFixed(2) + "k" : tokSec.toFixed(1), color: "var(--brand)", spark: tokSpark },

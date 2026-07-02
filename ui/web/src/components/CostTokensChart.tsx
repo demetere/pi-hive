@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useHive } from "../store";
 import { fmtCost, fmtNum } from "../lib/format";
 import { smooth } from "../lib/agents";
-import { cumulativeSeries, rateSeries } from "../lib/series";
+import { cumulativeSeries, delegationsFromEvents, rateSeries } from "../lib/series";
+import type { Delegation } from "../api";
 import type { HiveEvent } from "../types";
 
 interface Pt { t: number; tok: number; cost: number; }
@@ -11,12 +12,13 @@ interface Pt { t: number; tok: number; cost: number; }
 // Overview chart is labeled "last 60 min · cost/min · tokens/min", so it uses
 // mode="rate" and the labels now match what is plotted. The Cost tab uses the
 // cumulative view (running totals over the session). Both draw from the single
-// shared aggregation (lib/series).
-function buildSeries(events: HiveEvent[], mode: "cumulative" | "rate", now: number): Pt[] {
+// shared aggregation (lib/series) over typed delegation DELTAS (Phase 3.1) — no
+// longer the truncated raw-event window.
+function buildSeries(rows: Delegation[], mode: "cumulative" | "rate", now: number): Pt[] {
   if (mode === "rate") {
-    return rateSeries(events, 60, now).map((p) => ({ t: p.t, tok: p.tokPerMin, cost: p.costPerMin }));
+    return rateSeries(rows, 60, now).map((p) => ({ t: p.t, tok: p.tokPerMin, cost: p.costPerMin }));
   }
-  return cumulativeSeries(events).map((p) => ({ t: p.t, tok: p.tok, cost: p.cost }));
+  return cumulativeSeries(rows).map((p) => ({ t: p.t, tok: p.tok, cost: p.cost }));
 }
 
 const PAD = { l: 56, r: 56, t: 16, b: 30 };
@@ -35,11 +37,16 @@ function fmtTime(t: number): string {
 }
 
 export default function CostTokensChart({ mode = "cumulative", events }: { mode?: "cumulative" | "rate"; events?: HiveEvent[] }) {
-  const scopedEvents = useHive((s) => s.scopedEvents);
+  const scopedDelegations = useHive((s) => s.scopedDelegations);
   const now = useHive((s) => s.now);
-  // When an explicit event set is passed (replay, K5), chart that instead of the
-  // live scoped events; live SSE updates never touch the replay slice.
-  const source = events ?? scopedEvents;
+  // Live: the store's typed delegation deltas for the scoped sessions. Replay
+  // (K5): an explicit event slice is passed — reconstruct its deltas client-side
+  // (there are no server rows for a historical cursor). Live SSE never touches
+  // the replay slice.
+  const source = useMemo<Delegation[]>(
+    () => (events ? delegationsFromEvents(events) : scopedDelegations),
+    [events, scopedDelegations],
+  );
   // For the rate view, bucket against the live clock so the 60-min window slides.
   const series = useMemo(() => buildSeries(source, mode, now || Date.now()), [source, mode, now]);
   const [hover, setHover] = useState<{ i: number; px: number } | null>(null);

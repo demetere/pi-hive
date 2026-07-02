@@ -13,9 +13,12 @@ let tokenPromise: Promise<string | null> | null = null;
 function daemonToken(): Promise<string | null> {
   if (!tokenPromise) {
     tokenPromise = fetch("/bootstrap.json")
-      .then((r) => (r.ok ? r.json() : { token: null }))
-      .then((b: { token: string | null }) => b.token)
-      .catch(() => null);
+      .then(async (r): Promise<string | null> => {
+        if (!r.ok) return null;
+        const body = (await r.json()) as { token: string | null };
+        return body.token;
+      })
+      .catch((): string | null => null);
   }
   return tokenPromise;
 }
@@ -117,14 +120,60 @@ export async function fetchSessionEvents(
 export interface SessionSummary {
   session_id: string;
   cwd?: string;
+  session_dir?: string;
   first_ts?: string;
   last_ts?: string;
   event_count: number;
+  running?: number;
+  // Authoritative token/cost totals from the SQL sessions row (B2). Carried so
+  // the KPI TOKENS + CACHE cards read one consistent source instead of TOKENS
+  // from the snapshot and CACHE re-derived from the raw event window (Phase 3.0).
+  tokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  cost?: number;
   topologyHash?: string;
 }
 export async function fetchSessionSummaries(): Promise<SessionSummary[]> {
   const data = await jsonOr<{ sessions: SessionSummary[] }>(fetch("/sessions"), { sessions: [] });
   return data.sessions || [];
+}
+
+// A typed, completed delegation row from the SQL projection (Phase 2/3). Token
+// and cost figures are PER-RUN DELTAS (schemaVersion 1) — additive across rows,
+// so summing them never double-counts a re-run agent. Legacy cumulative rows
+// (schemaVersion 0) are excluded server-side when deltasOnly is passed.
+export interface Delegation {
+  cursor: number;
+  sessionId: string;
+  cwd?: string;
+  agent?: string;
+  parent?: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+  schemaVersion: number;
+  status?: string;
+  stopReason?: string;
+  model?: string;
+}
+// Typed delegations for cost/token aggregation (Phase 3.1). ALWAYS request
+// deltasOnly for anything that SUMS these rows — mixing per-run deltas with
+// legacy cumulative rows would double-count. `after` pages forward by cursor.
+export async function fetchDelegations(opts: { session?: string; cwd?: string; after?: number; limit?: number; deltasOnly?: boolean } = {}): Promise<Delegation[]> {
+  const q = new URLSearchParams();
+  if (opts.session) q.set("session", opts.session);
+  if (opts.cwd) q.set("cwd", opts.cwd);
+  if (opts.after != null) q.set("after", String(opts.after));
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.deltasOnly !== false) q.set("deltasOnly", "1"); // default on
+  const data = await jsonOr<{ delegations: Delegation[] }>(fetch(`/delegations?${q.toString()}`), { delegations: [] });
+  return data.delegations || [];
 }
 
 // Storage usage + prune preview (GET /storage). `cwd` scopes to a project; add

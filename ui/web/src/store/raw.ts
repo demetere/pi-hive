@@ -89,7 +89,10 @@ export function purgeLocal(ids: string[]) {
   for (const [k, v] of Object.entries(st.eventMap)) if (!idSet.has(v.session_id)) eventMap[k] = v;
   const snapshots = { ...st.snapshots };
   for (const id of idSet) delete snapshots[id];
-  store.setState({ eventMap, snapshots });
+  // Drop the deleted sessions' typed delegation rows too, so the cost/token
+  // series (Phase 3.1) doesn't keep counting a session that no longer exists.
+  const delegations = st.delegations.filter((d) => !idSet.has(d.sessionId));
+  store.setState({ eventMap, snapshots, delegations });
 }
 
 // ── delete actions ───────────────────────────────────────────────────────────

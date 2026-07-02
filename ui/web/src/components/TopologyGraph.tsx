@@ -327,7 +327,11 @@ function Node(props: {
   const tier: "lead" | "worker" = isLead ? "lead" : "worker";
 
   const model = data.model || rt?.model;
-  const ctxPct = Math.max(0, Math.min(100, Math.round(rt?.contextPct ?? 0)));
+  // contextPct is unknown (no runtime / not yet reported) vs genuinely 0. Track
+  // the distinction so the CTX bar shows "—" for unknown instead of a misleading
+  // "0%" that reads as "empty context" (Phase 3.4).
+  const ctxKnown = rt?.contextPct != null && Number.isFinite(rt.contextPct);
+  const ctxPct = ctxKnown ? Math.max(0, Math.min(100, Math.round(rt!.contextPct as number))) : 0;
   const level = thinkLevel(model, rt?.thinking);
   // Dial level resolution (K3/Decision 6): node sidecar → rt sidecar → /models
   // lookup by effective model → undefined (plain text, no invented ladder).
@@ -394,7 +398,7 @@ function Node(props: {
       <text className="g-cap" x="12" y="45" style={{ fontSize: 7.5 }}>CTX</text>
       <rect x="32" y="40" width={W - 76} height="4" rx="2" className="g-ctx-track" />
       <rect x="32" y="40" width={(W - 76) * (ctxPct / 100)} height="4" rx="2" fill={ctxCol} />
-      <text x={W - 12} y="45" textAnchor="end" className="g-val" style={{ fontSize: 8.5, fill: ctxCol }}>{ctxPct}%</text>
+      <text x={W - 12} y="45" textAnchor="end" className="g-val" style={{ fontSize: 8.5, fill: ctxCol }}>{ctxKnown ? `${ctxPct}%` : "—"}</text>
 
       {/* Row 3: THINK dial · TOK/S · TOTAL */}
       <text className="g-cap" x="12" y="63" style={{ fontSize: 7 }}>THINK</text>

@@ -1,4 +1,4 @@
-import { fetchEventsAfter, fetchInitialData, fetchModels, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, fetchTopologies, fetchTopologyDetail, openEventStream, pruneTelemetryRemote, saveProjectOverride } from "../api";
+import { fetchDelegations, fetchEventsAfter, fetchInitialData, fetchModels, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, fetchTopologies, fetchTopologyDetail, openEventStream, pruneTelemetryRemote, saveProjectOverride } from "../api";
 import { store } from "./index";
 import { recomputeHeavy, recomputeLive, recomputeScoped } from "./derive";
 import { ingestEvents, ingestSnapshot, purgeLocal, pushToast, setSelectedSession, tick } from "./raw";
@@ -31,6 +31,33 @@ export async function refreshSessionSummaries() {
   const summaries = await fetchSessionSummaries();
   const map = new Map(summaries.map((s) => [s.session_id, s]));
   store.setState({ sessionSummaries: map });
+}
+
+// Fetch typed delegation rows (deltas-only) into the store, incrementally (E2/
+// Phase 3.1). Pages forward from the highest cursor already held so a refresh
+// after a delegation_end frame only pulls the new rows, then appends. This is the
+// authoritative, untruncated source for the cost/token history + CACHE totals.
+let delegationsInFlight = false;
+export async function refreshDelegations(reset = false): Promise<void> {
+  if (delegationsInFlight) return;
+  delegationsInFlight = true;
+  try {
+    const after = reset ? 0 : store.getState().delegationsCursor;
+    const rows = await fetchDelegations({ after, limit: 5000 });
+    if (!rows.length && !reset) return;
+    const prev = reset ? [] : store.getState().delegations;
+    // Dedupe by cursor in case a page overlaps the boundary; keep cursor order.
+    const seen = new Set(prev.map((d) => d.cursor));
+    const merged = [...prev];
+    let maxCursor = store.getState().delegationsCursor;
+    for (const d of rows) {
+      if (!seen.has(d.cursor)) { merged.push(d); seen.add(d.cursor); }
+      if (d.cursor > maxCursor) maxCursor = d.cursor;
+    }
+    merged.sort((a, b) => a.cursor - b.cursor);
+    store.setState({ delegations: merged, delegationsCursor: maxCursor });
+  } catch { /* transient; the live snapshot totals still render */ }
+  finally { delegationsInFlight = false; }
 }
 
 // Fetch model capabilities once (K3). Build a lookup keyed by both the full
@@ -78,6 +105,7 @@ export async function pruneTelemetry(olderThanDays: number): Promise<boolean> {
     pushToast("success", `Pruned ${res.events ?? 0} events and ${res.sessions ?? 0} session${res.sessions === 1 ? "" : "s"}.`);
     // Refresh authoritative counts + summaries so the UI reflects the smaller DB.
     await refreshSessionSummaries();
+    await refreshDelegations(true); // rebuild deltas cache against the pruned DB
     return true;
   }
   pushToast("error", res.error || "Prune failed — is the dashboard still running?");
@@ -114,8 +142,13 @@ function wire() {
   wired = true;
   store.subscribe((s) => s.eventMap, recomputeHeavy);
   store.subscribe((s) => s.snapshots, recomputeHeavy);
+  // Server session list unions into the sidebar/session view (Phase 3.4), so a
+  // fresh summaries fetch must re-run the heavy tier to surface event-only rows.
+  store.subscribe((s) => s.sessionSummaries, recomputeHeavy);
   store.subscribe((s) => s.scope, recomputeScoped);
   store.subscribe((s) => s.selectedSession, recomputeScoped);
+  // New typed delegation rows change the scoped cost/token series (Phase 3.1).
+  store.subscribe((s) => s.delegations, recomputeScoped);
   store.subscribe((s) => s.now, recomputeLive);
   // Re-fetch thinking whenever the scoped session set changes.
   store.subscribe((s) => s.scopedSessions, () => { void refreshThinking(); });
@@ -141,6 +174,7 @@ export function connect(): EventSource | undefined {
   setInterval(() => { void refreshThinking(); }, 5000);
   void refreshOverrides(); // load project display-name overrides once
   void refreshSessionSummaries(); // load server-authoritative event counts
+  void refreshDelegations(true); // load typed delegation deltas for cost/token series
   void refreshModels(); // load model capabilities for the thinking dial (K3)
 
   fetchInitialData().then(({ events, states, cursor }) => {
@@ -205,12 +239,31 @@ export function connect(): EventSource | undefined {
       if (es.readyState !== EventSource.OPEN) store.setState({ connection: "reconnecting" });
     }, 2500);
   });
-  es.addEventListener("hive", (e) => { try { ingestEvents([JSON.parse((e as MessageEvent).data)]); } catch { /* */ } });
+  es.addEventListener("hive", (e) => {
+    try {
+      const ev = JSON.parse((e as MessageEvent).data);
+      ingestEvents([ev]);
+      // A completed delegation added a new typed row — pull it (debounced so a
+      // burst of concurrent finishes triggers one catch-up fetch, not N).
+      if (ev?.type === "delegation_end") scheduleDelegationsRefresh();
+    } catch { /* */ }
+  });
   es.addEventListener("hive_state", (e) => { try { ingestSnapshot(JSON.parse((e as MessageEvent).data)); } catch { /* */ } });
   es.addEventListener("hive_delete", (e) => {
     try { const { session_ids } = JSON.parse((e as MessageEvent).data); purgeLocal(session_ids || []); reconcileAfterDelete(session_ids || []); } catch { /* */ }
   });
   return es;
+}
+
+// Debounce delegation refetches: a wave of concurrent worker finishes emits many
+// delegation_end frames in quick succession; coalesce them into one catch-up.
+let delegationsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleDelegationsRefresh() {
+  if (delegationsRefreshTimer) return;
+  delegationsRefreshTimer = setTimeout(() => {
+    delegationsRefreshTimer = undefined;
+    void refreshDelegations();
+  }, 800);
 }
 
 // Lossless SSE catch-up after a reconnect (E1). Fetch the exact gap since our
@@ -231,6 +284,7 @@ async function resyncAfterReconnect(): Promise<boolean> {
     if (events.length) ingestEvents(events);
     for (const snap of states) ingestSnapshot(snap);
     void refreshSessionSummaries(); // event counts may have advanced during the gap
+    void refreshDelegations(); // catch up any delegations completed during the gap
   } catch { /* transient; the live stream continues */ }
   finally { resyncInFlight = false; }
   return true;

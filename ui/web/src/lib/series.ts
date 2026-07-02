@@ -1,14 +1,51 @@
+import type { Delegation } from "../api";
 import type { HiveEvent } from "../types";
 
-// One aggregation to rule them all (E2). Both the Overview chart and the KPI
-// cards derive their token/cost numbers from THIS function instead of each
-// re-implementing the peak-and-sum over delegation_end payloads.
+// Derive per-run delegation deltas from a raw delegation_end event slice — used
+// only by REPLAY (Phase 3.1), which reconstructs a session over events[0..cursor]
+// client-side and has no server delegation rows for a historical cursor. Reads
+// the `delta` block Phase 2 stamps onto delegation_end (schemaVersion 1); an
+// older event without it falls back to its lifetime runtime values (a legacy
+// replay may then approximate, exactly as it did before this change).
+export function delegationsFromEvents(events: HiveEvent[]): Delegation[] {
+  const out: Delegation[] = [];
+  for (const e of events) {
+    if (e.type !== "delegation_end") continue;
+    const p: any = e.payload || {};
+    const d = p.delta;
+    const isDelta = Number(p.delegationsSchema) >= 1 && d && typeof d === "object";
+    const rt = p.runtime || {};
+    out.push({
+      cursor: Number(e.cursor || 0),
+      sessionId: e.session_id,
+      cwd: e.cwd,
+      agent: rt.name || p.from,
+      parent: p.to,
+      endedAt: e.ts,
+      durationMs: Number(p.elapsedMs) || undefined,
+      inputTokens: Number((isDelta ? d.inputTokens : rt.inputTokens ?? p.inputTokens) ?? 0),
+      outputTokens: Number((isDelta ? d.outputTokens : rt.outputTokens ?? p.outputTokens) ?? 0),
+      cacheReadTokens: Number((isDelta ? d.cacheReadTokens : rt.cacheReadTokens) ?? 0),
+      cacheWriteTokens: Number((isDelta ? d.cacheWriteTokens : rt.cacheWriteTokens) ?? 0),
+      costUsd: Number((isDelta ? d.costUsd : rt.costUsd ?? p.costUsd) ?? 0),
+      schemaVersion: isDelta ? 1 : 0,
+      status: p.type,
+      stopReason: p.stopReason,
+      model: Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model,
+    });
+  }
+  return out;
+}
+
+// One aggregation to rule them all (E2). The Overview chart and the KPI cards
+// derive their token/cost numbers from THIS function over the typed delegation
+// rows (Phase 3.1) — NOT the raw ~1000-event window, which truncates history.
 //
-// Tokens/cost per agent are cumulative (Phase A overwrites the runtime counters
-// from getSessionStats() at delegation end, so the latest delegation_end for an
-// agent carries its true lifetime total — we take the peak to be robust to
-// out-of-order events). Summing the per-agent peaks gives the session/scope
-// total at each point in time.
+// Each delegation row carries PER-RUN DELTAS (Phase 2, schemaVersion 1): the
+// tokens/cost THIS run consumed. Deltas are ADDITIVE, so the cumulative series
+// is a simple running sum in endedAt order — no per-agent peak/max needed, and a
+// re-run agent no longer double-counts (the old lifetime-peak approach did). The
+// store fetches these deltas-only, so legacy cumulative rows never reach here.
 
 export interface SeriesPoint {
   t: number;         // wall-clock ms
@@ -25,43 +62,29 @@ export interface SeriesTotals {
   cacheWrite: number;
 }
 
-// Build the cumulative, monotonic series from (scope-filtered) events. `events`
-// may be newest-first (scopedEvents) or chronological — we sort by ts to be safe.
-export function cumulativeSeries(events: HiveEvent[]): SeriesPoint[] {
-  const chrono = [...events].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
-  const peakTok = new Map<string, number>();
-  const peakCost = new Map<string, number>();
-  const peakCR = new Map<string, number>();
-  const peakCW = new Map<string, number>();
+// Build the cumulative series by summing per-run deltas in completion order.
+// `rows` should already be scope-filtered by the caller; we sort by endedAt so a
+// late-arriving row lands at the right point on the timeline.
+export function cumulativeSeries(rows: Delegation[]): SeriesPoint[] {
+  const chrono = [...rows]
+    .filter((r) => r.endedAt)
+    .sort((a, b) => String(a.endedAt).localeCompare(String(b.endedAt)));
   const pts: SeriesPoint[] = [];
-  for (const e of chrono) {
-    if (e.type !== "delegation_end") continue;
-    const p: any = e.payload || {};
-    const rt = p.runtime || {};
-    const name = rt.name || p.from;
-    if (!name) continue;
-    peakTok.set(name, Math.max(peakTok.get(name) || 0, Number(rt.inputTokens || 0) + Number(rt.outputTokens || 0)));
-    peakCost.set(name, Math.max(peakCost.get(name) || 0, Number(rt.costUsd ?? p.costUsd ?? 0)));
-    peakCR.set(name, Math.max(peakCR.get(name) || 0, Number(rt.cacheReadTokens || 0)));
-    peakCW.set(name, Math.max(peakCW.get(name) || 0, Number(rt.cacheWriteTokens || 0)));
-    const sum = (m: Map<string, number>) => { let s = 0; for (const v of m.values()) s += v; return s; };
-    pts.push({ t: new Date(e.ts).getTime(), tok: sum(peakTok), cost: sum(peakCost), cacheRead: sum(peakCR), cacheWrite: sum(peakCW) });
-  }
-  // Enforce monotonicity (a late out-of-order event can't drop the running total).
-  let mTok = 0, mCost = 0, mCR = 0, mCW = 0;
-  for (const pt of pts) {
-    mTok = Math.max(mTok, pt.tok); pt.tok = mTok;
-    mCost = Math.max(mCost, pt.cost); pt.cost = mCost;
-    mCR = Math.max(mCR, pt.cacheRead); pt.cacheRead = mCR;
-    mCW = Math.max(mCW, pt.cacheWrite); pt.cacheWrite = mCW;
+  let tok = 0, cost = 0, cacheRead = 0, cacheWrite = 0;
+  for (const r of chrono) {
+    tok += Number(r.inputTokens || 0) + Number(r.outputTokens || 0);
+    cost += Number(r.costUsd || 0);
+    cacheRead += Number(r.cacheReadTokens || 0);
+    cacheWrite += Number(r.cacheWriteTokens || 0);
+    pts.push({ t: new Date(r.endedAt as string).getTime(), tok, cost, cacheRead, cacheWrite });
   }
   return pts;
 }
 
 // Final cumulative totals (the KPI-card figures). Includes cache split so the
 // cards can show cache tokens as their own stat (Decision 2).
-export function seriesTotals(events: HiveEvent[]): SeriesTotals {
-  const pts = cumulativeSeries(events);
+export function seriesTotals(rows: Delegation[]): SeriesTotals {
+  const pts = cumulativeSeries(rows);
   const last = pts[pts.length - 1];
   return last ? { tok: last.tok, cost: last.cost, cacheRead: last.cacheRead, cacheWrite: last.cacheWrite }
     : { tok: 0, cost: 0, cacheRead: 0, cacheWrite: 0 };
@@ -71,8 +94,8 @@ export function seriesTotals(events: HiveEvent[]): SeriesTotals {
 // and cost by the minute they were produced (deltas of the cumulative series),
 // so the Overview chart's "per minute" labels match what is plotted.
 export interface RatePoint { t: number; tokPerMin: number; costPerMin: number; }
-export function rateSeries(events: HiveEvent[], windowMin = 60, now = Date.now()): RatePoint[] {
-  const pts = cumulativeSeries(events);
+export function rateSeries(rows: Delegation[], windowMin = 60, now = Date.now()): RatePoint[] {
+  const pts = cumulativeSeries(rows);
   const start = now - windowMin * 60_000;
   const buckets = new Map<number, { tok: number; cost: number }>();
   let prevTok = 0, prevCost = 0;

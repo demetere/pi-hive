@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { projectName } from "../src/shared/project.ts";
 import { buildHistoryBySession, historyTotals } from "../ui/web/src/store/history.ts";
 import { buildEventStatus } from "../ui/web/src/store/status.ts";
-import { cumulativeSeries, seriesTotals } from "../ui/web/src/lib/series.ts";
+import { cumulativeSeries, delegationsFromEvents, seriesTotals } from "../ui/web/src/lib/series.ts";
 
 test("projectName keeps useful parent context for generic paths", () => {
   assert.equal(projectName("/Users/me/work/app"), "work / app");
@@ -53,26 +53,30 @@ test("replay to the final cursor equals the full-history derivation (F3)", () =>
     { session_id: "s1", seq: 5, ts: "2026-07-02T00:00:05Z", type: "delegation_end", payload: { from: "B", type: "done", runtime: { name: "B", inputTokens: 200, outputTokens: 60, cacheReadTokens: 0, cacheWriteTokens: 5, costUsd: 0.03 } } },
   ];
   const fullStatus = buildEventStatus(events).get("s1")!;
-  const fullTotals = seriesTotals(events);
+  // Phase 3: replay reconstructs per-run delegation deltas from the event slice
+  // (delegationsFromEvents), then the same series helpers sum them. These events
+  // carry single-run agents with no `delta` block, so the fallback maps their
+  // lifetime runtime values to the per-run delta 1:1.
+  const fullTotals = seriesTotals(delegationsFromEvents(events));
 
   // The replay slice at the last cursor is the whole array.
   const replaySlice = events.slice(0, events.length);
   const replayStatus = buildEventStatus(replaySlice).get("s1")!;
-  const replayTotals = seriesTotals(replaySlice);
+  const replayTotals = seriesTotals(delegationsFromEvents(replaySlice));
 
   assert.deepEqual([...replayStatus.entries()].sort(), [...fullStatus.entries()].sort());
   assert.deepEqual(replayTotals, fullTotals);
-  // Totals are the summed per-agent peaks (Phase A honest usage).
+  // Totals are the summed per-run deltas (Phase 2/3 honest usage).
   assert.equal(fullTotals.tok, 400); // (100+40) + (200+60)
   assert.equal(fullTotals.cacheRead, 900);
   assert.equal(fullTotals.cacheWrite, 15);
   assert.equal(Number(fullTotals.cost.toFixed(2)), 0.08);
 
   // A partial cursor is a strict prefix: totals never exceed the full totals.
-  const midTotals = seriesTotals(events.slice(0, 3));
+  const midTotals = seriesTotals(delegationsFromEvents(events.slice(0, 3)));
   assert.equal(midTotals.tok, 140);
   assert.ok(midTotals.tok <= fullTotals.tok);
   // Cumulative series is monotonic non-decreasing.
-  const series = cumulativeSeries(events);
+  const series = cumulativeSeries(delegationsFromEvents(events));
   for (let i = 1; i < series.length; i++) assert.ok(series[i].tok >= series[i - 1].tok);
 });

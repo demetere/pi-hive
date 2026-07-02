@@ -27,16 +27,19 @@ export function mergeThinking(items: ActivityItem[], thinking: Array<{ agent: st
   return [...items, ...thinkItems].sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
 }
 
-// Pairs worker_tool_start/worker_tool_end events into a single "tool" item and
-// passes other events through, newest-first.
+// Pairs tool start/end events into a single "tool" item and passes other events
+// through, newest-first. Both worker (worker_tool_*) and orchestrator
+// (orchestrator_tool_*) tool calls are bundled identically (Phase 3.3) — the
+// server materializes them the same way, so the orchestrator's tool calls get
+// the same started/finished card, duration, and outcome as a worker's.
 export function bundleEvents(events: any[]): ActivityItem[] {
   const pending = new Map<string, any>();
   const out: ActivityItem[] = [];
   for (const e of [...events].reverse()) {
     const p = e.payload || {};
     const callId = p.toolCallId || `${e.session_id}:${p.agent}:${p.toolName}:${e.seq}`;
-    if (e.type === "worker_tool_start") { pending.set(callId, e); continue; }
-    if (e.type === "worker_tool_end") {
+    if (e.type === "worker_tool_start" || e.type === "orchestrator_tool_start") { pending.set(callId, e); continue; }
+    if (e.type === "worker_tool_end" || e.type === "orchestrator_tool_end") {
       const start = pending.get(callId);
       pending.delete(callId);
       out.push({ kind: "tool", id: callId, type: "worker_tool", ts: e.ts, start, end: e });

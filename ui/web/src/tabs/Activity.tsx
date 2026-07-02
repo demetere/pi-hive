@@ -25,6 +25,31 @@ function payloadMeta(e: any): Array<[string, string]> {
     .map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)] as [string, string]);
 }
 function fmtTime(ts?: string): string { return ts ? new Date(ts).toLocaleString() : "—"; }
+function fmtMs(ms?: number): string {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+// Typed fields surfaced for a delegation_end event (Phase 3.2) instead of a raw
+// JSON dump. Reads the per-run `delta` block (Phase 2) for this run's tokens/cost
+// and the stop_reason / duration / model the SDK reported.
+function delegationDetail(e: any): Array<[string, string]> {
+  const p = e?.payload || {};
+  const d = p.delta || {};
+  const model = Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model;
+  const inTok = Number(d.inputTokens ?? p.inputTokens ?? 0);
+  const outTok = Number(d.outputTokens ?? p.outputTokens ?? 0);
+  const rows: Array<[string, string]> = [
+    ["Outcome", String(p.type || "—")],
+    ["Stop reason", String(p.stopReason || "—")],
+    ["Duration", fmtMs(Number(p.elapsedMs) || undefined)],
+    ["Model", model ? shortModel(String(model)) : "—"],
+    ["Tokens (in+out)", fmtNum(inTok + outTok)],
+    ["Cache (r+w)", fmtNum(Number(d.cacheReadTokens ?? 0) + Number(d.cacheWriteTokens ?? 0))],
+    ["Cost", p.costUsd != null || d.costUsd != null ? fmtCost(Number(d.costUsd ?? p.costUsd)) : "—"],
+  ];
+  if (p.errorMessage) rows.push(["Error", String(p.errorMessage)]);
+  return rows;
+}
 function toolDuration(item: Extract<ActivityItem, { kind: "tool" }>): string {
   if (!item.start || !item.end) return "running";
   const ms = new Date(item.end.ts).getTime() - new Date(item.start.ts).getTime();
@@ -240,6 +265,11 @@ export default function Activity(props: { search: string }) {
             {types.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
           <div className="spacer" />
+          {/* Phase 3.4: the reasoning feed is capped server-side at the last 12
+              entries per agent, so older thinking isn't shown here. */}
+          {thinking.length > 0 && (
+            <span className="muted-cell" title="The reasoning feed shows only the most recent 12 thinking entries per agent (server-clipped).">💭 last 12/agent</span>
+          )}
           <span className="muted-cell">{total ? `${clampedPage * PAGE + 1}-${Math.min(total, (clampedPage + 1) * PAGE)} of ${total}` : "no events"}</span>
           <div className="pager">
             <button className="btn pill" disabled={clampedPage <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Newer</button>
@@ -333,6 +363,16 @@ export default function Activity(props: { search: string }) {
                               {item.end?.payload && <pre className="phase-payload">{JSON.stringify(item.end.payload, null, 2)}</pre>}
                             </section>
                           </div>
+                        </>
+                      ) : raw?.type === "delegation_end" ? (
+                        <>
+                          <div className="detail-grid">
+                            <span>Session</span><b>{sessionSlug(raw?.session_id)}</b>
+                            <span>Agent</span><b>{raw?.payload?.from || raw?.actor || "—"}</b>
+                            <span>Time</span><b>{fmtTime(item.ts)}</b>
+                          </div>
+                          {/* Typed per-delegation fields (Phase 3.2) — no raw JSON dump. */}
+                          <div className="meta-list">{delegationDetail(raw).map(([k, v], i) => <p key={i}><span>{k}</span><b>{v}</b></p>)}</div>
                         </>
                       ) : (
                         <>

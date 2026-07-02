@@ -3,7 +3,7 @@ import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { HiveEvent, ProjectGroup, SessionView, Snapshot } from "../types";
-import type { SessionSummary, TopologyDetail, TopologyVersionSummary } from "../api";
+import type { Delegation, SessionSummary, TopologyDetail, TopologyVersionSummary } from "../api";
 
 // ── scope: fleet (all projects) | project (one project, its sessions
 // aggregated) | session (one session detail). The tabs render within whatever
@@ -56,12 +56,22 @@ export interface HiveState {
   // history detection (I4) and versioned-topology lookups (K2). Distinct from
   // sessionsById, whose event_count only counts locally-loaded events.
   sessionSummaries: Map<string, SessionSummary>;
+  // Typed, completed delegation rows (deltas-only) served by /delegations, in
+  // cursor order. This is the AUTHORITATIVE source for the cost/token history
+  // series and CACHE totals (Phase 3.1) — unlike the ~1000-row raw event window,
+  // it is not truncated, and its per-run deltas sum without double-counting.
+  // delegationsCursor is the highest cursor fetched, for incremental catch-up.
+  delegations: Delegation[];
+  delegationsCursor: number;
   liveSet: Set<string>;
   projectGroups: ProjectGroup[];
   currentSession: SessionView | undefined;
   fleetStats: ScopeStats;
   scopedSessions: SessionView[];
   scopedEvents: HiveEvent[];
+  // Typed delegation deltas for the sessions in scope (Phase 3.1) — the source
+  // for the cost/token history chart, KPI sparklines, and CACHE totals.
+  scopedDelegations: Delegation[];
   scopedStats: ScopeStats;
   scopedAgents: ScopeAgent[];
   // Distinct-by-name counts over scopedAgents. scopedAgents holds one row per
@@ -134,12 +144,15 @@ const initialState: HiveState = {
     sessions: [],
     sessionsById: new Map(),
     sessionSummaries: new Map(),
+    delegations: [],
+    delegationsCursor: 0,
     liveSet: new Set(),
     projectGroups: [],
     currentSession: undefined,
     fleetStats: initialStats,
     scopedSessions: [],
     scopedEvents: [],
+    scopedDelegations: [],
     scopedStats: initialStats,
     scopedAgents: [],
     scopedAgentCount: 0,
