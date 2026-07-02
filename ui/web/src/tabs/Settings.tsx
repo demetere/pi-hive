@@ -1,7 +1,21 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useHive } from "../store";
 import { pruneTelemetry, saveOverride } from "../store/wiring";
-import { confirmAction } from "../store/raw";
+import { confirmAction, deleteProject } from "../store/raw";
+import { fetchStorage, type StorageBreakdown } from "../api";
+import { fmtBytes, fmtNum } from "../lib/format";
+
+// One labelled metric tile in the storage summary. `accent` gives the prune-
+// preview tile a subtly tinted card so it reads as the actionable figure.
+function StorageTile(props: { label: string; value: string; valueClass?: string; hint?: ReactNode; accent?: boolean }) {
+  return (
+    <div className={`storage-tile${props.accent ? " accent" : ""}`}>
+      <div className="storage-tile-label">{props.label}</div>
+      <div className={`storage-tile-value${props.valueClass ? ` ${props.valueClass}` : ""}`}>{props.value}</div>
+      {props.hint && <div className="storage-tile-hint">{props.hint}</div>}
+    </div>
+  );
+}
 
 // Settings: rename projects (persisted in the telemetry DB, keyed by cwd).
 // Future settings can be added as additional sections below.
@@ -18,6 +32,29 @@ export default function Settings() {
   const [busy, setBusy] = useState<string>("");
   const [pruneDays, setPruneDays] = useState<string>("30");
   const [pruning, setPruning] = useState(false);
+  const [storage, setStorage] = useState<StorageBreakdown | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+
+  // The cwd of the scoped project (first cwd of its group), or undefined at fleet
+  // scope → whole-DB storage. The server resolves it to the project's full cwd set.
+  const scopedCwd = useMemo(() => {
+    if (!scopedProject) return undefined;
+    return projectGroups.find((g) => g.name === scopedProject)?.cwds[0];
+  }, [projectGroups, scopedProject]);
+
+  // Fetch storage usage + prune preview whenever the scope or the days input
+  // settles. Debounced so typing in the days field doesn't spam the endpoint.
+  useEffect(() => {
+    const days = Number(pruneDays.trim());
+    const validDays = Number.isFinite(days) && days >= 0 ? days : undefined;
+    let cancelled = false;
+    setStorageLoading(true);
+    const t = setTimeout(async () => {
+      const res = await fetchStorage(scopedCwd, validDays);
+      if (!cancelled) { setStorage(res); setStorageLoading(false); }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [scopedCwd, pruneDays]);
 
   // Seed the draft from current labels when the group set changes.
   useEffect(() => {
@@ -50,6 +87,16 @@ export default function Settings() {
     setBusy("");
   }
 
+  function requestDelete(project: string, label: string, sessions: number) {
+    confirmAction({
+      title: "Delete project telemetry?",
+      message: <>This permanently removes all telemetry for <b>{label}</b> — {sessions} session{sessions === 1 ? "" : "s"} plus their events, delegations, tool calls, and messages. Project files on disk are not touched.</>,
+      confirmLabel: "Delete telemetry",
+      danger: true,
+      onConfirm: () => deleteProject(project),
+    });
+  }
+
   function requestPrune() {
     const days = Number(pruneDays.trim());
     if (!Number.isFinite(days) || days < 0) return;
@@ -60,9 +107,15 @@ export default function Settings() {
       danger: true,
       onConfirm: async () => {
         setPruning(true);
-        try { await pruneTelemetry(days); } finally { setPruning(false); }
+        try { await pruneTelemetry(days); await refreshStorage(); } finally { setPruning(false); }
       },
     });
+  }
+
+  async function refreshStorage() {
+    const days = Number(pruneDays.trim());
+    const validDays = Number.isFinite(days) && days >= 0 ? days : undefined;
+    setStorage(await fetchStorage(scopedCwd, validDays));
   }
 
   return (
@@ -103,6 +156,7 @@ export default function Settings() {
                     {r.overridden && (
                       <button className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.cwd, r.key, ""); }}>Reset</button>
                     )}
+                    <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.derived, r.label, r.sessions)}>Delete…</button>
                   </div>
                 </div>
               );
@@ -114,26 +168,54 @@ export default function Settings() {
       <section className="tab-card settings-card">
         <div className="settings-head">
           <div>
-            <h2 className="settings-title">Prune history</h2>
-            <p className="settings-sub">Delete telemetry older than a chosen age across all projects. This frees space in the local dashboard database and cannot be undone.</p>
+            <h2 className="settings-title">Storage &amp; prune</h2>
+            <p className="settings-sub">Telemetry content size {scopedProject ? "for this project" : "across all projects"} (payloads + tool/message text; the physical database file is larger and shrinks after a prune). Pruning removes telemetry older than a chosen age and cannot be undone.</p>
           </div>
         </div>
-        <div className="setting-row">
-          <div className="setting-meta">
-            <div className="setting-name">Retain the last</div>
-            <div className="setting-path">Older events are removed; sessions entirely older than this are dropped.</div>
+
+        <div className="storage-panel">
+          <div className="storage-scope">{scopedProject ? "This project" : "All telemetry"}</div>
+          {storageLoading && !storage ? (
+            <div className="storage-muted">Measuring…</div>
+          ) : storage ? (
+            <div className="storage-tiles">
+              <StorageTile label="Content size" value={fmtBytes(storage.bytes)} hint="payloads + text" />
+              <StorageTile label="Events" value={fmtNum(storage.events)} />
+              <StorageTile label="Sessions" value={String(storage.sessions)} />
+              {storage.prune && (
+                storage.prune.removeEvents > 0 ? (
+                  <StorageTile
+                    accent
+                    label={`Prune ≥ ${pruneDays.trim() || "0"}d frees`}
+                    value={fmtBytes(storage.prune.removeBytes)}
+                    valueClass="text-crit"
+                    hint={<>{storage.prune.removeSessions > 0 && `${storage.prune.removeSessions} session${storage.prune.removeSessions === 1 ? "" : "s"} · `}{fmtBytes(storage.prune.keepBytes)} would remain</>}
+                  />
+                ) : (
+                  <StorageTile accent label={`Prune ≥ ${pruneDays.trim() || "0"}d frees`} value="0 B" hint={`nothing older${scopedProject ? " here" : ""}`} />
+                )
+              )}
+            </div>
+          ) : (
+            <div className="storage-muted">Unavailable — is the dashboard daemon running?</div>
+          )}
+        </div>
+
+        <div className="prune-row">
+          <div className="prune-copy">
+            <div className="prune-copy-title">Retain the last</div>
+            <div className="prune-copy-sub">Older events are removed and sessions entirely older than this are dropped. Prune runs across <b>all</b> projects, not just this one.</div>
           </div>
-          <input
-            className="setting-input"
-            type="number"
-            min={0}
-            value={pruneDays}
-            onChange={(e) => setPruneDays(e.target.value)}
-            aria-label="Days of telemetry to retain"
-            style={{ maxWidth: 120 }}
-          />
-          <div className="setting-actions">
-            <span className="setting-path">day{pruneDays.trim() === "1" ? "" : "s"}</span>
+          <div className="prune-control">
+            <input
+              className="prune-input"
+              type="number"
+              min={0}
+              value={pruneDays}
+              onChange={(e) => setPruneDays(e.target.value)}
+              aria-label="Days of telemetry to retain"
+            />
+            <span className="prune-unit">day{pruneDays.trim() === "1" ? "" : "s"}</span>
             <button className="btn sm danger" disabled={pruning || !(Number(pruneDays) >= 0)} onClick={requestPrune}>
               {pruning ? "Pruning…" : "Prune…"}
             </button>

@@ -12,6 +12,9 @@ import {
   dbSessionRowFromEvent,
   deleteSessionRows,
   pruneOlderThan,
+  storageBreakdown,
+  knownCwds,
+  type StorageBreakdown,
   ensureSession,
   getIngestOffset,
   insertEvent,
@@ -610,6 +613,25 @@ export function pruneTelemetry(cutoffIso: string): { events: number; sessions: n
 export function deleteProject(name: string): number {
   const ids = sessionSummaries().filter((s) => projectName(s.cwd)).filter((s) => projectName(s.cwd) === name).map((s) => s.session_id);
   return deleteSessions(ids);
+}
+
+// Storage usage + prune preview for the Settings tab. `cwd` scopes to a single
+// project — resolved to that project's FULL cwd set (a project can span several
+// working dirs sharing a basename), so the number matches what a project-scoped
+// prune/delete would touch. Omit `cwd` for the whole DB. `olderThanDays`, when
+// given, adds the remove/keep preview at that cutoff.
+export function telemetryStorage(cwd?: string, olderThanDays?: number): StorageBreakdown {
+  let cwds: string[] | undefined;
+  if (cwd) {
+    const name = projectName(cwd);
+    // All known cwds that resolve to the same project as the requested one.
+    cwds = knownCwds().filter((c) => projectName(c) === name);
+    if (!cwds.length) cwds = [cwd];
+  }
+  const cutoff = Number.isFinite(olderThanDays) && (olderThanDays as number) >= 0
+    ? new Date(Date.now() - (olderThanDays as number) * 86400_000).toISOString()
+    : undefined;
+  return storageBreakdown(cwds, cutoff);
 }
 
 // Resolve an agent's own conversation-log file from the latest snapshot. The

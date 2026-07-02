@@ -9,6 +9,17 @@ export function fmtCost(n: number): string {
   return "$" + Number(n || 0).toFixed(2);
 }
 
+// Human byte size (KB/MB/GB, base 1024). Sub-KB shown as B.
+export function fmtBytes(n: number): string {
+  const b = Number(n) || 0;
+  if (b < 1024) return `${Math.round(b)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = b / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
+}
+
 export function relTime(ts: string | number, now = Date.now()): string {
   const t = typeof ts === "number" ? ts : new Date(ts).getTime();
   const s = Math.round((now - t) / 1000);

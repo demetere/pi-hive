@@ -220,3 +220,31 @@ test("cursors are stable and gapless across a DB reopen (L5)", () => {
   expect(after.length).toBe(1);
   expect(after[0].cursor).toBeGreaterThan(written[written.length - 1]);
 });
+
+test("storageBreakdown scopes by cwd and previews prune remove/keep split", () => {
+  // Two cwds; one old (pre-cutoff), one new (post-cutoff). Distinct session ids.
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-o", session_id: "sb-old", ts: "2020-01-01T00:00:00.000Z", cwd: "/sb", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-n", session_id: "sb-new", ts: "2030-01-01T00:00:00.000Z", cwd: "/sb", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-x", session_id: "sb-other", ts: "2030-01-01T00:00:00.000Z", cwd: "/other", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  insertEvent({ event_id: "sb-e-old", session_id: "sb-old", seq: 0, ts: "2020-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/sb", payload: { text: "old-in-scope" } });
+  insertEvent({ event_id: "sb-e-new", session_id: "sb-new", seq: 0, ts: "2030-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/sb", payload: { text: "new-in-scope" } });
+  insertEvent({ event_id: "sb-e-other", session_id: "sb-other", seq: 0, ts: "2030-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/other", payload: { text: "out-of-scope" } });
+
+  const cutoff = "2025-01-01T00:00:00.000Z";
+  const scoped = db.storageBreakdown(["/sb"], cutoff);
+  // Only the two /sb events count — the /other event is excluded by scope.
+  expect(scoped.events).toBe(2);
+  expect(scoped.sessions).toBe(2);
+  expect(scoped.bytes).toBeGreaterThan(0);
+  // Prune preview: exactly the one pre-cutoff event/session is removed; the rest kept.
+  expect(scoped.prune!.removeEvents).toBe(1);
+  expect(scoped.prune!.removeSessions).toBe(1);
+  expect(scoped.prune!.keepEvents).toBe(1);
+  expect(scoped.prune!.removeBytes).toBeGreaterThan(0);
+  // Remove + keep bytes reconcile to the total (no double counting).
+  expect(scoped.prune!.removeBytes + scoped.prune!.keepBytes).toBe(scoped.bytes);
+
+  // Whole-DB (no cwd) sees strictly more events than the /sb-scoped view.
+  const whole = db.storageBreakdown(undefined, cutoff);
+  expect(whole.events).toBeGreaterThan(scoped.events);
+});

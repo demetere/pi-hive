@@ -127,6 +127,23 @@ export async function fetchSessionSummaries(): Promise<SessionSummary[]> {
   return data.sessions || [];
 }
 
+// Storage usage + prune preview (GET /storage). `cwd` scopes to a project; add
+// `olderThanDays` for the remove/keep estimate at that cutoff. `bytes` is logical
+// telemetry content (payloads + projection text), not the physical .db size.
+export interface StorageBreakdown {
+  bytes: number;
+  events: number;
+  sessions: number;
+  prune?: { removeBytes: number; removeEvents: number; removeSessions: number; keepBytes: number; keepEvents: number };
+}
+export async function fetchStorage(cwd?: string, olderThanDays?: number): Promise<StorageBreakdown | null> {
+  const q = new URLSearchParams();
+  if (cwd) q.set("cwd", cwd);
+  if (olderThanDays != null && Number.isFinite(olderThanDays)) q.set("olderThanDays", String(olderThanDays));
+  const qs = q.toString();
+  return jsonOr<StorageBreakdown | null>(fetch(`/storage${qs ? `?${qs}` : ""}`), null);
+}
+
 // Model capability lookup (GET /models). Feeds the thinking dial's fallback:
 // when a node lacks its own thinkingLevels sidecar, we look the effective model
 // up here for its SDK-reported levels (K3/Decision 6) instead of inventing a

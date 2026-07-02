@@ -443,11 +443,11 @@
 
 /* ── settings ─────────────────────────────────────────────────────────────── */
 @layer components {
-  .settings { @apply max-w-[860px]; }
+  .settings { @apply max-w-[860px] flex flex-col gap-5; }
   .settings-card { @apply p-0; }
-  .settings-head { @apply px-[18px] pt-[18px] pb-3 border-b border-line; }
-  .settings-title { @apply m-0 text-[15px] font-bold; }
-  .settings-sub { @apply mt-1.5 mb-0 text-ink-dim text-[12.5px] leading-relaxed max-w-[560px]; }
+  .settings-head { @apply px-5 pt-5 pb-4 border-b border-line; }
+  .settings-title { @apply m-0 text-[15px] font-bold tracking-[-.01em]; }
+  .settings-sub { @apply mt-1.5 mb-0 text-ink-dim text-[12.5px] leading-relaxed max-w-[600px]; }
   .settings-list { @apply flex flex-col; }
   .setting-row { @apply flex items-center gap-3 px-[18px] py-3.5 border-b border-line; }
   .setting-row:last-child { @apply border-b-0; }
@@ -458,6 +458,27 @@
   .setting-input { @apply w-[220px] flex-none bg-well border border-line text-ink rounded-[9px] px-[11px] py-2 text-[12.5px] outline-none; font: inherit; }
   .setting-input:focus { border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); box-shadow: 0 0 0 3px var(--brand-bg); }
   .setting-actions { @apply flex items-center gap-2 flex-none; }
+
+  /* Storage summary — a strip of metric tiles above the prune control. */
+  .storage-panel { @apply px-5 py-5 border-b border-line; }
+  .storage-scope { @apply text-[10.5px] font-semibold uppercase tracking-[.5px] text-ink-dimmer mb-3.5; }
+  .storage-tiles { @apply flex flex-wrap items-stretch gap-2.5; }
+  .storage-tile { @apply flex-1 min-w-[128px] bg-well border border-line rounded-xl px-3.5 py-3; }
+  .storage-tile.accent { @apply border-[color-mix(in_srgb,var(--brand)_35%,var(--line))]; background: color-mix(in srgb, var(--brand) 7%, var(--well)); }
+  .storage-tile-label { @apply text-[10px] font-medium uppercase tracking-[.4px] text-ink-dimmer; }
+  .storage-tile-value { @apply text-[20px] font-bold tabular-nums leading-none mt-1.5 text-ink; }
+  .storage-tile-hint { @apply text-[10.5px] text-ink-dim mt-1 leading-snug; }
+  .storage-muted { @apply text-ink-dim text-[13px] py-1; }
+  /* Prune control row — input + unit + action, roomy and vertically centered. */
+  .prune-row { @apply flex items-center gap-4 px-5 py-4; }
+  .prune-copy { @apply min-w-0 flex-1; }
+  .prune-copy-title { @apply text-[13px] font-semibold text-ink; }
+  .prune-copy-sub { @apply text-[11.5px] text-ink-dim mt-1 leading-relaxed; }
+  .prune-control { @apply flex items-center gap-2.5 flex-none; }
+  .prune-input { @apply w-[84px] flex-none bg-well border border-line text-ink rounded-[9px] px-3 py-2 text-[13px] text-right tabular-nums outline-none; font: inherit; }
+  .prune-input:focus { border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); box-shadow: 0 0 0 3px var(--brand-bg); }
+  .prune-unit { @apply text-ink-dim text-[12.5px] mr-0.5; }
+
   .expand-mark { @apply text-muted font-extrabold ml-0.5; }
   .activity-summary { @apply whitespace-nowrap relative max-w-[860px]; }
   .activity-detail { @apply mt-2 p-2.5 border border-border rounded-xl bg-chip; }

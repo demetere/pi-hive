@@ -20,6 +20,7 @@ import {
   sessionSummaries,
   sourcePaths,
   startTelemetryRuntime,
+  telemetryStorage,
   topologyDetail,
 } from "./runtime";
 import { addApproval, addComment, listPlans, planDetail, planFile, resolveProjectCwd } from "./plans";
@@ -180,6 +181,16 @@ Bun.serve({
     }
     if (url.pathname === "/states") return json({ states: allSnapshots() });
     if (url.pathname === "/sessions") return json({ sessions: sessionSummaries() });
+
+    // Storage usage + prune preview for the Settings tab. `cwd` scopes to a
+    // project (resolved to its full cwd set server-side); `olderThanDays` adds the
+    // remove/keep estimate at that cutoff. Read-only.
+    if (url.pathname === "/storage") {
+      const cwd = url.searchParams.get("cwd") || undefined;
+      const daysRaw = url.searchParams.get("olderThanDays");
+      const days = daysRaw != null ? Number(daysRaw) : undefined;
+      return json(telemetryStorage(cwd, days));
+    }
 
     // Versioned topology (Phase C). List versions for a project, or fetch one
     // reassembled tree by hash. /models is the capability lookup for the dial.

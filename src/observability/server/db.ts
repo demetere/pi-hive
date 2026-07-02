@@ -643,6 +643,60 @@ export function knownCwds(): string[] {
   return rows.map((r) => r.cwd);
 }
 
+// ── Storage breakdown (prune preview) ─────────────────────────────────────────
+
+export interface StorageBreakdown {
+  // Logical content bytes (sum of stored text: event payloads + projection text).
+  // This is what the telemetry itself occupies; the physical .db file is larger
+  // (indexes + SQLite free pages) and shrinks only after prune + vacuum.
+  bytes: number;
+  events: number;
+  sessions: number;
+  // What a prune at `cutoffIso` would remove and leave, in the same units. Null
+  // when no cutoff was supplied.
+  prune?: { removeBytes: number; removeEvents: number; removeSessions: number; keepBytes: number; keepEvents: number };
+}
+
+// Per-scope storage usage + prune preview. `cwds` scopes to a project (which can
+// span several working dirs); omit/empty for the whole DB. Read-only — it never
+// mutates; the prune numbers are computed by counting, not deleting.
+export function storageBreakdown(cwds: string[] | undefined, cutoffIso?: string): StorageBreakdown {
+  // Build a reusable WHERE fragment + params for an optional cwd-set filter.
+  const scoped = cwds && cwds.length > 0;
+  const placeholders = scoped ? cwds!.map((_, i) => `$c${i}`).join(",") : "";
+  const cwdParams: Record<string, string> = {};
+  if (scoped) cwds!.forEach((c, i) => { cwdParams[`$c${i}`] = c; });
+  const cwdWhere = scoped ? `cwd IN (${placeholders})` : "1=1";
+
+  const one = (sql: string, params: Record<string, any> = {}) => (db.query(sql).get({ ...cwdParams, ...params }) as any) || {};
+
+  // Content bytes = event payloads + the text-heavy projection columns.
+  const eventsAgg = one(`SELECT COUNT(*) AS n, COALESCE(SUM(length(payload_json)),0) AS b FROM events WHERE ${cwdWhere}`);
+  const msgBytes = Number(one(`SELECT COALESCE(SUM(length(COALESCE(text,''))),0) AS b FROM messages WHERE ${cwdWhere}`).b || 0);
+  const toolBytes = Number(one(`SELECT COALESCE(SUM(length(COALESCE(args_preview,'')) + length(COALESCE(result_preview,''))),0) AS b FROM tool_calls WHERE ${cwdWhere}`).b || 0);
+  const bytes = Number(eventsAgg.b || 0) + msgBytes + toolBytes;
+  const events = Number(eventsAgg.n || 0);
+  const sessions = Number(one(`SELECT COUNT(*) AS n FROM sessions WHERE ${cwdWhere}`).n || 0);
+
+  const out: StorageBreakdown = { bytes, events, sessions };
+
+  if (cutoffIso) {
+    // Events (and their payload bytes) older than the cutoff are trimmed.
+    const rem = one(`SELECT COUNT(*) AS n, COALESCE(SUM(length(payload_json)),0) AS b FROM events WHERE ${cwdWhere} AND ts < $cutoff`, { $cutoff: cutoffIso });
+    const remMsg = Number(one(`SELECT COALESCE(SUM(length(COALESCE(text,''))),0) AS b FROM messages WHERE ${cwdWhere} AND ts IS NOT NULL AND ts < $cutoff`, { $cutoff: cutoffIso }).b || 0);
+    const remTool = Number(one(`SELECT COALESCE(SUM(length(COALESCE(args_preview,'')) + length(COALESCE(result_preview,''))),0) AS b FROM tool_calls WHERE ${cwdWhere} AND started_at IS NOT NULL AND started_at < $cutoff`, { $cutoff: cutoffIso }).b || 0);
+    const removeBytes = Number(rem.b || 0) + remMsg + remTool;
+    const removeEvents = Number(rem.n || 0);
+    const removeSessions = Number(one(`SELECT COUNT(*) AS n FROM sessions WHERE ${cwdWhere} AND last_ts IS NOT NULL AND last_ts < $cutoff`, { $cutoff: cutoffIso }).n || 0);
+    out.prune = {
+      removeBytes, removeEvents, removeSessions,
+      keepBytes: Math.max(0, bytes - removeBytes),
+      keepEvents: Math.max(0, events - removeEvents),
+    };
+  }
+  return out;
+}
+
 // ── Prune (B6): explicit, age-based cleanup on demand ─────────────────────────
 
 export function pruneOlderThan(cutoffIso: string): { events: number; sessions: number; sessionIds: string[] } {
