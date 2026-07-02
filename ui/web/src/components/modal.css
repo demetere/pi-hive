@@ -1,5 +1,5 @@
-.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: #0008; backdrop-filter: blur(6px); display: grid; place-items: center; padding: 32px; animation: fadein .15s var(--ease); }
-.modal-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 30px 80px #000a; width: min(1200px, 94vw); height: min(820px, 90vh); display: flex; flex-direction: column; overflow: hidden; animation: modalpop .2s var(--ease); }
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: #0008; backdrop-filter: blur(6px); display: grid; place-items: center; padding: 20px; animation: fadein .15s var(--ease); }
+.modal-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 30px 80px #000a; width: min(1800px, 96vw); height: min(1100px, 94vh); display: flex; flex-direction: column; overflow: hidden; animation: modalpop .2s var(--ease); }
 .modal-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
 .modal-body > * { flex: 1; }
 .w-collapsed { flex: 1; display: grid; place-items: center; color: var(--muted); font-size: 12px; cursor: pointer; min-height: 120px; }

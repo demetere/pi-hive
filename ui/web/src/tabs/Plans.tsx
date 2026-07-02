@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, For, JSX, on, Show } from "solid-js";
+import { Portal } from "solid-js/web";
 import {
   fetchPlanDetail, fetchPlanFile, fetchPlans, postPlanApproval, postPlanComment,
   type PlanApproval, type PlanComment, type PlanDetail, type PlanSummary, type PlanVerdict,
@@ -7,7 +8,7 @@ import { currentSession, now } from "../store";
 import { absTime, relTime } from "../lib/format";
 import "./plans.css";
 
-const GATES = ["proposal", "requirements", "design", "tasks"] as const;
+type ReviewAnnotation = { id: string; artifact: string; type: "COMMENT" | "DELETION" | "LOOKS_GOOD"; originalText: string; text: string; };
 
 // ── Safe markdown renderer ──────────────────────────────────────────────────
 // Builds JSX nodes line-by-line from plan artifacts. Nothing is injected as raw
@@ -15,7 +16,24 @@ const GATES = ["proposal", "requirements", "design", "tasks"] as const;
 // nodes with their text set via JSX children (auto-escaped by Solid). Supports
 // headings, bold, inline code, fenced code blocks, lists, checklists, links.
 
-function inline(text: string): JSX.Element[] {
+function highlightedText(text: string, anns: ReviewAnnotation[]): JSX.Element[] {
+  const matches = anns
+    .map((ann) => ({ ann, at: text.indexOf(ann.originalText) }))
+    .filter((m) => m.at >= 0)
+    .sort((a, b) => a.at - b.at || b.ann.originalText.length - a.ann.originalText.length);
+  const out: JSX.Element[] = [];
+  let pos = 0;
+  for (const m of matches) {
+    if (m.at < pos) continue;
+    if (m.at > pos) out.push(text.slice(pos, m.at));
+    out.push(<mark class={`plan-mark ${m.ann.type.toLowerCase()}`} title={m.ann.text}>{text.slice(m.at, m.at + m.ann.originalText.length)}</mark>);
+    pos = m.at + m.ann.originalText.length;
+  }
+  if (pos < text.length) out.push(text.slice(pos));
+  return out;
+}
+
+function inline(text: string, anns: ReviewAnnotation[] = []): JSX.Element[] {
   const nodes: JSX.Element[] = [];
   // Tokenize on inline code, bold, and links. Order matters: code first so ** or
   // [ ] inside code spans is left literal.
@@ -23,7 +41,7 @@ function inline(text: string): JSX.Element[] {
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m.index > last) nodes.push(...highlightedText(text.slice(last, m.index), anns));
     const tok = m[0];
     if (tok.startsWith("`")) {
       nodes.push(<code class="md-code">{tok.slice(1, -1)}</code>);
@@ -41,11 +59,11 @@ function inline(text: string): JSX.Element[] {
     }
     last = m.index + tok.length;
   }
-  if (last < text.length) nodes.push(text.slice(last));
+  if (last < text.length) nodes.push(...highlightedText(text.slice(last), anns));
   return nodes;
 }
 
-function renderMarkdown(src: string): JSX.Element {
+function renderMarkdown(src: string, anns: ReviewAnnotation[] = []): JSX.Element {
   const lines = (src || "").replace(/\r\n/g, "\n").split("\n");
   const out: JSX.Element[] = [];
   let list: JSX.Element[] | null = null;
@@ -53,7 +71,7 @@ function renderMarkdown(src: string): JSX.Element {
   let code: string[] | null = null;
 
   const flushPara = () => {
-    if (para.length) { out.push(<p class="md-p">{inline(para.join(" "))}</p>); para = []; }
+    if (para.length) { out.push(<p class="md-p">{inline(para.join(" "), anns)}</p>); para = []; }
   };
   const flushList = () => {
     if (list && list.length) { out.push(<ul class="md-ul">{list}</ul>); }
@@ -74,7 +92,7 @@ function renderMarkdown(src: string): JSX.Element {
     if (heading) {
       flushPara(); flushList();
       const level = heading[1].length;
-      const content = inline(heading[2]);
+      const content = inline(heading[2], anns);
       out.push(level === 1 ? <h3 class="md-h1">{content}</h3> : level === 2 ? <h4 class="md-h2">{content}</h4> : <h5 class="md-h3">{content}</h5>);
       continue;
     }
@@ -84,7 +102,7 @@ function renderMarkdown(src: string): JSX.Element {
       flushPara();
       const done = check[1].toLowerCase() === "x";
       list = list || [];
-      list.push(<li class="md-task"><input type="checkbox" checked={done} disabled /><span classList={{ "md-task-done": done }}>{inline(check[2])}</span></li>);
+      list.push(<li class="md-task"><input type="checkbox" checked={done} disabled /><span classList={{ "md-task-done": done }}>{inline(check[2], anns)}</span></li>);
       continue;
     }
 
@@ -92,7 +110,7 @@ function renderMarkdown(src: string): JSX.Element {
     if (bullet) {
       flushPara();
       list = list || [];
-      list.push(<li class="md-li">{inline(bullet[1])}</li>);
+      list.push(<li class="md-li">{inline(bullet[1], anns)}</li>);
       continue;
     }
 
@@ -131,10 +149,15 @@ export default function Plans(props: { search: string }) {
   const [cFile, setCFile] = createSignal<string>("");
   const [cAnchor, setCAnchor] = createSignal<string>("");
   const [cBody, setCBody] = createSignal<string>("");
+  const [reviewNote, setReviewNote] = createSignal("");
+  const [selectedText, setSelectedText] = createSignal("");
+  const [selectionBox, setSelectionBox] = createSignal<{ top: number; left: number } | null>(null);
+  const [annType, setAnnType] = createSignal<ReviewAnnotation["type"]>("COMMENT");
+  const [annText, setAnnText] = createSignal("");
+  const [annotations, setAnnotations] = createSignal<ReviewAnnotation[]>([]);
   const [submitting, setSubmitting] = createSignal(false);
+  let artifactEl: HTMLDivElement | undefined;
 
-  // approval form
-  const [aPhase, setAPhase] = createSignal<string>("proposal");
 
   async function loadPlans() {
     setLoading(true);
@@ -158,13 +181,59 @@ export default function Plans(props: { search: string }) {
 
   async function selectPlan(changeId: string) {
     setSelected(changeId);
-    setCFile(""); setCAnchor(""); setCBody("");
+    setCFile(""); setCAnchor(""); setCBody(""); setReviewNote("");
     await loadDetail(changeId);
   }
 
   async function openArtifact(name: string) {
     setArtifact(name);
+    setSelectedText(""); setAnnText(""); setSelectionBox(null);
     setFileBody(await fetchPlanFile(selected(), name, cwd()));
+  }
+
+  function captureSelection() {
+    const sel = window.getSelection();
+    const text = sel?.toString().trim() || "";
+    if (!text || !artifactEl || !sel?.anchorNode || !sel?.focusNode || !artifactEl.contains(sel.anchorNode) || !artifactEl.contains(sel.focusNode)) return;
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    setSelectedText(text.replace(/\s+/g, " ").slice(0, 1200));
+    setSelectionBox({ top: Math.max(12, rect.top - 10), left: rect.left + rect.width / 2 });
+    setAnnType("COMMENT");
+    setAnnText("");
+  }
+
+  function addAnnotation(type = annType()) {
+    const originalText = selectedText().trim();
+    if (!originalText) return;
+    const text = annText().trim();
+    if (type === "COMMENT" && !text) return;
+    setAnnotations((prev) => [...prev, { id: crypto.randomUUID(), artifact: artifact(), type, originalText, text }]);
+    setSelectedText(""); setAnnText(""); setSelectionBox(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function closeSelectionTools() {
+    setSelectedText(""); setAnnText(""); setSelectionBox(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function removeAnnotation(id: string) { setAnnotations((prev) => prev.filter((a) => a.id !== id)); }
+
+  function exportReviewFeedback(extra = reviewNote().trim()): string {
+    const lines: string[] = [];
+    if (extra) lines.push(`# General feedback\n\n${extra}`);
+    if (annotations().length) {
+      lines.push(`# Inline plan annotations`);
+      for (const [idx, ann] of annotations().entries()) {
+        const title = ann.type === "DELETION" ? "Remove this" : ann.type === "LOOKS_GOOD" ? "Looks good" : "Feedback";
+        lines.push(`## ${idx + 1}. ${title} (${ann.artifact})`);
+        lines.push(`> ${ann.originalText}`);
+        if (ann.type === "DELETION") lines.push(ann.text || "Remove this section from the plan.");
+        else if (ann.type === "LOOKS_GOOD") lines.push(ann.text || "This part is approved / looks good.");
+        else lines.push(ann.text);
+      }
+    }
+    return lines.join("\n\n").trim();
   }
 
   async function submitComment() {
@@ -175,10 +244,31 @@ export default function Plans(props: { search: string }) {
     if (ok) { setCBody(""); setCAnchor(""); await loadDetail(selected()); }
   }
 
-  async function approveGate() {
+  async function approveGate(phase: string, summary = exportReviewFeedback()) {
     if (!selected()) return;
-    const ok = await postPlanApproval(selected(), { phase: aPhase() }, cwd());
-    if (ok) { await loadDetail(selected()); await loadPlans(); }
+    const ok = await postPlanApproval(selected(), { phase, summary: summary || undefined }, cwd());
+    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected()); await loadPlans(); }
+  }
+
+  async function sendReviewFeedback() {
+    if (!selected()) return;
+    const general = reviewNote().trim();
+    const anns = annotations();
+    if (!general && !anns.length) return;
+    setSubmitting(true);
+    let ok = true;
+    if (general) ok = await postPlanComment(selected(), { body: general, author: "dashboard" }, cwd()) && ok;
+    for (const ann of anns) {
+      ok = await postPlanComment(selected(), {
+        file: ann.artifact,
+        author: "dashboard",
+        body: ann.text || (ann.type === "DELETION" ? "Remove this section from the plan." : "Looks good."),
+        annotationType: ann.type,
+        originalText: ann.originalText,
+      }, cwd()) && ok;
+    }
+    setSubmitting(false);
+    if (ok) { setReviewNote(""); setAnnotations([]); await loadDetail(selected()); }
   }
 
   // Refetch the list whenever the scoped project cwd changes (and on mount).
@@ -189,7 +279,19 @@ export default function Plans(props: { search: string }) {
     return plans().filter((p) => !q || p.changeId.toLowerCase().includes(q) || (p.title || "").toLowerCase().includes(q));
   });
 
+  const persistedAnnotations = createMemo<ReviewAnnotation[]>(() => (detail()?.comments || [])
+    .filter((c) => c.annotationType && c.originalText)
+    .map((c) => ({
+      id: c.id,
+      artifact: c.file || "",
+      type: c.annotationType as ReviewAnnotation["type"],
+      originalText: c.originalText || "",
+      text: c.body,
+    })));
+  const artifactAnnotations = createMemo(() => [...persistedAnnotations(), ...annotations()].filter((ann) => ann.artifact === artifact()));
+
   return (
+    <>
     <div class="plans-layout">
       <div class="plans-list tab-card">
         <div class="plans-list-head">
@@ -238,6 +340,28 @@ export default function Plans(props: { search: string }) {
                     )}
                   </For>
                 </div>
+                <div class="review-box slim">
+                  <div class="review-main">
+                    <textarea placeholder="General feedback… or select text in the artifact below for inline feedback" value={reviewNote()} onInput={(e) => setReviewNote(e.currentTarget.value)} rows={2} />
+                    <Show when={annotations().length}>
+                      <div class="annotation-list compact">
+                        <For each={annotations()}>{(ann) => (
+                          <div class="annotation-item">
+                            <b>{ann.type === "DELETION" ? "Remove" : ann.type === "LOOKS_GOOD" ? "Looks good" : "Comment"}</b>
+                            <span class="mono">{ann.artifact}</span>
+                            <button onClick={() => removeAnnotation(ann.id)}>×</button>
+                            <p>“{ann.originalText}”</p>
+                            <Show when={ann.text}><small>{ann.text}</small></Show>
+                          </div>
+                        )}</For>
+                      </div>
+                    </Show>
+                  </div>
+                  <div class="review-actions">
+                    <button class="btn-submit" disabled={(!reviewNote().trim() && !annotations().length) || submitting()} onClick={() => void sendReviewFeedback()}>{submitting() ? "Sending…" : "Send feedback"}</button>
+                    <button class="btn-approve" disabled={d().phase === "ready"} onClick={() => void approveGate(d().phase)}>Approve {d().phase}</button>
+                  </div>
+                </div>
               </div>
 
               <div class="tab-card plan-artifacts">
@@ -248,9 +372,29 @@ export default function Plans(props: { search: string }) {
                     )}
                   </For>
                 </div>
-                <Show when={artifact()} fallback={<div class="empty">Nothing to display.</div>}>
-                  <div class="artifact-body">{renderMarkdown(fileBody())}</div>
-                </Show>
+                <div class="artifact-review-shell">
+                  <Show when={artifact()} fallback={<div class="empty">Nothing to display.</div>}>
+                    <div class="artifact-body" ref={artifactEl} onMouseUp={captureSelection}>{renderMarkdown(fileBody(), artifactAnnotations())}</div>
+                  </Show>
+                  <aside class="artifact-rail">
+                    <div class="rail-head">
+                      <b>Annotations</b>
+                      <span>{artifactAnnotations().length}</span>
+                    </div>
+                    <For each={artifactAnnotations()} fallback={<div class="empty small">Select text to annotate this artifact.</div>}>
+                      {(ann) => (
+                        <div class={`rail-ann ${ann.type.toLowerCase()} ${annotations().some((a) => a.id === ann.id) ? "pending" : "saved"}`}>
+                          <div class="rail-ann-top">
+                            <b>{ann.type === "DELETION" ? "Remove" : ann.type === "LOOKS_GOOD" ? "Looks good" : "Comment"}</b>
+                            <Show when={annotations().some((a) => a.id === ann.id)}><button onClick={() => removeAnnotation(ann.id)}>×</button></Show>
+                          </div>
+                          <blockquote>{ann.originalText}</blockquote>
+                          <Show when={ann.text}><p>{ann.text}</p></Show>
+                        </div>
+                      )}
+                    </For>
+                  </aside>
+                </div>
               </div>
 
               <div class="plan-grid">
@@ -275,12 +419,6 @@ export default function Plans(props: { search: string }) {
 
                 <div class="tab-card timeline-card">
                   <h3 class="card-h">Approvals</h3>
-                  <div class="approve-row">
-                    <select value={aPhase()} onChange={(e) => setAPhase(e.currentTarget.value)}>
-                      <For each={GATES}>{(g) => <option value={g}>{g}</option>}</For>
-                    </select>
-                    <button class="btn-approve" onClick={() => void approveGate()}>Approve gate</button>
-                  </div>
                   <For each={[...d().approvals].reverse()} fallback={<div class="empty">No approvals yet.</div>}>
                     {(a: PlanApproval) => (
                       <div class="timeline-item">
@@ -297,7 +435,7 @@ export default function Plans(props: { search: string }) {
               </div>
 
               <div class="tab-card comments-card">
-                <h3 class="card-h">Comments</h3>
+                <h3 class="card-h">Review log</h3>
                 <div class="comment-form">
                   <div class="cf-row">
                     <select value={cFile()} onChange={(e) => setCFile(e.currentTarget.value)}>
@@ -316,9 +454,11 @@ export default function Plans(props: { search: string }) {
                     <div class="comment-item">
                       <div class="ci-head">
                         <span class="ci-who">{c.author || "anon"}</span>
+                        <Show when={c.annotationType}><span class={`ann-kind ${(c.annotationType || "").toLowerCase()}`}>{c.annotationType === "DELETION" ? "Remove" : c.annotationType === "LOOKS_GOOD" ? "Looks good" : "Comment"}</span></Show>
                         <Show when={c.file}><span class="ci-target mono">{c.file}{c.anchor ? `#${c.anchor}` : ""}</span></Show>
                         <span class="ti-time" title={absTime(c.createdAt)}>{relTime(c.createdAt, now())}</span>
                       </div>
+                      <Show when={c.originalText}><blockquote class="ci-quote">{c.originalText}</blockquote></Show>
                       <div class="ci-body">{c.body}</div>
                     </div>
                   )}
@@ -329,5 +469,33 @@ export default function Plans(props: { search: string }) {
         </Show>
       </div>
     </div>
+    <Show when={selectionBox()}>
+      {(box) => (
+        <Portal>
+          <div class="selection-popover" style={{ top: `${box().top}px`, left: `${box().left}px` }} onMouseDown={(e) => e.preventDefault()}>
+            <Show when={annType() !== "COMMENT"} fallback={
+              <>
+                <div class="selection-popover-actions">
+                  <button onClick={() => setAnnType("DELETION")}>Remove</button>
+                  <button onClick={() => setAnnType("LOOKS_GOOD")}>Looks good</button>
+                  <button onClick={closeSelectionTools}>×</button>
+                </div>
+                <textarea autofocus placeholder="Feedback for this text…" value={annText()} onInput={(e) => setAnnText(e.currentTarget.value)} rows={3} />
+                <div class="selection-popover-actions end">
+                  <button class="btn-submit" disabled={!annText().trim()} onClick={() => addAnnotation("COMMENT")}>Add comment</button>
+                </div>
+              </>
+            }>
+              <div class="selection-popover-actions">
+                <button onClick={() => addAnnotation(annType())}>{annType() === "DELETION" ? "Remove selected text" : "Mark looks good"}</button>
+                <button onClick={() => setAnnType("COMMENT")}>Comment instead</button>
+                <button onClick={closeSelectionTools}>×</button>
+              </div>
+            </Show>
+          </div>
+        </Portal>
+      )}
+    </Show>
+    </>
   );
 }
