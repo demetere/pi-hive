@@ -173,8 +173,15 @@ export interface AgentRuntime {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  // Reasoning ("thinking") tokens (Phase 4.8). Accumulated per message_end;
+  // getSessionStats().tokens does NOT carry reasoning, so the end-of-run
+  // authoritative overwrite must PRESERVE this accumulated value.
+  reasoningTokens: number;
   costUsd: number;
   contextPct: number;
+  // Raw context-window fill (Phase 4.7): the tokens/window behind contextPct.
+  contextTokens?: number;
+  contextWindow?: number;
   runCount: number;
   sessionFile: string;
   // SDK-reported thinking levels for the runtime's effective model (A10).
@@ -188,6 +195,7 @@ export interface AgentRuntime {
   runStartOutputTokens?: number;
   runStartCacheReadTokens?: number;
   runStartCacheWriteTokens?: number;
+  runStartReasoningTokens?: number;
   runStartCostUsd?: number;
   startedAt?: number;
   timer?: ReturnType<typeof setInterval>;
@@ -209,8 +217,14 @@ export interface OrchestratorRuntime {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  reasoningTokens: number;
   costUsd: number;
   toolCount: number;
+  // Live context-window fill for the MAIN session (Phase 4.3), mirroring the
+  // per-worker poll. Read from ctx.getContextUsage(); null until first response.
+  contextPct?: number;
+  tokens?: number;
+  contextWindow?: number;
 }
 
 export interface YamlLine {

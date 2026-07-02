@@ -17,7 +17,7 @@ function runtimeFor(name: string, sessionFile: string): AgentRuntime {
   return {
     config: { name, path: `${name}.md`, role: "member", agentType: "lead", routingTags: [], domain: [], tools: "read", model: "test/model", thinking: "off" },
     systemPrompt: "", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0,
-    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile,
   };
 }
 
@@ -25,7 +25,7 @@ function runtimeFor(name: string, sessionFile: string): AgentRuntime {
 // events (live accumulation), then an agent_end, to the subscriber. getSessionStats
 // returns the authoritative lifetime aggregate that dispatch OVERWRITES with.
 function scriptedSession(opts: {
-  turns: Array<{ input: number; output: number; cacheRead?: number; cacheWrite?: number; cost: number }>;
+  turns: Array<{ input: number; output: number; cacheRead?: number; cacheWrite?: number; reasoning?: number; cost: number }>;
   stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 }) {
   let handler: ((e: any) => void) | undefined;
@@ -39,7 +39,7 @@ function scriptedSession(opts: {
     state: { errorMessage: undefined as string | undefined },
     async prompt() {
       for (const t of opts.turns) {
-        handler?.({ type: "message_end", message: { role: "assistant", model: "test/model", stopReason: "endTurn", usage: { input: t.input, output: t.output, cacheRead: t.cacheRead || 0, cacheWrite: t.cacheWrite || 0, cost: { total: t.cost } } } });
+        handler?.({ type: "message_end", message: { role: "assistant", model: "test/model", stopReason: "endTurn", usage: { input: t.input, output: t.output, cacheRead: t.cacheRead || 0, cacheWrite: t.cacheWrite || 0, reasoning: t.reasoning || 0, cost: { total: t.cost } } } });
       }
       // agent_end fires last. The FIXED dispatch only backfills output text here;
       // it must NOT re-add the final turn's usage.
@@ -135,7 +135,7 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
   assert.equal(run1.delegationsSchema, 1);
   assert.equal(run2.delegationsSchema, 1);
   // Run 1 delta = full lifetime (baseline 0).
-  assert.deepEqual(run1.delta, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 10, cacheWriteTokens: 5, costUsd: 0.10 });
+  assert.deepEqual(run1.delta, { inputTokens: 100, outputTokens: 40, cacheReadTokens: 10, cacheWriteTokens: 5, reasoningTokens: 0, costUsd: 0.10 });
   // Run 2 delta = lifetime growth only (260-100, 95-40, 25-10, 10-5, 0.25-0.10).
   assert.equal(run2.delta.inputTokens, 160);
   assert.equal(run2.delta.outputTokens, 55);
@@ -144,6 +144,43 @@ test("delegation_end emits per-run deltas against the run-start baseline (Decisi
   assert.ok(Math.abs(run2.delta.costUsd - 0.15) < 1e-9, `run2 cost delta ${run2.delta.costUsd} ≈ 0.15`);
   // The lifetime runtime summary still rides along for live display / TOK/S.
   assert.equal(run2.runtime.inputTokens, 260);
+});
+
+// Phase 4.8: reasoning ("thinking") tokens are extracted from message_end usage,
+// accumulated on the runtime, and carried through the per-run delta + runtime
+// summary. getSessionStats() lacks reasoning, so the end-of-run overwrite must
+// PRESERVE the accumulated value rather than zeroing it.
+test("dispatchAgent carries reasoning tokens through the delta + summary (Phase 4.8)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-reasoning-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    streamStartMs: 0, streamedChars: 0, lastTokPerSec: 0, sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+  // Two turns each reporting reasoning; getSessionStats (no reasoning field)
+  // overwrites the token/cost totals but must not clobber accumulated reasoning.
+  const create: CreateAgentSession = (async () => ({ session: scriptedSession({
+    turns: [{ input: 10, output: 5, reasoning: 30, cost: 0.01 }, { input: 10, output: 5, reasoning: 20, cost: 0.01 }],
+    stats: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0.02 },
+  }) })) as any;
+  await dispatchAgent(state, "Builder", "think hard", ctx, false, create);
+
+  // Accumulated on the runtime and preserved past the getSessionStats overwrite.
+  assert.equal(worker.reasoningTokens, 50);
+  const end = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end")[0].payload;
+  assert.equal(end.delta.reasoningTokens, 50);
+  assert.equal(end.runtime.reasoningTokens, 50);
 });
 
 // M8a: the FIRST run's delegation_start must already carry thinkingLevels +

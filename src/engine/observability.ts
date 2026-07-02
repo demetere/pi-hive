@@ -99,6 +99,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     outputTokens: runtime.outputTokens,
     cacheReadTokens: runtime.cacheReadTokens,
     cacheWriteTokens: runtime.cacheWriteTokens,
+    reasoningTokens: runtime.reasoningTokens,
     costUsd: runtime.costUsd,
     contextPct: runtime.contextPct,
     sessionFile: runtime.sessionFile,
@@ -130,7 +131,10 @@ function withOrchestratorUsage(
     outputTokens: (summary.outputTokens || 0) + orch.outputTokens,
     cacheReadTokens: (summary.cacheReadTokens || 0) + orch.cacheReadTokens,
     cacheWriteTokens: (summary.cacheWriteTokens || 0) + orch.cacheWriteTokens,
+    reasoningTokens: (summary.reasoningTokens || 0) + orch.reasoningTokens,
     costUsd: (summary.costUsd || 0) + orch.costUsd,
+    // Phase 4.3: the main session's live context fill, captured at each turn end.
+    contextPct: orch.contextPct ?? summary.contextPct,
   };
 }
 

@@ -134,6 +134,7 @@ export async function dispatchAgent(
   // dimension + cost (Decision 1), not just the two TOK/S needs.
   runtime.runStartCacheReadTokens = runtime.cacheReadTokens;
   runtime.runStartCacheWriteTokens = runtime.cacheWriteTokens;
+  runtime.runStartReasoningTokens = runtime.reasoningTokens;
   runtime.runStartCostUsd = runtime.costUsd;
 
   const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
@@ -197,6 +198,9 @@ export async function dispatchAgent(
     // flashing to 0 during that transient window.
     const usage = runtime.session?.getContextUsage?.();
     if (usage?.percent != null) runtime.contextPct = usage.percent;
+    // Phase 4.7: keep raw tokens/contextWindow too, not just the percent.
+    if (usage?.tokens != null) runtime.contextTokens = usage.tokens;
+    if (usage?.contextWindow != null) runtime.contextWindow = usage.contextWindow;
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
   }, 1000);
@@ -255,6 +259,8 @@ export async function dispatchAgent(
         attempt: event.attempt,
         maxAttempts: event.maxAttempts,
         errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
+        // Phase 4.6: the backoff delay before this retry.
+        delayMs: Number(event.delayMs) || undefined,
         phase: "start",
       }, runtime.config.name);
     } else if (event.type === "auto_retry_end") {
@@ -266,11 +272,22 @@ export async function dispatchAgent(
         maxAttempts: event.maxAttempts ?? lastRetryMaxAttempts,
         phase: "end",
         success: event.success,
+        // Phase 4.6: the terminal error when retries are exhausted.
+        finalError: event.finalError ? truncateMiddle(String(event.finalError), 500) : undefined,
       }, runtime.config.name);
     } else if (event.type === "compaction_start") {
       emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
     } else if (event.type === "compaction_end") {
-      emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "end" }, runtime.config.name);
+      // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
+      const result = event.result || {};
+      emitHiveEvent(state, "worker_compaction", {
+        agent: runtime.config.name, reason: event.reason, phase: "end",
+        tokensBefore: Number(result.tokensBefore ?? event.tokensBefore) || undefined,
+        estimatedTokensAfter: Number(result.estimatedTokensAfter ?? event.estimatedTokensAfter) || undefined,
+        aborted: (result.aborted ?? event.aborted) === true ? true : undefined,
+        willRetry: (result.willRetry ?? event.willRetry) === true ? true : undefined,
+        errorMessage: (result.errorMessage ?? event.errorMessage) ? truncateMiddle(String(result.errorMessage ?? event.errorMessage), 500) : undefined,
+      }, runtime.config.name);
     } else if (event.type === "message_end") {
       const message = event.message;
       const actualModel = message?.model || message?.responseModel;
@@ -287,6 +304,7 @@ export async function dispatchAgent(
         runtime.outputTokens += u.output;
         runtime.cacheReadTokens += u.cacheRead;
         runtime.cacheWriteTokens += u.cacheWrite;
+        runtime.reasoningTokens += u.reasoning;
         runtime.costUsd += u.cost;
       }
     } else if (event.type === "agent_end") {
@@ -347,6 +365,11 @@ export async function dispatchAgent(
       if (Number.isFinite(cacheWrite)) runtime.cacheWriteTokens = cacheWrite;
       const cost = Number(stats.cost?.total ?? stats.cost ?? stats.costUsd);
       if (Number.isFinite(cost)) runtime.costUsd = cost;
+      // reasoning is NOT part of SessionStats.tokens (Phase 4.8): only overwrite
+      // when the SDK actually reports it, otherwise keep the value accumulated
+      // from message_end so reasoning tokens are not silently zeroed.
+      const reasoning = Number(tokens.reasoning ?? tokens.reasoningTokens);
+      if (Number.isFinite(reasoning)) runtime.reasoningTokens = reasoning;
     }
   } catch { /* keep incremental values if stats is unavailable */ }
 
@@ -390,6 +413,7 @@ export async function dispatchAgent(
     outputTokens: nonneg(runtime.outputTokens - (runtime.runStartOutputTokens ?? 0)),
     cacheReadTokens: nonneg(runtime.cacheReadTokens - (runtime.runStartCacheReadTokens ?? 0)),
     cacheWriteTokens: nonneg(runtime.cacheWriteTokens - (runtime.runStartCacheWriteTokens ?? 0)),
+    reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
   emitHiveEvent(state, "delegation_end", {

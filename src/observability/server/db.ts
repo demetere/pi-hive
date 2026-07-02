@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS delegations (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
   status TEXT,
   stop_reason TEXT,
@@ -253,6 +254,8 @@ try { db.run(`ALTER TABLE sessions ADD COLUMN topology_hash TEXT`); } catch { /*
 // the delta producer stamps 1. Every aggregation of delegation token/cost rows
 // MUST filter `schema_version >= 1`.
 try { db.run(`ALTER TABLE delegations ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+// Phase 4.8: reasoning ("thinking") tokens per delegation run.
+try { db.run(`ALTER TABLE delegations ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 // Phase 2.5: drop the unused (session_id, ts, seq) events index — no query
 // orders by (session_id, ts); session-filtered reads order by rowid and are
 // served by idx_hive_events_session_seq. Dropping frees write/space overhead.
@@ -522,6 +525,7 @@ const completeDelegationStmt = db.query(`
     output_tokens = $output_tokens,
     cache_read_tokens = $cache_read_tokens,
     cache_write_tokens = $cache_write_tokens,
+    reasoning_tokens = $reasoning_tokens,
     cost_usd = $cost_usd,
     schema_version = $schema_version,
     status = $status,
@@ -539,9 +543,9 @@ const completeDelegationStmt = db.query(`
 // inserts a standalone completed row keyed by its own event_id.
 const insertDelegationEndStmt = db.query(`
   INSERT INTO delegations
-    (event_id, session_id, cwd, agent, parent, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, schema_version, status, stop_reason, model)
+    (event_id, session_id, cwd, agent, parent, ended_at, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, schema_version, status, stop_reason, model)
   VALUES
-    ($event_id, $session_id, $cwd, $agent, $parent, $ended_at, $duration_ms, $input_tokens, $output_tokens, $cache_read_tokens, $cache_write_tokens, $cost_usd, $schema_version, $status, $stop_reason, $model)
+    ($event_id, $session_id, $cwd, $agent, $parent, $ended_at, $duration_ms, $input_tokens, $output_tokens, $cache_read_tokens, $cache_write_tokens, $reasoning_tokens, $cost_usd, $schema_version, $status, $stop_reason, $model)
   ON CONFLICT(event_id) DO NOTHING
 `);
 
@@ -569,7 +573,7 @@ export function materializeDelegationStart(input: { eventId: string; sessionId: 
 
 export function materializeDelegationEnd(input: {
   eventId: string; sessionId: string; cwd?: string; agent?: string; parent?: string; endedAt: string; durationMs?: number;
-  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; reasoningTokens?: number; costUsd: number;
   // 0 = legacy cumulative, 1 = per-run delta (Decision 1). Producer stamps this.
   schemaVersion: number; status?: string; stopReason?: string; model?: string;
 }): void {
@@ -578,6 +582,7 @@ export function materializeDelegationEnd(input: {
     $parent: input.parent ?? null, $ended_at: input.endedAt, $duration_ms: input.durationMs ?? null,
     $input_tokens: input.inputTokens, $output_tokens: input.outputTokens,
     $cache_read_tokens: input.cacheReadTokens, $cache_write_tokens: input.cacheWriteTokens,
+    $reasoning_tokens: input.reasoningTokens ?? 0,
     $cost_usd: input.costUsd, $schema_version: input.schemaVersion,
     $status: input.status ?? null, $stop_reason: input.stopReason ?? null, $model: input.model ?? null,
   };
@@ -615,6 +620,7 @@ export function queryDelegations(q: { session?: string; cwd?: string; after?: nu
     cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, parent: r.parent,
     startedAt: r.started_at, endedAt: r.ended_at, durationMs: r.duration_ms,
     inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens,
+    reasoningTokens: r.reasoning_tokens ?? 0,
     costUsd: r.cost_usd, schemaVersion: r.schema_version ?? 0, status: r.status, stopReason: r.stop_reason, model: r.model,
   }));
 }

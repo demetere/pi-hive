@@ -26,6 +26,7 @@ function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): Age
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    reasoningTokens: 0,
     costUsd: 0,
     contextPct: 0,
     runCount: 0,
@@ -128,7 +129,7 @@ test("buildOrchestratorPrompt routes to the ACTUAL configured leads, nothing har
   const orchestrator = lead("Conductor", { role: "orchestrator" });
 
   const state = stateWith([
-    { config: orchestrator, systemPrompt: "ORCH-SYS", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: "" },
+    { config: orchestrator, systemPrompt: "ORCH-SYS", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: "" },
   ]);
   state.config = {
     orchestrator, agents: [shipwright, cartographer], sharedContext: [],

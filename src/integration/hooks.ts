@@ -87,6 +87,70 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     const m = event?.model || (ctx as any).model;
     const effectiveModel = m?.provider && m?.id ? `${m.provider}/${m.id}` : undefined;
     try { emitModelCatalog(state, (ctx as any).modelRegistry, effectiveModel); } catch { /* best-effort */ }
+    // Phase 4.4: emit the SWITCH itself (not just the catalog re-emit) so the
+    // main session's model changes are an observable event, with provenance.
+    const prev = event?.previousModel;
+    const previousModel = prev?.provider && prev?.id ? `${prev.provider}/${prev.id}` : undefined;
+    emitHiveEvent(state, "model_select", {
+      agent: "Orchestrator", model: effectiveModel, previousModel, source: event?.source,
+    }, "Orchestrator");
+  });
+
+  // Phase 4.4: the main session's thinking-level changes, previously invisible.
+  pi.on("thinking_level_select", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "thinking_level_select", {
+      agent: "Orchestrator", level: event?.level, previousLevel: event?.previousLevel,
+    }, "Orchestrator");
+  });
+
+  // Phase 4.1: main-session compactions produced zero telemetry — the orchestrator
+  // was a second-class citizen next to its own workers (which emit worker_compaction).
+  pi.on("session_compact", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "orchestrator_compaction", {
+      agent: "Orchestrator",
+      reason: event?.reason,
+      willRetry: event?.willRetry === true,
+      fromExtension: event?.fromExtension === true,
+    }, "Orchestrator");
+  });
+
+  // Phase 4.10/4.11: per-turn latency. turn_start stamps the start; turn_end
+  // emits one `turn` event carrying turnIndex + the measured duration — the only
+  // per-turn timing the dashboard can surface for the main session.
+  const turnStartedAt = new Map<number, number>();
+  pi.on("turn_start", async (event: any) => {
+    if (state.mode === "normal") return;
+    if (typeof event?.turnIndex === "number") turnStartedAt.set(event.turnIndex, Date.now());
+  });
+  pi.on("turn_end", async (event: any) => {
+    if (state.mode === "normal") return;
+    const started = typeof event?.turnIndex === "number" ? turnStartedAt.get(event.turnIndex) : undefined;
+    if (typeof event?.turnIndex === "number") turnStartedAt.delete(event.turnIndex);
+    emitHiveEvent(state, "turn", {
+      agent: "Orchestrator",
+      turnIndex: event?.turnIndex,
+      durationMs: started != null ? Date.now() - started : undefined,
+    }, "Orchestrator");
+  });
+
+  // Phase 4.10/4.11: the ONLY pre-retry view of provider back-pressure. Surface
+  // rate-limit / overload responses (429/529) and their retry-after headers so a
+  // stalled session has a visible cause. Only emit non-2xx to avoid one row per
+  // successful call flooding the log.
+  pi.on("after_provider_response", async (event: any) => {
+    if (state.mode === "normal") return;
+    const status = Number(event?.status);
+    if (!Number.isFinite(status) || (status >= 200 && status < 300)) return;
+    const headers = event?.headers || {};
+    const pick = (k: string) => headers[k] ?? headers[k.toLowerCase()];
+    emitHiveEvent(state, "provider_response", {
+      agent: "Orchestrator",
+      status,
+      retryAfter: pick("retry-after"),
+      rateLimitRemaining: pick("anthropic-ratelimit-requests-remaining") ?? pick("x-ratelimit-remaining"),
+    }, "Orchestrator");
   });
 
   pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
@@ -138,10 +202,31 @@ ${catalog}`,
     }
   });
 
-  pi.on("message_end", async (event: any) => {
+  pi.on("message_end", async (event: any, ctx: ExtensionContext) => {
     if ((event as any).message?.role === "assistant") {
+      // Phase 4.12: reconcile the live chars÷4 TOK/S estimate against the real
+      // output-token count now that the turn is complete. The streaming estimate
+      // (message_update) is a rough proxy; the SDK's usage.output is exact, so
+      // replace the footer rate with tokens-over-elapsed before resetting.
+      const realOutput = extractUsage((event as any).message?.usage).output;
+      if (realOutput > 0 && state.streamStartMs) {
+        const elapsedSeconds = Math.max(0.1, (Date.now() - state.streamStartMs) / 1000);
+        state.lastTokPerSec = realOutput / elapsedSeconds;
+      }
       state.streamStartMs = 0;
       state.streamedChars = 0;
+      // Phase 4.3: capture the MAIN session's live context-window fill, mirroring
+      // the per-worker poll in dispatch.ts. tokens is null right after compaction
+      // until the next response, so keep the last known percent rather than
+      // flashing to 0.
+      try {
+        const usage = (ctx as any).getContextUsage?.();
+        if (usage && state.orchestratorRuntime) {
+          if (usage.percent != null) state.orchestratorRuntime.contextPct = usage.percent;
+          if (usage.tokens != null) state.orchestratorRuntime.tokens = usage.tokens;
+          if (usage.contextWindow != null) state.orchestratorRuntime.contextWindow = usage.contextWindow;
+        }
+      } catch { /* capability probe is best-effort */ }
     }
     // This hook is registered once, on the orchestrator's own pi: ExtensionAPI
     // — workers run as separate in-process AgentSessions (see dispatchAgent)
@@ -163,11 +248,27 @@ ${catalog}`,
       orch.outputTokens += u.output;
       orch.cacheReadTokens += u.cacheRead;
       orch.cacheWriteTokens += u.cacheWrite;
+      orch.reasoningTokens += u.reasoning;
       orch.costUsd += u.cost;
       // J5: persist a snapshot so a delegation-free conversation's orchestrator
       // usage still lands in hive-state.json. Debounced to avoid a write per
       // message during a burst.
       scheduleOrchestratorSnapshot();
+    }
+    // Phase 4.2: an orchestrator turn that errors or hits a length stop must be
+    // visible. Emit a compact orchestrator_message event carrying the SDK's
+    // stop_reason / error / model / per-message usage — previously reduced to
+    // just {text, truncated} on assistant_message. Only for assistant turns
+    // (user turns have no usage/stop_reason).
+    if (role === "assistant" && (message?.stopReason || message?.errorMessage || message?.usage)) {
+      const u = message?.usage ? extractUsage(message.usage) : undefined;
+      emitHiveEvent(state, "orchestrator_message", {
+        agent: "Orchestrator",
+        stopReason: message?.stopReason ? String(message.stopReason) : undefined,
+        errorMessage: message?.errorMessage ? truncateMiddle(String(message.errorMessage), 500) : undefined,
+        model: message?.model || message?.responseModel,
+        usage: u ? { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, reasoning: u.reasoning, cost: u.cost } : undefined,
+      }, "Orchestrator");
     }
     const text = textFromMessage(message).trim();
     if (!text) return;

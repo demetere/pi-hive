@@ -156,6 +156,7 @@ export interface Delegation {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  reasoningTokens?: number;
   costUsd: number;
   schemaVersion: number;
   status?: string;

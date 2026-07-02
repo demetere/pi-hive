@@ -11,7 +11,7 @@ function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): Age
   return {
     config: { name, path: `${name}.md`, role: "member", routingTags: [], domain: [], ...extra },
     systemPrompt: "", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0,
-    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: "",
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: "",
   };
 }
 

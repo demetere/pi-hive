@@ -110,6 +110,7 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    reasoningTokens: 0,
     costUsd: 0,
     contextPct: 0,
     runCount: 0,

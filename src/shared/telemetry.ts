@@ -13,6 +13,15 @@ export type HiveTelemetryEventType =
   | "worker_compaction"
   | "orchestrator_tool_start"
   | "orchestrator_tool_end"
+  // Orchestrator (main-session) parity events (Phase 4): the main session's own
+  // compactions, model/thinking switches, and per-turn latency were previously
+  // invisible next to its workers'.
+  | "orchestrator_compaction"
+  | "orchestrator_message"
+  | "model_select"
+  | "thinking_level_select"
+  | "turn"
+  | "provider_response"
   | "model_catalog"
   | "distill_start"
   | "distill_end"
@@ -103,6 +112,7 @@ export interface TelemetryAgentRuntime {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  reasoningTokens?: number;
   costUsd?: number;
   contextPct?: number;
   sessionFile?: string;

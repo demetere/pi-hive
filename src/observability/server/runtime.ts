@@ -412,6 +412,7 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
         outputTokens: Number((isDelta ? d.outputTokens : rt.outputTokens ?? p.outputTokens) ?? 0),
         cacheReadTokens: Number((isDelta ? d.cacheReadTokens : rt.cacheReadTokens) ?? 0),
         cacheWriteTokens: Number((isDelta ? d.cacheWriteTokens : rt.cacheWriteTokens) ?? 0),
+        reasoningTokens: Number((isDelta ? d.reasoningTokens : rt.reasoningTokens) ?? 0),
         costUsd: Number((isDelta ? d.costUsd : rt.costUsd ?? p.costUsd) ?? 0),
         schemaVersion: isDelta ? 1 : 0,
         status: p.type, stopReason: p.stopReason,

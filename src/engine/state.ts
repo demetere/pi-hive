@@ -21,7 +21,7 @@ export function createState(pi: ExtensionAPI): HiveState {
     sddStatus: null,
     obsSeq: 0,
     latestVerdicts: new Map(),
-    orchestratorRuntime: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, toolCount: 0 },
+    orchestratorRuntime: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, toolCount: 0 },
   };
 }
 

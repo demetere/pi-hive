@@ -74,6 +74,13 @@ function itemTitle(item: ActivityItem): string {
     case "worker_retry": return p.phase === "end"
       ? `${p.agent || "worker"} retry ${p.success ? "succeeded" : "failed"}`
       : `${p.agent || "worker"} retry ${p.attempt ?? "?"}/${p.maxAttempts ?? "?"}`;
+    // Phase 4 orchestrator-parity events.
+    case "orchestrator_compaction": return `Orchestrator compacted (${p.reason || "context"})`;
+    case "orchestrator_message": return p.errorMessage ? "Orchestrator turn errored" : `Orchestrator turn (${p.stopReason || "done"})`;
+    case "model_select": return `Model → ${p.model ? shortModel(String(p.model)) : "?"}`;
+    case "thinking_level_select": return `Thinking → ${p.level ?? "?"}`;
+    case "turn": return `Turn ${p.turnIndex ?? "?"}${p.durationMs != null ? ` · ${fmtMs(Number(p.durationMs))}` : ""}`;
+    case "provider_response": return `Provider ${p.status ?? "?"}${p.retryAfter ? ` · retry ${p.retryAfter}s` : ""}`;
     default: return e.type;
   }
 }
