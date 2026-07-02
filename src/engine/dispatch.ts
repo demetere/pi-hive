@@ -53,7 +53,15 @@ function archivePriorRun(sessionFile: string) {
   renameSync(sessionFile, archive);
 }
 
-export async function dispatchAgent(state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false): Promise<{ output: string; exitCode: number; elapsed: number }> {
+// Session factory seam (L1): defaults to the real createAgentSession, but a test
+// can inject a scripted AgentSession to drive dispatchAgent end-to-end without a
+// live model. Kept as the last optional param so existing callers are unchanged.
+export type CreateAgentSession = typeof createAgentSession;
+
+export async function dispatchAgent(
+  state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false,
+  createSession: CreateAgentSession = createAgentSession,
+): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();
   const runtime = state.runtimes.get(agentName.toLowerCase());
@@ -130,7 +138,7 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   const chunks: string[] = [];
   const sessionManager = SessionManager.open(runtime.sessionFile);
 
-  const { session } = await createAgentSession({
+  const { session } = await createSession({
     cwd: ctx.cwd,
     model: resolvedModel,
     modelRegistry: (ctx as any).modelRegistry,

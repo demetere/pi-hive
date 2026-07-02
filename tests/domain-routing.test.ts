@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { bashMutationKind, domainAllows, enforceDomainForTool, pathWithin } from "../src/engine/domain.ts";
 import { routeAgents } from "../src/engine/routing.ts";
 import { runAsAgent } from "../src/engine/session.ts";
-import type { AgentRuntime, HiveState } from "../src/core/types.ts";
+import { buildOrchestratorPrompt } from "../src/agents/prompts.ts";
+import type { AgentConfig, AgentRuntime, HiveState } from "../src/core/types.ts";
 
 function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
   return {
@@ -115,4 +116,35 @@ test("routeAgents scores specialists and respects delegation hierarchy", () => {
   const matches = runAsAgent("Orchestrator", () => routeAgents(state, "fix the React CSS component", 3));
   assert.equal(matches[0].name, "Frontend Dev");
   assert.equal(matches.some((match) => match.name === "Security Reviewer"), false);
+});
+
+test("buildOrchestratorPrompt routes to the ACTUAL configured leads, nothing hardcoded (H3/L4)", () => {
+  // A team with entirely custom lead names — no "Engineering Lead"/"Planning
+  // Lead" anywhere. The routing block must name these leads and their cues.
+  const lead = (name: string, extra: Partial<AgentConfig> = {}): AgentConfig =>
+    ({ name, path: `${name}.md`, role: "lead", routingTags: [], domain: [], ...extra });
+  const shipwright = lead("Shipwright", { consultWhen: "building and shipping features", agentType: "lead" });
+  const cartographer = lead("Cartographer", { consultWhen: "mapping requirements and specs", agentType: "lead" });
+  const orchestrator = lead("Conductor", { role: "orchestrator" });
+
+  const state = stateWith([
+    { config: orchestrator, systemPrompt: "ORCH-SYS", status: "idle", task: "", lastWork: "", toolCount: 0, elapsedMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, contextPct: 0, runCount: 0, sessionFile: "" },
+  ]);
+  state.config = {
+    orchestrator, agents: [shipwright, cartographer], sharedContext: [],
+    settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+  } as any;
+
+  const prompt = buildOrchestratorPrompt(state, { cwd: "/repo" } as any);
+
+  // Names the configured leads and their cues.
+  assert.match(prompt, /Shipwright/);
+  assert.match(prompt, /Cartographer/);
+  assert.match(prompt, /building and shipping features/);
+  assert.match(prompt, /mapping requirements and specs/);
+  // Routing lines are derived from the real cues → real leads.
+  assert.match(prompt, /Work matching "building and shipping features" → Shipwright\./);
+  assert.match(prompt, /Work matching "mapping requirements and specs" → Cartographer\./);
+  // Nothing hardcoded from the example teams leaks in.
+  assert.doesNotMatch(prompt, /Engineering Lead|Planning Lead/);
 });

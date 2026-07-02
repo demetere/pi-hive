@@ -147,6 +147,10 @@ test("isCommitCommand closes the parsing bypasses (G2)", () => {
   assert.equal(isCommitCommand("sh -c 'git push'"), true);
   // Command substitution backstop.
   assert.equal(isCommitCommand("echo $(git commit -m x)"), true);
+  // Backtick command substitution — same commit bypass, older syntax (L3).
+  assert.equal(isCommitCommand("echo `git commit -m x`"), true);
+  assert.equal(isCommitCommand("x=`git commit -m y` echo done"), true);
+  assert.equal(isCommitCommand("result=`git -C /repo commit -m z`"), true);
   // Still not commit: a -C flag pointing at a helper, no commit subcommand.
   assert.equal(isCommitCommand("git -C /repo status"), false);
 });
@@ -247,6 +251,20 @@ test("enforce: reviewer may run non-mutating inspection bash but not mutating ba
   const state = stateWith([runtime("Rev", { agentType: "reviewer", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
   assert.equal(block(state, "Rev", { toolName: "bash", input: { command: "grep -r foo ./src" } }), undefined);
   assert.match(block(state, "Rev", { toolName: "bash", input: { command: "touch src/x.ts" } }) ?? "", /may not upsert/);
+});
+
+test("enforce: pathless mutating bash is blocked fail-safe (L3)", () => {
+  // A mutating bash with no extractable path (e.g. a glob that resolves at
+  // runtime) can't be domain-checked, so it must be denied outright — never
+  // silently allowed. A coder fully in-domain still can't run it.
+  const state = stateWith([runtime("Dev", { agentType: "coder", domain: codeDomain })]);
+  const reason = block(state, "Dev", { toolName: "bash", input: { command: "rm -rf *" } });
+  assert.match(reason ?? "", /without explicit in-domain paths/);
+  // A reviewer hits the type layer first (no mutation at all), also blocked.
+  const rev = stateWith([runtime("Rev", { agentType: "reviewer", domain: codeDomain })]);
+  assert.match(block(rev, "Rev", { toolName: "bash", input: { command: "rm -rf *" } }) ?? "", /may not/);
+  // Sanity: a mutating bash WITH an in-domain path is allowed for the coder.
+  assert.equal(block(state, "Dev", { toolName: "bash", input: { command: "rm -rf src/tmp" } }), undefined);
 });
 
 test("enforce: untyped runtime skips type-policy (only domain applies)", () => {

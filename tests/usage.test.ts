@@ -33,46 +33,7 @@ test("cacheWrite falls back to cacheWrite1h when the 5m field is absent", () => 
   assert.equal(extractUsage({ cacheWrite1h: 20 }).cacheWrite, 20);
 });
 
-// A1: the double-count. The old code added the final assistant message's usage
-// on message_end AND again on agent_end. The fix: message_end accumulates for
-// live display, then getSessionStats() OVERWRITES the totals at run end. Model
-// that exact sequence and assert the totals equal the SDK aggregate, not the
-// doubled sum.
-test("getSessionStats overwrite kills the message_end/agent_end double-count", () => {
-  // Simulate the dispatch runtime counters.
-  const runtime = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
-
-  // Two turns stream in; the final turn's message_end fires (live accumulation).
-  const turns = [
-    { input: 200, output: 50, cacheRead: 0, cacheWrite: 10, cost: { total: 0.05 } },
-    { input: 120, output: 30, cacheRead: 400, cacheWrite: 0, cost: { total: 0.03 } },
-  ];
-  for (const usage of turns) {
-    const u = extractUsage(usage);
-    runtime.inputTokens += u.input;
-    runtime.outputTokens += u.output;
-    runtime.cacheReadTokens += u.cacheRead;
-    runtime.cacheWriteTokens += u.cacheWrite;
-    runtime.costUsd += u.cost;
-  }
-  // The historical bug: agent_end re-added the last turn's usage here. The fixed
-  // dispatch code does NOT — the agent_end block only backfills output text.
-
-  // Run end: getSessionStats() returns the session-lifetime aggregate. Overwrite.
-  const stats = {
-    tokens: { input: 320, output: 80, cacheRead: 400, cacheWrite: 10 },
-    cost: { total: 0.08 },
-  };
-  runtime.inputTokens = stats.tokens.input;
-  runtime.outputTokens = stats.tokens.output;
-  runtime.cacheReadTokens = stats.tokens.cacheRead;
-  runtime.cacheWriteTokens = stats.tokens.cacheWrite;
-  runtime.costUsd = stats.cost.total;
-
-  // Totals equal the SDK aggregate exactly — no doubling of the final turn.
-  assert.equal(runtime.inputTokens, 320);
-  assert.equal(runtime.outputTokens, 80);
-  assert.equal(runtime.cacheReadTokens, 400);
-  assert.equal(runtime.cacheWriteTokens, 10);
-  assert.equal(runtime.costUsd, 0.08);
-});
+// A1: the message_end/agent_end double-count regression is now covered by a REAL
+// end-to-end test that drives dispatchAgent with a scripted AgentSession — see
+// tests/dispatch-usage.test.ts (L1). The old plain-object re-implementation that
+// lived here could not catch a real regression and was removed.

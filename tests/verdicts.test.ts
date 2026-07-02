@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildHiveTools } from "../src/agents/tools.ts";
 import { createChange } from "../src/engine/plan-store.ts";
-import { runWithChange } from "../src/engine/session.ts";
+import { runAsAgent, runWithChange } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
 function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
@@ -92,6 +92,28 @@ test("approve_plan requires an existing change-id", async () => {
   const ok = await runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
   assert.equal(ok.details.ok, true);
   assert.equal(ok.details.changeId, "add-auth");
+});
+
+test("approve_plan rejects a delegated worker-lead caller (G5/L3)", async () => {
+  // "Lead" is a worker lead: it carries approve_plan by type, but a delegated
+  // worker (an ALS agent context is present) must NOT approve gates — only the
+  // human-driven main session may. The change exists and is valid, so a rejection
+  // here can only come from the caller-identity guard, not a missing change.
+  const state = stateWith([runtime("Lead", { agentType: "lead" })]);
+  const ctx = { cwd: state.session!.sessionDir };
+  await createChange(ctx.cwd, "Add Auth");
+  const tool = buildHiveTools(state, "Lead").find((t) => t.name === "approve_plan")!;
+
+  // Called AS the worker lead (runAsAgent sets currentAgentName) → rejected.
+  const rejected = await runAsAgent("Lead", () =>
+    runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx)));
+  assert.equal(rejected.details.ok, false);
+  assert.equal(rejected.details.reason, "worker cannot approve");
+
+  // Same change, same tool, but called AS the main session → allowed. Proves the
+  // rejection was about caller identity, not the change.
+  const allowed = await runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
+  assert.equal(allowed.details.ok, true);
 });
 
 test("team_status surfaces the latest verdict", async () => {

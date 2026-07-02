@@ -2,11 +2,13 @@
 // typed projections, cursor pagination, ingest offsets, project-scoped plan
 // reads, and prune — all against a throwaway DB. Run: bun test tests/storage-b.spec.ts
 import { expect, test, beforeAll } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.HIVE_TELEMETRY_DB = join(mkdtempSync(join(tmpdir(), "pi-hive-storeb-")), "telemetry.db");
+const DB_FILE = join(mkdtempSync(join(tmpdir(), "pi-hive-storeb-")), "telemetry.db");
+process.env.HIVE_TELEMETRY_DB = DB_FILE;
 
 let db: typeof import("../src/observability/server/db");
 
@@ -170,4 +172,44 @@ test("prune removes sessions fully older than the cutoff and shrinks projections
   // All projections for the pruned session are gone.
   expect(db.queryDelegations({ session: "old-sess" }).length).toBe(0);
   expect(db.queryToolCalls({ session: "old-sess" }).length).toBe(0);
+});
+
+test("cursors are stable and gapless across a DB reopen (L5)", () => {
+  // Write a run of events through the live handle, capturing their cursors.
+  const written: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    insertEvent({ event_id: `l5-${i}`, session_id: "l5-sess", seq: i, ts: `2026-07-01T09:00:0${i}.000Z`, type: "user_message", actor: "User", pid: 1, cwd: "/l5", payload: { text: `m${i}` } });
+  }
+  const beforeClose = db.queryEvents({ session: "l5-sess", after: 0, limit: 100 });
+  for (const e of beforeClose) written.push(e.cursor);
+  expect(written.length).toBe(8);
+  // Strictly increasing cursors, no duplicates.
+  for (let i = 1; i < written.length; i++) expect(written[i]).toBeGreaterThan(written[i - 1]);
+
+  // Reopen the SAME file with a fresh handle (simulates a daemon restart). rowid
+  // — the cursor — is durable in SQLite, so pagination must continue from where
+  // it left off with no holes or duplicates. Checkpoint the WAL first so the
+  // fresh connection sees every committed write (WAL is per-connection until a
+  // checkpoint flushes it into the main db file).
+  db.db.run("PRAGMA wal_checkpoint(FULL)");
+  // Use the path the shared db module ACTUALLY opened, not this spec's env value:
+  // when all specs run in one process, whichever spec's HIVE_TELEMETRY_DB was set
+  // before db.ts first imported wins, so db.db.filename is the source of truth.
+  const reopened = new Database((db.db as any).filename || DB_FILE);
+  const rows = reopened.query(`SELECT rowid AS cursor, event_id FROM events WHERE session_id = 'l5-sess' ORDER BY rowid ASC`).all() as any[];
+  const reCursors = rows.map((r) => Number(r.cursor));
+  expect(reCursors).toEqual(written); // identical cursors after reopen
+
+  // Paginating with an `after` cursor on the reopened DB returns disjoint pages
+  // that reassemble to the full set with no gaps.
+  const mid = written[3];
+  const page = reopened.query(`SELECT rowid AS cursor FROM events WHERE session_id = 'l5-sess' AND rowid > ? ORDER BY rowid ASC`).all(mid) as any[];
+  expect(page.map((r) => Number(r.cursor))).toEqual(written.slice(4));
+  reopened.close();
+
+  // The live handle keeps assigning higher cursors after the reopen — no reset.
+  insertEvent({ event_id: "l5-post", session_id: "l5-sess", seq: 8, ts: "2026-07-01T09:00:08.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/l5", payload: {} });
+  const after = db.queryEvents({ session: "l5-sess", after: written[written.length - 1], limit: 10 });
+  expect(after.length).toBe(1);
+  expect(after[0].cursor).toBeGreaterThan(written[written.length - 1]);
 });

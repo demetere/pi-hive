@@ -9,10 +9,12 @@ process.env.HIVE_TELEMETRY_DB = join(mkdtempSync(join(tmpdir(), "pi-hive-topoc-"
 
 let hash: typeof import("../src/observability/server/topology-hash");
 let db: typeof import("../src/observability/server/db");
+let runtime: typeof import("../src/observability/server/runtime");
 
 beforeAll(async () => {
   hash = await import("../src/observability/server/topology-hash");
   db = await import("../src/observability/server/db");
+  runtime = await import("../src/observability/server/runtime");
 });
 
 const TOPO = {
@@ -108,6 +110,56 @@ test("thinking_levels sidecar fills without changing the hash (C3/A10)", () => {
   expect(coder.thinkingLevels).toEqual(["off", "low", "medium", "high"]);
   // The hash source is unchanged.
   expect(hash.topologyHash(TOPO as any)).toBe(h);
+});
+
+test("explode → topologyDetail reassembles the exact tree + canonical JSON (L2)", () => {
+  const h = hash.topologyHash(TOPO as any);
+  const nodes = hash.explodeTopology(TOPO as any).map(({ team, nodeId, parentId, node }) => ({
+    topologyHash: h, team, nodeId, parentId, name: node.name, role: node.role, agentType: (node as any).agentType,
+    model: node.model, thinking: node.thinking, domain: (node as any).domain, tools: (node as any).tools, commitAllowed: (node as any).commit === true,
+  }));
+  db.upsertTopologyVersion({ hash: h, cwd: "/l2", topologyJson: hash.canonicalTopologyJson(TOPO as any), ts: "2026-07-02T03:00:00.000Z", nodes: nodes as any });
+
+  const detail = runtime.topologyDetail(h);
+  expect(detail).toBeTruthy();
+  // Adjacency/identity reassembles: Lead is the hive orchestrator with Coder +
+  // Tester as its children; Planner is the planning orchestrator.
+  expect(detail.hive.orchestrator.name).toBe("Lead");
+  const childNames = (detail.hive.orchestrator.children || []).map((c: any) => c.name).sort();
+  expect(childNames).toEqual(["Coder", "Tester"]);
+  const coder = detail.hive.orchestrator.children.find((c: any) => c.name === "Coder");
+  expect(coder.model).toBe("anthropic/sonnet");
+  expect(coder.commit).toBe(false);
+  expect(detail.hive.orchestrator.commit).toBe(true);
+  expect(detail.hive.orchestrator.domain).toEqual(["src/**"]);
+  expect(detail.planning.orchestrator.name).toBe("Planner");
+
+  // The canonical JSON stored round-trips byte-for-byte, and re-hashing the
+  // reassembled canonical form yields the SAME hash (stable identity).
+  expect(detail.canonicalJson).toBe(hash.canonicalTopologyJson(TOPO as any));
+  expect(hash.topologyHash(JSON.parse(detail.canonicalJson))).toBe(h);
+});
+
+test("hash is invariant under key insertion-order permutation (L2)", () => {
+  const base = hash.topologyHash(TOPO as any);
+  // Rebuild the SAME topology with keys inserted in a shuffled order at every
+  // level. A canonical hash must be insertion-order independent.
+  const shuffled = {
+    hive: {
+      agents: [
+        { thinking: "medium", model: "anthropic/sonnet", tools: "read,edit", domain: ["src/app/**"], agentType: "coder", role: "member", name: "Coder" },
+        { name: "Tester", thinking: "low", role: "member", agentType: "tester", model: "anthropic/sonnet" },
+      ],
+      orchestrator: { commit: true, domain: ["src/**"], thinking: "high", model: "anthropic/opus", role: "orchestrator", name: "Lead" },
+    },
+    planning: {
+      agents: [],
+      orchestrator: { thinking: "high", name: "Planner", model: "anthropic/opus", role: "orchestrator" },
+    },
+    active: "hive",
+  };
+  expect(hash.topologyHash(shuffled as any)).toBe(base);
+  expect(hash.canonicalTopologyJson(shuffled as any)).toBe(hash.canonicalTopologyJson(TOPO as any));
 });
 
 test("models are content-versioned: a price change mints a new immutable row", () => {
