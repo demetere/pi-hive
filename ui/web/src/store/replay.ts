@@ -19,15 +19,18 @@ function stopTimer() {
 
 export async function enterReplay(sessionId: string) {
   stopTimer();
-  setReplay({ active: true, sessionId, events: [], loading: true, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false });
-  const events = await fetchSessionEvents(sessionId, (n) => setReplay({ loadedCount: n }));
+  setReplay({ active: true, sessionId, events: [], loading: true, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false, historyStartsAt: "" });
+  const { events, fetchedTotal } = await fetchSessionEvents(sessionId, (n) => setReplay({ loadedCount: n }));
   // Guard against a session switch mid-load.
   if (store.getState().replay.sessionId !== sessionId) return;
-  // F3: compare fetched count against the session's recorded event_count; a
-  // shortfall means early history was pruned.
-  const recorded = store.getState().sessionsById.get(sessionId)?.event_count ?? events.length;
-  const truncatedStart = events.length < recorded;
-  setReplay({ events, loading: false, cursor: events.length ? events.length - 1 : 0, truncatedStart });
+  // F3/I4: compare the RAW fetched count (delegation_progress included) against
+  // the server's authoritative sessions.event_count. A shortfall means early
+  // history was pruned. `sessionsById` is the client-derived view (its count
+  // only reflects loaded events), so it can't detect this — we use the summary.
+  const recorded = store.getState().sessionSummaries.get(sessionId)?.event_count;
+  const truncatedStart = recorded != null && fetchedTotal < recorded;
+  const historyStartsAt = truncatedStart && events.length ? events[0].ts : "";
+  setReplay({ events, loading: false, cursor: events.length ? events.length - 1 : 0, truncatedStart, historyStartsAt });
 }
 
 export function exitReplay() {

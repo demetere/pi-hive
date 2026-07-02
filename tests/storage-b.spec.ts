@@ -63,6 +63,31 @@ test("tool_calls projection pairs start/end by tool_call_id (B3)", () => {
   expect(tc.isError).toBe(false);
 });
 
+test("queryDelegations/queryToolCalls honor the after cursor (I1)", () => {
+  // Fresh session so pagination is deterministic and disjoint.
+  for (let i = 0; i < 3; i++) {
+    db.materializeDelegationStart({ eventId: `dp-s-${i}`, sessionId: "sPag", cwd: "/pag", agent: `A${i}`, parent: "Orchestrator", startedAt: `2026-07-01T05:0${i}:00.000Z`, model: "anthropic/x" });
+    db.materializeDelegationEnd({
+      eventId: `dp-e-${i}`, sessionId: "sPag", cwd: "/pag", agent: `A${i}`, parent: "Orchestrator", endedAt: `2026-07-01T05:0${i}:30.000Z`, durationMs: 30000,
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01, status: "done", stopReason: "toolUse", model: "anthropic/x",
+    });
+    db.materializeToolStart({ eventId: `tp-s-${i}`, sessionId: "sPag", cwd: "/pag", agent: `A${i}`, toolName: "read_file", toolCallId: `tcp${i}`, argsPreview: "{}", startedAt: `2026-07-01T05:0${i}:10.000Z` });
+    db.materializeToolEnd({ sessionId: "sPag", toolCallId: `tcp${i}`, resultPreview: "ok", isError: false, endedAt: `2026-07-01T05:0${i}:12.000Z`, durationMs: 2000 });
+  }
+  // Delegations: page 1 (limit 2), then page 2 with after=<last cursor> — disjoint.
+  const dPage1 = db.queryDelegations({ session: "sPag", limit: 2 });
+  expect(dPage1.length).toBe(2);
+  const dPage2 = db.queryDelegations({ session: "sPag", after: dPage1[dPage1.length - 1].cursor, limit: 2 });
+  expect(dPage2.every((r) => r.cursor > dPage1[dPage1.length - 1].cursor)).toBe(true);
+  const dOverlap = dPage1.filter((a) => dPage2.some((b) => b.cursor === a.cursor));
+  expect(dOverlap.length).toBe(0);
+  // Tool calls: same disjoint-page contract (the correct template I1 mirrors).
+  const tPage1 = db.queryToolCalls({ session: "sPag", limit: 2 });
+  expect(tPage1.length).toBe(2);
+  const tPage2 = db.queryToolCalls({ session: "sPag", after: tPage1[tPage1.length - 1].cursor, limit: 2 });
+  expect(tPage2.every((r) => r.cursor > tPage1[tPage1.length - 1].cursor)).toBe(true);
+});
+
 test("session stats update sums (never Math.max) and is SQL-readable (B2)", () => {
   db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "x", session_id: "s2", ts: "2026-07-01T02:00:00.000Z", cwd: "/proj2", type: "session_start", actor: "System", pid: 1, payload: {} }));
   db.updateSessionStats.run({

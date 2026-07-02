@@ -52,7 +52,7 @@ export default function ModelMix() {
     const leaders = Array.from(byAgent.values()).sort((a, b) => b.tok - a.tok).slice(0, 5);
     const topTok = leaders[0]?.tok || 1;
     return { total, segments, leaders, agentCount, topTok };
-  }, [scopedAgents]);
+  }, [scopedAgents, actualModelByAgent]);
 
   if (!(data.total > 1 || data.leaders.length)) {
     return <div className="mix-wrap"><div className="empty">No agent usage yet.</div></div>;

@@ -75,21 +75,47 @@ export async function fetchStates(): Promise<Snapshot[]> {
 
 // Page a whole session's event history for replay (F1). SQL-backed, cursor
 // ordered; onProgress reports the running count so the UI can show a loader.
-export async function fetchSessionEvents(sessionId: string, onProgress?: (n: number) => void): Promise<HiveEvent[]> {
+// `events` is filtered (delegation_progress dropped to keep replay light);
+// `fetchedTotal` is the RAW count actually paged from the DB — the like-for-like
+// baseline to compare against the server's sessions.event_count for pruned-
+// history detection (I4), which counts progress rows too.
+export async function fetchSessionEvents(
+  sessionId: string,
+  onProgress?: (n: number) => void,
+): Promise<{ events: HiveEvent[]; fetchedTotal: number }> {
   const all: HiveEvent[] = [];
+  let fetchedTotal = 0;
   let after = 0;
   for (let guard = 0; guard < 500; guard++) {
     const page = await jsonOr<{ events: HiveEvent[] }>(
       fetch(`/events?session=${encodeURIComponent(sessionId)}&after=${after}&limit=1000`), { events: [] });
-    const evs = (page.events || []).filter((e) => e.type !== "delegation_progress");
-    all.push(...evs);
+    const raw = page.events || [];
+    fetchedTotal += raw.length;
+    all.push(...raw.filter((e) => e.type !== "delegation_progress"));
     onProgress?.(all.length);
-    if ((page.events || []).length < 1000) break;
-    const last = page.events![page.events!.length - 1]?.cursor;
+    if (raw.length < 1000) break;
+    const last = raw[raw.length - 1]?.cursor;
     if (last == null || last <= after) break;
     after = last;
   }
-  return all;
+  return { events: all, fetchedTotal };
+}
+
+// Server-authoritative session summaries (GET /sessions). The `event_count`
+// here is the DB's true row count for the session — unlike the client-derived
+// SessionView count (which only ever counts the events currently loaded), so it
+// is the correct baseline for detecting pruned/absent early history (I4/F3).
+export interface SessionSummary {
+  session_id: string;
+  cwd?: string;
+  first_ts?: string;
+  last_ts?: string;
+  event_count: number;
+  topologyHash?: string;
+}
+export async function fetchSessionSummaries(): Promise<SessionSummary[]> {
+  const data = await jsonOr<{ sessions: SessionSummary[] }>(fetch("/sessions"), { sessions: [] });
+  return data.sessions || [];
 }
 
 export async function deleteSessionRemote(sessionId: string): Promise<boolean> {

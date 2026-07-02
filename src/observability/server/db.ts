@@ -578,6 +578,7 @@ export function queryDelegations(q: { session?: string; cwd?: string; after?: nu
   const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
   if (q.cwd) { where.push(`cwd = $cwd`); params.$cwd = q.cwd; }
+  if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
   const rows = db.query(`SELECT rowid, * FROM delegations WHERE ${where.join(" AND ")} ORDER BY rowid ASC LIMIT $limit`).all(params) as any[];
   return rows.map((r) => ({
     cursor: Number(r.rowid), sessionId: r.session_id, cwd: r.cwd, agent: r.agent, parent: r.parent,
@@ -675,23 +676,33 @@ export interface TopologyNodeRow {
   commitAllowed?: boolean; routingTags?: string[]; consultWhen?: string; responsibilities?: string;
 }
 
-// Insert a version (idempotent by hash) and, only on first insert, explode its
-// nodes. Callers pass the node rows already derived from the canonical JSON.
+const countTopologyNodesStmt = db.query(`SELECT COUNT(*) AS n FROM topology_nodes WHERE topology_hash = $hash`);
+
+// Insert a version (idempotent by hash) and explode its nodes. The whole thing
+// runs in one transaction so a crash cannot leave a partial node tree behind.
+// Self-healing: if the version row already exists but its node count doesn't
+// match the canonical node count (e.g. a pre-fix crash left it partial), we
+// re-explode with INSERT OR IGNORE to complete the tree. Callers pass the node
+// rows already derived from the canonical JSON.
 export function upsertTopologyVersion(input: { hash: string; cwd: string; topologyJson: string; ts: string; nodes: TopologyNodeRow[] }): void {
-  const wasNew = !topologyVersionExists(input.hash);
-  upsertTopologyVersionStmt.run({ $hash: input.hash, $cwd: input.cwd, $topology_json: input.topologyJson, $ts: input.ts });
-  if (!wasNew) return;
-  for (const n of input.nodes) {
-    insertTopologyNodeStmt.run({
-      $topology_hash: n.topologyHash, $team: n.team, $node_id: n.nodeId, $parent_id: n.parentId,
-      $name: n.name, $role: n.role ?? null, $agent_type: n.agentType ?? null, $model: n.model ?? null,
-      $thinking: n.thinking ?? null, $thinking_levels: n.thinkingLevels ? JSON.stringify(n.thinkingLevels) : null,
-      $color: n.color ?? null, $group_name: n.group ?? null, $tools_json: n.tools ?? null,
-      $domain_json: n.domain ? JSON.stringify(n.domain) : null, $stages_json: n.stages ? JSON.stringify(n.stages) : null,
-      $commit_allowed: n.commitAllowed ? 1 : 0, $routing_tags_json: n.routingTags ? JSON.stringify(n.routingTags) : null,
-      $consult_when: n.consultWhen ?? null, $responsibilities_json: n.responsibilities ? JSON.stringify(n.responsibilities) : null,
-    });
-  }
+  const tx = db.transaction(() => {
+    upsertTopologyVersionStmt.run({ $hash: input.hash, $cwd: input.cwd, $topology_json: input.topologyJson, $ts: input.ts });
+    const existing = countTopologyNodesStmt.get({ $hash: input.hash }) as any;
+    // Fast path: node tree already complete for this hash — nothing to explode.
+    if (Number(existing?.n || 0) === input.nodes.length) return;
+    for (const n of input.nodes) {
+      insertTopologyNodeStmt.run({
+        $topology_hash: n.topologyHash, $team: n.team, $node_id: n.nodeId, $parent_id: n.parentId,
+        $name: n.name, $role: n.role ?? null, $agent_type: n.agentType ?? null, $model: n.model ?? null,
+        $thinking: n.thinking ?? null, $thinking_levels: n.thinkingLevels ? JSON.stringify(n.thinkingLevels) : null,
+        $color: n.color ?? null, $group_name: n.group ?? null, $tools_json: n.tools ?? null,
+        $domain_json: n.domain ? JSON.stringify(n.domain) : null, $stages_json: n.stages ? JSON.stringify(n.stages) : null,
+        $commit_allowed: n.commitAllowed ? 1 : 0, $routing_tags_json: n.routingTags ? JSON.stringify(n.routingTags) : null,
+        $consult_when: n.consultWhen ?? null, $responsibilities_json: n.responsibilities ? JSON.stringify(n.responsibilities) : null,
+      });
+    }
+  });
+  tx();
 }
 
 // Fill in the thinking_levels sidecar for a node once authoritative levels

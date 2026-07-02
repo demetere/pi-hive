@@ -1,4 +1,4 @@
-import { fetchEventsAfter, fetchInitialData, fetchProjectOverrides, fetchStates, fetchThinking, openEventStream, saveProjectOverride } from "../api";
+import { fetchEventsAfter, fetchInitialData, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, openEventStream, saveProjectOverride } from "../api";
 import { store } from "./index";
 import { recomputeHeavy, recomputeLive, recomputeScoped } from "./derive";
 import { ingestEvents, ingestSnapshot, purgeLocal, setSelectedSession, tick } from "./raw";
@@ -21,6 +21,16 @@ async function refreshThinking() {
     store.setState({ thinkingBySession: next });
   } catch { /* transient */ }
   finally { thinkingInFlight = false; }
+}
+
+// Fetch server-authoritative session summaries (true event_count + topologyHash)
+// into the store. Refreshed at boot and after each reconnect so the pruned-
+// history marker (I4) and topology-version chips (K2) reflect the DB, not the
+// locally-loaded event window.
+export async function refreshSessionSummaries() {
+  const summaries = await fetchSessionSummaries();
+  const map = new Map(summaries.map((s) => [s.session_id, s]));
+  store.setState({ sessionSummaries: map });
 }
 
 // Fetch project display-name overrides and recompute so labels apply everywhere.
@@ -72,6 +82,7 @@ export function connect(): EventSource | undefined {
   // Poll thinking on a relaxed cadence (transcripts change slower than events).
   setInterval(() => { void refreshThinking(); }, 5000);
   void refreshOverrides(); // load project display-name overrides once
+  void refreshSessionSummaries(); // load server-authoritative event counts
 
   fetchInitialData().then(({ events, states, cursor }) => {
     ingestEvents(events);
@@ -131,6 +142,7 @@ async function resyncAfterReconnect() {
     const [{ events }, states] = await Promise.all([fetchEventsAfter(cursor), fetchStates()]);
     if (events.length) ingestEvents(events);
     for (const snap of states) ingestSnapshot(snap);
+    void refreshSessionSummaries(); // event counts may have advanced during the gap
   } catch { /* transient; the live stream continues */ }
   finally { resyncInFlight = false; }
 }

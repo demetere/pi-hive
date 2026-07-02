@@ -82,6 +82,25 @@ test("version insert is hash-idempotent — no duplicate rows on re-ingest (C3)"
   expect(db.listTopologies("/proj").filter((t) => t.hash === h).length).toBe(1);
 });
 
+test("upsertTopologyVersion self-heals a partial node tree on re-ingest (I2)", () => {
+  const h = hash.topologyHash(TOPO as any);
+  const nodes = hash.explodeTopology(TOPO as any).map(({ team, nodeId, parentId, node }) => ({
+    topologyHash: h, team, nodeId, parentId, name: node.name, role: node.role, agentType: (node as any).agentType,
+    model: node.model, thinking: node.thinking, domain: (node as any).domain, tools: (node as any).tools, commitAllowed: (node as any).commit === true,
+  }));
+  const full = db.topologyNodes(h).length;
+  expect(full).toBe(4);
+  // Simulate a pre-fix crash mid-explode: version row exists but only half its
+  // nodes are present. Deleting rows directly leaves the tree partial.
+  db.db.run(`DELETE FROM topology_nodes WHERE topology_hash = ? AND name IN ('Coder', 'Tester')`, [h]);
+  expect(db.topologyNodes(h).length).toBe(2);
+  // Re-ingesting the same hash must detect the mismatch and re-explode to full.
+  db.upsertTopologyVersion({ hash: h, cwd: "/proj", topologyJson: hash.canonicalTopologyJson(TOPO as any), ts: "2026-07-02T02:00:00.000Z", nodes: nodes as any });
+  expect(db.topologyNodes(h).length).toBe(4);
+  const coder = db.topologyNodes(h).find((r) => r.name === "Coder")!;
+  expect(coder.model).toBe("anthropic/sonnet"); // healed row carries full data
+});
+
 test("thinking_levels sidecar fills without changing the hash (C3/A10)", () => {
   const h = hash.topologyHash(TOPO as any);
   db.fillNodeThinkingLevels(h, "Coder", ["off", "low", "medium", "high"]);

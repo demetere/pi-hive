@@ -29,7 +29,7 @@ export default function Replay({ sessionId }: { sessionId: string }) {
 
 function ReplayActive() {
   const replay = useHive((s) => s.replay);
-  const { events, cursor, loading, loadedCount, playing, speed, truncatedStart } = replay;
+  const { events, cursor, loading, loadedCount, playing, speed, truncatedStart, historyStartsAt } = replay;
 
   const slice = useMemo(() => events.slice(0, cursor + 1), [events, cursor]);
   const statusBySession = useMemo(() => buildEventStatus(slice), [slice]);
@@ -76,7 +76,7 @@ function ReplayActive() {
 
       {truncatedStart && (
         <div className="text-[11px] text-wait bg-well rounded-md px-2 py-1">
-          History starts partway through — earlier events were pruned.
+          History starts at {historyStartsAt ? new Date(historyStartsAt).toLocaleString() : "an unknown point"} — earlier events were pruned.
         </div>
       )}
 

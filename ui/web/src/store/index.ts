@@ -3,6 +3,7 @@ import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { HiveEvent, ProjectGroup, SessionView, Snapshot } from "../types";
+import type { SessionSummary } from "../api";
 
 // ── scope: fleet (all projects) | project (one project, its sessions
 // aggregated) | session (one session detail). The tabs render within whatever
@@ -49,6 +50,11 @@ export interface HiveState {
   allEvents: HiveEvent[];
   sessions: SessionView[];
   sessionsById: Map<string, SessionView>;
+  // Server-authoritative session summaries (GET /sessions), keyed by session_id.
+  // Holds the DB's true event_count + topologyHash — the baseline for pruned-
+  // history detection (I4) and versioned-topology lookups (K2). Distinct from
+  // sessionsById, whose event_count only counts locally-loaded events.
+  sessionSummaries: Map<string, SessionSummary>;
   liveSet: Set<string>;
   projectGroups: ProjectGroup[];
   currentSession: SessionView | undefined;
@@ -82,6 +88,9 @@ export interface ReplayState {
   // True when the fetched count is below the session's recorded event_count
   // (early history pruned, F3) — the panel shows a "history starts at …" marker.
   truncatedStart: boolean;
+  // Timestamp of the earliest fetched event, shown in the pruned-history marker
+  // ("history starts at …"). Empty when nothing was fetched.
+  historyStartsAt: string;
 }
 
 export interface ThinkingEntry { agent: string; ts: string; text: string; tokens?: number; }
@@ -104,6 +113,7 @@ const initialState: HiveState = {
     allEvents: [],
     sessions: [],
     sessionsById: new Map(),
+    sessionSummaries: new Map(),
     liveSet: new Set(),
     projectGroups: [],
     currentSession: undefined,
@@ -116,7 +126,7 @@ const initialState: HiveState = {
     eventStatus: new Map(),
     thinkingBySession: new Map(),
     projectOverrides: new Map(),
-    replay: { active: false, sessionId: "", events: [], loading: false, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false },
+    replay: { active: false, sessionId: "", events: [], loading: false, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false, historyStartsAt: "" },
 };
 
 export const store = createStore<HiveState>()(subscribeWithSelector(() => initialState));
