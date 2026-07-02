@@ -124,6 +124,14 @@ export function extractToolPaths(toolName: string, input: any): string[] {
   return Array.from(new Set(paths));
 }
 
+// Extract path-like tokens from a bash command for read-domain checks. NOTE
+// (accepted limitation, Phase 5.3): the regex only matches tokens containing a
+// `/` (or an absolute path). A BARE filename with no slash — `cat secrets.env`,
+// `less .env` — yields no token, so no read-domain check runs and the read
+// fails OPEN. Mutations still fail CLOSED (bashMutationKind matches the command
+// verb, not the path). Tightening this would false-positive on ordinary bash
+// words (every argument looks like a filename), so it is left as documented risk
+// alongside the interpreter limit.
 export function extractBashPathTokens(command: string): string[] {
   const matches = command.match(/(?:^|\s)(\.{0,2}\/?[A-Za-z0-9_.-]+\/[A-Za-z0-9_./@-]+|\/[A-Za-z0-9_./@-]+)/g) || [];
   return Array.from(new Set(matches

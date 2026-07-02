@@ -10,14 +10,14 @@ export type JsonRecord = Record<string, any>;
 //            that route to them). The orchestrator drives planners to produce
 //            full specs (proposal→requirements→design→tasks); no code execution.
 //   hive   — full hive: delegates to coders/testers/reviewers, executes tasks.
-// "team" is a back-compat alias for "hive" (older persisted state / configs).
 export type HiveMode = "normal" | "plan" | "hive";
-export type TeamMode = HiveMode | "team";
 
-// Normalize any stored/legacy mode value to a canonical HiveMode.
-export function canonicalMode(mode: TeamMode | string | undefined): HiveMode {
+// Normalize any mode-ish value to a canonical HiveMode. Mode is never persisted,
+// so this only guards against unexpected inputs; the historical "team" alias was
+// dead (Phase 5.5) and has been dropped.
+export function canonicalMode(mode: string | undefined): HiveMode {
   if (mode === "plan") return "plan";
-  if (mode === "hive" || mode === "team") return "hive";
+  if (mode === "hive") return "hive";
   return "normal";
 }
 
@@ -114,8 +114,10 @@ export interface AgentConfig {
   // Omitted = all four gates. Ignored for non-planners.
   stages?: PlanStage[];
   // Optional commit guidance. Its PRESENCE (non-empty) unlocks the commit gate
-  // for this agent (only leads carry it in practice); the text is injected into
-  // the agent's prompt as guidance.
+  // for this agent; the text is injected into the agent's prompt as guidance.
+  // DECISION (Phase 5.6): commit capability intentionally follows this `commit:`
+  // config, NOT agent-type. There is no "commit ⇒ lead" enforcement — a small
+  // project may deliberately let a leaf agent commit. Do not add a type gate here.
   commit?: string;
   // Derived grouping label: the name of the top-level agent (the orchestrator's
   // direct report) whose subtree this agent belongs to. Not configured.

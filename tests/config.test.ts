@@ -77,6 +77,42 @@ test("loadConfig reads shared_context from YAML (both snake_case and camelCase)"
   }
 });
 
+test("planning block with a coder/tester warns but still loads (Phase 5.1)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-planexec-"));
+  mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nLead.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "coder.md"), "---\nmodel: anthropic/claude-sonnet\nthinking: off\nagent-type: coder\n---\nCode.");
+  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
+settings:
+  distiller:
+    enabled: false
+planning:
+  main:
+    name: Plan Main
+    path: .pi/hive/agents/plan-main.md
+  agents:
+    - name: Stray Coder
+      path: .pi/hive/agents/coder.md
+hive:
+  main:
+    name: Orchestrator
+    path: .pi/hive/agents/orchestrator.md
+  agents: []
+`);
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (msg?: any) => { warnings.push(String(msg)); };
+  try {
+    const config = loadConfig(cwd); // must NOT throw
+    assert.equal(config.planning?.agents[0].agentType, "coder");
+  } finally {
+    console.warn = orig;
+  }
+  assert.ok(warnings.some((w) => /planning block contains execution agents/.test(w) && /Stray Coder/.test(w)),
+    "expected a planning-execution-agent warning naming the offender");
+});
+
 test("allowedAgents in config warns but still loads (H1)", () => {
   const cwd = fixtureProject();
   // Inject a user-set allowedAgents on a node — it must be ignored (derivation

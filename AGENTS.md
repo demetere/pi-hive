@@ -32,6 +32,7 @@ The extension must stay safe to install globally: it should do nothing unless th
 ## Policy enforcement limits (accepted risk)
 
 - The bash policy classifies mutations by matching known commands (`rm`, `mv`, `git restore`, `find -delete`, `dd of=`, `rsync`, …). File changes made *through* a general-purpose interpreter — `node -e`, `python -c`, `sh script.sh`, `npm run <script>` — are **statically unpoliceable**: the enforcer cannot see writes hidden inside interpreted code. This is a known, accepted limit, stated in the worker operating-contract prompt so agents treat it as a trust boundary, not a loophole. Do not rely on the bash classifier to contain a hostile interpreter invocation.
+- Bash **read** checks fail OPEN on bare filenames. `extractBashPathTokens` only recognizes path-like tokens containing a `/` (or an absolute path), so `cat secrets.env` / `less .env` (no slash) produce no token and skip the read-domain check. Mutations still fail CLOSED (classification keys off the command verb, not the path). Tightening this would false-positive on ordinary bash arguments — every word looks like a filename — so it is left as documented accepted risk, alongside the interpreter limit.
 
 ## Repository hygiene
 

@@ -74,11 +74,24 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
   const shouldNotify = options.notify ?? true;
 
   const previous = state.mode;
+
+  // Phase 5.4 drain guard: switching plan⇄hive rebuilds state.runtimes, which
+  // disposes the previous team's live worker sessions. Doing that mid-dispatch
+  // would kill an in-flight worker and leak its run. Refuse the switch while any
+  // worker is running and tell the user to wait; keep the current mode intact.
+  const rebuildsTeam = mode !== "normal" && state.config && canonicalMode(previous) !== mode;
+  if (rebuildsTeam && state.activeRuns > 0) {
+    if (shouldNotify && ctx.hasUI) {
+      ctx.ui.notify(`Cannot switch mode while ${state.activeRuns} agent${state.activeRuns === 1 ? " is" : "s are"} running. Wait for the current work to finish, then switch.`, "error");
+    }
+    return;
+  }
+
   state.mode = mode;
 
   // Rebuild the active team's runtimes when entering plan/hive (or switching
   // between them). Normal mode leaves the runtimes as-is (harmless; tools are off).
-  if (mode !== "normal" && state.config && canonicalMode(previous) !== mode) {
+  if (rebuildsTeam) {
     activateTeamRuntimes(state, ctx, mode);
   }
 

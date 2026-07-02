@@ -69,8 +69,12 @@ export async function dispatchAgent(
     const available = Array.from(state.runtimes.values()).map((agent) => agent.config.name).join(", ");
     return { output: `Unknown agent "${agentName}". Available: ${available}`, exitCode: 1, elapsed: 0 };
   }
-  if (state.mode === "plan" && runtime.config.agentType !== "planner" && runtime.config.agentType !== "lead") {
-    return { output: `Delegation blocked: plan mode may only delegate to planning leads/planners; ${runtime.config.name} is agent-type "${runtime.config.agentType || "unknown"}". Switch to hive mode or use /hive-execute after tasks approval for execution.`, exitCode: 1, elapsed: 0 };
+  // Plan mode delegates to planners, leads, AND reviewers (Phase 5.1 decision):
+  // reviewers give plan-phase feedback but stay read-only on files via the type
+  // matrix, so they are safe to run during planning. coder/tester remain blocked
+  // (they mutate; that needs an approved plan + hive/execute mode).
+  if (state.mode === "plan" && !["planner", "lead", "reviewer"].includes(runtime.config.agentType || "")) {
+    return { output: `Delegation blocked: plan mode may only delegate to planners, leads, or reviewers; ${runtime.config.name} is agent-type "${runtime.config.agentType || "unknown"}". Switch to hive mode or use /hive-execute after tasks approval for execution.`, exitCode: 1, elapsed: 0 };
   }
   if (state.mode === "hive" && (runtime.config.agentType === "coder" || runtime.config.agentType === "tester")) {
     const changeId = currentChangeId() || state.activeChangeId || "";

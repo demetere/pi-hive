@@ -4,16 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { canonicalMode } from "../src/core/types.ts";
-import { loadConfig, teamForMode, hasPlanningTeam, allConfiguredAgents } from "../src/core/config.ts";
+import { loadConfig, teamForMode, allConfiguredAgents } from "../src/core/config.ts";
 import { auditAgentTypes } from "../src/core/agent-type-audit.ts";
 import { nextMode, modeLabel } from "../src/ui/tui/widget.ts";
 
 // ── canonicalMode + cycle ────────────────────────────────────────────────────
 
-test("canonicalMode maps legacy 'team' to 'hive' and unknown to 'normal'", () => {
+test("canonicalMode maps known modes and coerces unknown to 'normal'", () => {
   assert.equal(canonicalMode("plan"), "plan");
   assert.equal(canonicalMode("hive"), "hive");
-  assert.equal(canonicalMode("team"), "hive"); // legacy alias
   assert.equal(canonicalMode("normal"), "normal");
   assert.equal(canonicalMode(undefined), "normal");
   assert.equal(canonicalMode("garbage"), "normal");
@@ -65,7 +64,7 @@ hive:
 
 test("loadConfig parses planning + hive blocks; active team defaults to hive", () => {
   const config = loadConfig(twoBlockProject());
-  assert.equal(hasPlanningTeam(config), true);
+  assert.ok(config.planning, "planning team is populated");
   // Active mirror defaults to the hive team.
   assert.equal(config.orchestrator.name, "Hive Main");
   assert.deepEqual(config.agents.map((a) => a.name), ["Coder"]);

@@ -33,6 +33,27 @@ function warnOnAllowedAgents(parsed: any): void {
   }
 }
 
+// Phase 5.1: warn (not throw) when the planning team contains coder/tester
+// agents. Plan mode only delegates to planners/leads/reviewers, so such agents
+// are dead weight in the planning block — they can never run there. Called after
+// enrichment so agentType is populated from frontmatter.
+function warnOnPlanningExecutionAgents(planning: HiveTeam | undefined): void {
+  if (!planning) return;
+  const offenders: string[] = [];
+  const walk = (node: AgentConfig | undefined) => {
+    if (!node) return;
+    if (node.agentType === "coder" || node.agentType === "tester") {
+      offenders.push(`${node.name} (${node.agentType})`);
+    }
+    for (const child of node.members || node.children || []) walk(child);
+  };
+  walk(planning.main);
+  (planning.agents || []).forEach(walk);
+  if (offenders.length) {
+    console.warn(`[pi-hive] planning block contains execution agents that plan mode cannot delegate to (${offenders.join(", ")}). Plan mode only delegates to planners/leads/reviewers; move coders/testers to the 'hive:' block.`);
+  }
+}
+
 function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): void {
   if (!agent) return;
   // agent-type/stages/commit live in the agent's .md frontmatter (like
@@ -110,6 +131,10 @@ export function loadConfig(cwd: string): HiveConfig {
   if (planning) validateHiveConfigShape({ orchestrator: planning.main, agents: planning.agents } as HiveConfig);
   validateAgentTypes({ orchestrator: hive.main, agents: hive.agents } as HiveConfig);
   if (planning) validateAgentTypes({ orchestrator: planning.main, agents: planning.agents } as HiveConfig);
+  // Phase 5.1: coder/tester agents in the planning block are undelegatable there
+  // (plan mode only delegates to planners/leads/reviewers). Warn — don't throw —
+  // so the config still loads; they simply never run during planning.
+  warnOnPlanningExecutionAgents(planning);
 
   return {
     // Active team defaults to hive; applyMode swaps to planning in plan mode.
@@ -140,10 +165,6 @@ export function loadConfig(cwd: string): HiveConfig {
 export function teamForMode(config: HiveConfig, mode: HiveMode): HiveTeam {
   if (mode === "plan" && config.planning) return config.planning;
   return config.hive ?? { main: config.orchestrator, agents: config.agents };
-}
-
-export function hasPlanningTeam(config: HiveConfig | null): boolean {
-  return Boolean(config?.planning);
 }
 
 // Flatten a team (main + reports) into runtime agent configs with derived roles.

@@ -108,7 +108,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
 
     const planBlock = planMode
       ? `# Plan mode — you are the main session of the PLANNING team
-You are running as the visible main session in PLAN mode. Your job is to produce a COMPLETE spec for the requested change, not to implement it. Drive the planning team (or write artifacts yourself) to fill the plan store under \`.pi/hive/plans/<change-id>/\` one gate at a time: proposal → requirements → design → tasks. Use plan_new to create/select a change, delegate to planners for each gate, and stop at each gate for user confirmation when scope is uncertain. Do NOT write or modify production/test code in this mode — that is execution, which happens in hive mode. The end result of plan mode is an approved tasks.md; then the user switches to hive mode (or runs /hive-execute) to build it.
+You are running as the visible main session in PLAN mode. Your job is to produce a COMPLETE spec for the requested change, not to implement it. You have NO file-writing tools in this mode — you delegate. Drive the planning team to fill the plan store under \`.pi/hive/plans/<change-id>/\` one gate at a time: proposal → requirements → design → tasks. Use plan_new to create/select a change, delegate to planners (and reviewers, for plan-phase feedback) for each gate, and stop at each gate for user confirmation when scope is uncertain. Do NOT attempt to write or modify any files yourself in this mode — that is execution, which happens in hive mode. The end result of plan mode is an approved tasks.md; then the user switches to hive mode (or runs /hive-execute) to build it.
 
 `
       : "";

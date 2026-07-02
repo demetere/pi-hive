@@ -7,7 +7,9 @@ export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ 
   const caller = currentAgentName();
   const scored = Array.from(state.runtimes.values())
     .filter((runtime) => runtime.config.role !== "orchestrator")
-    .filter((runtime) => state.mode !== "plan" || runtime.config.agentType === "planner" || runtime.config.agentType === "lead")
+    // Plan mode routing surfaces planners, leads, and reviewers (Phase 5.1) —
+    // mirrors the dispatch guard; reviewers are delegable in planning (read-only).
+    .filter((runtime) => state.mode !== "plan" || ["planner", "lead", "reviewer"].includes(runtime.config.agentType || ""))
     .filter((runtime) => canDelegateTo(state, caller, runtime.config.name).ok)
     .map((runtime) => {
       const searchableParts = [

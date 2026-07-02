@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HiveState } from "../core/types";
-import { renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
+import { renderKnowledgeRefs } from "../core/prompting";
 import { renderSddPromptBlock } from "../engine/sdd";
 
 export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext): string {
@@ -10,7 +10,13 @@ export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext)
   const responsibilities = runtime.config.responsibilities?.length ? runtime.config.responsibilities.map((item) => `- ${item}`).join("\n") : "- Route work to the team leads and synthesize results.";
   const context = renderKnowledgeRefs(ctx, "Orchestrator context and mental model", runtime.config.context);
   const sdd = renderSddPromptBlock(state);
-  const domain = renderDomainScopes(runtime.config.domain);
+  // Phase 5.2: the main session has NO enforceable file tools, so do not render
+  // the worker-style "these scopes are ENFORCED at the tool layer" block for it —
+  // that language is false here (there is nothing to enforce against). Just note
+  // that any configured domain is advisory context for what the team owns.
+  const domain = runtime.config.domain?.length
+    ? `## Domain context\nThe team's file domains are enforced on the WORKERS you delegate to, not on you (you have no direct file tools). Route work to the lead whose domain covers it.`
+    : "";
   const leadRoster = state.config.agents
     .map((agent) => `- ${agent.name}: ${agent.consultWhen || agent.routingTags?.join(", ") || "team work"}`)
     .join("\n");

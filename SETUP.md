@@ -206,7 +206,7 @@ hive:
               path: .pi/hive/agents/<lead-b>/<sub-lead>/<member>/<member>.md
 ```
 
-> **Legacy shape still works.** A config with top-level `orchestrator:` + `agents:` (no `hive:`/`planning:` blocks) loads as the hive team. Plan mode then falls back to any `planner`-typed agents in that tree. Add a `planning:` block only when you want a dedicated planning hierarchy.
+> **Both blocks are required.** `hive-config.yaml` must define *both* a `hive:` team block and a `planning:` team block — the loader hard-throws otherwise. There is no top-level `orchestrator:` / `agents:` shape: keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree.
 
 Rules:
 - Every `name` must be **unique** across the whole tree (case-insensitive). Duplicates are dropped. Names are shared across both blocks' namespace — do not reuse a name between `planning:` and `hive:` unless it is deliberately the same agent.
@@ -216,7 +216,7 @@ Rules:
 YAML subset supported by pi-hive:
 - Use two-space indentation, nested maps, and `- ` list items.
 - Use scalar strings, booleans, numbers, and simple inline arrays such as `[read, grep, find]`.
-- Kebab-case keys are converted to camelCase internally (`subagent-output-limit` → `subagentOutputLimit`).
+- Kebab-case keys are converted to camelCase internally (`subagent-output-limit` → `subagentOutputLimit`). Snake_case keys are NOT auto-converted, so where both spellings are documented (e.g. `shared_context:` / `shared-context:`) the loader accepts each explicitly; prefer the kebab form for anything else.
 - Quote strings containing `#` or leading/trailing whitespace.
 - Do not rely on anchors, aliases, block scalars (`|` / `>`), tags, flow objects, or other advanced YAML features.
 
@@ -586,7 +586,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] `.pi/hive/hive-config.yaml` exists (this is what activates the extension).
 - [ ] Every `path` in the config points to a file that **exists**.
 - [ ] Every agent `.md` has **`name`, `model`, `thinking`, `agent-type`** in frontmatter (these are required — missing `model`/`thinking`/`agent-type` throws at load). The orchestrator and every lead are `agent-type: lead`.
-- [ ] `stages` appears only on `agent-type: planner` agents; `commit:` appears only on the lead(s) that may commit.
+- [ ] `stages` appears only on `agent-type: planner` agents. `commit:` unlocks the commit gate for whatever agent carries it: commit capability follows this config field, **not** agent-type — there is no "only leads may commit" enforcement, so a small project may deliberately give a leaf agent `commit:`. In practice you will usually put it only on the lead(s).
 - [ ] Every `name` is **unique** across the tree and **matches** between config and the agent's frontmatter `name`.
 - [ ] Every agent has a sibling `<stem>-mental-model.yaml` with a valid spine and `owner` = the agent's name.
 - [ ] Every `context`/`skills`/`domain` path referenced in frontmatter **exists** (knowledge files created).
