@@ -23,6 +23,8 @@ function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): Age
     elapsedMs: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     costUsd: 0,
     contextPct: 0,
     runCount: 0,

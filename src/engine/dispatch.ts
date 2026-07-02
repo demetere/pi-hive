@@ -10,10 +10,12 @@ import {
   ensureDir,
   modelFrom,
   normalizeWorkerTools,
+  safeJson,
   safeRead,
   slug,
   tailLines,
   textFromMessage,
+  textOfResult,
   truncateMiddle,
   extractUsage,
 } from "../core/utils";
@@ -108,6 +110,10 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     model,
     tools,
     thinking,
+    // Authoritative per-model thinking levels, captured once the session
+    // resolves below and stamped on the runtime (A10). Present from the second
+    // run onward; the topology_nodes sidecar fills in as it arrives.
+    thinkingLevels: runtime.thinkingLevels,
     runtime: runtimeSummary(runtime),
   }, caller);
   publishRuntimeUpdate(state);
@@ -162,6 +168,20 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   });
   runtime.session = session;
 
+  // Authoritative per-model thinking levels for this worker's effective model.
+  // This is the SDK's own answer — no ModelRegistry plumbing needed (A10).
+  try {
+    const levels = session.getAvailableThinkingLevels?.();
+    if (Array.isArray(levels) && levels.length) runtime.thinkingLevels = levels.map(String);
+  } catch { /* capability probe is best-effort */ }
+
+  // Distinct actual models seen across this run's assistant messages (A3).
+  const modelsSeen = new Set<string>();
+  let lastStopReason: string | undefined;
+  // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
+  // calls: deleted on tool_execution_end.
+  const toolStartedAt = new Map<string, number>();
+
   const unsubscribe = session.subscribe((event: any) => {
     if (event.type === "message_update") {
       const delta = event.assistantMessageEvent;
@@ -173,28 +193,70 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
       }
     } else if (event.type === "tool_execution_start") {
       runtime.toolCount++;
-      runtime.lastWork = `tool: ${event.toolName || event.name || "unknown"}`;
-      emitHiveEvent(state, "worker_tool_start", { agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", toolCallId: event.toolCallId }, runtime.config.name);
+      const toolName = event.toolName || event.name || "unknown";
+      runtime.lastWork = `tool: ${toolName}`;
+      if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
+      emitHiveEvent(state, "worker_tool_start", {
+        agent: runtime.config.name,
+        toolName,
+        toolCallId: event.toolCallId,
+        args: truncateMiddle(safeJson(event.args ?? {}), 500),
+      }, runtime.config.name);
     } else if (event.type === "tool_execution_end") {
-      emitHiveEvent(state, "worker_tool_end", { agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", toolCallId: event.toolCallId, isError: event.isError === true }, runtime.config.name);
+      const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
+      if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
+      emitHiveEvent(state, "worker_tool_end", {
+        agent: runtime.config.name,
+        toolName: event.toolName || event.name || "unknown",
+        toolCallId: event.toolCallId,
+        isError: event.isError === true,
+        resultPreview: truncateMiddle(textOfResult(event.result), 500),
+        durationMs: startedAt != null ? Date.now() - startedAt : undefined,
+      }, runtime.config.name);
+    } else if (event.type === "auto_retry_start") {
+      emitHiveEvent(state, "worker_retry", {
+        agent: runtime.config.name,
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        errorMessage: event.errorMessage ? truncateMiddle(String(event.errorMessage), 500) : undefined,
+        phase: "start",
+      }, runtime.config.name);
+    } else if (event.type === "auto_retry_end") {
+      emitHiveEvent(state, "worker_retry", {
+        agent: runtime.config.name,
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        phase: "end",
+        success: event.success,
+      }, runtime.config.name);
+    } else if (event.type === "compaction_start") {
+      emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
+    } else if (event.type === "compaction_end") {
+      emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "end" }, runtime.config.name);
     } else if (event.type === "message_end") {
-      const usage = event.message?.usage;
+      const message = event.message;
+      const actualModel = message?.model || message?.responseModel;
+      if (actualModel) modelsSeen.add(String(actualModel));
+      if (message?.stopReason) lastStopReason = String(message.stopReason);
+      const usage = message?.usage;
       if (usage) {
+        // Incremental accumulation for live display only. Authoritative totals
+        // are overwritten from getSessionStats() at run end (A1) — this avoids
+        // the historical double-count where agent_end re-added the final
+        // message's usage.
         const u = extractUsage(usage);
         runtime.inputTokens += u.input;
         runtime.outputTokens += u.output;
+        runtime.cacheReadTokens += u.cacheRead;
+        runtime.cacheWriteTokens += u.cacheWrite;
         runtime.costUsd += u.cost;
       }
     } else if (event.type === "agent_end") {
       const messages = event.messages || [];
       const last = [...messages].reverse().find((message: any) => message.role === "assistant");
+      // Keep the chunks fallback for output text; the usage-add block that used
+      // to live here is deleted (double-count fix, Decision 1).
       if (last && !chunks.length) chunks.push(textFromMessage(last));
-      if (last?.usage) {
-        const u = extractUsage(last.usage);
-        runtime.inputTokens += u.input;
-        runtime.outputTokens += u.output;
-        runtime.costUsd += u.cost;
-      }
     }
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
@@ -229,6 +291,27 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     errorMessage = error?.message || String(error);
   }
 
+  // Authoritative usage: overwrite the incremental live-display counters with
+  // the SDK's session-lifetime aggregate (includes cache splits). This kills
+  // the double-count and any accumulation drift in one move (Decision 1). If
+  // stats throws, the incremental values already on the runtime are kept.
+  try {
+    const stats: any = session.getSessionStats?.();
+    if (stats) {
+      const tokens = stats.tokens ?? stats.usage ?? stats;
+      const input = Number(tokens.input ?? tokens.inputTokens);
+      const output = Number(tokens.output ?? tokens.outputTokens);
+      if (Number.isFinite(input)) runtime.inputTokens = input;
+      if (Number.isFinite(output)) runtime.outputTokens = output;
+      const cacheRead = Number(tokens.cacheRead ?? tokens.cacheReadTokens);
+      const cacheWrite = Number(tokens.cacheWrite ?? tokens.cacheWriteTokens);
+      if (Number.isFinite(cacheRead)) runtime.cacheReadTokens = cacheRead;
+      if (Number.isFinite(cacheWrite)) runtime.cacheWriteTokens = cacheWrite;
+      const cost = Number(stats.cost?.total ?? stats.cost ?? stats.costUsd);
+      if (Number.isFinite(cost)) runtime.costUsd = cost;
+    }
+  } catch { /* keep incremental values if stats is unavailable */ }
+
   unsubscribe();
   if (runtime.timer) clearInterval(runtime.timer);
   runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
@@ -246,7 +329,10 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
   // turned the shared log into a multi-hundred-KB-per-line firehose.
   const completion = {
     from: runtime.config.name,
-    to: "Orchestrator",
+    // The real delegation parent: the ALS caller (A6). For top-level
+    // delegations this resolves to "Orchestrator"; nested lead→member
+    // delegations now record the truthful parent instead of a hardcoded root.
+    to: caller,
     type: runtime.status,
     message: truncateMiddle(output, 2_000),
     costUsd: runtime.costUsd,
@@ -255,7 +341,22 @@ export async function dispatchAgent(state: HiveState, agentName: string, task: s
     elapsedMs: runtime.elapsedMs,
   };
   logRecord(state, completion);
-  emitHiveEvent(state, "delegation_end", { ...completion, exitCode, runtime: runtimeSummary(runtime) }, runtime.config.name);
+  emitHiveEvent(state, "delegation_end", {
+    ...completion,
+    exitCode,
+    stopReason: lastStopReason,
+    errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
+    models: [...modelsSeen],
+    runtime: runtimeSummary(runtime),
+  }, runtime.config.name);
+  // Surface delegation failures as the now-live `error` telemetry event (A3).
+  if (errorMessage) {
+    emitHiveEvent(state, "error", {
+      agent: runtime.config.name,
+      message: truncateMiddle(errorMessage, 500),
+      stopReason: lastStopReason,
+    }, runtime.config.name);
+  }
   publishRuntimeUpdate(state);
   writeHiveStateSnapshot(state);
   state.onRuntimeFinish?.(runtime, ctx);

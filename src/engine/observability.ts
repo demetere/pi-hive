@@ -47,6 +47,13 @@ function agentSummary(agent: AgentConfig): TopologyNode {
     thinking: agent.thinking,
     consultWhen: agent.consultWhen,
     routingTags: agent.routingTags || [],
+    // The enforcement boundary (A8): the glob list the agent may write, whether
+    // it may commit (presence of commit guidance unlocks the gate), and its
+    // declared responsibilities. These are what Phase E renders and what the
+    // versioned topology (Phase C) hashes.
+    domain: (agent.domain || []).map((scope) => scope.path),
+    commit: Boolean(agent.commit && agent.commit.trim()),
+    responsibilities: (agent.responsibilities || []).join("\n") || undefined,
     children: [...(agent.members || []), ...(agent.children || [])].map(agentSummary),
   };
 }
@@ -89,11 +96,36 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     elapsedMs: runtime.elapsedMs,
     inputTokens: runtime.inputTokens,
     outputTokens: runtime.outputTokens,
+    cacheReadTokens: runtime.cacheReadTokens,
+    cacheWriteTokens: runtime.cacheWriteTokens,
     costUsd: runtime.costUsd,
     contextPct: runtime.contextPct,
     sessionFile: runtime.sessionFile,
     model: runtime.config.model,
     thinking: runtime.config.thinking,
+    thinkingLevels: runtime.thinkingLevels,
+  };
+}
+
+// Overlay the accumulated orchestrator (main-session) usage onto the main
+// node's runtime summary so its tokens/cost/tool-calls are observable (A5). The
+// main node lives in state.runtimes as role "orchestrator" but its dispatch
+// counters stay zero (it is never delegated to); its real activity is tracked
+// on state.orchestratorRuntime by the hooks.
+function withOrchestratorUsage(
+  state: HiveState,
+  summary: NonNullable<HiveStateSnapshot["agents"]>[number],
+): NonNullable<HiveStateSnapshot["agents"]>[number] {
+  const orch = state.orchestratorRuntime;
+  if (!orch || summary.role !== "orchestrator") return summary;
+  return {
+    ...summary,
+    toolCount: (summary.toolCount || 0) + orch.toolCount,
+    inputTokens: (summary.inputTokens || 0) + orch.inputTokens,
+    outputTokens: (summary.outputTokens || 0) + orch.outputTokens,
+    cacheReadTokens: (summary.cacheReadTokens || 0) + orch.cacheReadTokens,
+    cacheWriteTokens: (summary.cacheWriteTokens || 0) + orch.cacheWriteTokens,
+    costUsd: (summary.costUsd || 0) + orch.costUsd,
   };
 }
 
@@ -111,11 +143,74 @@ export function writeHiveStateSnapshot(state: HiveState) {
     topology: hiveTopology(state),
     topologies: hiveTeamTopologies(state),
     active_runs: state.activeRuns,
-    agents: Array.from(state.runtimes.values()).map(runtimeSummary),
+    agents: Array.from(state.runtimes.values()).map((runtime) => withOrchestratorUsage(state, runtimeSummary(runtime))),
   };
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(snapshot));
   renameSync(tmp, path);
+}
+
+// Distinct config-declared models across both teams (excluding "inherit"). Used
+// to scope the model_catalog to what this project actually references (A10).
+function configuredModels(state: HiveState): string[] {
+  const models = new Set<string>();
+  const visit = (node?: TopologyNode) => {
+    if (!node) return;
+    if (node.model && node.model !== "inherit") models.add(node.model);
+    (node.children || []).forEach(visit);
+  };
+  const teams = hiveTeamTopologies(state);
+  for (const team of [teams?.hive, teams?.planning]) {
+    if (!team) continue;
+    visit(team.orchestrator);
+    (team.agents || []).forEach(visit);
+  }
+  return [...models];
+}
+
+// Emit one model_catalog event describing every model the active config
+// references, sourced from the SDK ModelRegistry (A10). Best-effort: if the
+// registry is unavailable the per-worker getAvailableThinkingLevels() path
+// (dispatch.ts) still supplies authoritative levels incrementally.
+export function emitModelCatalog(state: HiveState, registry: any) {
+  if (!state.session || state.mode === "normal" || !registry?.getAll) return;
+  const wanted = new Set(configuredModels(state));
+  if (!wanted.size) return;
+  let all: any[] = [];
+  try { all = registry.getAll() || []; } catch { return; }
+  const VOCAB = ["off", "minimal", "low", "medium", "high", "xhigh"];
+  const thinkingLevelsOf = (model: any): string[] => {
+    const map = model?.thinkingLevelMap;
+    // No map: reasoning models expose the full thinking ladder (no explicit
+    // "off"); non-reasoning models expose only "off".
+    if (!map || typeof map !== "object") {
+      return model?.reasoning ? VOCAB.filter((l) => l !== "off") : ["off"];
+    }
+    // With a map: a level is supported when its key is present and non-null
+    // (explicit null marks it unsupported; pi-ai types.d.ts:576-577). The
+    // authoritative per-worker answer comes from getAvailableThinkingLevels().
+    const levels = VOCAB.filter((level) => level in map && map[level] !== null);
+    return levels.length ? levels : (model?.reasoning ? VOCAB.filter((l) => l !== "off") : ["off"]);
+  };
+  const models = all
+    .filter((model) => wanted.has(`${model.provider}/${model.id}`))
+    .map((model) => ({
+      provider: model.provider,
+      modelId: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: Boolean(model.reasoning),
+      thinkingLevels: thinkingLevelsOf(model),
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      costRates: model.cost ? {
+        input: model.cost.input,
+        output: model.cost.output,
+        cacheRead: model.cost.cacheRead,
+        cacheWrite: model.cost.cacheWrite,
+      } : undefined,
+    }));
+  if (models.length) emitHiveEvent(state, "model_catalog", { models }, "System");
 }
 
 export function startHiveTelemetrySession(state: HiveState, cwd: string) {

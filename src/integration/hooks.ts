@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
-import { configuredChildAgents, textFromMessage } from "../core/utils";
+import { configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
@@ -23,7 +23,28 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     // Enforcement (domain + agent-type policy) runs in plan AND hive mode; only
     // normal mode is unguarded plain Pi.
     if (state.mode === "normal") return;
+    // Orchestrator tool telemetry parity (A5). This hook fires on the main
+    // session's own tool calls; worker tool calls are emitted from dispatch.ts.
+    const orch = state.orchestratorRuntime;
+    if (orch) orch.toolCount++;
+    emitHiveEvent(state, "orchestrator_tool_start", {
+      agent: "Orchestrator",
+      toolName: event.toolName || event.name || "unknown",
+      toolCallId: event.toolCallId,
+      args: truncateMiddle(safeJson(event.args ?? {}), 500),
+    }, "Orchestrator");
     return enforceDomainForTool(state, event, ctx);
+  });
+
+  pi.on("tool_result", async (event: any) => {
+    if (state.mode === "normal") return;
+    emitHiveEvent(state, "orchestrator_tool_end", {
+      agent: "Orchestrator",
+      toolName: event.toolName || event.name || "unknown",
+      toolCallId: event.toolCallId,
+      isError: event.isError === true,
+      resultPreview: truncateMiddle(textOfResult(event.result), 500),
+    }, "Orchestrator");
   });
 
   pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
@@ -91,6 +112,17 @@ ${catalog}`,
     const message = (event as any).message;
     const role = message?.role;
     if (!role || role === "toolResult") return;
+    // Accumulate the orchestrator's own usage/cost so the main session gets the
+    // same token/cost observability workers have (A5).
+    if (role === "assistant" && message?.usage && state.orchestratorRuntime) {
+      const u = extractUsage(message.usage);
+      const orch = state.orchestratorRuntime;
+      orch.inputTokens += u.input;
+      orch.outputTokens += u.output;
+      orch.cacheReadTokens += u.cacheRead;
+      orch.cacheWriteTokens += u.cacheWrite;
+      orch.costUsd += u.cost;
+    }
     const text = textFromMessage(message).trim();
     if (!text) return;
     const from = role === "user" ? "User" : role === "assistant" ? "Orchestrator" : role;

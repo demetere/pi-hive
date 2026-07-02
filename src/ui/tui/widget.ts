@@ -6,7 +6,7 @@ import { HIVE_TOOL_NAMES } from "../../core/constants";
 import { canonicalMode } from "../../core/types";
 import type { AgentConfig, AgentRuntime, HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
-import { startHiveTelemetrySession } from "../../engine/observability";
+import { emitModelCatalog, startHiveTelemetrySession } from "../../engine/observability";
 import { configuredChildAgents } from "../../core/utils";
 import { installHiveFooter, requestHiveFooterRender } from "./footer";
 
@@ -96,6 +96,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
   }
 
   startHiveTelemetrySession(state, ctx.cwd);
+  emitModelCatalog(state, (ctx as any).modelRegistry);
   startDashboardActionPoller(state, ctx);
   state.pi.setActiveTools(mode === "plan" ? PLAN_MODE_TOOLS : HIVE_MODE_TOOLS);
   updateWidget(state);

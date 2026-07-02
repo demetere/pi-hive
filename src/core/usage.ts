@@ -12,54 +12,33 @@ function firstNumber(...candidates: any[]): number {
   return 0;
 }
 
-// Token/cost usage is reported in different shapes by different providers.
-const TOKEN_KEYS = {
-  input: ["input", "input_tokens", "inputTokens", "prompt_tokens", "promptTokens"],
-  output: ["output", "output_tokens", "outputTokens", "completion_tokens", "completionTokens"],
-} as const;
-
-function readTokens(usage: any, kind: "input" | "output"): number {
-  if (!usage || typeof usage !== "object") return 0;
-  const keys = TOKEN_KEYS[kind];
-  const direct = firstNumber(...keys.map((k) => usage[k]));
-  if (direct) return direct;
-  for (const container of ["usage", "tokens", "token_usage", "tokenUsage"]) {
-    const inner = usage[container];
-    if (inner && typeof inner === "object") {
-      const v = firstNumber(...keys.map((k) => inner[k]));
-      if (v) return v;
-    }
-  }
-  return 0;
+// Normalized usage totals. `cost` is SDK-priced (pi-ai computes it); pi-hive
+// keeps no pricing table of its own.
+export interface UsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  cost: number;
 }
 
-function readCost(usage: any): number {
-  if (!usage || typeof usage !== "object") return 0;
-  const direct = firstNumber(
-    usage.cost?.total,
-    usage.costUsd,
-    typeof usage.cost === "number" ? usage.cost : undefined,
-    usage.totalCost,
-    usage.cost_usd,
-    usage.cost?.usd,
-  );
-  if (direct) return direct;
-  for (const container of ["usage", "token_usage", "tokenUsage"]) {
-    const inner = usage[container];
-    if (inner && typeof inner === "object") {
-      const v = firstNumber(inner.cost?.total, inner.costUsd, typeof inner.cost === "number" ? inner.cost : undefined, inner.totalCost, inner.cost_usd);
-      if (v) return v;
-    }
+// Normalize a pi-ai `Usage` object into typed totals. Every worker session is
+// created via pi's own createAgentSession and always yields the canonical shape
+// (input/output/cacheRead/cacheWrite/reasoning + cost.total). One legacy
+// fallback (`input_tokens`/`output_tokens`) is kept for pre-canonical logs read
+// back during replay.
+export function extractUsage(usage: any): UsageTotals {
+  if (!usage || typeof usage !== "object") {
+    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 };
   }
-  return 0;
-}
-
-// Normalize any provider's usage object into { input, output, cost }.
-export function extractUsage(usage: any): { input: number; output: number; cost: number } {
   return {
-    input: readTokens(usage, "input"),
-    output: readTokens(usage, "output"),
-    cost: readCost(usage),
+    input: firstNumber(usage.input, usage.input_tokens),
+    output: firstNumber(usage.output, usage.output_tokens),
+    cacheRead: firstNumber(usage.cacheRead),
+    cacheWrite: firstNumber(usage.cacheWrite, usage.cacheWrite1h),
+    reasoning: firstNumber(usage.reasoning),
+    cost: firstNumber(usage.cost?.total, typeof usage.cost === "number" ? usage.cost : undefined),
   };
 }
 

@@ -3,13 +3,17 @@ export type JsonRecord = Record<string, unknown>;
 
 export type HiveTelemetryEventType =
   | "session_start"
-  | "agent_session_start"
   | "user_message"
   | "assistant_message"
   | "delegation_start"
   | "delegation_end"
   | "worker_tool_start"
   | "worker_tool_end"
+  | "worker_retry"
+  | "worker_compaction"
+  | "orchestrator_tool_start"
+  | "orchestrator_tool_end"
+  | "model_catalog"
   | "distill_start"
   | "distill_end"
   // Plan-store events. Emitted by the core (which cannot reach bun:sqlite) and
@@ -17,6 +21,7 @@ export type HiveTelemetryEventType =
   | "review_verdict"
   | "plan_approval"
   | "plan_comment"
+  // Emitted on delegation failure with { agent, message, stopReason }.
   | "error";
 
 export type TelemetryAgentStatus = "idle" | "running" | "waiting" | "done" | "error";
@@ -61,6 +66,14 @@ export interface TopologyNode {
   thinking?: string;
   consultWhen?: string;
   routingTags?: string[];
+  // The enforcement boundary (Phase A8): domain globs the agent may write,
+  // whether it may commit, and its declared responsibilities.
+  domain?: string[];
+  commit?: boolean;
+  responsibilities?: string;
+  // SDK-reported thinking levels supported by this node's model (A10). Sidecar
+  // data — excluded from the topology content hash (Decision 13).
+  thinkingLevels?: string[];
   children?: TopologyNode[];
 }
 
@@ -87,11 +100,14 @@ export interface TelemetryAgentRuntime {
   elapsedMs?: number;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   costUsd?: number;
   contextPct?: number;
   sessionFile?: string;
   model?: string;
   thinking?: string;
+  thinkingLevels?: string[];
 }
 
 export interface HiveStateSnapshot {
@@ -119,5 +135,8 @@ export interface TelemetrySessionSummary {
   event_count: number;
   running: number;
   tokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   cost: number;
+  topologyHash?: string;
 }

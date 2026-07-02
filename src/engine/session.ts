@@ -105,6 +105,8 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     elapsedMs: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     costUsd: 0,
     contextPct: 0,
     runCount: 0,
@@ -161,7 +163,7 @@ function restoreRuntimeCounters(state: HiveState) {
   try { text = readFileSync(logPath, "utf8"); } catch { return; }
 
   // peak cumulative values keyed by agent name
-  const peak = new Map<string, { input: number; output: number; cost: number; runs: number; tools: number }>();
+  const peak = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; runs: number; tools: number }>();
   for (const line of text.split("\n")) {
     if (!line.trim() || !line.includes("delegation_end")) continue;
     let ev: any;
@@ -170,9 +172,11 @@ function restoreRuntimeCounters(state: HiveState) {
     const rt = ev.payload?.runtime;
     const name = rt?.name || ev.payload?.from;
     if (!name || !rt) continue;
-    const cur = peak.get(name) || { input: 0, output: 0, cost: 0, runs: 0, tools: 0 };
+    const cur = peak.get(name) || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, runs: 0, tools: 0 };
     cur.input = Math.max(cur.input, Number(rt.inputTokens || 0));
     cur.output = Math.max(cur.output, Number(rt.outputTokens || 0));
+    cur.cacheRead = Math.max(cur.cacheRead, Number(rt.cacheReadTokens || 0));
+    cur.cacheWrite = Math.max(cur.cacheWrite, Number(rt.cacheWriteTokens || 0));
     cur.cost = Math.max(cur.cost, Number(rt.costUsd || 0));
     cur.runs = Math.max(cur.runs, Number(rt.runCount || 0));
     cur.tools = Math.max(cur.tools, Number(rt.toolCount || 0));
@@ -184,6 +188,8 @@ function restoreRuntimeCounters(state: HiveState) {
     if (!p) continue;
     runtime.inputTokens = p.input;
     runtime.outputTokens = p.output;
+    runtime.cacheReadTokens = p.cacheRead;
+    runtime.cacheWriteTokens = p.cacheWrite;
     runtime.costUsd = p.cost;
     runtime.runCount = p.runs;
     runtime.toolCount = p.tools;

@@ -32,6 +32,29 @@ export function textFromMessage(message: any): string {
   }
 }
 
+// Best-effort JSON stringify for bounded telemetry previews (tool args). Never
+// throws; falls back to String() on circular/unserializable values.
+export function safeJson(value: any): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+// Extract a text preview from a tool-execution result (string, content array,
+// or arbitrary object). Bounded by the caller via truncateMiddle.
+export function textOfResult(result: any): string {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+  if (typeof result.text === "string") return result.text;
+  if (Array.isArray(result.content)) {
+    return result.content.map((part: any) => part?.text || part?.content || "").filter(Boolean).join("\n");
+  }
+  if (typeof result.output === "string") return result.output;
+  return safeJson(result);
+}
+
 export function truncateMiddle(text: string, max: number): string {
   if (text.length <= max) return text;
   const head = Math.floor(max * 0.65);

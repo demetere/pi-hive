@@ -165,10 +165,14 @@ export interface AgentRuntime {
   elapsedMs: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
   contextPct: number;
   runCount: number;
   sessionFile: string;
+  // SDK-reported thinking levels for the runtime's effective model (A10).
+  thinkingLevels?: string[];
   startedAt?: number;
   timer?: ReturnType<typeof setInterval>;
   session?: any;
@@ -180,6 +184,18 @@ export interface SessionState {
   conversationLog: string;
   observabilityLog: string;
   activeTeam: string;
+}
+
+// Accumulated telemetry for the visible main session (the orchestrator), which
+// has no delegation lifecycle of its own (A5). Counters are cumulative for the
+// session and folded into HiveStateSnapshot.agents as an "Orchestrator" entry.
+export interface OrchestratorRuntime {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+  toolCount: number;
 }
 
 export interface YamlLine {
@@ -219,6 +235,10 @@ export interface HiveState {
   // The core cannot read the plan_verdicts SQLite table (Bun-only), so this is
   // how team_status surfaces the most recent verdict without a DB round-trip.
   latestVerdicts?: Map<string, ReviewVerdict>;
+  // Orchestrator (main-session) telemetry parity (A5). Worker runtimes live in
+  // `runtimes`; the main session has no delegation lifecycle, so its own
+  // tokens/cost/tool-calls are accumulated here and folded into snapshots.
+  orchestratorRuntime?: OrchestratorRuntime;
   onRuntimeUpdate?: (state: HiveState) => void;
   onRuntimeFinish?: (runtime: AgentRuntime, ctx: ExtensionContext) => void;
   // The shared, global telemetry dashboard. It is a machine-wide daemon (reads
