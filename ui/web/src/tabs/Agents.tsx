@@ -1,8 +1,23 @@
 import { useMemo } from "react";
 import { useHive } from "../store";
 import type { ScopeAgent } from "../store";
+import type { ModelInfo } from "../api";
 import { viewAgent } from "../store/raw";
 import { fmtCost, fmtNum, shortModel } from "../lib/format";
+
+// Phase 6.5: model-capability tooltip — context window + cost per Mtok, from the
+// /models capability record. costRates are USD/token; ×1e6 gives USD per Mtok.
+function modelCapabilityTitle(m: ModelInfo | undefined): string | undefined {
+  if (!m) return undefined;
+  const lines: string[] = [];
+  if (m.contextWindow) lines.push(`context: ${(m.contextWindow / 1000).toFixed(0)}k tokens`);
+  if (m.maxTokens) lines.push(`max output: ${(m.maxTokens / 1000).toFixed(0)}k tokens`);
+  const inC = m.costRates?.input, outC = m.costRates?.output;
+  if (inC != null || outC != null) {
+    lines.push(`cost/Mtok: in $${((inC || 0) * 1e6).toFixed(2)} · out $${((outC || 0) * 1e6).toFixed(2)}`);
+  }
+  return lines.length ? lines.join("\n") : undefined;
+}
 
 // Status group order: actively-running first, then those blocked waiting on a
 // child, then finished, idle, errored. Within a group, keep hierarchy order.
@@ -35,13 +50,57 @@ function collapseByName(agents: ScopeAgent[]): ScopeAgent[] {
     if (!cur.color && a.color) cur.color = a.color;
     if (!cur.role && a.role) cur.role = a.role;
     if (!cur.agentType && a.agentType) cur.agentType = a.agentType;
+    // Enforcement contract is the same for an agent name across sessions; keep
+    // the first non-empty values (a runtime-only row carries none).
+    if (!cur.domain?.length && a.domain?.length) cur.domain = a.domain;
+    if (!cur.commit && a.commit) cur.commit = a.commit;
+    if (!cur.stages?.length && a.stages?.length) cur.stages = a.stages;
+    if (!cur.consultWhen && a.consultWhen) cur.consultWhen = a.consultWhen;
+    if (!cur.responsibilities && a.responsibilities) cur.responsibilities = a.responsibilities;
   }
   return Array.from(byName.values());
 }
 
+// The full enforcement contract for a row, as a hover tooltip (Phase 6.1) — the
+// same answer the topology node tooltip gives, surfaced in the table. Omits
+// fields the config didn't declare.
+function enforcementTitle(r: ScopeAgent): string {
+  const lines: string[] = [];
+  if (r.commit) lines.push("commit: yes");
+  if (r.domain?.length) lines.push(`domains: ${r.domain.join(", ")}`);
+  if (r.stages?.length) lines.push(`plan gates: ${r.stages.join(", ")}`);
+  if (r.consultWhen) lines.push(`consult when: ${r.consultWhen}`);
+  if (r.responsibilities) lines.push(`responsibilities:\n${r.responsibilities}`);
+  return lines.join("\n");
+}
+
+// Compact enforcement cell: a commit marker (✓) plus the domain count/first path,
+// with the full contract on hover. "—" when the agent declares no boundary.
+function enforcementCell(r: ScopeAgent) {
+  const hasDomain = !!r.domain?.length;
+  if (!hasDomain && !r.commit && !r.stages?.length) return "—";
+  const domainLabel = hasDomain
+    ? (r.domain!.length === 1 ? r.domain![0] : `${r.domain![0]} +${r.domain!.length - 1}`)
+    : (r.stages?.length ? `gates: ${r.stages.length}` : "");
+  return (
+    <span title={enforcementTitle(r)}>
+      {r.commit ? <span title="may commit" style={{ color: "var(--brand)" }}>✓ </span> : null}
+      {domainLabel || (r.commit ? "commit" : "—")}
+    </span>
+  );
+}
+
 export default function Agents(props: { search: string }) {
   const scopedAgents = useHive((s) => s.scopedAgents);
+  const modelInfo = useHive((s) => s.modelInfo);
   const scope = useHive((s) => s.scope);
+  // Resolve a row's model to its capability record (Phase 6.5), matching the
+  // store's normalized keys (full "provider/id" or bare id, lowercased).
+  const capabilityOf = (model?: string): ModelInfo | undefined => {
+    if (!model) return undefined;
+    const k = model.toLowerCase();
+    return modelInfo.get(k) || modelInfo.get(k.split("/").pop() || k);
+  };
   // Per-session rows only make sense at session scope; elsewhere collapse by name.
   const collapsed = scope.level !== "session";
 
@@ -61,7 +120,7 @@ export default function Agents(props: { search: string }) {
       <table className="table">
         <thead>
           <tr>
-            <th>Agent</th><th>Role</th><th>Type</th><th>Status</th><th>Model</th>
+            <th>Agent</th><th>Role</th><th>Type</th><th>Domain</th><th>Status</th><th>Model</th>
             <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Runs</th><th className="num">Tools</th>
             {!collapsed && <th className="num">Context</th>}
           </tr>
@@ -75,8 +134,9 @@ export default function Agents(props: { search: string }) {
               </td>
               <td className="muted-cell">{r.role || "member"}</td>
               <td className="muted-cell mono">{r.agentType || "—"}</td>
+              <td className="muted-cell mono">{enforcementCell(r)}</td>
               <td><span className={`status-tag ${r.status}`}>{r.status}</span></td>
-              <td className="muted-cell mono">{shortModel(r.model)}</td>
+              <td className="muted-cell mono" title={modelCapabilityTitle(capabilityOf(r.model))}>{shortModel(r.model)}</td>
               <td className="num">{fmtNum(r.tokens)}</td>
               <td className="num">{fmtCost(r.cost)}</td>
               <td className="num">{r.runs}</td>

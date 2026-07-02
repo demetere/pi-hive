@@ -66,15 +66,20 @@ export async function refreshDelegations(reset = false): Promise<void> {
 export async function refreshModels() {
   const models = await fetchModels();
   const map = new Map<string, string[]>();
+  // Phase 6.5: also keep the full capability record (context window / cost) under
+  // the same normalized keys so the UI can show model detail on hover.
+  const info = new Map<string, typeof models[number]>();
   for (const m of models) {
-    const levels = Array.isArray(m.thinkingLevels) ? m.thinkingLevels : [];
-    if (!levels.length) continue;
     const id = String(m.modelId || "").toLowerCase();
     const full = `${String(m.provider || "").toLowerCase()}/${id}`;
+    if (id) info.set(id, m);
+    if (full !== "/") info.set(full, m);
+    const levels = Array.isArray(m.thinkingLevels) ? m.thinkingLevels : [];
+    if (!levels.length) continue;
     if (id) map.set(id, levels);
     if (full !== "/") map.set(full, levels);
   }
-  store.setState({ modelLevels: map });
+  store.setState({ modelLevels: map, modelInfo: info });
 }
 
 // Fetch the versioned topology list for a cwd into the store cache (K2). Skips
@@ -238,6 +243,24 @@ export function connect(): EventSource | undefined {
       reconnectTimer = undefined;
       if (es.readyState !== EventSource.OPEN) store.setState({ connection: "reconnecting" });
     }, 2500);
+  });
+  // Phase 6.2: the server's `hello` frame carries the stream-tail cursor. On the
+  // FIRST connect, events can land between fetchInitialData() and the SSE
+  // subscription; if the hello cursor is ahead of our high-water mark, gap-fetch
+  // the difference so that fetch-vs-subscribe window is not silently lost. On
+  // reconnects the open-handler resync already covers this, so only act when the
+  // server is genuinely ahead.
+  es.addEventListener("hello", (e) => {
+    try {
+      const { cursor } = JSON.parse((e as MessageEvent).data) as { cursor?: number };
+      if (typeof cursor === "number" && cursor > store.getState().lastCursor) {
+        void fetchEventsAfter(store.getState().lastCursor).then(({ events, cursor: c }) => {
+          if (events.length) ingestEvents(events);
+          if (c > store.getState().lastCursor) store.setState({ lastCursor: c });
+          if (events.some((ev) => ev.type === "delegation_end")) scheduleDelegationsRefresh();
+        });
+      }
+    } catch { /* */ }
   });
   es.addEventListener("hive", (e) => {
     try {

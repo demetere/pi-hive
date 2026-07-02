@@ -29,6 +29,14 @@ export function ingestSnapshot(s: Snapshot) {
   // snapshots and rehydrates the versioned topology the session actually ran
   // under, so the old client-side active-team guess (name-matching runtime
   // agents against each team) is obsolete and removed.
+  //
+  // Phase 6.3 freshness guard: a reconnect re-sync (fetchStates) and the live SSE
+  // stream both feed here. If a slower re-sync response lands AFTER a newer live
+  // frame it must not roll the session back. Drop any snapshot whose updated_at
+  // is older than the one we already hold. (Missing/equal timestamps pass so a
+  // legacy snapshot without updated_at still updates.)
+  const existing = store.getState().snapshots[s.session_id];
+  if (existing?.updated_at && s.updated_at && s.updated_at < existing.updated_at) return;
   store.setState({ snapshots: { ...store.getState().snapshots, [s.session_id]: s } });
 }
 

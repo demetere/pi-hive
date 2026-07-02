@@ -154,6 +154,18 @@ export function recomputeLive() {
     const isLive = (v.active ?? v.running) > 0 && fresh;
     v.live = isLive;
     if (isLive) live.add(v.session_id);
+    // Phase 6.4: per-agent stuck-"running" staleness. An agent whose process died
+    // without a final delegation_end stays "running" forever in the status
+    // overlay/topology. Once its session is stale (same window as session
+    // liveness), demote any running/waiting agent to idle and zero the running
+    // count so a dead worker stops rendering as active.
+    if (!fresh) {
+      let anyDemoted = false;
+      for (const a of v.agents.values()) {
+        if (a.status === "running" || a.status === "waiting") { a.status = "idle"; anyDemoted = true; }
+      }
+      if (anyDemoted) { v.running = 0; v.active = 0; }
+    }
   }
   // Project groups for the sidebar; live flag derived from the live set.
   const overrides = s.projectOverrides;
@@ -273,6 +285,8 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
         key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || (rt as any)?.agentType, model: node.model || rt?.model, color: node.color,
         status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
         elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
+        // Enforcement contract carried from the topology node (Phase 6.1).
+        domain: node.domain, commit: node.commit, stages: node.stages, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
       });
       for (const c of node.children || []) walk(c, depth + 1);
     };

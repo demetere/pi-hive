@@ -3,7 +3,7 @@ import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { HiveEvent, ProjectGroup, SessionView, Snapshot } from "../types";
-import type { Delegation, SessionSummary, TopologyDetail, TopologyVersionSummary } from "../api";
+import type { Delegation, ModelInfo, SessionSummary, TopologyDetail, TopologyVersionSummary } from "../api";
 
 // ── scope: fleet (all projects) | project (one project, its sessions
 // aggregated) | session (one session detail). The tabs render within whatever
@@ -22,6 +22,10 @@ export interface ScopeAgent {
   key: string; name: string; role?: string; agentType?: string; model?: string; color?: string; status: string;
   tokens: number; cost: number; runs: number; tools: number; elapsedMs?: number; contextPct?: number;
   task?: string; session_id: string; depth: number; order: number;
+  // Enforcement contract from the topology node (Phase 6.1): what the agent may
+  // touch / commit / which gates it owns. Undefined for runtime-only agents that
+  // have no topology row yet.
+  domain?: string[]; commit?: boolean; stages?: string[]; consultWhen?: string; responsibilities?: string;
 }
 
 export interface ScopeStats { sessions: number; live: number; running: number; tokens: number; cost: number; }
@@ -90,6 +94,9 @@ export interface HiveState {
   // SDK-reported thinking levels per model (GET /models), keyed by a normalized
   // model string — the dial's fallback when a node lacks its own sidecar (K3).
   modelLevels: Map<string, string[]>;
+  // Full model capabilities (GET /models), same normalized keying as modelLevels
+  // (Phase 6.5): context window, max output, and cost rates for hover detail.
+  modelInfo: Map<string, ModelInfo>;
   // Versioned-topology surface (K2): per-cwd version list (ordered v1..vN by
   // first_seen_at) and a hash→reassembled-tree cache filled on demand.
   topologiesByCwd: Map<string, TopologyVersionSummary[]>;
@@ -162,6 +169,7 @@ const initialState: HiveState = {
     thinkingBySession: new Map(),
     projectOverrides: new Map(),
     modelLevels: new Map(),
+    modelInfo: new Map(),
     topologiesByCwd: new Map(),
     topologyByHash: new Map(),
     replay: { active: false, sessionId: "", events: [], loading: false, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false, historyStartsAt: "" },

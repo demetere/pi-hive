@@ -204,6 +204,12 @@ export interface ModelInfo {
   name?: string;
   reasoning: boolean;
   thinkingLevels: string[];
+  // Capability richness (Phase 6.5) — previously dropped on the client. Cost
+  // rates are USD per token (the SDK's own pricing); context window / max output
+  // in tokens.
+  contextWindow?: number;
+  maxTokens?: number;
+  costRates?: { input?: number | null; output?: number | null; cacheRead?: number | null; cacheWrite?: number | null };
 }
 export async function fetchModels(): Promise<ModelInfo[]> {
   const data = await jsonOr<{ models: ModelInfo[] }>(fetch("/models"), { models: [] });

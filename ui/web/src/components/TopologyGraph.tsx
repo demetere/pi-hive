@@ -24,6 +24,23 @@ function nodeWidthFor(name: string, tag: string): number {
   return 12 + 15 + idW + 8 + tagWidth(tag) + 12;
 }
 
+// The node's enforcement contract, rendered as a native SVG <title> tooltip on
+// hover (Phase 6.1). Answers "what may this agent touch / can it commit / which
+// gates does this planner own". Absent fields are omitted so the tooltip only
+// shows what the config actually declares; returns "" when nothing is known.
+function enforcementSummary(node: TopologyNode): string {
+  const lines: string[] = [];
+  const kind = node.agentType || node.role;
+  if (kind) lines.push(`type: ${kind}`);
+  if (node.commit) lines.push("commit: yes");
+  if (node.domain?.length) lines.push(`domains: ${node.domain.join(", ")}`);
+  if (node.stages?.length) lines.push(`plan gates: ${node.stages.join(", ")}`);
+  if (node.consultWhen) lines.push(`consult when: ${node.consultWhen}`);
+  if (node.routingTags?.length) lines.push(`routing: ${node.routingTags.join(", ")}`);
+  if (node.responsibilities) lines.push(`responsibilities:\n${node.responsibilities}`);
+  return lines.join("\n");
+}
+
 type TopologyKind = "active" | "hive" | "planning";
 
 function pickTopology(sess: SessionView | undefined, kind: TopologyKind): Topology | undefined {
@@ -357,6 +374,8 @@ function Node(props: {
   const safeName = data.name.replace(/[^a-z0-9]/gi, "");
   const clipId = `nclip-${safeName}`;
   const gradId = `nwash-${safeName}`;
+  // Enforcement contract shown as a hover tooltip (Phase 6.1).
+  const enforcement = enforcementSummary(data);
 
   return (
     <g
@@ -368,6 +387,8 @@ function Node(props: {
       onClick={onClick}
       onKeyDown={onKeyDown}
     >
+      {/* Enforcement contract on hover (Phase 6.1): domains, commit, gates, etc. */}
+      <title>{enforcement ? `${data.name}\n${enforcement}` : data.name}</title>
       <defs>
         <clipPath id={clipId}><rect rx="14" width={W} height={H} /></clipPath>
         {/* wash carries the full card width, fading left→right into transparent */}
