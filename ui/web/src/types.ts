@@ -6,6 +6,7 @@ import type {
   HiveTelemetryEvent,
   HiveTelemetryEventType,
   HiveTopology,
+  HiveTeamTopologies,
   TelemetryAgentRuntime,
   TelemetryAgentStatus,
   TopologyNode,
@@ -15,6 +16,7 @@ export type AgentStatus = TelemetryAgentStatus;
 export type HiveEventType = HiveTelemetryEventType;
 export type HiveEvent = HiveTelemetryEvent<Record<string, any>> & { type: HiveEventType | string };
 export type Topology = HiveTopology;
+export type TeamTopologies = HiveTeamTopologies;
 export type { TopologyNode };
 export type AgentRuntime = TelemetryAgentRuntime;
 export type Snapshot = HiveStateSnapshot;
@@ -33,6 +35,7 @@ export interface SessionView {
   cost: number;
   live: boolean;
   topology?: Topology;
+  topologies?: TeamTopologies;
   agents: Map<string, AgentRuntime>;
 }
 

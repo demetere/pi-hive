@@ -74,6 +74,17 @@ function ingestEvents(list: HiveEvent[]) {
 
 function ingestSnapshot(s: Snapshot) {
   if (!s || !s.session_id) return;
+  // Older snapshots did not record the explicit mode, and server-side backfill
+  // can misclassify legacy root "Orchestrator" as hive even for planning runs.
+  // Prefer the runtime agent names when they clearly match one configured team.
+  if (s.topologies?.hive || s.topologies?.planning) {
+    const runtimeNames = new Set((s.agents || []).map((a) => a.name));
+    const countMatches = (topo: any) => (flattenTopology(topo) || []).reduce((n: number, node: any) => n + (runtimeNames.has(node.name) ? 1 : 0), 0);
+    const hiveMatches = countMatches(s.topologies.hive);
+    const planningMatches = countMatches(s.topologies.planning);
+    if (planningMatches > hiveMatches) s = { ...s, topologies: { ...s.topologies, active: "planning" } };
+    else if (hiveMatches > planningMatches) s = { ...s, topologies: { ...s.topologies, active: "hive" } };
+  }
   setSnapshots(s.session_id, s);
 }
 
@@ -222,6 +233,7 @@ export const sessions = createMemo<SessionView[]>(() => {
     if (snap.updated_at > v.last_ts) v.last_ts = snap.updated_at;
     sessionUpdatedAt.set(id, new Date(snap.updated_at).getTime());
     v.topology = snap.topology;
+    v.topologies = snap.topologies;
     v.agents = buildAgents(snap);
     const hist = historyBySession().get(id);
     if (hist) {
@@ -371,7 +383,7 @@ export const scopedStats = createMemo(() => {
 // Agent rows for the current scope. For a single session it's that session's
 // topology; for project/fleet it aggregates every session's agents (keyed by
 // session::name so same-named agents across sessions don't collide).
-export interface ScopeAgent { key: string; name: string; role?: string; model?: string; color?: string; status: string; tokens: number; cost: number; runs: number; tools: number; contextPct?: number; task?: string; session_id: string; depth: number; order: number; }
+export interface ScopeAgent { key: string; name: string; role?: string; model?: string; color?: string; status: string; tokens: number; cost: number; runs: number; tools: number; elapsedMs?: number; contextPct?: number; task?: string; session_id: string; depth: number; order: number; }
 export const scopedAgents = createMemo<ScopeAgent[]>(() => {
   const hist = historyBySession();
   const out: ScopeAgent[] = [];
@@ -379,24 +391,54 @@ export const scopedAgents = createMemo<ScopeAgent[]>(() => {
   for (const sess of scopedSessions()) {
     const sessHist = hist.get(sess.session_id);
     // Depth-first walk preserves hierarchy order (orchestrator → leads →
-    // members) and records each agent's tree depth.
+    // members) and records each agent's tree depth. Config/topology snapshots
+    // can contain the same agent both nested under the orchestrator and in the
+    // top-level agents[] list; render each agent name only once per session.
+    const seen = new Set<string>();
+    const topo = sess.topologies?.active ? sess.topologies[sess.topologies.active] : sess.topology;
+    const rootName = topo?.orchestrator?.name;
+    const norm = (name: string | undefined) => (name || "").trim().toLowerCase();
+    const inferredRole = (node: any, depth: number, rt?: AgentRuntime) => {
+      if (node.role || rt?.role) return node.role || rt?.role;
+      if (rootName && norm(node.name) === norm(rootName) && depth === 0) return "orchestrator";
+      return depth <= (rootName ? 1 : 0) || (node.children || []).length ? "lead" : "member";
+    };
     const walk = (node: any, depth: number) => {
-      if (!node) return;
+      const key = norm(node?.name);
+      if (!node || !key || seen.has(key)) return;
+      seen.add(key);
       const rt = sess.agents.get(node.name);
       const h = sessHist?.get(node.name);
       const snapTok = (rt?.inputTokens || 0) + (rt?.outputTokens || 0);
       const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
       const cost = Math.max(rt?.costUsd || 0, h?.cost || 0);
       out.push({
-        key: sess.session_id + "::" + node.name, name: node.name, role: node.role, model: node.model, color: node.color,
+        key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), model: node.model || rt?.model, color: node.color,
         status: agentStatus(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
-        contextPct: rt?.contextPct, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
+        elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
       });
       for (const c of node.children || []) walk(c, depth + 1);
     };
-    const topo = sess.topology;
     if (topo?.orchestrator) walk(topo.orchestrator, 0);
     for (const root of topo?.agents || []) walk(root, topo?.orchestrator ? 1 : 0);
+
+    // Runtime/event-only agents may exist before (or without) a topology row —
+    // e.g. a planning worker in an older snapshot. Keep them visible in
+    // Activity's agent list instead of depending solely on config topology.
+    for (const rt of sess.agents.values()) {
+      const key = norm(rt.name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const h = sessHist?.get(rt.name);
+      const snapTok = (rt.inputTokens || 0) + (rt.outputTokens || 0);
+      const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
+      const cost = Math.max(rt.costUsd || 0, h?.cost || 0);
+      out.push({
+        key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", model: rt.model, color: undefined,
+        status: agentStatus(sess.session_id, rt.name, rt.status), tokens, cost, runs: Math.max(rt.runCount || 0, h?.runs || 0), tools: Math.max(rt.toolCount || 0, h?.tools || 0),
+        elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
+      });
+    }
   }
   return out; // hierarchy order by default; the Agents tab re-sorts by status+hierarchy
 });

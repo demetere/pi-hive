@@ -52,7 +52,7 @@ export interface PlanVerdict {
   summary: string; evidence: string[]; concerns: string[]; blockers: string[]; createdAt: string;
 }
 export interface PlanApproval { id: string; changeId: string; phase: string; approvedBy: string; actor?: string; summary?: string; createdAt: string; }
-export interface PlanComment { id: string; changeId: string; file?: string; anchor?: string; author?: string; body: string; createdAt: string; }
+export interface PlanComment { id: string; changeId: string; file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string; createdAt: string; }
 export interface PlanSummary { changeId: string; title?: string; phase: string; status?: string; owner?: string; artifacts: string[]; latestVerdict: PlanVerdict | null; }
 export interface PlanDetail {
   changeId: string; title?: string; status?: string; owner?: string; phase: string;
@@ -78,7 +78,7 @@ export async function fetchPlanFile(changeId: string, path: string, cwd?: string
   return data.content || "";
 }
 
-export async function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string }, cwd?: string): Promise<boolean> {
+export async function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }, cwd?: string): Promise<boolean> {
   try {
     const res = await fetch(`/plans/${encodeURIComponent(changeId)}/comments${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return res.ok;
