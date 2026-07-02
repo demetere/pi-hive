@@ -107,7 +107,12 @@ symlink:
       printf "{{GREEN}}Updated pi-hive symlink: %s -> %s{{NC}}\n" "$target" "$source"
     fi
   elif [ -e "$target" ]; then
-    backup="$target.backup.$(date +%Y%m%d%H%M%S)"
+    # Keep backups outside ~/.pi/agent/extensions. Pi auto-discovers any
+    # extensions/*/index.ts directory, so in-place backups register duplicate
+    # commands such as /hive-plan:1 and /hive-plan:2.
+    backup_dir="$(dirname "$(dirname "$target")")/extension-backups"
+    mkdir -p "$backup_dir"
+    backup="$backup_dir/$(basename "$target").$(date +%Y%m%d%H%M%S)"
     mv "$target" "$backup"
     ln -s "$source" "$target"
     printf "{{YELLOW}}Moved existing extension to %s{{NC}}\n" "$backup"

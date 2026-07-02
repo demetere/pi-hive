@@ -52,6 +52,8 @@ export interface TelemetryRegistryRow {
 export interface TopologyNode {
   name: string;
   role?: TelemetryAgentRole;
+  agentType?: string;
+  stages?: string[];
   group?: string;
   color?: string;
   model?: string;
@@ -65,6 +67,12 @@ export interface TopologyNode {
 export interface HiveTopology {
   orchestrator?: TopologyNode;
   agents?: TopologyNode[];
+}
+
+export interface HiveTeamTopologies {
+  active: "hive" | "planning";
+  hive?: HiveTopology;
+  planning?: HiveTopology;
 }
 
 export interface TelemetryAgentRuntime {
@@ -93,7 +101,10 @@ export interface HiveStateSnapshot {
   session_dir?: string;
   telemetry_log?: string;
   conversation_log?: string;
+  // Back-compat/current active team topology.
   topology?: HiveTopology;
+  // Both configured team topologies, when available: execution hive + planning.
+  topologies?: HiveTeamTopologies;
   active_runs?: number;
   agents?: TelemetryAgentRuntime[];
 }

@@ -16,7 +16,7 @@ import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
-import { approveGate, changeExists, createChange, listChangeIds, readPlanMeta } from "../engine/plan-store";
+import { approveGate, changeExists, createChange, listChangeIds, readPlanMeta, toChangeId } from "../engine/plan-store";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
@@ -243,10 +243,20 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
         const { title, owner } = params as { title: string; owner?: string };
-        const result = await createChange(ctx.cwd, title, owner);
+        const requestedChangeId = toChangeId(title);
+        if (state.activeChangeId && changeExists(ctx.cwd, state.activeChangeId) && state.activeChangeId !== requestedChangeId) {
+          return {
+            content: [{
+              type: "text",
+              text: `This planning session already has active change "${state.activeChangeId}". Continue that plan and put related slices/gates inside it. To intentionally switch to another existing plan, use plan_select(changeId). Do not create a second plan from the same session unless the user explicitly asks to switch scope.`,
+            }],
+            details: { ok: false, activeChangeId: state.activeChangeId, requestedChangeId },
+          };
+        }
+        const result = await createChange(ctx.cwd, title, owner, state.session?.sessionId);
         state.activeChangeId = result.changeId;
         const note = result.created ? "created" : "already existed";
-        return { content: [{ type: "text", text: `Plan change "${result.changeId}" ${note} and is now the active change (${result.path}). Delegate planners to write proposal/requirements/design/tasks here.` }], details: { ok: true, ...result } };
+        return { content: [{ type: "text", text: `Plan change "${result.changeId}" ${note} and is now the active change (${result.path}). Keep this session focused on this plan; add related slices to its proposal/requirements/design/tasks instead of creating sibling plans.` }], details: { ok: true, ...result } };
       },
     }));
 

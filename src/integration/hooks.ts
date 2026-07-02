@@ -12,7 +12,7 @@ import { applyMode, captureNormalTools, installHeader, updateWidget } from "../u
 import { installHiveFooter, registerFooterHooks } from "../ui/tui/footer";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
-import { emitHiveEvent, hiveTopology, registerHiveTelemetrySession, writeHiveStateSnapshot } from "../engine/observability";
+import { emitHiveEvent } from "../engine/observability";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -87,6 +87,7 @@ ${catalog}`,
     // messages. Each worker keeps its own full transcript in agents/<slug>.jsonl
     // (read it via team_conversation(agent)) — unbounded worker output (a
     // mental-model YAML can be hundreds of KB) never reaches the shared log.
+    if (state.mode === "normal") return;
     const message = (event as any).message;
     const role = message?.role;
     if (!role || role === "toolResult") return;
@@ -107,15 +108,6 @@ ${catalog}`,
       reloadTeam(state, ctx);
       state.sddStatus = resolveHiveSddStatus(state, ctx.cwd);
       logRecord(state, { from: "System", type: "system", message: "Session started" });
-      registerHiveTelemetrySession(state, ctx.cwd);
-      emitHiveEvent(state, "session_start", {
-        cwd: ctx.cwd,
-        sessionDir: state.session.sessionDir,
-        conversationLog: state.session.conversationLog,
-        observabilityLog: state.session.observabilityLog,
-        topology: hiveTopology(state),
-      }, "System");
-      writeHiveStateSnapshot(state);
       captureNormalTools(state);
       applyMode(state, ctx, "normal", { notify: false });
       // Other globally-installed footer extensions may also handle session_start.
@@ -153,6 +145,9 @@ ${catalog}`,
     // using it — so we do NOT kill it here. Just drop this session's reference.
     // Explicit teardown is /hive-observe-stop.
     state.obsServer = undefined;
+    if (state.dashboardActionTimer) clearInterval(state.dashboardActionTimer);
+    state.dashboardActionTimer = undefined;
+    state.dashboardActionOffset = undefined;
     state.onRuntimeUpdate = undefined;
     state.onRuntimeFinish = undefined;
     if (ctx.mode === "tui") {

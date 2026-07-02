@@ -19,6 +19,7 @@ export interface PlanMeta {
   status?: string;
   phase?: string;
   owner?: string;
+  sessionId?: string;
 }
 
 export function plansRoot(cwd: string): string {
@@ -68,13 +69,14 @@ function renderPlanYaml(meta: PlanMeta): string {
     `status: ${meta.status || "planning"}`,
     `phase: ${meta.phase || "proposal"}`,
     `owner: ${JSON.stringify(meta.owner || "")}`,
+    ...(meta.sessionId ? [`session_id: ${JSON.stringify(meta.sessionId)}`] : []),
   ];
   return `${lines.join("\n")}\n`;
 }
 
 // Create a new change folder with a plan.yaml. Returns the change-id. Idempotent
 // on the folder (never overwrites an existing plan.yaml).
-export async function createChange(cwd: string, title: string, owner?: string): Promise<{ changeId: string; created: boolean; path: string }> {
+export async function createChange(cwd: string, title: string, owner?: string, sessionId?: string): Promise<{ changeId: string; created: boolean; path: string }> {
   const changeId = toChangeId(title);
   assertSafeChangeId(changeId);
   const dir = changeDir(cwd, changeId);
@@ -83,7 +85,7 @@ export async function createChange(cwd: string, title: string, owner?: string): 
   return withFileMutationQueue(planYaml, async () => {
     if (existsSync(planYaml)) return { changeId, created: false, path };
     ensureDir(dir);
-    writeFileSync(planYaml, renderPlanYaml({ title, owner, status: "planning", phase: "proposal" }));
+    writeFileSync(planYaml, renderPlanYaml({ title, owner, sessionId, status: "planning", phase: "proposal" }));
     return { changeId, created: true, path };
   });
 }
@@ -99,6 +101,7 @@ export function readPlanMeta(cwd: string, changeId: string): PlanMeta {
       status: parsed?.status ? String(parsed.status) : undefined,
       phase: parsed?.phase ? String(parsed.phase) : undefined,
       owner: parsed?.owner ? String(parsed.owner) : undefined,
+      sessionId: parsed?.session_id ? String(parsed.session_id) : undefined,
     };
   } catch {
     return {};

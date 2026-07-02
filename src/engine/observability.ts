@@ -2,7 +2,7 @@ import { appendFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentConfig, AgentRuntime, HiveState } from "../core/types";
+import type { AgentConfig, AgentRuntime, HiveState, HiveTeam } from "../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TopologyNode } from "../shared/telemetry";
 import { ensureDir, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
@@ -38,6 +38,8 @@ function agentSummary(agent: AgentConfig): TopologyNode {
   return {
     name: agent.name,
     role: agent.role,
+    agentType: agent.agentType,
+    stages: agent.stages,
     group: agent.groupName,
     color: agent.color,
     model: agent.model,
@@ -49,11 +51,28 @@ function agentSummary(agent: AgentConfig): TopologyNode {
   };
 }
 
+function teamTopology(team?: HiveTeam): HiveStateSnapshot["topology"] | undefined {
+  if (!team) return undefined;
+  return {
+    orchestrator: team.main ? agentSummary(team.main) : undefined,
+    agents: (team.agents || []).map(agentSummary),
+  };
+}
+
 export function hiveTopology(state: HiveState): HiveStateSnapshot["topology"] {
   const roots = state.config?.agents || [];
   return {
     orchestrator: state.config?.orchestrator ? agentSummary(state.config.orchestrator) : undefined,
     agents: roots.map(agentSummary),
+  };
+}
+
+export function hiveTeamTopologies(state: HiveState): HiveStateSnapshot["topologies"] | undefined {
+  if (!state.config) return undefined;
+  return {
+    active: state.mode === "plan" ? "planning" : "hive",
+    hive: teamTopology(state.config.hive ?? { main: state.config.orchestrator, agents: state.config.agents }),
+    planning: teamTopology(state.config.planning),
   };
 }
 
@@ -79,7 +98,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
 }
 
 export function writeHiveStateSnapshot(state: HiveState) {
-  if (!state.session) return;
+  if (!state.session || state.mode === "normal") return;
   const path = join(state.session.sessionDir, "hive-state.json");
   ensureDir(dirname(path));
   const snapshot: HiveStateSnapshot = {
@@ -90,6 +109,7 @@ export function writeHiveStateSnapshot(state: HiveState) {
     telemetry_log: state.session.observabilityLog,
     conversation_log: state.session.conversationLog,
     topology: hiveTopology(state),
+    topologies: hiveTeamTopologies(state),
     active_runs: state.activeRuns,
     agents: Array.from(state.runtimes.values()).map(runtimeSummary),
   };
@@ -98,8 +118,22 @@ export function writeHiveStateSnapshot(state: HiveState) {
   renameSync(tmp, path);
 }
 
+export function startHiveTelemetrySession(state: HiveState, cwd: string) {
+  if (!state.session || state.mode === "normal" || state.telemetryRegistered) return;
+  state.telemetryRegistered = true;
+  registerHiveTelemetrySession(state, cwd);
+  emitHiveEvent(state, "session_start", {
+    cwd,
+    sessionDir: state.session.sessionDir,
+    conversationLog: state.session.conversationLog,
+    observabilityLog: state.session.observabilityLog,
+    topology: hiveTopology(state),
+  }, "System");
+  writeHiveStateSnapshot(state);
+}
+
 export function emitHiveEvent(state: HiveState, type: HiveObsEventType, payload: JsonRecord = {}, actor = currentAgentName()) {
-  if (!state.session) return;
+  if (!state.session || state.mode === "normal") return;
   const logPath = state.session.observabilityLog;
   if (!logPath) return;
   ensureDir(dirname(logPath));

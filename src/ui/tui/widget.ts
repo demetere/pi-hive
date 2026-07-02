@@ -1,9 +1,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { HIVE_TOOL_NAMES } from "../../core/constants";
 import { canonicalMode } from "../../core/types";
 import type { AgentConfig, AgentRuntime, HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
+import { startHiveTelemetrySession } from "../../engine/observability";
 import { configuredChildAgents } from "../../core/utils";
 import { installHiveFooter, requestHiveFooterRender } from "./footer";
 
@@ -12,6 +15,35 @@ import { installHiveFooter, requestHiveFooterRender } from "./footer";
 const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
 const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "approve_plan"];
 const HIVE_MODE_TOOLS = COMMON_HIVE_TOOLS;
+
+function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
+  if (!state.session || state.dashboardActionTimer) return;
+  const file = join(state.session.sessionDir, "dashboard-actions.jsonl");
+  try { state.dashboardActionOffset = existsSync(file) ? statSync(file).size : 0; } catch { state.dashboardActionOffset = 0; }
+  state.dashboardActionTimer = setInterval(() => {
+    if (!state.session) return;
+    try {
+      if (!existsSync(file)) return;
+      const text = readFileSync(file, "utf8");
+      const offset = state.dashboardActionOffset || 0;
+      if (text.length <= offset) return;
+      state.dashboardActionOffset = text.length;
+      for (const line of text.slice(offset).split("\n")) {
+        if (!line.trim()) continue;
+        const action = JSON.parse(line);
+        if (action.type === "plan_approval" && action.changeId && action.phase) {
+          const next = action.nextPhase === "apply"
+            ? `The dashboard approved tasks for change "${action.changeId}". The plan is ready; summarize readiness and ask whether to run /hive-execute ${action.changeId}.`
+            : `The dashboard approved the ${action.phase} gate for change "${action.changeId}". Continue planning the next gate (${action.nextPhase || "next phase"}) with the planning team.`;
+          state.pi.sendUserMessage(next);
+        } else if (action.type === "plan_comment" && action.changeId && action.body) {
+          const where = action.file ? ` on ${action.file}${action.anchor ? `#${action.anchor}` : ""}` : "";
+          state.pi.sendUserMessage(`Dashboard feedback for change "${action.changeId}"${where}:\n\n${action.body}\n\nAddress this feedback in the active plan before continuing.`);
+        }
+      }
+    } catch { /* best-effort bridge from dashboard to live TUI session */ }
+  }, 1000);
+}
 
 export function captureNormalTools(state: HiveState) {
   const active = state.pi.getActiveTools().filter((name: string) => !HIVE_TOOL_NAMES.has(name));
@@ -63,6 +95,8 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     return;
   }
 
+  startHiveTelemetrySession(state, ctx.cwd);
+  startDashboardActionPoller(state, ctx);
   state.pi.setActiveTools(mode === "plan" ? PLAN_MODE_TOOLS : HIVE_MODE_TOOLS);
   updateWidget(state);
   if (shouldNotify && ctx.hasUI) {

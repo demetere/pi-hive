@@ -206,6 +206,11 @@ export interface HiveState {
   lastTokPerSec: number;
   sddStatus: SddStatus | null;
   obsSeq: number;
+  // Dashboard telemetry is registered lazily: normal chat sessions stay out of
+  // the telemetry dashboard until the user enters plan/hive mode.
+  telemetryRegistered?: boolean;
+  dashboardActionTimer?: ReturnType<typeof setInterval>;
+  dashboardActionOffset?: number;
   // The currently-selected plan change-id (set by plan_new/plan_select and
   // /hive-execute). Persists across turns; delegations are wrapped in
   // runWithChange(activeChangeId) so workers' tools see it via currentChangeId().

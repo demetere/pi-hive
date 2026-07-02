@@ -2,7 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
-import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary } from "../../shared/telemetry";
+import { loadConfig } from "../../core/config";
+import type { AgentConfig, HiveTeam } from "../../core/types";
+import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
 import { BOOT_SESSION_ID, CONVERSATION_LOG, MAX_EVENTS, PROJECT_CWD, REGISTRY_PATH, SINGLE_LOG_PATH } from "./config";
 import {
   dbEventRow,
@@ -34,7 +36,7 @@ export function allEvents(): HiveTelemetryEvent[] {
 }
 
 export function allSnapshots(): HiveStateSnapshot[] {
-  return Array.from(snapshots.values());
+  return Array.from(snapshots.values()).map(enrichSnapshotTopologies);
 }
 
 export function addSource(logPath: string, meta: TelemetryRegistryRow = {}) {
@@ -110,9 +112,62 @@ export function readState(logPath: string) {
   } catch { /* ignore partial snapshot writes */ }
 }
 
+const topologyCache = new Map<string, { mtimeMs: number; topologies?: HiveStateSnapshot["topologies"] }>();
+
+function agentSummary(agent: AgentConfig): TopologyNode {
+  return {
+    name: agent.name,
+    role: agent.role,
+    agentType: agent.agentType,
+    stages: agent.stages,
+    group: agent.groupName,
+    color: agent.color,
+    model: agent.model,
+    tools: agent.tools,
+    thinking: agent.thinking,
+    consultWhen: agent.consultWhen,
+    routingTags: agent.routingTags || [],
+    children: [...(agent.members || []), ...(agent.children || [])].map(agentSummary),
+  };
+}
+
+function teamTopology(team?: HiveTeam): HiveStateSnapshot["topology"] | undefined {
+  if (!team) return undefined;
+  return { orchestrator: team.main ? agentSummary(team.main) : undefined, agents: (team.agents || []).map(agentSummary) };
+}
+
+function configuredTopologies(cwd: string | undefined, legacy?: HiveStateSnapshot["topology"]): HiveStateSnapshot["topologies"] | undefined {
+  if (!cwd) return undefined;
+  const configPath = path.join(cwd, ".pi", "hive", "hive-config.yaml");
+  let mtimeMs = 0;
+  try { mtimeMs = fs.statSync(configPath).mtimeMs; } catch { return undefined; }
+  const cached = topologyCache.get(cwd);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.topologies;
+  try {
+    const config = loadConfig(cwd);
+    const hive = teamTopology(config.hive ?? { main: config.orchestrator, agents: config.agents });
+    const planning = teamTopology(config.planning);
+    const legacyRoot = legacy?.orchestrator?.name;
+    const active = legacyRoot && planning?.orchestrator?.name === legacyRoot && hive?.orchestrator?.name !== legacyRoot ? "planning" : "hive";
+    const topologies: HiveStateSnapshot["topologies"] = { active, hive, planning };
+    topologyCache.set(cwd, { mtimeMs, topologies });
+    return topologies;
+  } catch {
+    topologyCache.set(cwd, { mtimeMs, topologies: undefined });
+    return undefined;
+  }
+}
+
+function enrichSnapshotTopologies(snapshot: HiveStateSnapshot): HiveStateSnapshot {
+  if (!snapshot || snapshot.topologies || !snapshot.cwd) return snapshot;
+  const topologies = configuredTopologies(snapshot.cwd, snapshot.topology);
+  return topologies ? { ...snapshot, topologies } : snapshot;
+}
+
 function addSnapshot(snapshot: HiveStateSnapshot) {
   if (!snapshot || !snapshot.session_id) return;
   snapshot.updated_at ||= new Date().toISOString();
+  snapshot = enrichSnapshotTopologies(snapshot);
   snapshots.set(snapshot.session_id, snapshot);
   upsertState.run({
     $session_id: snapshot.session_id,
@@ -182,6 +237,8 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
       anchor: payload.anchor ? String(payload.anchor) : undefined,
       author: payload.author ? String(payload.author) : (event.actor || undefined),
       body: String(payload.body || ""),
+      annotationType: payload.annotationType ? String(payload.annotationType) : undefined,
+      originalText: payload.originalText ? String(payload.originalText) : undefined,
       sessionId: event.session_id,
       createdAt: event.ts,
     });
@@ -206,7 +263,7 @@ function addEvent(event: HiveTelemetryEvent) {
 
 function loadDbIntoMemory() {
   events = loadPersistedEvents(MAX_EVENTS);
-  for (const snapshot of loadPersistedStates()) snapshots.set(snapshot.session_id, snapshot);
+  for (const snapshot of loadPersistedStates()) snapshots.set(snapshot.session_id, enrichSnapshotTopologies(snapshot));
 }
 
 export function sessionSummaries(): TelemetrySessionSummary[] {
@@ -314,17 +371,53 @@ export function deleteProject(name: string): number {
 
 // Resolve an agent's own conversation-log file from the latest snapshot. The
 // snapshot's agents[] carry the sessionFile each pi subprocess writes to.
-export function agentLogPath(sessionId: string, agentName: string): { file?: string; status?: string } {
+export function agentLogPath(sessionId: string, agentName: string): { file?: string; status?: string; main?: boolean } {
   const snap = snapshots.get(sessionId);
-  if (!snap || !Array.isArray(snap.agents)) return {};
-  const agent = snap.agents.find((candidate) => candidate.name === agentName);
+  if (!snap) return {};
+  const activeRoot = snap.topologies?.active ? snap.topologies[snap.topologies.active]?.orchestrator?.name : snap.topology?.orchestrator?.name;
+  const isMain = agentName === activeRoot || (agentName === "Orchestrator" && !!activeRoot) || (agentName === "Planning Lead" && activeRoot === "Planning Lead");
+  const agent = Array.isArray(snap.agents) ? snap.agents.find((candidate) => candidate.name === agentName) : undefined;
+  if (isMain) return { file: agent?.sessionFile && fs.existsSync(agent.sessionFile) ? agent.sessionFile : snap.conversation_log, status: agent?.status || "running", main: true };
   if (!agent || !agent.sessionFile) return { status: agent?.status };
   return { file: agent.sessionFile, status: agent.status };
 }
 
+function parseMainConversationLog(file: string, fromOffset = 0): { entries: any[]; offset: number; size: number } {
+  let stat: fs.Stats;
+  try { stat = fs.statSync(file); } catch { return { entries: [], offset: 0, size: 0 }; }
+  const start = fromOffset > stat.size ? 0 : fromOffset;
+  const text = fs.readFileSync(file, "utf8").slice(start);
+  const entries: any[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let row: any;
+    try { row = JSON.parse(line); } catch { continue; }
+    const from = String(row.from || "assistant");
+    const type = String(row.type || "message");
+    const role = from === "User" ? "user" : from === "System" ? "system" : "assistant";
+    const heading = row.to ? `${from} → ${row.to} · ${type}` : `${from} · ${type}`;
+    const body = row.message ? `${heading}\n\n${row.message}` : heading;
+    entries.push({ kind: "message", role, parts: [{ type: "text", text: body }], ts: row.timestamp });
+  }
+  return { entries, offset: stat.size, size: stat.size };
+}
+
 export function readAgentLog(sessionId: string, agent: string, offset: number, runId: string): any {
-  const { file: currentFile, status } = agentLogPath(sessionId, agent);
+  const { file: currentFile, status, main } = agentLogPath(sessionId, agent);
   if (!currentFile) return { entries: [], offset: 0, size: 0, status: status || "unknown", exists: false, runs: [] };
+  if (main) {
+    const parsed = parseMainConversationLog(currentFile, offset);
+    return {
+      entries: parsed.entries,
+      offset: parsed.offset,
+      size: parsed.size,
+      status: status || "running",
+      exists: true,
+      running: true,
+      runs: [{ id: "current", label: "Main session" }],
+      run: "current",
+    };
+  }
   const runs = agentRuns(currentFile);
   if (!runs.length) return { entries: [], offset: 0, size: 0, status, exists: false, runs: [] };
   const chosen = runs.find((r) => r.id === runId) || runs[0];

@@ -1,9 +1,11 @@
 import * as path from "node:path";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { PROJECT_CWD } from "./config";
 import { sessionSummaries } from "./runtime";
 import { randomUUID } from "node:crypto";
 import { insertPlanApproval, insertPlanComment, listApprovals, listComments, latestVerdict, listVerdicts } from "./db";
 import {
+  changeDir,
   changeExists,
   listArtifacts,
   listChangeIds,
@@ -11,7 +13,7 @@ import {
   readPlanMeta,
   resolveArtifact,
 } from "../../engine/plan-store";
-import { readIfSmall } from "../../core/utils";
+import { ensureDir, readIfSmall } from "../../core/utils";
 import { PLAN_GATES } from "../../engine/sdd";
 
 // The plan-store lives per-project under <cwd>/.pi/hive/plans/. The dashboard is
@@ -46,6 +48,7 @@ export interface PlanSummary {
   phase: string;
   status?: string;
   owner?: string;
+  sessionId?: string;
   artifacts: string[];
   latestVerdict: ReturnType<typeof latestVerdict>;
 }
@@ -60,6 +63,7 @@ export function listPlans(cwd: string): PlanSummary[] {
       phase,
       status: meta.status,
       owner: meta.owner,
+      sessionId: meta.sessionId,
       artifacts: listArtifacts(cwd, changeId),
       latestVerdict: latestVerdict(changeId),
     };
@@ -75,6 +79,7 @@ export function planDetail(cwd: string, changeId: string) {
     title: meta.title || proposalTitle(cwd, changeId),
     status: meta.status,
     owner: meta.owner,
+    sessionId: meta.sessionId,
     phase,
     gates,
     artifacts: listArtifacts(cwd, changeId),
@@ -99,36 +104,73 @@ export function planFile(cwd: string, changeId: string, relPath: string): { path
 // server is Bun). Verdicts are NOT written here — they only ever originate from
 // a reviewer's tool, materialized from the review_verdict event on ingest.
 
-export function addComment(cwd: string, changeId: string, body: { file?: string; anchor?: string; author?: string; body: string }): { ok: boolean; id?: string; error?: string } {
+export function addComment(cwd: string, changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }): { ok: boolean; id?: string; error?: string } {
   if (!changeExists(cwd, changeId)) return { ok: false, error: "unknown change" };
   const text = String(body.body || "").trim();
   if (!text) return { ok: false, error: "empty comment" };
   const id = randomUUID();
-  insertPlanComment({
-    id,
-    changeId,
-    file: body.file ? String(body.file) : undefined,
-    anchor: body.anchor ? String(body.anchor) : undefined,
-    author: body.author ? String(body.author) : undefined,
-    body: text,
-    createdAt: new Date().toISOString(),
-  });
+  const file = body.file ? String(body.file) : undefined;
+  const anchor = body.anchor ? String(body.anchor) : undefined;
+  const author = body.author ? String(body.author) : undefined;
+  const annotationType = body.annotationType ? String(body.annotationType) : undefined;
+  const originalText = body.originalText ? String(body.originalText) : undefined;
+  const createdAt = new Date().toISOString();
+  insertPlanComment({ id, changeId, file, anchor, author, body: text, annotationType, originalText, createdAt });
+  enqueueDashboardAction(cwd, changeId, { type: "plan_comment", id, changeId, file, anchor, body: text, annotationType, originalText });
   return { ok: true, id };
+}
+
+const NEXT_PHASE: Record<string, string> = { proposal: "requirements", requirements: "design", design: "tasks", tasks: "apply" };
+
+function renderPlanYaml(meta: { title?: string; status?: string; phase?: string; owner?: string; sessionId?: string }): string {
+  return [
+    `title: ${JSON.stringify(meta.title || "")}`,
+    `status: ${meta.status || "planning"}`,
+    `phase: ${meta.phase || "proposal"}`,
+    `owner: ${JSON.stringify(meta.owner || "")}`,
+    ...(meta.sessionId ? [`session_id: ${JSON.stringify(meta.sessionId)}`] : []),
+  ].join("\n") + "\n";
+}
+
+function approveGateSync(cwd: string, changeId: string, phase: string) {
+  const current = readPlanMeta(cwd, changeId);
+  const expectedPhase = current.phase || "proposal";
+  if (phase !== expectedPhase) return { ...current, advanced: false };
+  const next = { ...current, status: phase === "tasks" ? "ready" : "planning", phase: NEXT_PHASE[phase] || phase, advanced: true };
+  writeFileSync(path.join(changeDir(cwd, changeId), "plan.yaml"), renderPlanYaml(next));
+  return next;
+}
+
+function enqueueDashboardAction(cwd: string, changeId: string, action: Record<string, unknown>) {
+  const meta = readPlanMeta(cwd, changeId);
+  const sessions = sessionSummaries().filter((s) => path.resolve(s.cwd || "") === path.resolve(cwd));
+  const target = (meta.sessionId && sessions.find((s) => s.session_id === meta.sessionId)) || sessions.sort((a, b) => String(b.last_ts || "").localeCompare(String(a.last_ts || "")))[0];
+  if (!target?.session_dir) return;
+  const file = path.join(target.session_dir, "dashboard-actions.jsonl");
+  ensureDir(path.dirname(file));
+  appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...action })}\n`);
 }
 
 export function addApproval(cwd: string, changeId: string, body: { phase?: string; actor?: string; summary?: string }): { ok: boolean; id?: string; error?: string } {
   if (!changeExists(cwd, changeId)) return { ok: false, error: "unknown change" };
   const phase = String(body.phase || "").trim();
   if (!(PLAN_GATES as readonly string[]).includes(phase)) return { ok: false, error: `phase must be one of ${PLAN_GATES.join(", ")}` };
-  const id = randomUUID();
-  insertPlanApproval({
-    id,
-    changeId,
-    phase,
-    approvedBy: "ui",
-    actor: body.actor ? String(body.actor) : undefined,
-    summary: body.summary ? String(body.summary) : undefined,
-    createdAt: new Date().toISOString(),
-  });
-  return { ok: true, id };
+  try {
+    const nextMeta = approveGateSync(cwd, changeId, phase);
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    insertPlanApproval({
+      id,
+      changeId,
+      phase,
+      approvedBy: "ui",
+      actor: body.actor ? String(body.actor) : undefined,
+      summary: body.summary ? String(body.summary) : undefined,
+      createdAt,
+    });
+    if (nextMeta.advanced) enqueueDashboardAction(cwd, changeId, { type: "plan_approval", id, changeId, phase, nextPhase: nextMeta.phase, status: nextMeta.status });
+    return { ok: true, id };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }

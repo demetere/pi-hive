@@ -74,11 +74,17 @@ CREATE TABLE IF NOT EXISTS plan_comments (
   anchor       TEXT,
   author       TEXT,
   body         TEXT NOT NULL,
+  annotation_type TEXT,
+  original_text TEXT,
   session_id   TEXT,
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_comments_change ON plan_comments(change_id, created_at);
 `);
+
+// Lightweight migrations for existing local dashboard DBs.
+try { db.run(`ALTER TABLE plan_comments ADD COLUMN annotation_type TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE plan_comments ADD COLUMN original_text TEXT`); } catch { /* column already exists */ }
 
 export const insertEvent = db.query(`
   INSERT OR IGNORE INTO events
@@ -213,9 +219,9 @@ const insertPlanApprovalStmt = db.query(`
 
 const insertPlanCommentStmt = db.query(`
   INSERT OR IGNORE INTO plan_comments
-    (id, change_id, file, anchor, author, body, session_id, created_at)
+    (id, change_id, file, anchor, author, body, annotation_type, original_text, session_id, created_at)
   VALUES
-    ($id, $change_id, $file, $anchor, $author, $body, $session_id, $created_at)
+    ($id, $change_id, $file, $anchor, $author, $body, $annotation_type, $original_text, $session_id, $created_at)
 `);
 
 function jsonArray(value: unknown): string {
@@ -281,6 +287,8 @@ export interface PlanCommentInput {
   anchor?: string;
   author?: string;
   body: string;
+  annotationType?: string;
+  originalText?: string;
   sessionId?: string;
   createdAt: string;
 }
@@ -293,6 +301,8 @@ export function insertPlanComment(input: PlanCommentInput): void {
     $anchor: input.anchor ?? null,
     $author: input.author ?? null,
     $body: input.body,
+    $annotation_type: input.annotationType ?? null,
+    $original_text: input.originalText ?? null,
     $session_id: input.sessionId ?? null,
     $created_at: input.createdAt,
   });
@@ -355,6 +365,8 @@ export function listComments(changeId: string) {
     anchor: row.anchor || undefined,
     author: row.author || undefined,
     body: row.body,
+    annotationType: row.annotation_type || undefined,
+    originalText: row.original_text || undefined,
     sessionId: row.session_id || undefined,
     createdAt: row.created_at,
   }));
