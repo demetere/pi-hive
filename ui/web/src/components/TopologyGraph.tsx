@@ -44,7 +44,10 @@ function rootOf(t: Topology | undefined): TopologyNode | null {
   const agents: TopologyNode[] = t.agents || [];
   if (!t.orchestrator) {
     if (agents.length === 1) return agents[0];
-    return { name: "Hive", role: "orchestrator", children: dedupeByName(agents) } as TopologyNode;
+    // A fabricated grouping root (no real orchestrator configured). Marked
+    // synthetic so the renderer draws it as a non-interactive group header —
+    // no CTX/TOK-S stats, not clickable (E4).
+    return { name: "Hive", role: "orchestrator", synthetic: true, children: dedupeByName(agents) } as TopologyNode & { synthetic?: boolean };
   }
   const orchChildren = t.orchestrator.children || [];
   const placed = new Set<string>(orchChildren.map((c: TopologyNode) => c.name));
@@ -241,8 +244,8 @@ function EdgeLine(props: { link: any; ox: number; sessionId: string; inactiveTea
 
 // A short-height bar dial for reasoning effort, drawn as SVG rects that ascend
 // left→right; filled up to the current level. Rendered inside the node card.
-function ThinkDial({ x, y, model, level, tier }: { x: number; y: number; model?: string; level: number; tier: "lead" | "worker" }) {
-  const bars = thinkBars(model, level, tier);
+function ThinkDial({ x, y, levels, level, tier }: { x: number; y: number; levels?: string[]; level: number; tier: "lead" | "worker" }) {
+  const bars = thinkBars(levels, level, tier);
   const gap = tier === "lead" ? 2 : 1.2;
   const maxH = tier === "lead" ? 9 : 7;
   let cx = x;
@@ -262,7 +265,22 @@ function Node(props: {
 }) {
   const { node, ox, rt } = props;
   const data = node.data;
+  // Hooks run unconditionally (rules-of-hooks); the synthetic branch below reads
+  // status but ignores it.
   const status = useStatus(props.sessionId, data.name, props.inactiveTeam, rt?.status);
+
+  // A synthetic grouping root (no real orchestrator) renders as a plain,
+  // non-interactive group header — no CTX/TOK-S stats, not clickable (E4).
+  if ((data as any).synthetic) {
+    const W = props.nodeW;
+    return (
+      <g className="g-node group-header" transform={`translate(${node.x + ox - W / 2},${node.y})`} aria-hidden="true">
+        <rect className="g-bg" rx="14" width={W} height={NODE_H} opacity="0.5" />
+        <text className="g-id" x={W / 2} y={NODE_H / 2 + 4} textAnchor="middle" style={{ fontSize: 12, opacity: 0.7 }}>{data.name}</text>
+      </g>
+    );
+  }
+
   const sk = statusKey(status);
   const tokens = (rt?.inputTokens || 0) + (rt?.outputTokens || 0);
   const hasKids = (data.children?.length || 0) > 0;
@@ -340,7 +358,7 @@ function Node(props: {
 
       {/* Row 3: THINK dial · TOK/S · TOTAL */}
       <text className="g-cap" x="12" y="63" style={{ fontSize: 7 }}>THINK</text>
-      <ThinkDial x={12} y={66} model={model} level={level} tier={tier} />
+      <ThinkDial x={12} y={66} levels={(data as any).thinkingLevels || rt?.thinkingLevels} level={level} tier={tier} />
       <text className="g-cap" x="12" y="84" style={{ fontSize: 6.5 }}>{thinkName(model, level).toUpperCase()}</text>
 
       <text className="g-cap" x={W / 2} y="63" textAnchor="middle" style={{ fontSize: 7 }}>TOK/S</text>

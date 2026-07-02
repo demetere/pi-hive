@@ -47,9 +47,16 @@ function normLevel(v: string | undefined): string {
   return alias[t] || t;
 }
 
-// The dial always shows the full canonical scale (so bar heights are consistent
-// across models); the level fills up to the agent's current effort.
-export function thinkScale(_model?: string): string[] {
+// The levels the dial should show. When the node carries SDK-reported supported
+// levels (thinkingLevels sidecar, A10/E4), the dial shows exactly those — no
+// invented ladder. Otherwise it falls back to the full canonical scale so bar
+// heights stay consistent across models with unknown capabilities.
+export function thinkScale(supportedLevels?: string[]): string[] {
+  if (supportedLevels && supportedLevels.length) {
+    const set = new Set(supportedLevels.map((l) => normLevel(l)));
+    const ordered = THINK_ORDER.filter((l) => set.has(l));
+    if (ordered.length) return ordered;
+  }
   return [...THINK_ORDER];
 }
 
@@ -64,8 +71,11 @@ export interface ThinkBar { w: number; h: number; on: boolean; }
 // Ascending-height bar dial. Bars represent the ACTIVE effort levels only
 // (minimal…xhigh) — "off" (level 0) fills nothing, so the dial is all-gray when
 // an agent isn't thinking. A bar for level i (1-indexed) is on when level >= i.
-export function thinkBars(_model: string | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
-  const n = THINK_ORDER.length - 1; // exclude "off"
+// When SDK-supported levels are known (thinkingLevels sidecar, E4), the dial
+// shows exactly that many bars (minus "off"); otherwise the full canonical scale.
+export function thinkBars(supportedLevels: string[] | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
+  const scale = thinkScale(supportedLevels);
+  const n = Math.max(1, scale.filter((l) => l !== "off").length); // exclude "off"
   const boxW = tier === "lead" ? 34 : 20;
   const gap = tier === "lead" ? 2 : 1.2;
   const barW = Math.max(1.6, (boxW - gap * (n - 1)) / n);
