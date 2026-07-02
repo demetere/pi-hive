@@ -117,7 +117,10 @@ export function loadConfig(cwd: string): HiveConfig {
     agents: hive.agents,
     hive,
     planning,
-    sharedContext: parsed.sharedContext || [],
+    // `parseKeyValue` only camelizes kebab-case, so the documented snake_case
+    // `shared_context:` key arrives verbatim. Accept both here rather than
+    // camelizing snake_case parser-wide (plan-store reads `session_id` raw).
+    sharedContext: parsed.shared_context ?? parsed.sharedContext ?? [],
     settings: {
       subagentOutputLimit: Number(settings.subagentOutputLimit || 12_000),
       defaultTools: String(settings.defaultTools || "read, grep, find, ls"),

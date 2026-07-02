@@ -199,6 +199,10 @@ export async function dispatchAgent(
   // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
   // calls: deleted on tool_execution_end.
   const toolStartedAt = new Map<string, number>();
+  // The SDK's `auto_retry_end` event does NOT carry `maxAttempts`; only the
+  // matching `auto_retry_start` does. Remember the last seen value so the
+  // retry-end telemetry can report it instead of always emitting `undefined`.
+  let lastRetryMaxAttempts: number | undefined;
 
   const unsubscribe = session.subscribe((event: any) => {
     if (event.type === "message_update") {
@@ -236,6 +240,7 @@ export async function dispatchAgent(
         durationMs: startedAt != null ? Date.now() - startedAt : undefined,
       }, runtime.config.name);
     } else if (event.type === "auto_retry_start") {
+      if (event.maxAttempts != null) lastRetryMaxAttempts = event.maxAttempts;
       emitHiveEvent(state, "worker_retry", {
         agent: runtime.config.name,
         attempt: event.attempt,
@@ -244,10 +249,12 @@ export async function dispatchAgent(
         phase: "start",
       }, runtime.config.name);
     } else if (event.type === "auto_retry_end") {
+      // The SDK does not carry maxAttempts on retry-end; fall back to the value
+      // captured at the matching retry-start.
       emitHiveEvent(state, "worker_retry", {
         agent: runtime.config.name,
         attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
+        maxAttempts: event.maxAttempts ?? lastRetryMaxAttempts,
         phase: "end",
         success: event.success,
       }, runtime.config.name);

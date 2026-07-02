@@ -28,7 +28,17 @@ type TopologyKind = "active" | "hive" | "planning";
 
 function pickTopology(sess: SessionView | undefined, kind: TopologyKind): Topology | undefined {
   if (!sess) return undefined;
-  if (kind === "active") return sess.topology;
+  if (kind === "active") {
+    // A live session carries the resolved active tree on `sess.topology`. A
+    // source built by the version modal / replay instead sets `topologies.active`
+    // + the per-team trees but no `sess.topology`, so fall back to the active
+    // team's tree there (else the modal always renders empty).
+    if (sess.topology) return sess.topology;
+    const active = sess.topologies?.active;
+    if (active === "hive") return sess.topologies?.hive;
+    if (active === "planning") return sess.topologies?.planning;
+    return undefined;
+  }
   const teamTopo = kind === "hive" ? sess.topologies?.hive : sess.topologies?.planning;
   if (teamTopo) return teamTopo;
   if (!sess.topologies && kind === "hive") return sess.topology;

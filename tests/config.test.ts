@@ -59,6 +59,24 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
 });
 
+test("loadConfig reads shared_context from YAML (both snake_case and camelCase)", () => {
+  // The kebab-case `shared-context:` is camelized by the parser; the documented
+  // snake_case `shared_context:` is NOT, so it must be accepted verbatim at the
+  // config-load site. Exercise the full YAML→config parse path (the object-based
+  // tests skip it).
+  for (const key of ["shared_context", "shared-context"]) {
+    const cwd = fixtureProject();
+    const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+    const yaml = readFileSync(cfgPath, "utf8").replace(
+      "shared-context:\n  - README.md",
+      `${key}:\n  - README.md\n  - docs/ARCH.md`,
+    );
+    writeFileSync(cfgPath, yaml);
+    const config = loadConfig(cwd);
+    assert.deepEqual(config.sharedContext, ["README.md", "docs/ARCH.md"], `key ${key} should populate sharedContext`);
+  }
+});
+
 test("allowedAgents in config warns but still loads (H1)", () => {
   const cwd = fixtureProject();
   // Inject a user-set allowedAgents on a node — it must be ignored (derivation

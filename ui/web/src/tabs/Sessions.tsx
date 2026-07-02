@@ -26,6 +26,12 @@ export default function Sessions(props: { search: string }) {
 
   // Server-authoritative topology hash for a session (K2).
   const hashOf = useCallback((s: SessionView): string | undefined => sessionSummaries.get(s.session_id)?.topologyHash, [sessionSummaries]);
+  // The DB's true "events ever ingested" count. `s.event_count` only counts the
+  // events currently loaded in the ~1000-row window (derive.ts), so both the
+  // Events column and the destructive delete-confirmation would understate the
+  // real row count. Prefer the server summary; fall back to the window count
+  // only until the summary arrives.
+  const countOf = useCallback((s: SessionView): number => sessionSummaries.get(s.session_id)?.event_count ?? s.event_count, [sessionSummaries]);
   // "vN" rank of a hash within its cwd — the 1-based index of the version by
   // first_seen_at (topologiesByCwd is already ordered that way). undefined if the
   // versions for that cwd aren't loaded yet or the hash isn't among them.
@@ -74,7 +80,7 @@ export default function Sessions(props: { search: string }) {
       title: "Delete session telemetry?",
       danger: true,
       confirmLabel: "Delete session",
-      message: <>This permanently removes telemetry for <b>{s.project} · {sessionSlug(s.session_id)}</b> ({s.event_count} events). The project's own logs on disk are not touched.</>,
+      message: <>This permanently removes telemetry for <b>{s.project} · {sessionSlug(s.session_id)}</b> ({countOf(s)} events). The project's own logs on disk are not touched.</>,
       onConfirm: () => deleteSession(s.session_id),
     });
   }
@@ -93,10 +99,13 @@ export default function Sessions(props: { search: string }) {
   const resortKey = sortKey + ":" + dir + "|" + filtered.map((s) => s.session_id).slice().sort().join(",");
   const idOf = useCallback((s: SessionView) => s.session_id, []);
   const sorter = useCallback((a: SessionView, b: SessionView) => {
-    const va = a[sortKey] as any, vb = b[sortKey] as any;
+    // Sort the Events column by the same authoritative count the cell renders,
+    // not the window-local count on the row object.
+    const va = sortKey === "event_count" ? countOf(a) : (a[sortKey] as any);
+    const vb = sortKey === "event_count" ? countOf(b) : (b[sortKey] as any);
     const cmp = typeof va === "string" ? String(va).localeCompare(String(vb)) : (va - vb);
     return cmp * dir;
-  }, [sortKey, dir]);
+  }, [sortKey, dir, countOf]);
   const rows = useFrozenOrder(filtered, idOf, resortKey, sorter);
 
   const arrow = (k: Key) => (sortKey === k ? <span className="arrow">{dir === 1 ? "↑" : "↓"}</span> : null);
@@ -152,7 +161,7 @@ export default function Sessions(props: { search: string }) {
               </td>
               <td className="muted-cell">{absTime(s.first_ts)}</td>
               <td className="num">{s.running}</td>
-              <td className="num">{s.event_count}</td>
+              <td className="num">{countOf(s)}</td>
               <td className="num">{fmtNum(s.tokens)}</td>
               <td className="num">{fmtCost(s.cost)}</td>
               <td className="num muted-cell"><RelTime ts={s.last_ts} /></td>

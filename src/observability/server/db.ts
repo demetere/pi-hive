@@ -48,6 +48,10 @@ CREATE INDEX IF NOT EXISTS idx_hive_events_session_seq ON events(session_id, seq
 CREATE INDEX IF NOT EXISTS idx_hive_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_hive_events_type ON events(type);
 CREATE INDEX IF NOT EXISTS idx_hive_events_session_ts ON events(session_id, ts, seq);
+-- cwd-filtered paging (queryEvents/recentEvents) orders by rowid; a plain cwd
+-- index carries rowid as its implicit trailing key, so the WHERE seek and the
+-- ORDER BY rowid are both served without scanning the whole table.
+CREATE INDEX IF NOT EXISTS idx_hive_events_cwd ON events(cwd);
 CREATE TABLE IF NOT EXISTS states (
   session_id TEXT PRIMARY KEY,
   updated_at TEXT NOT NULL,
