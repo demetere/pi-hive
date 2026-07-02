@@ -85,6 +85,16 @@ Bun.serve({
       if (asset) return asset;
     }
 
+    // SPA history fallback: a top-level browser navigation/refresh (GET with an
+    // HTML Accept) to any client route — including ones that collide with API
+    // paths like /sessions or /plans — must serve the app shell, not the JSON
+    // API. The dashboard's own data fetches use fetch() (Accept: */*), so they
+    // still reach the JSON endpoints below. Handled before the API reads so the
+    // collision resolves in favor of the SPA for real navigations.
+    if (req.method === "GET" && url.pathname !== "/stream" && req.headers.get("accept")?.includes("text/html")) {
+      return dashboardHtml();
+    }
+
     if (!isSameOriginRequest(req, url)) return json({ error: "cross-origin read blocked" }, 403);
 
     if (url.pathname === "/health") return json({
@@ -141,6 +151,7 @@ Bun.serve({
       const runId = url.searchParams.get("run") || "";
       return json(readAgentLog(sessionId, agent, offset, runId));
     }
+
     return json({ error: "not found" }, 404);
   },
 });
