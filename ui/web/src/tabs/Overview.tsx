@@ -4,6 +4,7 @@ import Widget from "../components/WidgetModal";
 import LiveActivity from "../components/LiveActivity";
 import CostTokensChart from "../components/CostTokensChart";
 import ModelMix from "../components/ModelMix";
+import Replay from "../components/Replay";
 import { useHive } from "../store";
 
 // The topology graph pulls in d3-hierarchy; code-split it so that dependency
@@ -73,6 +74,14 @@ export default function Overview() {
   return (
     <>
       <Kpis />
+      {/* Session replay (Phase F): available on a single-session detail. It re-
+          derives status/feed/totals over a slice of the session's event history;
+          live mode is a separate store slice and is unaffected. */}
+      {scope.level === "session" && (
+        <div className="mb-[18px]">
+          <Replay sessionId={scope.sessionId} />
+        </div>
+      )}
       <div className="widgets">
         <Widget
           title={topoTitle}

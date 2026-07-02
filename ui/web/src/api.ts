@@ -73,6 +73,25 @@ export async function fetchStates(): Promise<Snapshot[]> {
   return data.states || [];
 }
 
+// Page a whole session's event history for replay (F1). SQL-backed, cursor
+// ordered; onProgress reports the running count so the UI can show a loader.
+export async function fetchSessionEvents(sessionId: string, onProgress?: (n: number) => void): Promise<HiveEvent[]> {
+  const all: HiveEvent[] = [];
+  let after = 0;
+  for (let guard = 0; guard < 500; guard++) {
+    const page = await jsonOr<{ events: HiveEvent[] }>(
+      fetch(`/events?session=${encodeURIComponent(sessionId)}&after=${after}&limit=1000`), { events: [] });
+    const evs = (page.events || []).filter((e) => e.type !== "delegation_progress");
+    all.push(...evs);
+    onProgress?.(all.length);
+    if ((page.events || []).length < 1000) break;
+    const last = page.events![page.events!.length - 1]?.cursor;
+    if (last == null || last <= after) break;
+    after = last;
+  }
+  return all;
+}
+
 export async function deleteSessionRemote(sessionId: string): Promise<boolean> {
   try {
     const res = await writeFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });

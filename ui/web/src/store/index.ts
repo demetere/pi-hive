@@ -63,6 +63,25 @@ export interface HiveState {
   thinkingBySession: Map<string, ThinkingEntry[]>;
   // Per-project display-name overrides, keyed by cwd (from settings, DB-backed).
   projectOverrides: Map<string, string>;
+
+  // ── replay slice (Phase F) — a SEPARATE store slice; no SSE frame mutates it,
+  // so live mode is untouched. Populated only when the user enters Replay on a
+  // session detail; the panel re-derives status/feed/chart over events[0..cursor].
+  replay: ReplayState;
+}
+
+export interface ReplayState {
+  active: boolean;
+  sessionId: string;
+  events: HiveEvent[];   // full session history, chronological
+  loading: boolean;
+  loadedCount: number;   // for the progress indicator while paging
+  cursor: number;        // index into events (0..events.length-1) currently shown
+  playing: boolean;
+  speed: 1 | 10 | 60;
+  // True when the fetched count is below the session's recorded event_count
+  // (early history pruned, F3) — the panel shows a "history starts at …" marker.
+  truncatedStart: boolean;
 }
 
 export interface ThinkingEntry { agent: string; ts: string; text: string; tokens?: number; }
@@ -97,6 +116,7 @@ const initialState: HiveState = {
     eventStatus: new Map(),
     thinkingBySession: new Map(),
     projectOverrides: new Map(),
+    replay: { active: false, sessionId: "", events: [], loading: false, loadedCount: 0, cursor: 0, playing: false, speed: 1, truncatedStart: false },
 };
 
 export const store = createStore<HiveState>()(subscribeWithSelector(() => initialState));
