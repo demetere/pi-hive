@@ -40,8 +40,10 @@ function publishRuntimeUpdate(state: HiveState) {
 // Coerce to a finite number or undefined. Unlike `Number(x) || undefined`, this
 // preserves a legitimate 0 (a real delayMs/tokensAfter of 0 is meaningful; only
 // NaN/absent should drop to undefined). Mirrors the Number.isFinite guards used
-// on the SessionStats overwrite below.
+// on the SessionStats overwrite below. Guards null/undefined FIRST (R3-2.5) so an
+// absent field stays undefined rather than coercing to Number(null) === 0.
 function finiteOrUndef(x: unknown): number | undefined {
+  if (x == null) return undefined;
   const n = Number(x);
   return Number.isFinite(n) ? n : undefined;
 }
@@ -233,11 +235,16 @@ export async function dispatchAgent(
 
   // Distinct actual models seen across this run's assistant messages (A3).
   const modelsSeen = new Set<string>();
-  // Distinct providers behind this run's assistant messages (Item 9). The
-  // assistant message carries `.provider` alongside `.model`; the SDK exposes no
-  // per-message responseId/api/diagnostics field, so provider is the identity we
-  // can truthfully record.
+  // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
+  // `.provider`, `.api`, `.responseId?`, `.diagnostics?` all ride the same
+  // message_end object. Capture the distinct providers/apis, the first+last
+  // responseId (bookends of the run), and a bounded set of diagnostics.
   const providersSeen = new Set<string>();
+  const apisSeen = new Set<string>();
+  let firstResponseId: string | undefined;
+  let lastResponseId: string | undefined;
+  const diagnostics: Array<{ type?: string; message?: string }> = [];
+  const MAX_DIAGNOSTICS = 20;
   let lastStopReason: string | undefined;
   // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
   // calls: deleted on tool_execution_end.
@@ -336,6 +343,21 @@ export async function dispatchAgent(
       const actualModel = message?.model || message?.responseModel;
       if (actualModel) modelsSeen.add(String(actualModel));
       if (message?.provider) providersSeen.add(String(message.provider));
+      if (message?.api) apisSeen.add(String(message.api));
+      if (message?.responseId) {
+        const rid = String(message.responseId);
+        if (!firstResponseId) firstResponseId = rid;
+        lastResponseId = rid;
+      }
+      if (Array.isArray(message?.diagnostics)) {
+        for (const d of message.diagnostics) {
+          if (diagnostics.length >= MAX_DIAGNOSTICS) break;
+          diagnostics.push({
+            type: d?.type ? String(d.type) : undefined,
+            message: d?.error?.message ? truncateMiddle(String(d.error.message), 300) : undefined,
+          });
+        }
+      }
       if (message?.stopReason) lastStopReason = String(message.stopReason);
       const usage = message?.usage;
       if (usage) {
@@ -415,8 +437,14 @@ export async function dispatchAgent(
         userMessages: Number.isFinite(userMessages) ? userMessages : undefined,
         assistantMessages: Number.isFinite(assistantMessages) ? assistantMessages : undefined,
       };
-      // Prefer the SDK's tool-call count over the tool_execution_start tally.
-      if (Number.isFinite(toolCalls)) runtime.toolCount = toolCalls;
+      // R3-1.3: do NOT overwrite runtime.toolCount with stats.toolCalls here.
+      // runtime.toolCount is reset per run (see the run-start block) and tallied
+      // live from tool_execution_start, so it means "tool calls THIS run". But
+      // stats.toolCalls is session-LIFETIME — on a resumed (non-fresh) re-run it
+      // covers the whole conversation, which would make the Agents "Tools" cell and
+      // delegation_end.runtime.toolCount jump from this-run to lifetime at run end.
+      // The lifetime count is preserved separately in the `counts` payload below,
+      // which honestly documents its session-lifetime semantics.
       const tokens = stats.tokens ?? stats.usage ?? stats;
       const input = Number(tokens.input ?? tokens.inputTokens);
       const output = Number(tokens.output ?? tokens.outputTokens);
@@ -492,10 +520,14 @@ export async function dispatchAgent(
     stopReason: lastStopReason,
     errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
     models: [...modelsSeen],
-    // Per-message identity the SDK actually exposes (Item 9): the distinct
-    // providers behind this run's assistant messages. No responseId/api/
-    // diagnostics field exists on the message, so provider is the identity.
+    // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
+    // distinct providers + apis behind this run's assistant messages, the first and
+    // last responseId (run bookends), and a bounded/truncated diagnostics list.
     providers: providersSeen.size ? [...providersSeen] : undefined,
+    apis: apisSeen.size ? [...apisSeen] : undefined,
+    firstResponseId,
+    lastResponseId,
+    diagnostics: diagnostics.length ? diagnostics : undefined,
     // Authoritative SDK message/tool counts for this session (Item 9), preferred
     // over the hand-tallied toolCount. Session-lifetime (not per-run) — a re-run
     // agent's stats cover the whole conversation.

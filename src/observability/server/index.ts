@@ -176,6 +176,16 @@ Bun.serve({
       const deltasOnly = url.searchParams.get("deltasOnly") === "1";
       return json({ delegations: queryDelegations({ session, cwd, after: after != null ? Number(after) : undefined, limit, deltasOnly }) });
     }
+    // ACCEPTED DESCOPE (Round 3 decision): the dashboard UI does NOT consume this
+    // endpoint. Deep per-tool history is reachable via `/events?before=` paging
+    // (which pages in the underlying worker_tool_start/end raw events), and
+    // per-agent tool COUNTS come from the snapshot runtime.toolCount — so nothing
+    // in the UI needs a second parallel tool-history source. The endpoint + its
+    // tool_calls materialization are kept (cheap, idempotent) for external/API
+    // consumers and possible future use. Known limit not worth wiring the UI for:
+    // tool counts for fresh-re-run agents in dead sessions outside the loaded event
+    // window are undercounted, and the `delegations` projection carries no tool
+    // count. Revisit if a UI feature genuinely needs untruncated per-tool history.
     if (url.pathname === "/tool-calls") {
       const session = url.searchParams.get("session") || undefined;
       const after = url.searchParams.get("after");

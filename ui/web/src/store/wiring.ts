@@ -37,23 +37,36 @@ export async function refreshSessionSummaries() {
 // Phase 3.1). Pages forward from the highest cursor already held so a refresh
 // after a delegation_end frame only pulls the new rows, then appends. This is the
 // authoritative, untruncated source for the cost/token history + CACHE totals.
+//
+// R3-2.5: page until DRAINED. A single fixed-size fetch left a DB with more delta
+// rows than the page size missing its newest rows at startup (they only trickled in
+// later as live frames triggered catch-ups). Keep fetching from the advancing cursor
+// until a short page (< limit) proves we've reached the tail.
+const DELEGATIONS_PAGE = 5000;
 let delegationsInFlight = false;
 export async function refreshDelegations(reset = false): Promise<void> {
   if (delegationsInFlight) return;
   delegationsInFlight = true;
   try {
-    const after = reset ? 0 : store.getState().delegationsCursor;
-    const rows = await fetchDelegations({ after, limit: 5000 });
-    if (!rows.length && !reset) return;
     const prev = reset ? [] : store.getState().delegations;
-    // Dedupe by cursor in case a page overlaps the boundary; keep cursor order.
     const seen = new Set(prev.map((d) => d.cursor));
     const merged = [...prev];
     let maxCursor = store.getState().delegationsCursor;
-    for (const d of rows) {
-      if (!seen.has(d.cursor)) { merged.push(d); seen.add(d.cursor); }
-      if (d.cursor > maxCursor) maxCursor = d.cursor;
+    let after = reset ? 0 : maxCursor;
+    let addedAny = false;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const rows = await fetchDelegations({ after, limit: DELEGATIONS_PAGE });
+      for (const d of rows) {
+        if (!seen.has(d.cursor)) { merged.push(d); seen.add(d.cursor); addedAny = true; }
+        if (d.cursor > maxCursor) maxCursor = d.cursor;
+        if (d.cursor > after) after = d.cursor;
+      }
+      // A short page means we've reached the tail; stop. (A full page means there
+      // may be more rows past `after`, so loop again from the advanced cursor.)
+      if (rows.length < DELEGATIONS_PAGE) break;
     }
+    if (!addedAny && !reset) return;
     merged.sort((a, b) => a.cursor - b.cursor);
     store.setState({ delegations: merged, delegationsCursor: maxCursor });
   } catch { /* transient; the live snapshot totals still render */ }

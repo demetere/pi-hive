@@ -166,6 +166,27 @@ export function recomputeLive() {
   const s = store.getState();
   const t = s.now || Date.now();
   const live = new Set<string>();
+  // R3-1.2: demote the shared event-status overlay AT THE SOURCE for stale
+  // sessions. buildEventStatus (heavy tier) rebuilds this map raw, marking
+  // running/waiting and clearing only on delegation_end — the one event a killed
+  // process never emits — so a dead session's overlay would pin an agent active
+  // forever. Every consumer reads this same map (TopologyGraph.useStatus, the
+  // computeSessions overlay-apply loop, computeScopedAgents.statusOf), so demoting
+  // here heals ALL of them at once instead of per-render-path. Only rebuild+store
+  // the map when a demotion actually changes something, so an unchanging overlay
+  // doesn't trigger a topology repaint every tick.
+  let overlayChanged = false;
+  const nextStatus: typeof s.eventStatus = new Map();
+  for (const [sid, agents] of s.eventStatus) {
+    const stale = sessionIsStale(sid, t);
+    const copy = new Map<string, string>();
+    for (const [name, st] of agents) {
+      const demoted = stale ? demoteIfStale(st, sid, t) : st;
+      if (demoted !== st) overlayChanged = true;
+      copy.set(name, demoted);
+    }
+    nextStatus.set(sid, copy);
+  }
   for (const v of s.sessions) {
     const at = sessionUpdatedAt.get(v.session_id) || new Date(v.last_ts).getTime() || 0;
     const fresh = at > 0 && t - at < STALE_LIVE_MS;
@@ -185,6 +206,7 @@ export function recomputeLive() {
       if (anyDemoted) { v.running = 0; v.active = 0; }
     }
   }
+  if (overlayChanged) store.setState({ eventStatus: nextStatus });
   // Project groups for the sidebar; live flag derived from the live set.
   const overrides = s.projectOverrides;
   const groups = new Map<string, ProjectGroup>();

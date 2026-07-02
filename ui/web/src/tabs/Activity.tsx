@@ -49,6 +49,17 @@ function delegationDetail(e: any): Array<[string, string]> {
     ["Reasoning", reasoningTok > 0 ? fmtNum(reasoningTok) : "—"],
     ["Cost", p.costUsd != null || d.costUsd != null ? fmtCost(Number(d.costUsd ?? p.costUsd)) : "—"],
   ];
+  // Item 9 identity + SDK counts (R3-2.4): surface the provider/api identity and the
+  // SDK's session-lifetime message/tool counts that ride the delegation_end payload,
+  // instead of leaving them visible only as raw JSON.
+  if (Array.isArray(p.providers) && p.providers.length) rows.push(["Providers", p.providers.join(", ")]);
+  if (Array.isArray(p.apis) && p.apis.length) rows.push(["APIs", p.apis.join(", ")]);
+  const c = p.counts || {};
+  const countBits: string[] = [];
+  if (c.toolCalls != null) countBits.push(`${c.toolCalls} tool`);
+  if (c.assistantMessages != null) countBits.push(`${c.assistantMessages} asst`);
+  if (c.userMessages != null) countBits.push(`${c.userMessages} user`);
+  if (countBits.length) rows.push(["SDK counts", countBits.join(" · ")]);
   if (p.errorMessage) rows.push(["Error", String(p.errorMessage)]);
   return rows;
 }
@@ -86,7 +97,9 @@ function itemTitle(item: ActivityItem): string {
     // Remaining SDK event classes (Phase 4). Rendered generically otherwise.
     case "user_bash": return `Bash: ${p.command || ""}`;
     case "input": return `Input (${p.source || "?"})`;
-    case "session_fork": return "Session forked";
+    // session_before_fork is a cancellable *before* event — the fork is requested,
+    // not yet confirmed (R3-2.5).
+    case "session_fork": return "Fork requested";
     case "session_tree": return "Session tree navigation";
     case "session_info_changed": return p.name ? `Session renamed → ${p.name}` : "Session name cleared";
     case "queue_update": return `Queue: ${p.steering ?? 0} steering · ${p.followUp ?? 0} follow-up`;

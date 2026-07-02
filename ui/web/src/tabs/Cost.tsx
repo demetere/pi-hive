@@ -14,36 +14,46 @@ export default function Cost() {
   // The live snapshot (scopedAgents) is a per-agent top-up via max(): it carries
   // an in-flight run's usage before its delegation_end row lands, mirroring how
   // Kpis treats the delta series as authoritative and the snapshot as live top-up.
+  //
+  // R3-2.3: the delta-vs-snapshot max() is taken PER-(session,agent), then summed
+  // across sessions — not on the scope-level aggregate. In a mixed legacy/delta
+  // scope (session A has only a legacy snapshot, session B has delta rows), a
+  // scope-level max would pick whichever single session was larger instead of
+  // adding them; per-session max-then-sum counts every session once.
   const breakdown = useMemo(() => {
-    const byName = new Map<string, { name: string; color: string; model: string; cost: number; tokens: number }>();
-    const ensure = (name: string) => {
-      let cur = byName.get(name);
-      if (!cur) { cur = { name, color: "var(--accent)", model: "", cost: 0, tokens: 0 }; byName.set(name, cur); }
+    // key = `${sessionId}::${agent}` → per-session-agent delta sums + snapshot.
+    const cell = new Map<string, { session: string; name: string; delCost: number; delTok: number; snapCost: number; snapTok: number }>();
+    const ensure = (session: string, name: string) => {
+      const k = `${session}::${name}`;
+      let cur = cell.get(k);
+      if (!cur) { cur = { session, name, delCost: 0, delTok: 0, snapCost: 0, snapTok: 0 }; cell.set(k, cur); }
       return cur;
     };
+    // Per-agent color + LAST-run model (R3-2.2: cursor-ordered rows, last wins —
+    // standardized with ModelMix so the two tabs never disagree on an agent's model).
+    const colorOf = new Map<string, string>();
+    const modelOf = new Map<string, string>();
     for (const d of scopedDelegations) {
       const name = d.agent;
       if (!name) continue;
-      const cur = ensure(name);
-      cur.cost += d.costUsd || 0;
-      cur.tokens += (d.inputTokens || 0) + (d.outputTokens || 0);
-      if (!cur.model && d.model) cur.model = shortModel(d.model);
+      const cur = ensure(d.sessionId, name);
+      cur.delCost += d.costUsd || 0;
+      cur.delTok += (d.inputTokens || 0) + (d.outputTokens || 0);
+      if (d.model) modelOf.set(name, shortModel(d.model)); // last row wins
     }
-    // Snapshot top-up: fold in live per-agent totals (color/model + max usage so
-    // an in-flight run isn't undercounted before its delegation row completes).
-    const snapByName = new Map<string, { cost: number; tokens: number }>();
     for (const a of scopedAgents) {
-      const s = snapByName.get(a.name) || { cost: 0, tokens: 0 };
-      s.cost += a.cost; s.tokens += a.tokens;
-      snapByName.set(a.name, s);
-      const cur = ensure(a.name);
-      if (cur.color === "var(--accent)" && a.color) cur.color = a.color;
-      if (!cur.model && a.model) cur.model = shortModel(a.model);
+      const cur = ensure(a.session_id, a.name);
+      cur.snapCost += a.cost; cur.snapTok += a.tokens;
+      if (a.color && !colorOf.has(a.name)) colorOf.set(a.name, a.color);
+      if (a.model && !modelOf.has(a.name)) modelOf.set(a.name, shortModel(a.model));
     }
-    for (const [name, s] of snapByName) {
-      const cur = byName.get(name)!;
-      cur.cost = Math.max(cur.cost, s.cost);
-      cur.tokens = Math.max(cur.tokens, s.tokens);
+    // Per (session,agent): max(delta, snapshot). Then sum across sessions per agent.
+    const byName = new Map<string, { name: string; color: string; model: string; cost: number; tokens: number }>();
+    for (const c of cell.values()) {
+      let row = byName.get(c.name);
+      if (!row) { row = { name: c.name, color: colorOf.get(c.name) || "var(--accent)", model: modelOf.get(c.name) || "", cost: 0, tokens: 0 }; byName.set(c.name, row); }
+      row.cost += Math.max(c.delCost, c.snapCost);
+      row.tokens += Math.max(c.delTok, c.snapTok);
     }
     const rows = Array.from(byName.values()).filter((r) => r.cost > 0 || r.tokens > 0).sort((a, b) => b.cost - a.cost);
     const max = Math.max(0.0001, ...rows.map((r) => r.cost));

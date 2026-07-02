@@ -158,16 +158,28 @@ export function reloadTeam(state: HiveState, ctx: ExtensionContext) {
 }
 
 // Rebuild per-agent cumulative counters from the session's hive-events.jsonl.
-// Each delegation_end carries the agent's cumulative runtime snapshot at that
-// moment; the peak per agent is its true accumulated total before the reload.
-function restoreRuntimeCounters(state: HiveState) {
+// Each delegation_end carries the agent's runtime snapshot at that moment.
+//
+// R3-1.1: restore from the agent's LATEST delegation_end row, not the peak across
+// all rows. The runtime snapshot holds session-LIFETIME aggregates (overwritten
+// from getSessionStats at run end), so a normal re-run's rows only grow and last ==
+// max. But a `fresh` re-run ARCHIVES the prior transcript and resets the counters
+// (dispatch.ts), so its post-reset row is deliberately SMALLER than the pre-fresh
+// rows. A peak/`Math.max` would resurrect the pre-fresh totals as the restored
+// baseline — reintroducing exactly the fresh-delta under-count W1.1 fixed (the next
+// run's run-start baseline would be the stale 500 instead of the fresh 80, clamping
+// its delta to ~0). The last row is the current post-reset reality for both paths.
+// runCount is the one field that must never regress across a fresh reset (the run
+// counter is monotonic and not reset), so keep its max explicitly.
+export function restoreRuntimeCounters(state: HiveState) {
   const logPath = state.session?.observabilityLog;
   if (!logPath || !existsSync(logPath)) return;
   let text: string;
   try { text = readFileSync(logPath, "utf8"); } catch { return; }
 
-  // peak cumulative values keyed by agent name
-  const peak = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; runs: number; tools: number }>();
+  // latest runtime snapshot keyed by agent name (file order is chronological, so a
+  // later row overwrites an earlier one), plus the monotonic max runCount.
+  const latest = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; runs: number; tools: number }>();
   for (const line of text.split("\n")) {
     if (!line.trim() || !line.includes("delegation_end")) continue;
     let ev: any;
@@ -176,19 +188,21 @@ function restoreRuntimeCounters(state: HiveState) {
     const rt = ev.payload?.runtime;
     const name = rt?.name || ev.payload?.from;
     if (!name || !rt) continue;
-    const cur = peak.get(name) || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, runs: 0, tools: 0 };
-    cur.input = Math.max(cur.input, Number(rt.inputTokens || 0));
-    cur.output = Math.max(cur.output, Number(rt.outputTokens || 0));
-    cur.cacheRead = Math.max(cur.cacheRead, Number(rt.cacheReadTokens || 0));
-    cur.cacheWrite = Math.max(cur.cacheWrite, Number(rt.cacheWriteTokens || 0));
-    cur.cost = Math.max(cur.cost, Number(rt.costUsd || 0));
-    cur.runs = Math.max(cur.runs, Number(rt.runCount || 0));
-    cur.tools = Math.max(cur.tools, Number(rt.toolCount || 0));
-    peak.set(name, cur);
+    const priorRuns = latest.get(name)?.runs ?? 0;
+    latest.set(name, {
+      input: Number(rt.inputTokens || 0),
+      output: Number(rt.outputTokens || 0),
+      cacheRead: Number(rt.cacheReadTokens || 0),
+      cacheWrite: Number(rt.cacheWriteTokens || 0),
+      cost: Number(rt.costUsd || 0),
+      // Monotonic: never let a later row lower the run count.
+      runs: Math.max(priorRuns, Number(rt.runCount || 0)),
+      tools: Number(rt.toolCount || 0),
+    });
   }
 
   for (const runtime of state.runtimes.values()) {
-    const p = peak.get(runtime.config.name);
+    const p = latest.get(runtime.config.name);
     if (!p) continue;
     runtime.inputTokens = p.input;
     runtime.outputTokens = p.output;

@@ -19,7 +19,9 @@ export default function ModelMix() {
   // model the provider ran, resolving a config-declared "inherit" to something
   // concrete (E4). Reading the untruncated delegation projection instead of the
   // raw-event window means older sessions no longer lose their model attribution.
-  // Rows are cursor-ordered, so the last row for an agent wins (its latest run).
+  // Rows are cursor-ordered, so the LAST row for an agent wins (its latest run) —
+  // standardized with Cost's per-agent model pick (R3-2.2) so the same agent never
+  // shows a different model across the two tabs after a mid-run model switch.
   const actualModelByAgent = useMemo(() => {
     const m = new Map<string, string>();
     for (const d of scopedDelegations) {
@@ -29,21 +31,47 @@ export default function ModelMix() {
   }, [scopedDelegations]);
 
   const data = useMemo(() => {
-    const byModel = new Map<string, number>();
-    const byAgent = new Map<string, { name: string; model?: string; color: string; tok: number }>();
-    const resolveModel = (a: { name: string; model?: string }) => {
-      const actual = actualModelByAgent.get(a.name);
-      const raw = actual || (a.model && a.model !== "inherit" ? a.model : "");
+    // R3-2.1: weight the donut from the typed delegation DELTAS (additive,
+    // untruncated), per-agent SUMMED, with the live snapshot as a max() top-up —
+    // the same authoritative-delta + live-snapshot basis Cost uses. The old
+    // scopedAgents[].tokens = max(snapshot, raw-window) distorted the donut for
+    // sessions outside the loaded window, and after W1.1 a fresh re-run's snapshot
+    // covers only its latest run, undercounting the donut specifically.
+    //
+    // Segments key on shortModel() as a CONSCIOUS choice (R3-2.1): the donut is a
+    // coarse model-FAMILY view, so same-named models from different providers merge
+    // into one segment. Keying by full "provider/id" would fragment the ramp for a
+    // distinction the widget doesn't otherwise surface. Provider-level identity
+    // lives in the Activity/Cost detail, not here.
+    const tokByAgent = new Map<string, number>();
+    for (const d of scopedDelegations) {
+      if (!d.agent) continue;
+      tokByAgent.set(d.agent, (tokByAgent.get(d.agent) || 0) + (d.inputTokens || 0) + (d.outputTokens || 0));
+    }
+    // Snapshot top-up: an in-flight run's tokens aren't in a delegation row yet.
+    for (const a of scopedAgents) {
+      if (a.tokens > (tokByAgent.get(a.name) || 0)) tokByAgent.set(a.name, a.tokens);
+    }
+
+    const colorOf = new Map<string, string>();
+    for (const a of scopedAgents) if (a.color && !colorOf.has(a.name)) colorOf.set(a.name, a.color);
+    const snapModelOf = new Map<string, string | undefined>();
+    for (const a of scopedAgents) if (!snapModelOf.has(a.name)) snapModelOf.set(a.name, a.model);
+
+    const resolveModel = (name: string) => {
+      const actual = actualModelByAgent.get(name);
+      const snap = snapModelOf.get(name);
+      const raw = actual || (snap && snap !== "inherit" ? snap : "");
       return raw ? shortModel(raw) : "";
     };
-    for (const a of scopedAgents) {
-      const tok = a.tokens;
+
+    const byModel = new Map<string, number>();
+    const byAgent = new Map<string, { name: string; color: string; tok: number }>();
+    for (const [name, tok] of tokByAgent) {
       if (!tok) continue; // donut counts only token-bearing agents (E4)
-      const model = resolveModel(a);
+      const model = resolveModel(name);
       if (model) byModel.set(model, (byModel.get(model) || 0) + tok);
-      const cur = byAgent.get(a.name) || { name: a.name, model: a.model, color: a.color || "var(--brand)", tok: 0 };
-      cur.tok += tok;
-      byAgent.set(a.name, cur);
+      byAgent.set(name, { name, color: colorOf.get(name) || "var(--brand)", tok });
     }
     const total = Array.from(byModel.values()).reduce((a, b) => a + b, 0) || 1;
     const segments = Array.from(byModel.entries())
@@ -52,7 +80,7 @@ export default function ModelMix() {
     const leaders = Array.from(byAgent.values()).sort((a, b) => b.tok - a.tok).slice(0, 5);
     const topTok = leaders[0]?.tok || 1;
     return { total, segments, leaders, topTok };
-  }, [scopedAgents, actualModelByAgent]);
+  }, [scopedAgents, scopedDelegations, actualModelByAgent]);
 
   if (!(data.total > 1 || data.leaders.length)) {
     return <div className="mix-wrap"><div className="empty">No agent usage yet.</div></div>;

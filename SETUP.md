@@ -158,7 +158,8 @@ settings:
     model: openai-codex/gpt-5.4-mini   # see: pi --list-models
     conversation-lines: 200
 
-# PLAN mode team (optional). The main session drives planners to produce full specs.
+# PLAN mode team (REQUIRED — the loader hard-throws without it, same as `hive:`).
+# The main session drives planners to produce full specs.
 planning:
   main:
     name: Plan Lead

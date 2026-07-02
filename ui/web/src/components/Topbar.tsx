@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useHive } from "../store";
 import { hhmmss } from "../lib/agents";
 
@@ -15,15 +16,26 @@ function Clock() {
 // for non-2xx responses (429/529 rate-limit/overload). Surface a count of those
 // seen in the last few minutes so a stalled fleet has a visible cause. Silent
 // when there's no recent pressure.
+//
+// R3-2.5: read `scopedEvents` (already filtered to the selected scope) rather than
+// the fleet-wide `allEvents`, so the indicator reflects the pressure on what the
+// user is actually looking at. The window filter is memoized so it doesn't re-scan
+// on every unrelated render (the 1s `now` tick advances the window boundary, so it
+// recomputes ~once a second by design, not per keystroke).
 const PRESSURE_WINDOW_MS = 5 * 60_000;
 function ProviderPressure() {
-  const events = useHive((s) => s.allEvents);
+  const events = useHive((s) => s.scopedEvents);
   const now = useHive((s) => s.now);
-  const recent = events.filter(
-    (e) => e.type === "provider_response" && (now || Date.now()) - new Date(e.ts).getTime() < PRESSURE_WINDOW_MS,
+  const recent = useMemo(
+    () => events.filter(
+      (e) => e.type === "provider_response" && (now || Date.now()) - new Date(e.ts).getTime() < PRESSURE_WINDOW_MS,
+    ),
+    [events, now],
   );
   if (!recent.length) return null;
-  const last = recent[recent.length - 1];
+  // scopedEvents is newest-first (recomputeScoped reverses it), so recent[0] is the
+  // latest pressure response.
+  const last = recent[0];
   const status = last?.payload?.status;
   return (
     <span

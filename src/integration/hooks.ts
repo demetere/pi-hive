@@ -312,6 +312,19 @@ ${catalog}`,
         // served model.
         model: message?.model || message?.responseModel,
         responseModel: message?.responseModel ? String(message.responseModel) : undefined,
+        // Item 9 / R3-1.4: the per-message identity the SDK's AssistantMessage
+        // exposes — provider, api, responseId, and bounded diagnostics — all on this
+        // same message object. (Round 2 captured none of these behind a comment that
+        // wrongly claimed they didn't exist.)
+        provider: message?.provider ? String(message.provider) : undefined,
+        api: message?.api ? String(message.api) : undefined,
+        responseId: message?.responseId ? String(message.responseId) : undefined,
+        diagnostics: Array.isArray(message?.diagnostics) && message.diagnostics.length
+          ? message.diagnostics.slice(0, 20).map((d: any) => ({
+              type: d?.type ? String(d.type) : undefined,
+              message: d?.error?.message ? truncateMiddle(String(d.error.message), 300) : undefined,
+            }))
+          : undefined,
         usage: u ? { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, reasoning: u.reasoning, cost: u.cost } : undefined,
       }, "Orchestrator");
     }

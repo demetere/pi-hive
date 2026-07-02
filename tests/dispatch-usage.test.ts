@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchAgent, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { restoreRuntimeCounters } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
 // L1: a REAL double-count regression test. It drives dispatchAgent end-to-end
@@ -26,7 +27,7 @@ function runtimeFor(name: string, sessionFile: string): AgentRuntime {
 // returns the authoritative lifetime aggregate that dispatch OVERWRITES with.
 function scriptedSession(opts: {
   turns: Array<{ input: number; output: number; cacheRead?: number; cacheWrite?: number; reasoning?: number; cost: number }>;
-  stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+  stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; reasoning?: number };
 }) {
   let handler: ((e: any) => void) | undefined;
   return {
@@ -34,7 +35,12 @@ function scriptedSession(opts: {
     getAvailableThinkingLevels() { return ["off", "low", "high"]; },
     getContextUsage() { return { percent: 12 }; },
     getSessionStats() {
-      return { tokens: { input: opts.stats.input, output: opts.stats.output, cacheRead: opts.stats.cacheRead, cacheWrite: opts.stats.cacheWrite }, cost: { total: opts.stats.cost } };
+      // reasoning is included only when the test sets it, so the default keeps the
+      // field ABSENT (Number(undefined) → NaN, the "SDK didn't report" path). Set
+      // stats.reasoning: 0 to exercise the finite-0-must-not-wipe branch (R3-3.1).
+      const tokens: any = { input: opts.stats.input, output: opts.stats.output, cacheRead: opts.stats.cacheRead, cacheWrite: opts.stats.cacheWrite };
+      if (opts.stats.reasoning !== undefined) tokens.reasoning = opts.stats.reasoning;
+      return { tokens, cost: { total: opts.stats.cost } };
     },
     state: { errorMessage: undefined as string | undefined },
     async prompt() {
@@ -200,6 +206,68 @@ test("fresh re-run resets lifetime counters so the delta is the fresh session's 
   assert.equal(worker.inputTokens, 80);
 });
 
+// R3-1.1: the fresh-delta fix must survive a runtime-counter restore. A mode
+// switch / reloadTeam rebuilds runtimes and calls restoreRuntimeCounters, which
+// reseeds lifetime totals from the delegation_end log. The OLD peak/Math.max
+// restore would pick the pre-fresh row (500) over the post-fresh row (80),
+// resurrecting the stale baseline so the NEXT run's delta clamps to ~0 — the exact
+// bug W1.1 fixed. This test drives run → fresh run → restore → run and asserts the
+// third delta is run-3-only, proving last-row-wins restoration.
+test("fresh-delta survives a mode-switch runtime restore — third run's delta is not resurrected to ~0 (R3-1.1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-restore-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+
+  // Run 1 (non-fresh): lifetime 500. Writes builder.jsonl so run 2's fresh path fires.
+  const create1: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 500, output: 200, cacheRead: 50, cacheWrite: 20, cost: 0.50 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run one", ctx, false, create1);
+  writeFileSync(worker.sessionFile, "{}\n");
+
+  // Run 2 (fresh): archives, resets counters, lifetime now 80. The delegation_end
+  // runtime snapshot for run 2 records 80 — SMALLER than run 1's 500.
+  const create2: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 80, output: 30, cacheRead: 5, cacheWrite: 2, cost: 0.08 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run two fresh", ctx, true, create2);
+  assert.equal(worker.inputTokens, 80);
+
+  // Simulate a mode switch / reloadTeam: rebuild the runtime with zeroed counters
+  // (as loadAgentRuntime does), then restore from the log. Last-row-wins must
+  // restore 80, NOT the peak 500.
+  worker.inputTokens = 0; worker.outputTokens = 0; worker.cacheReadTokens = 0;
+  worker.cacheWriteTokens = 0; worker.costUsd = 0; worker.runCount = 0; worker.toolCount = 0;
+  restoreRuntimeCounters(state);
+  assert.equal(worker.inputTokens, 80, "restore must pick the latest (post-fresh) row, not the peak");
+  assert.equal(worker.runCount, 2, "runCount stays monotonic across the restore");
+
+  // Run 3 (non-fresh): the fresh session continues, lifetime grows 80 → 130. With a
+  // correct baseline of 80, the delta is run-3-only (50). With the resurrected 500
+  // baseline it would clamp to 0.
+  const create3: CreateAgentSession = (async () => ({ session: scriptedSession({ turns: [{ input: 1, output: 1, cost: 0 }], stats: { input: 130, output: 55, cacheRead: 9, cacheWrite: 4, cost: 0.13 } }) })) as any;
+  await dispatchAgent(state, "Builder", "run three", ctx, false, create3);
+
+  const ends = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end");
+  assert.equal(ends.length, 3, "expected a delegation_end per run");
+  const run3 = ends[2].payload;
+  assert.equal(run3.delta.inputTokens, 50, "run 3 delta is run-3-only, not clamped to 0 by a resurrected baseline");
+  assert.equal(run3.delta.outputTokens, 25);
+  assert.equal(run3.delta.cacheReadTokens, 4);
+  assert.equal(run3.delta.cacheWriteTokens, 2);
+  assert.ok(Math.abs(run3.delta.costUsd - 0.05) < 1e-9, `run3 cost delta ${run3.delta.costUsd} ≈ 0.05`);
+});
+
 // Phase 4.8: reasoning ("thinking") tokens are extracted from message_end usage,
 // accumulated on the runtime, and carried through the per-run delta + runtime
 // summary. getSessionStats() lacks reasoning, so the end-of-run overwrite must
@@ -235,6 +303,73 @@ test("dispatchAgent carries reasoning tokens through the delta + summary (Phase 
   const end = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end")[0].payload;
   assert.equal(end.delta.reasoningTokens, 50);
   assert.equal(end.runtime.reasoningTokens, 50);
+});
+
+// R3-3.1: the reasoning-preservation guard must also survive a stats.reasoning of
+// FINITE 0 (SDK reports the field but as zero — e.g. reasoning simply absent for
+// this provider). The guard `reasoning > 0 || runtime.reasoningTokens === 0` must
+// keep the accumulated value rather than wiping it to 0. The Phase 4.8 test above
+// only covers the NaN path (field absent); this covers the finite-0 branch.
+test("finite-0 reasoning from SessionStats does not wipe accumulated reasoning (R3-3.1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-reasoning0-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+  // Turns accumulate 40 reasoning; stats reports reasoning: 0 explicitly (finite).
+  const create: CreateAgentSession = (async () => ({ session: scriptedSession({
+    turns: [{ input: 10, output: 5, reasoning: 25, cost: 0.01 }, { input: 10, output: 5, reasoning: 15, cost: 0.01 }],
+    stats: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0.02, reasoning: 0 },
+  }) })) as any;
+  await dispatchAgent(state, "Builder", "think then stats-zero", ctx, false, create);
+
+  // The finite-0 from stats must NOT clobber the 40 accumulated from message_end.
+  assert.equal(worker.reasoningTokens, 40);
+  const end = readEmittedEvents(obsLog).filter((e) => e.type === "delegation_end")[0].payload;
+  assert.equal(end.delta.reasoningTokens, 40);
+  assert.equal(end.runtime.reasoningTokens, 40);
+});
+
+// R3-3.1 companion: when NOTHING was accumulated, a finite-0 from stats is trusted
+// (the guard's `runtime.reasoningTokens === 0` arm) — reasoning stays 0, not left
+// stale. Guards against the fix over-correcting into "never trust a 0".
+test("finite-0 reasoning is trusted when nothing was accumulated (R3-3.1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-reasoning0b-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+  const create: CreateAgentSession = (async () => ({ session: scriptedSession({
+    turns: [{ input: 10, output: 5, cost: 0.01 }],
+    stats: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.01, reasoning: 0 },
+  }) })) as any;
+  await dispatchAgent(state, "Builder", "no reasoning", ctx, false, create);
+
+  assert.equal(worker.reasoningTokens, 0);
 });
 
 // M8a: the FIRST run's delegation_start must already carry thinkingLevels +

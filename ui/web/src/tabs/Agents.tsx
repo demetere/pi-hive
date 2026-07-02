@@ -112,23 +112,39 @@ export default function Agents(props: { search: string }) {
   const scope = useHive((s) => s.scope);
   // Per-agent average turn latency (Phase 4.11). `turn` events carry the SDK's
   // measured per-turn duration and are actor-tagged; today only the main session
-  // emits them, so this populates the Orchestrator row (workers have no turn
-  // lifecycle of their own). Keyed by actor so it lights up automatically if
-  // worker turn events are ever added.
+  // emits them (workers have no turn lifecycle of their own).
+  //
+  // R3-1.5: turn events are tagged with the literal telemetry actor "Orchestrator"
+  // (see hooks.ts), but the Agents rows key by the topology's CONFIGURED main name
+  // — which is "Planner" for a planning team and arbitrary for a custom-named main.
+  // So the column populated only when the main was literally named "Orchestrator".
+  // Remap the "Orchestrator" tag onto the actual orchestrator-role row name(s) so
+  // the per-row lookup succeeds regardless of the configured name. Still keyed by
+  // actor otherwise, so it lights up automatically if worker turn events appear.
+  // NOTE: the average only covers turn events in the loaded event window.
   const turnLatency = useMemo(() => {
+    const orchestratorNames = scopedAgents.filter((a) => a.role === "orchestrator").map((a) => a.name);
     const acc = new Map<string, { total: number; n: number }>();
+    const add = (who: string, ms: number) => {
+      const cur = acc.get(who) || { total: 0, n: 0 };
+      cur.total += ms; cur.n += 1; acc.set(who, cur);
+    };
     for (const e of scopedEvents) {
       if (e.type !== "turn") continue;
       const ms = Number(e.payload?.durationMs);
       const who = e.payload?.agent || e.actor;
       if (!who || !Number.isFinite(ms)) continue;
-      const cur = acc.get(who) || { total: 0, n: 0 };
-      cur.total += ms; cur.n += 1; acc.set(who, cur);
+      // Fan the "Orchestrator" telemetry tag out to the configured main name(s).
+      if (who === "Orchestrator" && orchestratorNames.length) {
+        for (const name of orchestratorNames) add(name, ms);
+      } else {
+        add(who, ms);
+      }
     }
     const out = new Map<string, number>();
     for (const [who, { total, n }] of acc) if (n) out.set(who, total / n);
     return out;
-  }, [scopedEvents]);
+  }, [scopedEvents, scopedAgents]);
   // Resolve a row's model to its capability record (Phase 6.5), matching the
   // store's normalized keys (full "provider/id" or bare id, lowercased).
   const capabilityOf = (model?: string): ModelInfo | undefined => {
