@@ -28,7 +28,7 @@ import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extrac
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
-import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
+import { isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict, type ArtifactId } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 
@@ -77,6 +77,36 @@ export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): stri
   return normalizeWorkerSkillPaths(refs).map((skillPath) => resolve(cwd, skillPath));
 }
 
+const ARTIFACT_REVISION_MARKERS = /\b(revise|revision|fix|address|correct|update|rewrite|repair|failed review|review failed|rejected|denied|blocker|blocking)\b/i;
+
+const ARTIFACT_TARGET_MARKERS: Record<ArtifactId, RegExp> = {
+  proposal: /\bproposal(?:\.md)?\b|proposal artifact|proposal gate/i,
+  design: /\bdesign(?:\.md)?\b|design artifact|design gate/i,
+  specs: /\bspecs?(?:\/\*\*\/\*\.md| artifact| gate)?\b|specs\/|spec\.md/i,
+  tasks: /\btasks(?:\.md)?\b|tasks artifact|tasks gate/i,
+};
+
+export function isPendingArtifactRevisionTask(task: string, pending: ArtifactId): boolean {
+  if (!ARTIFACT_REVISION_MARKERS.test(task)) return false;
+  if (/\bauthor the next artifact\b/i.test(task)) return false;
+  return ARTIFACT_TARGET_MARKERS[pending].test(task);
+}
+
+function inferArtifactFromReviewTask(task: string): ArtifactId | null {
+  for (const id of ["tasks", "specs", "design", "proposal"] as const) {
+    if (ARTIFACT_TARGET_MARKERS[id].test(task)) return id;
+  }
+  return null;
+}
+
+function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> | null {
+  const text = output.trim();
+  if (/^(PASS|GREEN)\b/i.test(text)) return "green";
+  if (/^(YELLOW)\b/i.test(text)) return "yellow";
+  if (/^(FAIL|RED)\b/i.test(text)) return "red";
+  return null;
+}
+
 export async function dispatchAgent(
   state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false,
   createSession: CreateAgentSession = createAgentSession,
@@ -98,12 +128,13 @@ export async function dispatchAgent(
   // Hard per-artifact planning stop: once a planner has authored an artifact and
   // it is awaiting the human's review, the pipeline HALTS — no planner may author
   // the next artifact until the human approves the pending one in the review UI.
-  // Reviewers still run (their agent review is what happens during the wait); a
-  // denied artifact does not block (revising it is the intended next action).
+  // Reviewers still run. If an agent review finds defects before the human has
+  // decided, allow an explicit same-artifact revision task instead of forcing a
+  // pointless human reject/deny round-trip.
   if (state.mode === "plan" && runtime.config.agentType === "planner") {
     const changeId = currentChangeId() || state.activeChangeId || "";
     const pending = changeId ? isAwaitingHumanApproval(ctx.cwd, changeId) : null;
-    if (pending) {
+    if (pending && !isPendingArtifactRevisionTask(task, pending)) {
       return { output: `Delegation blocked: the "${pending}" artifact for change "${changeId}" is authored and awaiting human review in the dashboard. The planning pipeline holds until it is approved (or denied for revision). Ask the human to review it at the Plans tab; reviewers may still run.`, exitCode: 1, elapsed: 0 };
     }
   }
@@ -538,6 +569,13 @@ export async function dispatchAgent(
     reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
+  if (state.mode === "plan" && runtime.config.agentType === "reviewer") {
+    const changeId = currentChangeId() || state.activeChangeId || "";
+    const artifact = inferArtifactFromReviewTask(task);
+    const verdict = inferReviewVerdict(output);
+    if (changeId && artifact && verdict) setAgentReviewVerdict(ctx.cwd, changeId, artifact, verdict, runtime.config.name);
+  }
+
   emitHiveEvent(state, "delegation_end", {
     ...completion,
     truncated: output.length > 2_000,

@@ -271,9 +271,10 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         concerns: Type.Optional(Type.Array(Type.String(), { description: "Yellow: non-blocking follow-ups to surface to the human." })),
         blockers: Type.Optional(Type.Array(Type.String(), { description: "Red: must-fix items before proceeding." })),
         changeId: Type.Optional(Type.String({ description: "The change-id under review. Defaults to the active change if one is set." })),
+        artifact: Type.Optional(Type.String({ description: "The OpenSpec artifact under review, e.g. proposal.md, design.md, specs/**/*.md, or tasks.md." })),
       }),
-      async execute(_toolCallId: string, params: unknown) {
-        const p = params as { verdict: ReviewVerdictLevel; summary: string; evidence?: string[]; concerns?: string[]; blockers?: string[]; changeId?: string };
+      async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
+        const p = params as { verdict: ReviewVerdictLevel; summary: string; evidence?: string[]; concerns?: string[]; blockers?: string[]; changeId?: string; artifact?: string };
         const changeId = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
         const evidence = p.evidence || [];
         const concerns = p.concerns || [];
@@ -288,6 +289,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
             changeId, reviewer: callerName, verdict: p.verdict, summary: p.summary,
             evidence, concerns, blockers, createdAt: new Date().toISOString(),
           });
+          if (p.artifact?.trim()) openspec.setAgentReviewVerdict(ctx.cwd, changeId, p.artifact.trim(), p.verdict, callerName);
         }
         const scope = changeId ? `change "${changeId}"` : "the current session (no active change-id)";
         const detail = p.verdict === "red" ? `${blockers.length} blocker(s)` : p.verdict === "yellow" ? `${concerns.length} concern(s)` : "clean";

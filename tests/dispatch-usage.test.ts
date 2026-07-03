@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchAgent, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { dispatchAgent, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
 import { restoreRuntimeCounters } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -25,6 +25,14 @@ function runtimeFor(name: string, sessionFile: string): AgentRuntime {
 // A scripted AgentSession: on prompt(), it replays the given turns as message_end
 // events (live accumulation), then an agent_end, to the subscriber. getSessionStats
 // returns the authoritative lifetime aggregate that dispatch OVERWRITES with.
+test("pending artifact revision tasks may bypass the human-review authoring hold", () => {
+  assert.equal(isPendingArtifactRevisionTask("Tasks gate failed review. Revise ONLY openspec/changes/x/tasks.md.", "tasks"), true);
+  assert.equal(isPendingArtifactRevisionTask("The plan-review UI rejected design.md. Revise ONLY design.md.", "design"), true);
+  assert.equal(isPendingArtifactRevisionTask("Author the next artifact (tasks) with the planning team", "tasks"), false);
+  assert.equal(isPendingArtifactRevisionTask("Continue planning after human approval", "tasks"), false);
+  assert.equal(isPendingArtifactRevisionTask("Spec reviewer failed. Revise specs/front-window/spec.md", "specs"), true);
+});
+
 test("resolveWorkerSkillPaths flattens skill refs so delegate setup never passes objects to path.resolve", () => {
   const cwd = "/repo";
   assert.deepEqual(

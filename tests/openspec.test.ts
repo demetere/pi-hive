@@ -131,6 +131,17 @@ test("isAwaitingHumanApproval halts the pipeline until the human decides", () =>
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
 });
 
+test("agent reviewer red unlocks same-artifact revision without human denial", () => {
+  const cwd = scratch();
+  const dir = join(cwd, "openspec", "changes", "add-auth");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), "proposal");
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal.md", "red", "Plan Reviewer");
+  assert.equal(openspec.agentReviewVerdict(cwd, "add-auth", "proposal.md"), "red");
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
+});
+
 test("canAuthorArtifact enforces upstream approval; nextAuthorable walks the pipeline", () => {
   const cwd = scratch();
   const dir = join(cwd, "openspec", "changes", "add-auth");

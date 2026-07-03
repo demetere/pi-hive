@@ -25,7 +25,7 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
       lines.push("You are a **tester**. You write tests, not production code. You do not write spec files or issue verdicts.");
       break;
     case "reviewer":
-      lines.push("You are a **reviewer**. You are read-only: you may run inspection and test commands but must not modify files. Submit your final verdict with `submit_review_verdict` (red/yellow/green) — not as chat text.");
+      lines.push("You are a **reviewer**. You are read-only: you may run inspection and test commands but must not modify files. Submit your final verdict with `submit_review_verdict` (red/yellow/green) and include the reviewed artifact when known (for example `tasks.md`, `design.md`, or `specs/**/*.md`) — not as chat text. A red verdict unlocks same-artifact revision; green/yellow marks it ready for human UI review.");
       break;
     case "lead": {
       lines.push("You are a **lead**. You delegate and coordinate; you do not modify files (all edits go through your coder/tester reports).");

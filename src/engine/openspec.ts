@@ -387,9 +387,19 @@ function downstreamOf(artifact: ArtifactId): ArtifactId[] {
 }
 
 export type ArtifactVerdict = "green" | "red" | null;
+export type AgentReviewVerdict = "green" | "yellow" | "red" | null;
 // Per-artifact approval ledger — pi-hive's own gate state, independent of
 // OpenSpec, persisted as a sidecar the CORE can read without SQLite.
 export type ApprovalLedger = Partial<Record<ArtifactId, ArtifactVerdict>>;
+export type AgentReviewLedger = Partial<Record<ArtifactId, AgentReviewVerdict>>;
+
+type ApprovalSidecar = {
+  approved?: boolean;
+  artifacts?: ApprovalLedger;
+  agentReviews?: AgentReviewLedger;
+  by?: string;
+  at?: string;
+};
 
 function approvalPath(cwd: string, name: string): string | null {
   if (!isSafeChangeId(name)) return null;
@@ -403,36 +413,48 @@ function toArtifactId(artifact: string): ArtifactId | null {
 
 // Read the ledger. Back-compat: the old flat shape {approved:true} maps to
 // {tasks:"green"} so pre-existing sidecars keep gating execution.
-export function readApprovalLedger(cwd: string, name: string): ApprovalLedger {
+function readApprovalSidecar(cwd: string, name: string): ApprovalSidecar {
   const p = approvalPath(cwd, name);
   if (!p) return {};
   const raw = readIfSmall(p, 16_000);
   if (!raw) return {};
   try {
-    const parsed = JSON.parse(raw) as { approved?: boolean; artifacts?: ApprovalLedger };
-    if (parsed.artifacts) return parsed.artifacts;
-    if (parsed.approved === true) return { tasks: "green" }; // legacy flat shape
-    return {};
+    return JSON.parse(raw) as ApprovalSidecar;
   } catch {
     return {};
   }
 }
 
+export function readApprovalLedger(cwd: string, name: string): ApprovalLedger {
+  const parsed = readApprovalSidecar(cwd, name);
+  if (parsed.artifacts) return parsed.artifacts;
+  if (parsed.approved === true) return { tasks: "green" }; // legacy flat shape
+  return {};
+}
+
+export function readAgentReviewLedger(cwd: string, name: string): AgentReviewLedger {
+  return readApprovalSidecar(cwd, name).agentReviews || {};
+}
+
 // Atomic write (temp + rename) so the core dispatch gate never reads a
-// half-written ledger. Single writer (the dashboard review surface); the core
-// only reads.
-function writeApprovalLedger(cwd: string, name: string, ledger: ApprovalLedger, by: string): boolean {
+// half-written ledger. Single writer in practice, but preserve unrelated sidecar
+// sections so UI approvals and agent-review gates do not overwrite each other.
+function writeApprovalSidecar(cwd: string, name: string, sidecar: ApprovalSidecar, by: string): boolean {
   const p = approvalPath(cwd, name);
   if (!p) return false;
   try {
     ensureDir(dirname(p));
     const tmp = `${p}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify({ artifacts: ledger, by, at: new Date().toISOString() }, null, 2)}\n`);
+    writeFileSync(tmp, `${JSON.stringify({ ...sidecar, by, at: new Date().toISOString() }, null, 2)}\n`);
     renameSync(tmp, p);
     return true;
   } catch {
     return false;
   }
+}
+
+function writeApprovalLedger(cwd: string, name: string, ledger: ApprovalLedger, by: string): boolean {
+  return writeApprovalSidecar(cwd, name, { ...readApprovalSidecar(cwd, name), artifacts: ledger }, by);
 }
 
 // Record a human verdict for one artifact. On a DENY (red), also revoke the
@@ -453,6 +475,21 @@ export function artifactVerdict(cwd: string, name: string, artifact: string): Ar
   const id = toArtifactId(artifact);
   if (!id) return null;
   return readApprovalLedger(cwd, name)[id] ?? null;
+}
+
+export function setAgentReviewVerdict(cwd: string, name: string, artifact: string, verdict: AgentReviewVerdict, by = "agent-reviewer"): boolean {
+  const id = toArtifactId(artifact);
+  if (!id) return false;
+  const sidecar = readApprovalSidecar(cwd, name);
+  const agentReviews = { ...(sidecar.agentReviews || {}) };
+  agentReviews[id] = verdict;
+  return writeApprovalSidecar(cwd, name, { ...sidecar, agentReviews }, by);
+}
+
+export function agentReviewVerdict(cwd: string, name: string, artifact: string): AgentReviewVerdict {
+  const id = toArtifactId(artifact);
+  if (!id) return null;
+  return readAgentReviewLedger(cwd, name)[id] ?? null;
 }
 
 export function isArtifactApproved(cwd: string, name: string, artifact: string): boolean {
@@ -498,7 +535,10 @@ export function pendingReviewArtifact(cwd: string, name: string): ArtifactId | n
   let pending: ArtifactId | null = null;
   for (const id of ARTIFACT_ORDER) {
     const present = id === "specs" ? hasSpecs : files.has(id);
-    if (present && ledger[id] == null) pending = id; // authored, human has not decided
+    // If the automated reviewer already rejected this artifact, it is not
+    // awaiting human review; it is awaiting same-artifact revision. Missing or
+    // green/yellow agent review still holds the pipeline before the next artifact.
+    if (present && ledger[id] == null && agentReviewVerdict(cwd, name, id) !== "red") pending = id;
   }
   return pending;
 }

@@ -40,6 +40,21 @@ const surface: ReviewSurface | null = registerReviewSurface({
     },
     onApprove(ctx, input) {
       const feedback = renderReviewInput(input);
+      const agentVerdict = openspec.agentReviewVerdict(ctx.cwd, ctx.change, ctx.artifact);
+      if (agentVerdict !== "green" && agentVerdict !== "yellow") {
+        const gateFeedback = agentVerdict === "red"
+          ? "Automated plan reviewer marked this artifact RED. Revise it before human approval."
+          : "Automated plan reviewer has not marked this artifact ready for human approval yet.";
+        recordVerdict(ctx, "red", gateFeedback);
+        enqueueDashboardAction(ctx.cwd, {
+          type: "plan_review_denied",
+          changeId: ctx.change,
+          artifact: ctx.artifact,
+          feedback: gateFeedback,
+          annotationCount: 0,
+        });
+        return;
+      }
       recordVerdict(ctx, "green", feedback);
       // Record the human's per-artifact approval in the ledger. This both
       // advances the planning gate (the next artifact becomes authorable) and,
