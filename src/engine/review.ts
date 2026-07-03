@@ -97,9 +97,9 @@ export function parseRid(rid: string): Rid | null {
   return { change, artifact: artifact || "proposal.md" };
 }
 
-// Extract rid from a request Referer that points at a review mount, e.g.
-// "http://127.0.0.1:43191/pl-review/?rid=add-auth%23proposal.md".
-export function ridFromReferer(referer: string | null, mountPath: string): string | null {
+// Extract a query parameter from a request Referer that points at a review
+// mount, e.g. "http://127.0.0.1:43191/pl-review/?rid=add-auth%23proposal.md".
+function reviewParamFromReferer(referer: string | null, mountPath: string, key: string): string | null {
   if (!referer) return null;
   let u: URL;
   try {
@@ -108,7 +108,15 @@ export function ridFromReferer(referer: string | null, mountPath: string): strin
     return null;
   }
   if (!u.pathname.startsWith(mountPath)) return null;
-  return u.searchParams.get("rid");
+  return u.searchParams.get(key);
+}
+
+export function ridFromReferer(referer: string | null, mountPath: string): string | null {
+  return reviewParamFromReferer(referer, mountPath, "rid");
+}
+
+export function cwdFromReferer(referer: string | null, mountPath: string): string | null {
+  return reviewParamFromReferer(referer, mountPath, "cwd");
 }
 
 // ---------------------------------------------------------------------------
@@ -242,9 +250,13 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
   // client's absolute /api/... calls route here while the dashboard's own API is
   // untouched.
   if (url.pathname.startsWith("/api/")) {
-    const rid = ridFromReferer(req.headers.get("referer"), mountPath);
+    const referer = req.headers.get("referer");
+    const rid = ridFromReferer(referer, mountPath);
     if (rid === null) return null; // not from our iframe — let the server handle it
-    const ctx = hooks.resolveContext(rid, url.searchParams.get("cwd"));
+    // The vendored client uses absolute /api/* URLs, so it cannot preserve our
+    // dashboard cwd query on those calls. Recover cwd from the iframe Referer.
+    const cwd = url.searchParams.get("cwd") || cwdFromReferer(referer, mountPath);
+    const ctx = hooks.resolveContext(rid, cwd);
 
     const p = url.pathname;
     if (p === "/api/plan" && req.method === "GET") {
