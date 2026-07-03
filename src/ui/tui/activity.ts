@@ -3,8 +3,9 @@ import { agentSlug, configuredChildAgents, truncateMiddle } from "../../core/uti
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 const WIDGET_ID = "hive-activity";
-const MAX_ENTRIES = 80;
-const MAX_RENDERED_ROWS = 9;
+const MAX_ENTRIES = 40;
+const MAX_RENDERED_ROWS = 4;
+const MAX_ENTRY_TEXT = 72;
 
 function nowIso() {
   return new Date().toISOString();
@@ -49,7 +50,8 @@ function renderActiveRows(state: HiveState, theme: any, depths: Map<string, numb
       const depth = depthFor(depths, runtime.config.name);
       const indent = "  ".repeat(Math.max(0, depth));
       const elapsed = formatElapsed(runtime.elapsedMs);
-      const work = truncateMiddle(runtime.lastWork || runtime.task || "working", 100);
+      const rawWork = runtime.lastWork || runtime.task || "working";
+      const work = rawWork.startsWith("tool: ") ? rawWork : truncateMiddle(rawWork, MAX_ENTRY_TEXT);
       const suffix = [elapsed, runtime.toolCount ? `${runtime.toolCount} tools` : ""].filter(Boolean).join(" · ");
       return `${theme.fg("accent", `${indent}${icon("running")} ${runtime.config.name}`)}${theme.fg("dim", suffix ? ` · ${suffix}` : "")} ${theme.fg("muted", `— ${work}`)}`;
     });
@@ -63,7 +65,7 @@ function renderEntry(entry: HiveActivityEntry, theme: any, depths: Map<string, n
   const color = status === "error" ? "error" : status === "done" ? "success" : status === "running" ? "accent" : "muted";
   const parent = entry.parent ? theme.fg("dim", `${entry.parent} → `) : "";
   const tool = entry.toolName ? theme.fg("dim", ` ${entry.toolName}`) : "";
-  const text = entry.text ? ` — ${truncateMiddle(entry.text, 120)}` : "";
+  const text = entry.text ? ` — ${truncateMiddle(entry.text, MAX_ENTRY_TEXT)}` : "";
   return `${theme.fg(color, `${indent}${icon(status)} `)}${parent}${theme.fg(color, label)}${tool}${theme.fg("muted", text)}`;
 }
 
@@ -102,6 +104,11 @@ export function updateHiveActivityWidget(state: HiveState) {
         const active = renderActiveRows(state, theme, depths);
         const recent = [...(state.activityLog || [])]
           .reverse()
+          // Keep the widget quiet: running tool calls are already reflected in
+          // active rows via `tool: <name>`, and rendering their JSON args in the
+          // persistent widget makes the TUI noisy. Only surface failures and
+          // higher-level delegation/retry/compaction milestones.
+          .filter((entry) => entry.kind !== "tool_start")
           .filter((entry) => entry.kind !== "tool_end" || entry.status === "error")
           .map((entry) => renderEntry(entry, theme, depths));
         const body = [...active, ...recent].slice(0, MAX_RENDERED_ROWS);
@@ -111,7 +118,7 @@ export function updateHiveActivityWidget(state: HiveState) {
         return lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
       },
     };
-  });
+  }, { placement: "belowEditor" });
 }
 
 export function clearHiveActivityWidget(state: HiveState) {

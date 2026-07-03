@@ -324,7 +324,7 @@ export async function dispatchAgent(
       runtime.lastWork = `tool: ${toolName}`;
       if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
       const argsJson = safeJson(event.args ?? {});
-      addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running", text: truncateMiddle(argsJson, 160) });
+      addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running" });
       emitHiveEvent(state, "worker_tool_start", {
         agent: runtime.config.name,
         toolName,
