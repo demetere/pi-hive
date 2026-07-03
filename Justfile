@@ -35,8 +35,31 @@ default:
 # =============================================================================
 # Recipes are grouped by prefix (dashboard-*, pi-*). Short shortcuts only.
 
+# quality
 alias v := verify
+
+# run everything
+alias r := run
+
+# dashboard-*  (d + first letter of the sub-command)
 alias db := dashboard-build
+alias dd := dashboard-dev
+alias di := dashboard-install
+alias dt := dashboard-typecheck
+alias dv := dashboard-verify
+alias dn := dashboard-vendor
+alias ds := dashboard-serve
+
+# pi-*
+alias pd := pi-dev
+alias pr := pi-reload
+alias ps := pi-symlink
+alias prd := pi-reload-dry-run
+
+# package/release
+alias pk := pack-dry-run
+alias pkf := pack-dry-run-fast
+alias pp := prepack
 
 # =============================================================================
 # SETUP & INFO
@@ -174,7 +197,7 @@ pi-reload-dry-run:
 dashboard-install:
   cd {{dashboard_dir}} && npm install
 
-# Rebuild the committed dashboard bundle and stamp dist/. (alias: db)
+# Rebuild the committed dashboard bundle and stamp dist/.
 [group('dashboard')]
 dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
