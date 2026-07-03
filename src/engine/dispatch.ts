@@ -30,6 +30,7 @@ import { buildHiveTools } from "../agents/tools";
 import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
 import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
+import { addHiveActivity } from "../ui/tui/activity";
 
 function resolveModel(ctx: ExtensionContext, modelString: string): any {
   const [provider, ...idParts] = modelString.split("/");
@@ -213,6 +214,7 @@ export async function dispatchAgent(
   } catch { /* capability probe is best-effort */ }
 
   logRecord(state, { from: caller, to: runtime.config.name, type: "delegation", message: task });
+  addHiveActivity(state, { kind: "delegation_start", parent: caller, agent: runtime.config.name, status: "running", text: task });
   emitHiveEvent(state, "delegation_start", {
     from: caller,
     to: runtime.config.name,
@@ -291,6 +293,7 @@ export async function dispatchAgent(
       runtime.lastWork = `tool: ${toolName}`;
       if (event.toolCallId) toolStartedAt.set(event.toolCallId, Date.now());
       const argsJson = safeJson(event.args ?? {});
+      addHiveActivity(state, { kind: "tool_start", agent: runtime.config.name, toolName, status: "running", text: truncateMiddle(argsJson, 160) });
       emitHiveEvent(state, "worker_tool_start", {
         agent: runtime.config.name,
         toolName,
@@ -302,6 +305,7 @@ export async function dispatchAgent(
       const startedAt = event.toolCallId ? toolStartedAt.get(event.toolCallId) : undefined;
       if (event.toolCallId) toolStartedAt.delete(event.toolCallId);
       const resultText = textOfResult(event.result);
+      addHiveActivity(state, { kind: "tool_end", agent: runtime.config.name, toolName: event.toolName || event.name || "unknown", status: event.isError === true ? "error" : "done", text: event.isError === true ? truncateMiddle(resultText, 160) : undefined });
       emitHiveEvent(state, "worker_tool_end", {
         agent: runtime.config.name,
         toolName: event.toolName || event.name || "unknown",
@@ -313,6 +317,7 @@ export async function dispatchAgent(
       }, runtime.config.name);
     } else if (event.type === "auto_retry_start") {
       if (event.maxAttempts != null) lastRetryMaxAttempts = event.maxAttempts;
+      addHiveActivity(state, { kind: "retry", agent: runtime.config.name, status: "running", text: `retry ${event.attempt}${event.maxAttempts ? `/${event.maxAttempts}` : ""}${event.errorMessage ? `: ${truncateMiddle(String(event.errorMessage), 120)}` : ""}` });
       emitHiveEvent(state, "worker_retry", {
         agent: runtime.config.name,
         attempt: event.attempt,
@@ -335,6 +340,7 @@ export async function dispatchAgent(
         finalError: event.finalError ? truncateMiddle(String(event.finalError), 500) : undefined,
       }, runtime.config.name);
     } else if (event.type === "compaction_start") {
+      addHiveActivity(state, { kind: "compaction", agent: runtime.config.name, status: "running", text: `compacting${event.reason ? `: ${event.reason}` : ""}` });
       emitHiveEvent(state, "worker_compaction", { agent: runtime.config.name, reason: event.reason, phase: "start" }, runtime.config.name);
     } else if (event.type === "compaction_end") {
       // Phase 4.5: keep the compaction RESULT fields, not just {reason, phase}.
@@ -515,6 +521,7 @@ export async function dispatchAgent(
     elapsedMs: runtime.elapsedMs,
   };
   logRecord(state, completion);
+  addHiveActivity(state, { kind: "delegation_end", parent: caller, agent: runtime.config.name, status: runtime.status, text: `${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s${runtime.toolCount ? ` · ${runtime.toolCount} tools` : ""}` });
   // Per-run deltas (Decision 1): runtime.* now hold session-lifetime aggregates
   // (overwritten from getSessionStats above), so a re-run agent's runtime would
   // make SUM() over delegations double-count. Subtract the run-start baseline so

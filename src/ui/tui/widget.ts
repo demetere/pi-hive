@@ -9,6 +9,7 @@ import { activateTeamRuntimes } from "../../engine/session";
 import { startHiveTelemetrySession } from "../../engine/observability";
 import { recordQuestion } from "../../engine/questions";
 import { installHiveFooter, requestHiveFooterRender } from "./footer";
+import { updateHiveActivityWidget } from "./activity";
 
 // Surface a delegated planner's promoted clarifying question to the human. With
 // a UI we block on an input dialog; either way we record the Q&A alongside the
@@ -163,7 +164,10 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
 
   if (mode === "normal") {
     state.pi.setActiveTools(state.normalToolNames);
-    if (ctx.mode === "tui") ctx.ui.setWidget("hive-tree", undefined);
+    if (ctx.mode === "tui") {
+      ctx.ui.setWidget("hive-tree", undefined);
+      updateHiveActivityWidget(state);
+    }
     if (shouldNotify && ctx.hasUI) ctx.ui.notify("Normal Pi chat mode enabled", "info");
     return true;
   }
@@ -210,6 +214,7 @@ export function updateWidget(state: HiveState) {
   // Keep team mode active without rendering the full team tree near the footer.
   if (!state.widgetCtx || state.widgetCtx.mode !== "tui") return;
   state.widgetCtx.ui.setWidget("hive-tree", undefined);
+  updateHiveActivityWidget(state);
   installHeader(state, state.widgetCtx);
   requestHiveFooterRender();
 }

@@ -213,6 +213,16 @@ export interface SessionState {
   observabilityLog: string;
 }
 
+export interface HiveActivityEntry {
+  ts: string;
+  kind: "delegation_start" | "delegation_end" | "tool_start" | "tool_end" | "retry" | "compaction" | "message";
+  agent?: string;
+  parent?: string;
+  toolName?: string;
+  status?: AgentStatus | "running";
+  text?: string;
+}
+
 // Accumulated telemetry for the visible main session (the orchestrator), which
 // has no delegation lifecycle of its own (A5). Counters are cumulative for the
 // session and folded into HiveStateSnapshot.agents as an "Orchestrator" entry.
@@ -293,4 +303,7 @@ export interface HiveState {
     host: string;
     adopted?: boolean;
   };
+  activityLog?: HiveActivityEntry[];
+  activityRender?: () => void;
+  activityWidgetInstalled?: boolean;
 }

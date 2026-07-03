@@ -10,6 +10,7 @@ import { enforceDomainForTool } from "../engine/domain";
 import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyMode, captureNormalTools, installHeader, updateWidget } from "../ui/tui/widget";
 import { installHiveFooter, registerFooterHooks } from "../ui/tui/footer";
+import { clearHiveActivityWidget } from "../ui/tui/activity";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
 import { resolveRuntime } from "../engine/agent-lookup";
@@ -420,6 +421,7 @@ ${catalog}`,
       ctx.ui.setHeader(undefined);
       ctx.ui.setFooter(undefined);
       ctx.ui.setWidget("hive-tree", undefined);
+      clearHiveActivityWidget(state);
     }
     if (ctx.hasUI) ctx.ui.setStatus("hive", undefined);
   });
