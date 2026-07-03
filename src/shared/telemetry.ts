@@ -135,8 +135,9 @@ export interface TelemetryAgentRuntime {
   model?: string;
   thinking?: string;
   thinkingLevels?: string[];
-  // Lifetime token counts at the start of the current run — the baseline the UI
-  // subtracts to compute per-run TOK/S (J8).
+  // Lifetime token counts at the start of the current run. The UI uses the
+  // output baseline to compute per-run generation TOK/S (J8); input is kept for
+  // telemetry symmetry and historical consumers.
   runStartInputTokens?: number;
   runStartOutputTokens?: number;
 }

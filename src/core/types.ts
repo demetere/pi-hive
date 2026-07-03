@@ -191,10 +191,10 @@ export interface AgentRuntime {
   // SDK-reported thinking levels for the runtime's effective model (A10).
   thinkingLevels?: string[];
   // Lifetime token/cost counts captured at the start of the current run (J8).
-  // The UI subtracts input/output from the live totals for per-run TOK/S; the
-  // full set (adding cache + cost) is what delegation_end turns into per-run
-  // deltas so SUM() over the delegations table never double-counts a re-run
-  // agent whose runtime carries session-lifetime aggregates (Decision 1).
+  // The UI subtracts output from the live total for per-run generation TOK/S;
+  // the full set (adding input/cache + cost) is what delegation_end turns into
+  // per-run deltas so SUM() over the delegations table never double-counts a
+  // re-run agent whose runtime carries session-lifetime aggregates (Decision 1).
   runStartInputTokens?: number;
   runStartOutputTokens?: number;
   runStartCacheReadTokens?: number;

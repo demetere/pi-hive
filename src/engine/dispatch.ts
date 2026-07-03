@@ -172,8 +172,8 @@ export async function dispatchAgent(
   runtime.startedAt = Date.now();
   state.activeRuns++;
   // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
-  // divides the *per-run* delta by *per-run* elapsedMs — not lifetime tokens by
-  // per-run elapsed.
+  // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
+  // tokens by per-run elapsed.
   runtime.runStartInputTokens = runtime.inputTokens;
   runtime.runStartOutputTokens = runtime.outputTokens;
   // Full baselines so delegation_end can emit per-run deltas for every token

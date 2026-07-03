@@ -4,6 +4,7 @@ import { projectName } from "../src/shared/project.ts";
 import { buildHistoryBySession, historyTotals } from "../ui/web/src/store/history.ts";
 import { buildEventStatus } from "../ui/web/src/store/status.ts";
 import { cumulativeSeries, delegationsFromEvents, seriesTotals } from "../ui/web/src/lib/series.ts";
+import { tokPerSec } from "../ui/web/src/lib/agents.ts";
 
 test("projectName keeps useful parent context for generic paths", () => {
   assert.equal(projectName("/Users/me/work/app"), "work / app");
@@ -24,6 +25,15 @@ test("buildEventStatus tracks nested delegation waiting and resume states", () =
   assert.equal(status.get("Orchestrator"), "waiting");
   assert.equal(status.get("Lead"), "running");
   assert.equal(status.get("Worker"), "done");
+});
+
+test("tokPerSec reports generation throughput, not prompt throughput", () => {
+  // 100k prompt tokens over 10s is provider context processing, not generation.
+  assert.equal(tokPerSec(100_000, 500, 10_000, 0, 0), 50);
+  // Re-runs subtract the output baseline so old output does not inflate the rate.
+  assert.equal(tokPerSec(150_000, 800, 10_000, 100_000, 500), 30);
+  // Legacy snapshots without baselines fall back to lifetime output only.
+  assert.equal(tokPerSec(100_000, 500, 10_000), 50);
 });
 
 test("buildHistoryBySession keeps peak cumulative usage per agent", () => {

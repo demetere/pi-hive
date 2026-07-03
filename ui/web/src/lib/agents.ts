@@ -139,25 +139,25 @@ export function modelTag(model?: string): string {
   return raw;
 }
 
-// Per-run throughput (K4/Decision 4). elapsedMs resets each run in dispatch.ts,
-// so the rate must divide the tokens produced DURING this run — the live totals
-// minus the run-start baselines (J8) — by that same per-run elapsed. Falls back
-// to lifetime totals only when no baseline was recorded (pre-J8 snapshots), so a
-// re-run agent's rate is no longer inflated by prior runs' tokens. Returns null
-// when unknowable/idle.
+// Per-run generation throughput (K4/Decision 4). elapsedMs resets each run in
+// dispatch.ts, so the rate must divide the OUTPUT tokens produced DURING this
+// run — live output minus the run-start output baseline (J8) — by that same
+// per-run elapsed. Input tokens are prompt/context read by the provider; adding
+// them makes short turns with large context look like impossible generation
+// speeds (for example 100k+ prompt tokens over a few seconds). Falls back to
+// lifetime output only when no baseline was recorded (pre-J8 snapshots). Returns
+// null when unknowable/idle.
 export function tokPerSec(
-  inputTokens = 0,
+  _inputTokens = 0,
   outputTokens = 0,
   elapsedMs?: number,
-  runStartInputTokens?: number,
+  _runStartInputTokens?: number,
   runStartOutputTokens?: number,
 ): number | null {
-  const lifetime = (inputTokens || 0) + (outputTokens || 0);
-  const baseline = (runStartInputTokens || 0) + (runStartOutputTokens || 0);
   // Guard against a baseline above the live total (snapshot ordering skew).
-  const tokens = runStartInputTokens != null || runStartOutputTokens != null
-    ? Math.max(0, lifetime - baseline)
-    : lifetime;
+  const tokens = runStartOutputTokens != null
+    ? Math.max(0, (outputTokens || 0) - runStartOutputTokens)
+    : (outputTokens || 0);
   if (!tokens || !elapsedMs || elapsedMs <= 0) return null;
   return tokens / (elapsedMs / 1000);
 }
