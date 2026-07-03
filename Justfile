@@ -147,6 +147,19 @@ reload-dry-run:
 build-dashboard:
   cd {{dashboard_dir}} && npm install && npm run build
 
+# Refresh the committed, vendored Plannotator review UI from the pinned dev
+# dependency. plannotator.html is a self-contained single-file build (all JS/CSS
+# inlined), so it needs no build step — we host it statically on the dashboard
+# server. Committed like ui/web/dist/; bumping the pinned @plannotator version is
+# a deliberate, tested step because the committed HTML must match the /api/*
+# contract in src/engine/review.ts.
+[group('dashboard')]
+vendor-plannotator:
+  npm install
+  mkdir -p {{dashboard_dir}}/vendor
+  cp node_modules/@plannotator/pi-extension/plannotator.html {{dashboard_dir}}/vendor/plannotator.html
+  @printf "{{GREEN}}Vendored plannotator.html (%s).{{NC}}\n" "$(du -h {{dashboard_dir}}/vendor/plannotator.html | cut -f1)"
+
 # Run the root extension TypeScript checker.
 [group('quality')]
 typecheck-core:

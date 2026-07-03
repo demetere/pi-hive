@@ -1,6 +1,6 @@
 import { isSameOriginRequest, writeGateResponse } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
-import { BOOT_SESSION_ID, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST, PORT, REGISTRY_PATH } from "./config";
+import { BOOT_SESSION_ID, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST, PORT, PROJECT_CWD, REGISTRY_PATH } from "./config";
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
 import type { Subscriber } from "./types";
 import {
@@ -23,7 +23,9 @@ import {
   telemetryStorage,
   topologyDetail,
 } from "./runtime";
-import { addApproval, addComment, listPlans, planDetail, planFile, resolveProjectCwd } from "./plans";
+import { listPlans, planDetail, planFile } from "./plan-routes";
+import { resolveProjectCwd } from "./plan-bridge";
+import { handlePlanReview } from "./review-wiring";
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
 
 function json(data: unknown, status = 200) {
@@ -54,6 +56,27 @@ Bun.serve({
   async fetch(req: Request) {
     const url = new URL(req.url);
 
+    // Self-hosted Plannotator plan-review surface (/pl-review/ + its /api/*).
+    // Handled BEFORE the bearer-token write gate because the prebuilt review
+    // client hardcodes absolute /api/... fetches and cannot attach our token;
+    // the surface is instead guarded by same-origin (the iframe is on our own
+    // origin) and only claims /api/* whose Referer is the review mount. A
+    // cross-origin caller is rejected here so the token exemption stays scoped
+    // to genuine same-origin review traffic.
+    if (url.pathname === "/pl-review/" || url.pathname.startsWith("/pl-review/") || url.pathname.startsWith("/api/")) {
+      if (!isSameOriginRequest(req, url)) {
+        // Only block if this actually belongs to the review surface; otherwise
+        // fall through so the normal API keeps its own gates.
+        const review = url.pathname.startsWith("/pl-review/")
+          ? json({ error: "cross-origin blocked" }, 403)
+          : null;
+        if (review) return review;
+      } else {
+        const review = await handlePlanReview(req, url);
+        if (review) return review;
+      }
+    }
+
     // Method-based write gate (J7/Decision 3), in one testable helper (M8c): any
     // method other than GET/HEAD must clear same-origin + the bearer token, once,
     // before any routing — closing the hole where a future PUT/PATCH endpoint
@@ -72,18 +95,8 @@ Bun.serve({
         const result = pruneTelemetry(cutoff);
         return json({ ok: true, ...result, cutoff });
       }
-      // POST /plans/:changeId/comments  and  POST /plans/:changeId/approval
-      const commentMatch = url.pathname.match(/^\/plans\/([^/]+)\/comments$/);
-      const approvalMatch = url.pathname.match(/^\/plans\/([^/]+)\/approval$/);
-      if (commentMatch || approvalMatch) {
-        const changeId = decodeURIComponent((commentMatch || approvalMatch)![1]);
-        const cwd = resolveProjectCwd(url.searchParams.get("cwd"));
-        if (!cwd) return json({ error: "unknown project cwd" }, 400);
-        let body: any = {};
-        try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
-        const result = commentMatch ? addComment(cwd, changeId, body) : addApproval(cwd, changeId, body);
-        return json(result, result.ok ? 200 : 400);
-      }
+      // Plan annotations/approvals now happen inside the self-hosted Plannotator
+      // review surface (/pl-review/ -> /api/approve|deny), not via these routes.
       // POST /project-overrides  { cwd, label } — rename a project's display name.
       if (url.pathname === "/project-overrides") {
         let body: any = {};
@@ -137,7 +150,7 @@ Bun.serve({
     // Same-origin bootstrap: hand the write token to the app (Phase D). Safe as
     // a same-origin GET — the token never appears in a URL or in cached HTML.
     // The browser attaches it as the Bearer header on POST/DELETE.
-    if (url.pathname === "/bootstrap.json") return json({ token: DAEMON_TOKEN || null });
+    if (url.pathname === "/bootstrap.json") return json({ token: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null });
 
     if (url.pathname === "/health") return json({
       ok: true,

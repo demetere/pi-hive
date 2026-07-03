@@ -7,12 +7,32 @@ import { canonicalMode } from "../../core/types";
 import type { HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
 import { startHiveTelemetrySession } from "../../engine/observability";
+import { recordQuestion } from "../../engine/questions";
 import { installHiveFooter, requestHiveFooterRender } from "./footer";
 
+// Surface a delegated planner's promoted clarifying question to the human. With
+// a UI we block on an input dialog; either way we record the Q&A alongside the
+// change and re-inject the answer so the planning main session proceeds.
+async function handlePromotedQuestion(state: HiveState, ctx: ExtensionContext, action: { question: string; change?: string; askedBy?: string }) {
+  const { question } = action;
+  let answer: string | undefined;
+  if (ctx.hasUI && typeof (ctx.ui as any)?.input === "function") {
+    try { answer = await (ctx.ui as any).input(`Planning question from ${action.askedBy || "a planner"}`, question); } catch { answer = undefined; }
+  }
+  if (action.change) recordQuestion(ctx.cwd, action.change, question, answer || undefined);
+  if (answer && answer.trim()) {
+    state.pi.sendUserMessage(`The human answered a planning question from ${action.askedBy || "a planner"}:\n\nQ: ${question}\nA: ${answer.trim()}\n\nRelay this answer to that planner (resume its delegation) so it can continue.`);
+  } else {
+    state.pi.sendUserMessage(`${action.askedBy || "A planner"} asked: "${question}". Please answer it in chat, then relay the answer to that planner so it can continue.`);
+  }
+}
+
 // Common hive tools are active in both plan and execution mode. Plan lifecycle
-// tools are active only in plan mode so approvals happen before /hive-execute.
+// tools are active only in plan mode. Approval is no longer a tool — it happens
+// in the dashboard's plan-review UI. ask_user lets a planner interrogate the
+// human before writing artifacts.
 const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
-const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "approve_plan"];
+const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "ask_user"];
 const HIVE_MODE_TOOLS = COMMON_HIVE_TOOLS;
 
 function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
@@ -30,14 +50,21 @@ function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
       for (const line of text.slice(offset).split("\n")) {
         if (!line.trim()) continue;
         const action = JSON.parse(line);
-        if (action.type === "plan_approval" && action.changeId && action.phase) {
-          const next = action.nextPhase === "apply"
-            ? `The dashboard approved tasks for change "${action.changeId}". The plan is ready; summarize readiness and ask whether to run /hive-execute ${action.changeId}.`
-            : `The dashboard approved the ${action.phase} gate for change "${action.changeId}". Continue planning the next gate (${action.nextPhase || "next phase"}) with the planning team.`;
-          state.pi.sendUserMessage(next);
-        } else if (action.type === "plan_comment" && action.changeId && action.body) {
-          const where = action.file ? ` on ${action.file}${action.anchor ? `#${action.anchor}` : ""}` : "";
-          state.pi.sendUserMessage(`Dashboard feedback for change "${action.changeId}"${where}:\n\n${action.body}\n\nAddress this feedback in the active plan before continuing.`);
+        if (action.type === "plan_review_approved" && action.changeId) {
+          const next = action.readyToExecute
+            ? `The plan-review UI approved the tasks artifact for change "${action.changeId}". The plan is validated and ready; summarize readiness and ask whether to run /hive-execute ${action.changeId}.`
+            : `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Continue with the next ready artifact (proposal → design/specs → tasks) with the planning team.`;
+          state.pi.sendUserMessage(action.feedback ? `${next}\n\nReviewer note:\n${action.feedback}` : next);
+        } else if (action.type === "plan_review_denied" && action.changeId) {
+          state.pi.sendUserMessage(`The plan-review UI rejected the ${action.artifact || "artifact"} for change "${action.changeId}":\n\n${action.feedback || "(no feedback given)"}\n\nRevise that artifact with the planning team, then re-submit it for review before continuing.`);
+        } else if (action.type === "question" && action.question) {
+          // WS-D: a delegated planner promoted a clarifying question to the main
+          // session. Surface it to the human (inline dialog when we have a UI),
+          // record the answer alongside the change, and feed it back so planning
+          // proceeds. The delegated session resumes on its next turn.
+          void handlePromotedQuestion(state, ctx, action);
+        } else if (action.type === "answer" && action.question && action.answer) {
+          state.pi.sendUserMessage(`Answer to the clarifying question "${action.question}":\n\n${action.answer}\n\nUse this to proceed with planning.`);
         }
       }
     } catch { /* best-effort bridge from dashboard to live TUI session */ }

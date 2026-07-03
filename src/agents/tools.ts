@@ -3,7 +3,6 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
-import { PLAN_STAGES } from "../core/normalize";
 import {
   extractFinalAnswer,
   hexAnsi,
@@ -16,7 +15,8 @@ import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentAgentName, currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
-import { approveGate, changeExists, createChange, listChangeIds, readPlanMeta, toChangeId } from "../engine/plan-store";
+import * as openspec from "../engine/openspec";
+import { enqueueQuestion, recordQuestion } from "../engine/questions";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
@@ -181,6 +181,50 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       return { content: [{ type: "text", text: renderHiveSddStatus(status) }], details: status };
     },
   }),
+
+  defineTool({
+    name: "ask_user",
+    label: "Ask User",
+    description: "Ask the human a clarifying question BEFORE writing plan artifacts when scope, requirements, or acceptance criteria are ambiguous. In the visible session this blocks for a typed answer; a delegated planner promotes the question to the main session and resumes when the human answers. Do not guess ambiguous requirements — ask.",
+    parameters: Type.Object({
+      question: Type.String({ description: "The specific clarifying question to put to the human." }),
+      changeId: Type.Optional(Type.String({ description: "The change this question relates to. Defaults to the active change." })),
+    }),
+    async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
+      const p = params as { question: string; changeId?: string };
+      const question = String(p.question || "").trim();
+      if (!question) return { content: [{ type: "text", text: "ask_user requires a non-empty question." }], details: { ok: false } };
+      const change = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
+      const askedBy = currentAgentName();
+
+      // Visible session with UI: block for a typed answer inline.
+      if (ctx.hasUI && typeof (ctx as any).ui?.input === "function") {
+        let answer: string | undefined;
+        try {
+          answer = await (ctx as any).ui.input(`Planning question from ${askedBy}`, question);
+        } catch {
+          answer = undefined;
+        }
+        if (change) recordQuestion(ctx.cwd, change, question, answer || undefined);
+        if (answer && answer.trim()) {
+          return { content: [{ type: "text", text: `User answered: ${answer.trim()}` }], details: { ok: true, question, answer: answer.trim() } };
+        }
+        return { content: [{ type: "text", text: "The user dismissed the question without answering. Proceed with a clearly-stated assumption and flag it for later confirmation." }], details: { ok: true, question, answer: null } };
+      }
+
+      // Headless / delegated planner: promote the question to the human-driven
+      // main session and pause. delegate_agent resumes this session by default,
+      // so the answer (delivered via the `answer` action) reaches this planner on
+      // its next turn.
+      if (change) recordQuestion(ctx.cwd, change, question);
+      const mainDir = state.session?.sessionDir;
+      const promoted = mainDir ? enqueueQuestion(mainDir, { question, change: change || undefined, askedBy }) : false;
+      const text = promoted
+        ? `Your question was raised to the human via the main session:\n"${question}"\nPause here — the answer will be delivered when they respond. Do not fabricate requirements in the meantime.`
+        : `No interactive session is available to answer right now. Record a clearly-stated assumption for "${question}", proceed, and flag it for the human to confirm.`;
+      return { content: [{ type: "text", text }], details: { ok: true, question, promoted } };
+    },
+  }),
   ];
 
   // Type-scoped tools. These are granted by AGENT TYPE (not the tools list), so
@@ -230,98 +274,66 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     }));
   }
 
-  // Plan lifecycle + approval tools. Available to leads (incl. the orchestrator),
-  // who select/create a change and then delegate planners/coders under it.
+  // Plan lifecycle tools. Available to leads (incl. the orchestrator), who
+  // select/create an OpenSpec change and then delegate planners under it.
+  // Approval is NOT a chat tool anymore: each artifact is approved in the
+  // dashboard's plan-review UI (the review IS the gate). Approving the tasks
+  // artifact opens the execution gate.
   if (callerType === "lead") {
     typeScopedTools.push(defineTool({
       name: "plan_new",
       label: "New Plan",
-      description: "Create a new plan change under .pi/hive/plans/<change-id>/ (scaffolds plan.yaml) and make it the active change. Planners you then delegate to will write proposal/requirements/design/tasks artifacts into it.",
+      description: "Scaffold a new OpenSpec change under openspec/changes/<change-id>/ and make it the active change. Then use /opsx-propose (or delegate a planner) to author proposal/design/specs/tasks artifacts into it.",
       parameters: Type.Object({
         title: Type.String({ description: "Human title for the change (also used to derive the kebab change-id)." }),
-        owner: Type.Optional(Type.String({ description: "Who owns this change. Optional." })),
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-        const { title, owner } = params as { title: string; owner?: string };
-        const requestedChangeId = toChangeId(title);
-        if (state.activeChangeId && changeExists(ctx.cwd, state.activeChangeId) && state.activeChangeId !== requestedChangeId) {
+        const { title } = params as { title: string };
+        if (!openspec.isAvailable()) {
+          return { content: [{ type: "text", text: "OpenSpec CLI is not installed, so no plan store is available. Install @fission-ai/openspec to author plans." }], details: { ok: false, reason: "openspec unavailable" } };
+        }
+        openspec.ensureInit(ctx.cwd);
+        const requestedChangeId = openspec.toChangeId(title);
+        if (state.activeChangeId && openspec.changeExists(ctx.cwd, state.activeChangeId) && state.activeChangeId !== requestedChangeId) {
           return {
             content: [{
               type: "text",
-              text: `This planning session already has active change "${state.activeChangeId}". Continue that plan and put related slices/gates inside it. To intentionally switch to another existing plan, use plan_select(changeId). Do not create a second plan from the same session unless the user explicitly asks to switch scope.`,
+              text: `This planning session already has active change "${state.activeChangeId}". Continue that plan and put related slices inside it. To intentionally switch, use plan_select(changeId). Do not create a second plan from the same session unless the user explicitly asks to switch scope.`,
             }],
             details: { ok: false, activeChangeId: state.activeChangeId, requestedChangeId },
           };
         }
-        const result = await createChange(ctx.cwd, title, owner, state.session?.sessionId);
+        const result = openspec.newChange(ctx.cwd, title);
+        if (!result) {
+          return { content: [{ type: "text", text: `Could not create change from "${title}". Ensure the derived id is valid kebab-case and OpenSpec is initialized.` }], details: { ok: false } };
+        }
         state.activeChangeId = result.changeId;
         const note = result.created ? "created" : "already existed";
-        return { content: [{ type: "text", text: `Plan change "${result.changeId}" ${note} and is now the active change (${result.path}). Keep this session focused on this plan; add related slices to its proposal/requirements/design/tasks instead of creating sibling plans.` }], details: { ok: true, ...result } };
+        return { content: [{ type: "text", text: `OpenSpec change "${result.changeId}" ${note} and is now the active change (openspec/changes/${result.changeId}/). Author its proposal → design/specs → tasks via /opsx-propose; keep this session focused on this change.` }], details: { ok: true, ...result } };
       },
     }));
 
     typeScopedTools.push(defineTool({
       name: "plan_select",
       label: "Select Plan",
-      description: "Set the active plan change by change-id (must exist under .pi/hive/plans/). With no argument, lists available changes.",
+      description: "Set the active OpenSpec change by change-id (must exist under openspec/changes/). With no argument, lists available changes.",
       parameters: Type.Object({
         changeId: Type.Optional(Type.String({ description: "The change-id to activate. Omit to list available changes." })),
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
         const changeId = String((params as any).changeId || "").trim();
-        const available = listChangeIds(ctx.cwd);
+        const available = openspec.listChanges(ctx.cwd).map((c) => c.name);
         if (!changeId) {
           const list = available.length ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}`).join("\n") : "(none)";
-          return { content: [{ type: "text", text: `Available plan changes:\n${list}` }], details: { ok: true, available, active: state.activeChangeId } };
+          return { content: [{ type: "text", text: `Available OpenSpec changes:\n${list}` }], details: { ok: true, available, active: state.activeChangeId } };
         }
-        if (!changeExists(ctx.cwd, changeId)) {
-          return { content: [{ type: "text", text: `No change "${changeId}" under .pi/hive/plans/. Available: ${available.join(", ") || "none"}. Use plan_new to create one.` }], details: { ok: false, available } };
+        if (!openspec.changeExists(ctx.cwd, changeId)) {
+          return { content: [{ type: "text", text: `No change "${changeId}" under openspec/changes/. Available: ${available.join(", ") || "none"}. Use plan_new to create one.` }], details: { ok: false, available } };
         }
         state.activeChangeId = changeId;
-        const meta = readPlanMeta(ctx.cwd, changeId);
-        return { content: [{ type: "text", text: `Active change set to "${changeId}"${meta.phase ? ` (phase: ${meta.phase})` : ""}.` }], details: { ok: true, changeId, meta } };
-      },
-    }));
-
-    typeScopedTools.push(defineTool({
-      name: "approve_plan",
-      label: "Approve Plan",
-      description: "Record a chat-side approval of a planning gate (proposal/requirements/design/tasks) for a change. Use when the user has approved that gate in conversation.",
-      parameters: Type.Object({
-        phase: Type.Union(PLAN_STAGES.map((stage) => Type.Literal(stage)) as any, { description: "Which planning gate is approved." }),
-        changeId: Type.Optional(Type.String({ description: "The change-id being approved. Defaults to the active change if set." })),
-        actor: Type.Optional(Type.String({ description: "Who approved (e.g. the user's name). Optional." })),
-        summary: Type.Optional(Type.String({ description: "Optional note about the approval." })),
-      }),
-      async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-        const p = params as { phase: string; changeId?: string; actor?: string; summary?: string };
-        // Approval authority (G5): only the visible main session (human-driven)
-        // may approve gates. A worker lead has this tool via TYPE_SCOPED_TOOL_NAMES
-        // but must not approve its own gates — reject when an ALS agent context is
-        // present (i.e. the caller is a delegated worker, not the main session).
-        const caller = currentAgentName();
-        const mainName = state.config?.orchestrator?.name;
-        const isMainSession = caller === "Orchestrator" || (!!mainName && caller === mainName);
-        if (!isMainSession) {
-          return { content: [{ type: "text", text: `${caller} may not approve planning gates. Only the main session (human-driven) approves gates; ask the user to approve in chat.` }], details: { ok: false, reason: "worker cannot approve" } };
-        }
-        const changeId = (p.changeId?.trim() || currentChangeId() || state.activeChangeId || "").trim();
-        if (!changeId) {
-          return { content: [{ type: "text", text: "No active change-id. Select or create a change first, or pass changeId." }], details: { ok: false } };
-        }
-        if (!changeExists(ctx.cwd, changeId)) {
-          const available = listChangeIds(ctx.cwd);
-          return { content: [{ type: "text", text: `No change "${changeId}" under .pi/hive/plans/. Available: ${available.join(", ") || "none"}. Use plan_new to create one.` }], details: { ok: false, changeId, available } };
-        }
-        try {
-          const meta = await approveGate(ctx.cwd, changeId, p.phase);
-          emitHiveEvent(state, "plan_approval", { changeId, phase: p.phase, approvedBy: "main", actor: p.actor, summary: p.summary, nextPhase: meta.phase, status: meta.status }, callerName);
-          const ready = meta.status === "ready" ? " Change is ready for /hive-execute." : ` Next phase: ${meta.phase}.`;
-          return { content: [{ type: "text", text: `Approved gate "${p.phase}" for change "${changeId}".${ready}` }], details: { ok: true, changeId, phase: p.phase, meta } };
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return { content: [{ type: "text", text: message }], details: { ok: false, changeId, phase: p.phase } };
-        }
+        const detail = openspec.changeDetail(ctx.cwd, changeId);
+        const next = detail?.nextReady ? ` (next artifact: ${detail.nextReady})` : "";
+        return { content: [{ type: "text", text: `Active change set to "${changeId}"${next}.` }], details: { ok: true, changeId, detail } };
       },
     }));
   }

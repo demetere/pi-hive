@@ -6,21 +6,34 @@ export interface InitialData {
   cursor: number;
 }
 
-// Per-daemon write token (Phase D). Fetched once from the same-origin
-// /bootstrap.json and attached as a Bearer header on every POST/DELETE. Cached
-// so repeated writes don't refetch; the promise dedupes concurrent first calls.
-let tokenPromise: Promise<string | null> | null = null;
-function daemonToken(): Promise<string | null> {
-  if (!tokenPromise) {
-    tokenPromise = fetch("/bootstrap.json")
-      .then(async (r): Promise<string | null> => {
-        if (!r.ok) return null;
-        const body = (await r.json()) as { token: string | null };
-        return body.token;
+// Same-origin bootstrap (Phase D): the per-daemon write token (attached as a
+// Bearer header on every POST/DELETE) and the server's boot project cwd (the
+// project the dashboard was started for). Fetched once and cached; the promise
+// dedupes concurrent first calls.
+interface Bootstrap { token: string | null; bootCwd: string | null }
+let bootstrapPromise: Promise<Bootstrap> | null = null;
+function bootstrap(): Promise<Bootstrap> {
+  if (!bootstrapPromise) {
+    bootstrapPromise = fetch("/bootstrap.json")
+      .then(async (r): Promise<Bootstrap> => {
+        if (!r.ok) return { token: null, bootCwd: null };
+        const body = (await r.json()) as Partial<Bootstrap>;
+        return { token: body.token ?? null, bootCwd: body.bootCwd ?? null };
       })
-      .catch((): string | null => null);
+      .catch((): Bootstrap => ({ token: null, bootCwd: null }));
   }
-  return tokenPromise;
+  return bootstrapPromise;
+}
+
+function daemonToken(): Promise<string | null> {
+  return bootstrap().then((b) => b.token);
+}
+
+// The project the dashboard was booted for. Used as the plan-store cwd fallback
+// when no telemetry session is in scope (e.g. a fresh OpenSpec project the user
+// has not yet run a pi session against).
+export function bootCwd(): Promise<string | null> {
+  return bootstrap().then((b) => b.bootCwd);
 }
 
 // fetch() for a mutating request: attaches the write token. Returns the Response
@@ -299,13 +312,21 @@ export interface PlanVerdict {
   id: string; changeId: string; reviewer: string; verdict: "red" | "yellow" | "green";
   summary: string; evidence: string[]; concerns: string[]; blockers: string[]; createdAt: string;
 }
-export interface PlanApproval { id: string; changeId: string; phase: string; approvedBy: string; actor?: string; summary?: string; createdAt: string; }
-export interface PlanComment { id: string; changeId: string; file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string; createdAt: string; }
-export interface PlanSummary { changeId: string; title?: string; phase: string; status?: string; owner?: string; artifacts: string[]; latestVerdict: PlanVerdict | null; }
+export type ChangeTaskStatus = "no-tasks" | "in-progress" | "complete";
+export interface PlanSummary {
+  changeId: string; status: ChangeTaskStatus; completedTasks: number; totalTasks: number;
+  lastModified?: string; latestVerdict: PlanVerdict | null;
+}
+export type ArtifactStatus = "done" | "ready" | "blocked";
+export interface ArtifactState { id: string; outputPath: string; status: ArtifactStatus; missingDeps: string[]; }
 export interface PlanDetail {
-  changeId: string; title?: string; status?: string; owner?: string; phase: string;
-  gates: Array<{ gate: string; present: boolean }>; artifacts: string[];
-  verdicts: PlanVerdict[]; approvals: PlanApproval[]; comments: PlanComment[];
+  changeId: string;
+  artifacts: ArtifactState[];
+  nextReady: string | null;
+  files: string[];
+  validation: { passed: boolean; failed: number; issues: Array<{ level: string; path: string; message: string }> };
+  readyToExecute: boolean;
+  verdicts: PlanVerdict[];
 }
 
 const cwdQuery = (cwd?: string) => (cwd ? `?cwd=${encodeURIComponent(cwd)}` : "");
@@ -331,12 +352,4 @@ export async function fetchPlanFile(changeId: string, path: string, cwd?: string
   } catch {
     return { content: null, error: true };
   }
-}
-
-export function postPlanComment(changeId: string, body: { file?: string; anchor?: string; author?: string; body: string; annotationType?: string; originalText?: string }, cwd?: string): Promise<WriteResult> {
-  return writeResult("comment", writeFetch(`/plans/${encodeURIComponent(changeId)}/comments${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
-}
-
-export function postPlanApproval(changeId: string, body: { phase: string; actor?: string; summary?: string }, cwd?: string): Promise<WriteResult> {
-  return writeResult("approval", writeFetch(`/plans/${encodeURIComponent(changeId)}/approval${cwdQuery(cwd)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
 }

@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildHiveTools } from "../src/agents/tools.ts";
-import { createChange } from "../src/engine/plan-store.ts";
-import { runAsAgent, runWithChange } from "../src/engine/session.ts";
+import { runWithChange } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
 function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
@@ -43,13 +42,17 @@ test("submit_review_verdict is present only for reviewers", () => {
   assert.ok(!toolNames(state, "Lead").includes("submit_review_verdict"));
 });
 
-test("approve_plan is present only for leads", () => {
+test("plan lifecycle tools are present only for leads", () => {
   const state = stateWith([
     runtime("Lead", { agentType: "lead" }),
     runtime("Rev", { agentType: "reviewer" }),
   ]);
-  assert.ok(toolNames(state, "Lead").includes("approve_plan"));
-  assert.ok(!toolNames(state, "Rev").includes("approve_plan"));
+  // plan_new/plan_select are lead-scoped. Approval is no longer a tool — it
+  // happens in the dashboard's plan-review UI — so approve_plan must NOT exist.
+  assert.ok(toolNames(state, "Lead").includes("plan_new"));
+  assert.ok(toolNames(state, "Lead").includes("plan_select"));
+  assert.ok(!toolNames(state, "Lead").includes("approve_plan"));
+  assert.ok(!toolNames(state, "Rev").includes("plan_new"));
 });
 
 function verdictTool(state: HiveState, caller: string) {
@@ -79,42 +82,10 @@ test("submit_review_verdict caches the latest verdict per change and degrades wi
   assert.equal(state.latestVerdicts?.size, 1); // still just add-auth
 });
 
-test("approve_plan requires an existing change-id", async () => {
-  const state = stateWith([runtime("Lead", { agentType: "lead" })]);
-  const ctx = { cwd: state.session!.sessionDir };
-  const tool = buildHiveTools(state, "Lead").find((t) => t.name === "approve_plan")!;
-  const res = await (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx);
-  assert.equal(res.details.ok, false);
-  const missing = await runWithChange("missing", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
-  assert.equal(missing.details.ok, false);
-
-  await createChange(ctx.cwd, "Add Auth");
-  const ok = await runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
-  assert.equal(ok.details.ok, true);
-  assert.equal(ok.details.changeId, "add-auth");
-});
-
-test("approve_plan rejects a delegated worker-lead caller (G5/L3)", async () => {
-  // "Lead" is a worker lead: it carries approve_plan by type, but a delegated
-  // worker (an ALS agent context is present) must NOT approve gates — only the
-  // human-driven main session may. The change exists and is valid, so a rejection
-  // here can only come from the caller-identity guard, not a missing change.
-  const state = stateWith([runtime("Lead", { agentType: "lead" })]);
-  const ctx = { cwd: state.session!.sessionDir };
-  await createChange(ctx.cwd, "Add Auth");
-  const tool = buildHiveTools(state, "Lead").find((t) => t.name === "approve_plan")!;
-
-  // Called AS the worker lead (runAsAgent sets currentAgentName) → rejected.
-  const rejected = await runAsAgent("Lead", () =>
-    runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx)));
-  assert.equal(rejected.details.ok, false);
-  assert.equal(rejected.details.reason, "worker cannot approve");
-
-  // Same change, same tool, but called AS the main session → allowed. Proves the
-  // rejection was about caller identity, not the change.
-  const allowed = await runWithChange("add-auth", () => (tool.execute as any)("id", { phase: "proposal" }, undefined, undefined, ctx));
-  assert.equal(allowed.details.ok, true);
-});
+// Note: gate approval is no longer a chat tool. Approving an artifact happens in
+// the dashboard's plan-review UI (POST /api/approve -> review-wiring), which
+// records a verdict and writes pi-hive's execution-approval sidecar. That path
+// is exercised through src/engine/review.ts + openspec.setExecutionApproval.
 
 test("team_status surfaces the latest verdict", async () => {
   const state = stateWith([runtime("Rev", { agentType: "reviewer" })]);

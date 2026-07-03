@@ -15,6 +15,7 @@
     "src/",
     "ui/web/src/",
     "ui/web/dist/",
+    "ui/web/vendor/",
     "ui/web/index.html",
     "ui/web/package.json",
     "ui/web/tsconfig.json",
@@ -44,7 +45,11 @@
     "typebox": { "optional": false }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.3"
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "@plannotator/pi-extension": "0.21.4"
+  },
+  "dependencies": {
+    "@fission-ai/openspec": "1.5.0"
   },
   "keywords": [
     "pi-package",

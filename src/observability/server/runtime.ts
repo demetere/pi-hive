@@ -18,8 +18,6 @@ import {
   ensureSession,
   getIngestOffset,
   insertEvent,
-  insertPlanApproval,
-  insertPlanComment,
   insertPlanVerdict,
   loadPersistedStates,
   materializeDelegationEnd,
@@ -353,6 +351,13 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
   const payload = (event.payload || {}) as any;
   const changeId = typeof payload.changeId === "string" ? payload.changeId.trim() : "";
   if (!changeId) return; // no active change ⇒ nothing plan-scoped to record
+  // Only reviewer verdicts are materialized from telemetry events now. Plan
+  // approvals and comments used to come from the in-house approve_plan tool and
+  // the home-grown annotator; both are gone — approval/annotation now happens in
+  // the self-hosted Plannotator review surface, which writes plan_verdicts + the
+  // execution-approval sidecar directly (see review-wiring.ts). The
+  // plan_approvals / plan_comments tables are left in place (no DROP migration);
+  // they simply stop receiving new rows.
   if (event.type === "review_verdict") {
     insertPlanVerdict({
       id: event.event_id,
@@ -363,32 +368,6 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
       evidence: payload.evidence,
       concerns: payload.concerns,
       blockers: payload.blockers,
-      sessionId: event.session_id,
-      cwd: event.cwd,
-      createdAt: event.ts,
-    });
-  } else if (event.type === "plan_approval") {
-    insertPlanApproval({
-      id: event.event_id,
-      changeId,
-      phase: String(payload.phase || "proposal"),
-      approvedBy: String(payload.approvedBy || "chat"),
-      actor: payload.actor ? String(payload.actor) : (event.actor || undefined),
-      summary: payload.summary ? String(payload.summary) : undefined,
-      sessionId: event.session_id,
-      cwd: event.cwd,
-      createdAt: event.ts,
-    });
-  } else if (event.type === "plan_comment") {
-    insertPlanComment({
-      id: event.event_id,
-      changeId,
-      file: payload.file ? String(payload.file) : undefined,
-      anchor: payload.anchor ? String(payload.anchor) : undefined,
-      author: payload.author ? String(payload.author) : (event.actor || undefined),
-      body: String(payload.body || ""),
-      annotationType: payload.annotationType ? String(payload.annotationType) : undefined,
-      originalText: payload.originalText ? String(payload.originalText) : undefined,
       sessionId: event.session_id,
       cwd: event.cwd,
       createdAt: event.ts,

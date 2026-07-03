@@ -502,9 +502,9 @@
 @media (max-width: 760px) { .tool-phases { grid-template-columns: 1fr !important; } .tool-detail-grid { grid-template-columns: 70px minmax(0, 1fr) !important; } }
 @media (max-width: 1050px) { .activity-layout { grid-template-columns: 1fr !important; } .activity-agents { position: static !important; height: auto !important; max-height: 360px !important; } }
 
-/* ── plans tab ────────────────────────────────────────────────────────────── */
+/* ── plans tab (OpenSpec change list + self-hosted Plannotator review iframe) ── */
 @layer components {
-  .plans-layout { @apply grid gap-3.5 items-start; grid-template-columns: 300px 1fr; }
+  .plans-layout { @apply grid gap-3.5 items-start; grid-template-columns: 320px 1fr; }
   .plans-list { @apply p-0 overflow-hidden; }
   .plans-list-head { @apply flex items-center justify-between px-3.5 py-3 border-b border-border text-[11px] font-bold uppercase tracking-[.5px] text-muted; }
   .plans-refresh { @apply bg-transparent border-0 text-muted cursor-pointer text-[15px] leading-none px-1.5 py-0.5 rounded-md; }
@@ -513,123 +513,45 @@
   .plan-row:last-child { @apply border-b-0; }
   .plan-row:hover { @apply bg-hover; }
   .plan-row.active { @apply bg-accent-soft; }
-  .plan-row-main { @apply flex flex-col gap-0.5 mb-1.5; }
+  .plan-row-main { @apply flex items-baseline justify-between gap-2 mb-1.5; }
   .plan-title { @apply text-[12.5px] font-semibold text-fg overflow-hidden text-ellipsis whitespace-nowrap; }
-  .plan-id { @apply text-[10.5px] text-muted; }
-  .plan-row-meta { @apply flex items-center gap-1.5; }
-  .phase-badge { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip text-fg2; }
-  .phase-badge.ready { @apply text-ok bg-ok-soft; }
+  .plan-tasks { @apply text-[10.5px] text-muted shrink-0; }
+  .plan-row-meta { @apply flex items-center gap-1.5 flex-wrap; }
+  .plan-status { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip text-fg2; }
+  .plan-status-complete { @apply text-ok bg-ok-soft; }
+  .plan-status-in-progress { @apply text-warn bg-warn-soft; }
   .verdict-pill { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
-  .verdict-pill.v-green { @apply text-ok bg-ok-soft; }
-  .verdict-pill.v-yellow { @apply text-warn bg-warn-soft; }
-  .verdict-pill.v-red { @apply text-crit; background: var(--crit-soft); }
+  .verdict-green { @apply text-ok bg-ok-soft; }
+  .verdict-yellow { @apply text-warn bg-warn-soft; }
+  .verdict-red { @apply text-crit; background: var(--crit-soft); }
   .plans-detail { @apply flex flex-col gap-3.5; }
   .plans-empty { @apply p-10 text-center; }
   .plan-head { @apply px-[18px] py-4; }
-  .plan-head-title { @apply flex items-baseline gap-2.5 flex-wrap; }
-  .plan-head-title h2 { @apply m-0 text-[17px]; }
-  .plan-head-meta { @apply flex items-center gap-2 mt-2 flex-wrap; }
-  .meta-chip { @apply text-[11px] text-muted bg-chip px-2 py-0.5 rounded-md; }
-  .gate-track { @apply flex items-center gap-1.5 mt-3.5 flex-wrap; }
-  .gate { @apply flex items-center gap-[5px] text-[11.5px] px-2.5 py-1 rounded-lg border border-border; }
-  .gate.on { @apply text-ok border-ok-border bg-ok-soft; }
-  .gate.off { @apply text-muted; }
-  .gate-mark { @apply text-[10px]; }
-  .review-box { @apply mt-3.5 p-3 border border-border rounded-xl bg-chip grid gap-2.5 items-start; grid-template-columns: minmax(0, 1fr) auto; }
-  .review-box.slim { @apply bg-transparent p-0 border-0; }
-  .review-main { @apply min-w-0 flex flex-col gap-2.5; }
-  .review-box textarea { @apply min-h-[48px] resize-y w-full bg-panel border border-border text-fg rounded-[9px] px-2.5 py-2 text-[12.5px] box-border; font: inherit; }
-  .review-actions { @apply flex gap-2 items-center; }
-  .annotation-list { @apply flex flex-col gap-1.5; }
-  .annotation-item { @apply grid items-center p-2 border border-border rounded-[10px] bg-panel; grid-template-columns: auto 1fr auto; gap: 6px 8px; }
-  .annotation-item b { @apply text-[11.5px] text-fg; }
-  .annotation-item span { @apply text-muted text-[10.5px] overflow-hidden text-ellipsis whitespace-nowrap; }
-  .annotation-item button { @apply border-0 bg-transparent text-muted cursor-pointer text-base; }
-  .annotation-item p { @apply m-0 text-fg2 text-xs overflow-hidden text-ellipsis whitespace-nowrap; grid-column: 1 / -1; }
-  .annotation-item small { @apply text-muted text-[11.5px] whitespace-pre-wrap; grid-column: 1 / -1; }
-  .selection-popover { @apply fixed z-[80] bg-panel border border-accent-border rounded-xl p-2 animate-activityIn; transform: translate(-50%, -100%); width: min(340px, calc(100vw - 24px)); box-shadow: 0 18px 50px #0009; }
-  .selection-popover::after { content: ""; position: absolute; left: 50%; bottom: -7px; width: 12px; height: 12px; transform: translateX(-50%) rotate(45deg); background: var(--panel); border-right: 1px solid var(--accent-border); border-bottom: 1px solid var(--accent-border); }
-  .selection-popover textarea { @apply w-full box-border mt-1.5 bg-chip border border-border rounded-[9px] text-fg px-2.5 py-2 text-[12.5px] resize-y; font: inherit; }
-  .selection-popover-actions { @apply flex gap-1.5 items-center justify-start; }
-  .selection-popover-actions.end { @apply justify-end mt-[7px]; }
-  .selection-popover-actions button { @apply border border-border rounded-lg bg-chip text-fg2 text-[11.5px] font-bold px-[9px] py-1.5 cursor-pointer; font: inherit; }
-  .selection-popover-actions button:hover { @apply text-fg border-accent-border; }
-  .selection-popover-actions .btn-submit { @apply bg-accent border-accent text-white; }
-  .plan-artifacts { @apply p-0 overflow-hidden; }
-  .artifact-tabs { @apply flex gap-1 px-3 py-2.5 border-b border-border flex-wrap; }
-  .artifact-tab { @apply bg-chip border border-border text-fg2 text-[11.5px] px-[11px] py-[5px] rounded-lg cursor-pointer transition-all duration-[.12s]; font: inherit; }
-  .artifact-tab:hover { @apply bg-hover text-fg; }
-  .artifact-tab.active { @apply bg-accent-soft text-accent border-accent-border; }
-  .empty-inline { @apply text-xs text-muted p-1; }
-  .artifact-review-shell { @apply grid min-h-[360px]; grid-template-columns: minmax(0, 1fr) 280px; }
-  .artifact-body { @apply px-5 pt-2 pb-5 max-h-[620px] overflow-auto min-w-0; }
-  .artifact-rail { @apply border-l border-border p-3 max-h-[620px] overflow-auto; }
-  .rail-head { @apply flex items-center justify-between text-fg text-xs mb-2.5; }
-  .rail-head span { @apply text-muted bg-chip border border-border rounded-full px-[7px] py-px; }
-  .rail-ann { @apply border border-border rounded-[10px] p-[9px] mb-[9px] bg-panel; border-left-width: 3px; }
-  .rail-ann.pending { border-style: dashed; }
-  .rail-ann.comment { border-left-color: var(--warn); }
-  .rail-ann.deletion { border-left-color: var(--err); }
-  .rail-ann.looks_good { border-left-color: var(--ok); }
-  .rail-ann-top { @apply flex items-center justify-between gap-2 text-[11px] uppercase tracking-[.35px] text-fg; }
-  .rail-ann-top button { @apply border-0 bg-transparent text-muted cursor-pointer text-base leading-none; }
-  .rail-ann blockquote { @apply mt-[7px] pl-2 text-muted text-[11.5px] max-h-[72px] overflow-hidden; border-left: 2px solid var(--border); }
-  .rail-ann p { @apply mt-[7px] text-xs text-fg2 whitespace-pre-wrap; }
-  .md { @apply text-[13px] text-fg; line-height: 1.65; }
-  .md-h1 { @apply text-[18px] mt-[18px] mb-2.5; }
-  .md-h2 { @apply text-[15px] mt-4 mb-2; }
-  .md-h3 { @apply text-[13px] mt-3.5 mb-1.5 text-fg2; }
-  .md-p { @apply my-2; }
-  .md-ul { @apply my-2 pl-5; list-style: disc; }
-  .md-li { @apply my-[3px]; }
-  .md-task { @apply my-[3px] flex items-start gap-2; list-style: none; }
-  .md-task input { @apply mt-[3px]; }
-  .md-task-done { @apply text-muted line-through; }
-  .md-code { @apply font-mono text-xs bg-chip px-[5px] py-px rounded-[5px]; }
-  .md-pre { @apply border border-border rounded-[10px] px-3.5 py-3 overflow-auto my-2.5; background: var(--app-bg); }
-  .md-pre code { @apply font-mono text-xs; white-space: pre; }
-  .md-link { @apply text-accent no-underline; }
-  .md-link:hover { @apply underline; }
-  .plan-mark { @apply rounded px-0.5; color: inherit; }
-  .plan-mark.comment { background: var(--warn-soft); box-shadow: inset 0 -1px 0 var(--warn); }
-  .plan-mark.deletion { background: var(--crit-soft); text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--err); }
-  .plan-mark.looks_good { @apply bg-ok-soft; box-shadow: inset 0 -1px 0 var(--ok); }
-  .plan-grid { @apply grid grid-cols-2 gap-3.5; }
-  .timeline-card, .comments-card { @apply px-4 py-3.5; }
-  .card-h { @apply m-0 mb-3 text-xs uppercase tracking-[.5px] text-muted; }
-  .timeline-item { @apply py-2.5 border-b border-border; }
-  .timeline-item:last-child { @apply border-b-0; }
-  .ti-head { @apply flex items-center gap-2; }
-  .ti-who { @apply text-xs font-semibold; }
-  .ti-time { @apply text-[11px] text-muted ml-auto; }
-  .ti-summary { @apply text-[12.5px] mt-1.5 text-fg2; }
-  .ti-list { @apply mt-1.5 pl-[18px] text-xs; list-style: disc; }
-  .ti-list.blockers li { @apply text-err; }
-  .ti-list.concerns li { @apply text-warn; }
-  .ti-list.evidence li { @apply text-muted; }
-  .approve-phase { @apply text-[11px] font-bold uppercase tracking-[.4px] text-ok bg-ok-soft px-2 py-0.5 rounded-full; }
-  .comment-form { @apply flex flex-col gap-2 mb-3.5; }
-  .comment-form select, .comment-form input, .comment-form textarea { @apply bg-panel border border-border text-fg rounded-lg px-2.5 py-[7px] text-[12.5px]; font: inherit; }
-  .comment-form textarea { @apply resize-y w-full box-border; }
-  .cf-row { @apply flex gap-2; }
-  .cf-row select { @apply shrink-0; }
-  .cf-row input { @apply flex-1; }
-  .cf-actions { @apply flex justify-end; }
-  .btn-approve, .btn-submit { @apply bg-accent text-accent-fg border-0 rounded-lg px-3.5 py-[7px] text-[12.5px] font-semibold cursor-pointer; }
-  .btn-approve:hover, .btn-submit:hover { filter: brightness(1.08); }
-  .btn-submit:disabled, .btn-approve:disabled { @apply opacity-50 cursor-default; filter: none; }
-  .comment-item { @apply py-2.5 border-b border-border; }
-  .comment-item:last-child { @apply border-b-0; }
-  .ci-head { @apply flex items-center gap-2; }
-  .ci-who { @apply text-xs font-semibold; }
-  .ci-target { @apply text-[10.5px] text-muted bg-chip px-1.5 py-px rounded-[5px]; }
-  .ann-kind { @apply text-[10px] font-extrabold uppercase tracking-[.35px] px-1.5 py-px rounded-full bg-chip text-fg2; }
-  .ann-kind.comment { @apply text-warn bg-warn-soft; }
-  .ann-kind.deletion { @apply text-crit; background: var(--crit-soft); }
-  .ann-kind.looks_good { @apply text-ok bg-ok-soft; }
-  .ci-quote { @apply mt-[7px] pl-2.5 text-muted text-xs whitespace-nowrap overflow-hidden text-ellipsis; border-left: 2px solid var(--border); }
-  .ci-body { @apply text-[12.5px] mt-[5px] text-fg2 whitespace-pre-wrap; }
+  .plan-head-title { @apply flex items-baseline gap-2.5 flex-wrap text-[14px]; }
+  .plan-validation { @apply text-[11px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip; }
+  .plan-validation.ok { @apply text-ok bg-ok-soft; }
+  .plan-validation.fail { @apply text-crit; background: var(--crit-soft); }
+  .plan-validation.progress { @apply text-warn bg-warn-soft; }
+  .plan-ready { @apply text-[11px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full text-ok bg-ok-soft; }
+  .plan-artifacts { @apply flex items-center gap-1.5 mt-3.5 flex-wrap; }
+  .plan-artifact { @apply flex items-center gap-1.5 text-[11.5px] px-2.5 py-1 rounded-lg border border-border bg-chip text-fg2 cursor-pointer transition-all duration-[.12s]; font: inherit; }
+  .plan-artifact:hover { @apply bg-hover text-fg; }
+  .plan-artifact.active { @apply bg-accent-soft text-accent border-accent-border; }
+  .plan-artifact-id { @apply font-semibold; }
+  .plan-artifact-next { @apply text-[11px] text-muted italic px-1; }
+  .plan-artifact-none { @apply text-[11.5px] text-muted; }
+  .plan-issues { @apply mt-3 pl-[18px] text-[11.5px]; list-style: disc; }
+  .plan-issue-error { @apply text-err; }
+  .plan-issue-warning { @apply text-warn; }
+  .plan-review-frame { @apply p-0 overflow-hidden flex flex-col; }
+  .plan-review-bar { @apply flex items-center justify-between px-3 py-2 border-b border-border; }
+  .plan-review-rid { @apply text-[11.5px] text-muted; }
+  .plan-review-actions { @apply flex items-center gap-1.5; }
+  .plan-review-btn { @apply text-[11.5px] text-fg2 bg-chip border border-border rounded-lg px-2.5 py-1 cursor-pointer no-underline transition-all duration-[.12s]; font: inherit; }
+  .plan-review-btn:hover { @apply text-fg border-accent-border bg-hover; }
+  .plan-review-iframe { @apply w-full block border-0 bg-app-bg; height: 72vh; min-height: 480px; }
+  .plan-review-frame.fullscreen { @apply fixed inset-0 z-[100] rounded-none border-0; }
+  .plan-review-frame.fullscreen .plan-review-iframe { @apply flex-1; height: auto; }
 }
-@media (max-width: 1100px) { .artifact-review-shell { grid-template-columns: 1fr !important; } .artifact-rail { border-left: 0 !important; border-top: 1px solid var(--border) !important; max-height: none !important; } }
-@media (max-width: 1000px) { .plans-layout, .plan-grid { grid-template-columns: 1fr !important; } }
+@media (max-width: 1000px) { .plans-layout { grid-template-columns: 1fr !important; } }
 @media (max-width: 900px) { .review-box { grid-template-columns: 1fr !important; } .review-actions { justify-content: flex-end !important; } }

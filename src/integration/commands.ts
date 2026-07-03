@@ -6,8 +6,12 @@ import type { HiveState } from "../core/types";
 import { applyMode, cycleMode } from "../ui/tui/widget";
 import { renderHiveDoctor } from "../engine/doctor";
 import { dashboardUrl, ensureDashboard, readDaemonToken, stopDashboard } from "../engine/dashboard";
-import { changeExists, hasTasks, isReadyToExecute, listChangeIds, readTasks } from "../engine/plan-store";
+import * as openspec from "../engine/openspec";
 import { truncateMiddle } from "../core/utils";
+
+function listChangeIds(cwd: string): string[] {
+  return openspec.listChanges(cwd).map((c) => c.name);
+}
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -59,16 +63,20 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         if (ctx.hasUI) ctx.ui.notify(`Usage: /hive-execute <change-id>. Available: ${available.join(", ") || "none (create one first)"}`, "warning");
         return;
       }
-      if (!changeExists(ctx.cwd, changeId)) {
-        if (ctx.hasUI) ctx.ui.notify(`No plan change "${changeId}" under .pi/hive/plans/. Available: ${listChangeIds(ctx.cwd).join(", ") || "none"}`, "error");
+      if (!openspec.changeExists(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`No OpenSpec change "${changeId}" under openspec/changes/. Available: ${listChangeIds(ctx.cwd).join(", ") || "none"}`, "error");
         return;
       }
-      if (!hasTasks(ctx.cwd, changeId)) {
-        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" has no tasks.md yet. Complete the planning gates (proposal → requirements → design → tasks) first.`, "error");
+      if (!openspec.hasTasks(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" has no tasks.md yet. Author the change (proposal → design/specs → tasks) via /opsx-propose first.`, "error");
         return;
       }
-      if (!isReadyToExecute(ctx.cwd, changeId)) {
-        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not approved for execution yet. Approve the tasks gate in plan mode first (approve_plan phase=tasks).`, "error");
+      if (!openspec.isReadyToExecute(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not ready: tasks.md must be authored and \`openspec validate\` must pass.`, "error");
+        return;
+      }
+      if (!openspec.isApprovedForExecution(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not approved for execution yet. Approve its tasks artifact in the dashboard's plan-review UI first.`, "error");
         return;
       }
       // Select the change so delegations are scoped to it, ensure HIVE (execution)
@@ -86,9 +94,9 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         else console.warn(`[pi-hive] ${msg}`);
         return;
       }
-      const tasks = truncateMiddle(readTasks(ctx.cwd, changeId), 12_000);
+      const tasks = truncateMiddle(openspec.readArtifact(ctx.cwd, changeId, "tasks.md"), 12_000);
       pi.sendUserMessage(
-        `Execute the approved plan for change "${changeId}" (.pi/hive/plans/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead and record implementation evidence. Do not edit files yourself.\n\n## tasks.md\n${tasks}`,
+        `Execute the approved plan for change "${changeId}" (openspec/changes/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead and record implementation evidence. Do not edit files yourself.\n\n## tasks.md\n${tasks}`,
       );
       if (ctx.hasUI) ctx.ui.notify(`Executing plan "${changeId}" — driving the hive from tasks.md.`, "info");
     },
@@ -100,8 +108,8 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
       const requested = args.trim().split(/\s+/)[0] || "";
       const available = listChangeIds(ctx.cwd);
       if (requested) {
-        if (!changeExists(ctx.cwd, requested)) {
-          if (ctx.hasUI) ctx.ui.notify(`No plan change "${requested}". Available: ${available.join(", ") || "none"}`, "error");
+        if (!openspec.changeExists(ctx.cwd, requested)) {
+          if (ctx.hasUI) ctx.ui.notify(`No OpenSpec change "${requested}". Available: ${available.join(", ") || "none"}`, "error");
           return;
         }
         state.activeChangeId = requested;
@@ -109,9 +117,9 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         return;
       }
       const lines = available.length
-        ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}${hasTasks(ctx.cwd, id) ? " — tasks ready" : ""}`).join("\n")
-        : "No plan changes yet. Ask the orchestrator to plan a change, or a lead to run plan_new.";
-      if (ctx.hasUI) ctx.ui.notify(`Plan changes under .pi/hive/plans/:\n${lines}`, "info");
+        ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}${openspec.hasTasks(ctx.cwd, id) ? " — tasks ready" : ""}`).join("\n")
+        : "No OpenSpec changes yet. Ask the orchestrator to plan a change, or a lead to run plan_new.";
+      if (ctx.hasUI) ctx.ui.notify(`OpenSpec changes under openspec/changes/:\n${lines}`, "info");
     },
   });
 

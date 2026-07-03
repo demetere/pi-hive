@@ -27,7 +27,7 @@ import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extrac
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { workerResourceLoader } from "./worker-extension";
-import { isReadyToExecute } from "./plan-store";
+import { isExecutionGateOpen } from "./openspec";
 
 function resolveModel(ctx: ExtensionContext, modelString: string): any {
   const [provider, ...idParts] = modelString.split("/");
@@ -90,8 +90,8 @@ export async function dispatchAgent(
   }
   if (state.mode === "hive" && (runtime.config.agentType === "coder" || runtime.config.agentType === "tester")) {
     const changeId = currentChangeId() || state.activeChangeId || "";
-    if (!changeId || !isReadyToExecute(ctx.cwd, changeId)) {
-      return { output: `Delegation blocked: execution agents require an approved plan. Create specs in plan mode, approve the tasks gate, then run /hive-execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
+    if (!changeId || !isExecutionGateOpen(ctx.cwd, changeId)) {
+      return { output: `Delegation blocked: execution agents require an approved plan. Draft the OpenSpec change in plan mode (/opsx-propose), get the tasks artifact approved in the review UI, then run /hive-execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
     }
   }
   const permission = canDelegateTo(state, caller, runtime.config.name);
