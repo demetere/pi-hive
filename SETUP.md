@@ -36,9 +36,11 @@ The session runs in one of three modes; the main Pi session changes identity wit
 - **plan** — the **planning team** is active. The main session is a `planner`; it drives planners to produce a complete spec under `.pi/hive/plans/<change-id>/` (proposal → requirements → design → tasks). No code execution. Enforcement is on (planners cannot touch code).
 - **hive** — the **execution team** is active. The main session is a `lead`; it delegates to coders/testers/reviewers to build the approved spec. Enforcement is on.
 
-Switch modes with `/hive-normal`, `/hive-plan-mode`, `/hive`, or cycle normal → plan → hive → normal with **`/hive-toggle`** / **Ctrl+Alt+T**. `/hive-execute <change-id>` switches to hive mode and drives execution from an approved `tasks.md`.
+Switch modes with `/hive-normal`, `/hive-plan-mode`, `/hive`, or cycle normal → plan → hive → normal with **`/hive-toggle`** / **Ctrl+Alt+T**. `/hive-execute <change-id>` switches to hive mode and drives execution only after validating that the change exists, `tasks.md` exists, and the tasks gate is approved.
 
-The two teams are configured as **two required blocks** in `hive-config.yaml` — a `planning:` block **and** a `hive:` block — each with its own `main:` (the main session's identity for that mode) and `agents:` (its reports). The loader **hard-throws** if either block is missing: there is no top-level `orchestrator:`/`agents:` shape and no fallback of plan mode onto the hive team. Keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree (see §1's shape reference below).
+Non-configurable mode behavior: the cycle order is fixed (`normal → plan → hive → normal`); plan gates are fixed (`proposal → requirements → design → tasks`); plan execution is gated by approved `tasks.md`; the mode/type-scoped hive tools are selected by runtime policy, not user config; and the local dashboard defaults to `127.0.0.1:43191` (overridable only with `HIVE_TELEMETRY_HOST` / `HIVE_TELEMETRY_PORT`, not hive-config YAML).
+
+The two teams are configured as **two required blocks** in `hive-config.yaml` — a `planning:` block **and** a `hive:` block — each with its own `main:` (the main session's identity for that mode) and `agents:` (its reports). The loader **hard-throws** if either block is missing: there is no top-level `orchestrator:`/`agents:` shape and no fallback of plan mode onto the hive team. Keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree (see §1's shape reference below). The supported mode contract is `planning.main` with `agent-type: planner` and `hive.main` with `agent-type: lead`; mismatches currently warn so older projects still load, but should be fixed.
 
 ### The one rule that drives the whole structure
 **Roles are derived from structure, never declared.** A node is:
@@ -144,8 +146,9 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 # `planning:` (active in plan mode). The loader hard-throws unless both are present.
 # Each has a `main:` (the main session's identity
 # for that mode) plus `agents:` (its reports). `main` IS the visible main
-# session — give the planning main agent-type: planner (or lead) and the hive main
-# agent-type: lead in their .md frontmatter.
+# session — give the planning main agent-type: planner and the hive main
+# agent-type: lead in their .md frontmatter. The loader warns if these main
+# session types do not match the supported mode contract.
 
 # Inlined into EVERY agent's prompt. Keep tiny (paid per delegation). Usually [].
 shared_context: []
@@ -165,7 +168,7 @@ planning:
   main:
     name: Plan Lead
     color: "#f9e2af"
-    path: .pi/hive/agents/plan-lead.md       # frontmatter: agent-type: planner (or lead)
+    path: .pi/hive/agents/plan-lead.md       # frontmatter: agent-type: planner
   agents:
     - name: Requirements Planner
       color: "#fab387"

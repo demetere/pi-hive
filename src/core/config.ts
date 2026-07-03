@@ -33,6 +33,23 @@ function warnOnAllowedAgents(parsed: any): void {
   }
 }
 
+// Warn (not throw) when the main-session node is not the expected type for its
+// mode. The runtime policy is still safe, but a mismatched main identity makes
+// prompts, tool affordances, and dashboard semantics confusing. Called after
+// enrichment so agentType is populated from frontmatter.
+function warnOnMainAgentTypes(planning: HiveTeam | undefined, hive: HiveTeam | undefined): void {
+  const mismatches: string[] = [];
+  if (planning?.main && planning.main.agentType !== "planner") {
+    mismatches.push(`planning.main "${planning.main.name}" is agent-type: ${planning.main.agentType || "<missing>"}; expected agent-type: planner`);
+  }
+  if (hive?.main && hive.main.agentType !== "lead") {
+    mismatches.push(`hive.main "${hive.main.name}" is agent-type: ${hive.main.agentType || "<missing>"}; expected agent-type: lead`);
+  }
+  if (mismatches.length) {
+    console.warn(`[pi-hive] main agent type mismatch: ${mismatches.join("; ")}. This is currently warn-only, but these main-session types are the supported mode contract.`);
+  }
+}
+
 // Phase 5.1: warn (not throw) when the planning team contains coder/tester
 // agents. Plan mode only delegates to planners/leads/reviewers, so such agents
 // are dead weight in the planning block — they can never run there. Called after
@@ -131,6 +148,10 @@ export function loadConfig(cwd: string): HiveConfig {
   if (planning) validateHiveConfigShape({ orchestrator: planning.main, agents: planning.agents } as HiveConfig);
   validateAgentTypes({ orchestrator: hive.main, agents: hive.agents } as HiveConfig);
   if (planning) validateAgentTypes({ orchestrator: planning.main, agents: planning.agents } as HiveConfig);
+  // Mode contract checks stay warn-only for compatibility, but make confusing
+  // config visible: plan mode's main session should be a planner and hive mode's
+  // main session should be a lead.
+  warnOnMainAgentTypes(planning, hive);
   // Phase 5.1: coder/tester agents in the planning block are undelegatable there
   // (plan mode only delegates to planners/leads/reviewers). Warn — don't throw —
   // so the config still loads; they simply never run during planning.

@@ -11,7 +11,7 @@ function fixtureProject() {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-config-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: medium\nagent-type: lead\n---\nOrchestrate.");
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: medium\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: medium\nagent-type: planner\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "frontend.md"), "---\nmodel: anthropic/claude-sonnet\nagent-type: coder\n---\nBuild UI.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "qa.md"), "---\nmodel: anthropic/claude-sonnet\nagent-type: tester\n---\nTest UI.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
@@ -81,7 +81,7 @@ test("planning block with a coder/tester warns but still loads (Phase 5.1)", () 
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-planexec-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nLead.");
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "coder.md"), "---\nmodel: anthropic/claude-sonnet\nthinking: off\nagent-type: coder\n---\nCode.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
@@ -111,6 +111,28 @@ hive:
   }
   assert.ok(warnings.some((w) => /planning block contains execution agents/.test(w) && /Stray Coder/.test(w)),
     "expected a planning-execution-agent warning naming the offender");
+});
+
+test("main-session agent-type mismatches warn but still load", () => {
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: reviewer\n---\nReview.");
+  const yaml = readFileSync(cfgPath, "utf8");
+  writeFileSync(cfgPath, yaml);
+
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (msg?: any) => { warnings.push(String(msg)); };
+  try {
+    const config = loadConfig(cwd);
+    assert.equal(config.planning?.main.agentType, "lead");
+    assert.equal(config.hive?.main.agentType, "reviewer");
+  } finally {
+    console.warn = orig;
+  }
+  assert.ok(warnings.some((w) => /main agent type mismatch/.test(w) && /planning\.main/.test(w) && /hive\.main/.test(w)),
+    "expected a warning for both main-session type mismatches");
 });
 
 test("allowedAgents in config warns but still loads (H1)", () => {
@@ -145,7 +167,7 @@ test("main-node model/thinking are optional; workers still require them (H2)", (
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   // Main nodes with NO model/thinking frontmatter — must not throw at runtime load.
   writeFileSync(join(cwd, ".pi", "hive", "agents", "main.md"), "---\nagent-type: lead\n---\nOrchestrate.");
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan.md"), "---\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan.md"), "---\nagent-type: planner\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "coder.md"), "---\nmodel: anthropic/claude-sonnet\nthinking: medium\nagent-type: coder\n---\nCode.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
@@ -270,7 +292,7 @@ test("loadConfig reads agent-type/stages/commit from frontmatter onto config", (
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\ncommit: \"Only commit after review is green.\"\n---\nLead.");
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "planner.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\nstages: [proposal, requirements]\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:
@@ -300,7 +322,7 @@ function typedFixture(orchestratorFrontmatter: string, agentFrontmatter: string,
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${orchestratorFrontmatter}\n---\nLead.`);
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\n---\nPlan.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "agent.md"), `---\nmodel: openai/gpt-5\nthinking: off\n${agentFrontmatter}\n---\nWork.`);
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
 settings:

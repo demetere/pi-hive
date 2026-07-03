@@ -36,7 +36,7 @@ function twoBlockProject(): string {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-modes-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
   const md = (type: string) => `---\nmodel: openai/gpt-5\nthinking: off\nagent-type: ${type}\n---\nWork.`;
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), md("lead"));
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), md("planner"));
   writeFileSync(join(cwd, ".pi", "hive", "agents", "reqs.md"), md("planner"));
   writeFileSync(join(cwd, ".pi", "hive", "agents", "hive-main.md"), md("lead"));
   writeFileSync(join(cwd, ".pi", "hive", "agents", "coder.md"), md("coder"));

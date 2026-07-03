@@ -62,13 +62,26 @@ Point an agent at the build guide and let it interview you:
 
 **[SETUP.md](./SETUP.md)** is the authoritative, self-contained playbook: the config + frontmatter schema, copy-paste templates for orchestrator/lead/member, the interview questions, conventions (tools, domains, distiller), and a validation checklist.
 
-## Commands (only registered when a hive is configured)
+## Modes and commands (only registered when a hive is configured)
 
-- `/hive-toggle` or `Ctrl+Alt+T` — toggle between normal chat and hive orchestrator mode.
+`pi-hive` has three hardcoded session modes: `normal` → `plan` → `hive` → `normal`. The cycle order is not configurable.
+
+- `normal` — plain Pi chat. No hive tools or hive enforcement.
+- `plan` — the `planning:` team is active. The visible main session should be `agent-type: planner`; plan gates run in order `proposal → requirements → design → tasks` under `.pi/hive/plans/<change-id>/`.
+- `hive` — the `hive:` team is active. The visible main session should be `agent-type: lead`; execution agents build an approved `tasks.md`.
+
+Commands:
+
+- `/hive-normal`, `/hive-plan-mode`, `/hive` — switch to a specific mode.
+- `/hive-toggle` or `Ctrl+Alt+T` — cycle `normal → plan → hive → normal`.
+- `/hive-execute <change-id>` — validates that the change exists, has `tasks.md`, and the tasks gate is approved, then switches to hive mode and drives execution.
+- `/hive-plan [change-id]` — list plan changes or select/show one.
 - `/hive-status` — open the live hierarchy view (per-agent status, tokens, cost).
 - `/hive-doctor` — run read-only diagnostics for opt-in config, loaded agents, dashboard assets, Bun availability, SDD state, and telemetry paths.
 - `/hive-observe` — restart/open the local browser dashboard for global hive telemetry (`http://127.0.0.1:43191` by default).
 - `/hive-observe-stop` — stop the telemetry dashboard on the configured port.
+
+The hive tool set is mode/type scoped in code, not configurable by users: plan mode exposes planning/store/review tools to eligible planners/reviewers, hive mode exposes delegation/status/review tools to eligible execution agents, and normal mode exposes none. The dashboard host/port default to `127.0.0.1:43191` and can only be changed with `HIVE_TELEMETRY_HOST` / `HIVE_TELEMETRY_PORT`.
 
 SDD/OpenSpec is the default operating mode for non-trivial hive work. Agent `skills:` paths are passed to worker Pi processes explicitly with `--no-skills` plus repeated `--skill <path>`, so Hive reuses Pi's native skill system without automatic discovery bleed-through.
 
