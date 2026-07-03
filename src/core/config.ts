@@ -15,6 +15,16 @@ import { validateAgentTypes, validateHiveConfigShape } from "./schema";
 // H1). The delegation hierarchy is derived from `members`/`children`; honoring a
 // user filter would silently fight that derivation. Warn-only — the value is
 // ignored either way (derivation overwrites it).
+function normalizeSharedContext(value: any): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("shared_context must be a list of strings.");
+  return value.map((entry, index) => {
+    if (typeof entry !== "string") throw new Error(`shared_context[${index}] must be a string; got ${Array.isArray(entry) ? "array" : typeof entry}. Quote inline text and use context: [{path: ...}] for structured refs.`);
+    return entry;
+  }).filter((entry) => entry.trim());
+}
+
+
 function warnOnAllowedAgents(parsed: any): void {
   const seen: string[] = [];
   const walk = (node: any) => {
@@ -168,7 +178,7 @@ export function loadConfig(cwd: string): HiveConfig {
     // `parseKeyValue` only camelizes kebab-case, so the documented snake_case
     // `shared_context:` key arrives verbatim. Accept both here rather than
     // camelizing snake_case parser-wide (plan-store reads `session_id` raw).
-    sharedContext: parsed.shared_context ?? parsed.sharedContext ?? [],
+    sharedContext: normalizeSharedContext(parsed.shared_context ?? parsed.sharedContext),
     settings: {
       subagentOutputLimit: Number(settings.subagentOutputLimit || 12_000),
       defaultTools: String(settings.defaultTools || "read, grep, find, ls"),

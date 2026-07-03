@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { workerResourceLoader } from "../src/engine/worker-extension.ts";
+import { normalizeWorkerSkillPaths, workerResourceLoader } from "../src/engine/worker-extension.ts";
 import { enforceDomainForTool } from "../src/engine/domain.ts";
 import { runAsAgent } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
@@ -61,6 +61,41 @@ function capturingPi() {
     pi: { on: (event: string, handler: (event: any, ctx: any) => any) => handlers.set(event, handler) },
   };
 }
+
+test("normalizeWorkerSkillPaths accepts strings, refs, and double-wrapped refs before Pi ResourceLoader sees them", () => {
+  assert.deepEqual(
+    normalizeWorkerSkillPaths([
+      ".pi/hive/skills/a/SKILL.md",
+      { path: ".pi/hive/skills/b/SKILL.md", useWhen: "planning" },
+      { path: { path: ".pi/hive/skills/c/SKILL.md" } },
+    ]),
+    [
+      ".pi/hive/skills/a/SKILL.md",
+      ".pi/hive/skills/b/SKILL.md",
+      ".pi/hive/skills/c/SKILL.md",
+    ],
+  );
+});
+
+test("normalizeWorkerSkillPaths rejects invalid entries with a clear indexed error", () => {
+  assert.throws(
+    () => normalizeWorkerSkillPaths(["ok", { nope: true }]),
+    /skillPaths\[1\] must be a string or \{path:string\}/,
+  );
+});
+
+test("workerResourceLoader normalizes skill refs before constructing Pi ResourceLoader", () => {
+  const loader = workerResourceLoader({} as HiveState, "/repo", "Planner", [
+    { path: ".pi/hive/skills/imed-repo-map/SKILL.md" },
+    { path: { path: ".pi/hive/skills/imed-frontend-map/SKILL.md" } },
+  ] as any);
+  assert.equal((loader as any).noExtensions, true, "worker loaders must not load global/package extensions");
+  assert.equal((loader as any).noSkills, true, "worker loaders must not merge global/package skill paths");
+  assert.deepEqual((loader as any).additionalSkillPaths, [
+    ".pi/hive/skills/imed-repo-map/SKILL.md",
+    ".pi/hive/skills/imed-frontend-map/SKILL.md",
+  ]);
+});
 
 test("workerResourceLoader re-attaches tool_call with identical behavior to enforceDomainForTool", async () => {
   const ctx = { cwd: "/repo" } as any;

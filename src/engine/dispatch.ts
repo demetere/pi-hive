@@ -27,7 +27,7 @@ import { canDelegateTo } from "./domain";
 import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
-import { workerResourceLoader } from "./worker-extension";
+import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
 import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 
@@ -71,6 +71,10 @@ function archivePriorRun(sessionFile: string) {
 // can inject a scripted AgentSession to drive dispatchAgent end-to-end without a
 // live model. Kept as the last optional param so existing callers are unchanged.
 export type CreateAgentSession = typeof createAgentSession;
+
+export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): string[] {
+  return normalizeWorkerSkillPaths(refs).map((skillPath) => resolve(cwd, skillPath));
+}
 
 export async function dispatchAgent(
   state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false,
@@ -184,7 +188,7 @@ export async function dispatchAgent(
   // not the tools list, so keep them even when the agent does not enumerate
   // them. buildHiveTools only emits them for the eligible type.
   const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
-  const skillPaths = (runtime.config.skills || []).map((skill) => resolve(ctx.cwd, skill.path));
+  const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
   const chunks: string[] = [];
   const sessionManager = SessionManager.open(runtime.sessionFile);

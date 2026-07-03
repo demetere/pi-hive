@@ -6,10 +6,16 @@ import { readIfSmall } from "./utils";
 export function buildSharedContext(state: HiveState, ctx: ExtensionContext): string {
   if (!state.config) return "";
   const blocks: string[] = [];
-  for (const relative of state.config.sharedContext || []) {
-    const fullPath = resolve(ctx.cwd, relative);
+  for (const entry of state.config.sharedContext || []) {
+    const text = String(entry);
+    const fullPath = resolve(ctx.cwd, text);
     const content = readIfSmall(fullPath);
-    if (content) blocks.push(`## ${relative}\n${content}`);
+    if (content) {
+      blocks.push(`## ${text}\n${content}`);
+      continue;
+    }
+    const looksLikePath = /[\\/]|\.[A-Za-z0-9]+$/.test(text) && !/\s/.test(text);
+    blocks.push(looksLikePath ? `## ${text}\n[not readable: ${text}]` : `## Inline shared context\n${text}`);
   }
   return blocks.join("\n\n---\n\n");
 }

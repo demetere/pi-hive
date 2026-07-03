@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { allConfiguredAgents, loadConfig } from "../src/core/config.ts";
 import { normalizeDomainScopes } from "../src/core/normalize.ts";
 import { auditAgentTypes, inferAgentType } from "../src/core/agent-type-audit.ts";
+import { buildSharedContext } from "../src/core/prompting.ts";
 
 function fixtureProject() {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-config-"));
@@ -75,6 +76,35 @@ test("loadConfig reads shared_context from YAML (both snake_case and camelCase)"
     const config = loadConfig(cwd);
     assert.deepEqual(config.sharedContext, ["README.md", "docs/ARCH.md"], `key ${key} should populate sharedContext`);
   }
+});
+
+test("loadConfig recovers quoted inline shared_context containing a colon", () => {
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const yaml = readFileSync(cfgPath, "utf8").replace(
+    "shared-context:\n  - README.md",
+    'shared_context:\n  - "iMed is HIPAA-regulated: no TODOs, no placeholders"',
+  );
+  writeFileSync(cfgPath, yaml);
+
+  const config = loadConfig(cwd);
+  assert.deepEqual(config.sharedContext, ["iMed is HIPAA-regulated: no TODOs, no placeholders"]);
+
+  const rendered = buildSharedContext({ config } as any, { cwd } as any);
+  assert.match(rendered, /Inline shared context/);
+  assert.match(rendered, /HIPAA-regulated: no TODOs/);
+});
+
+test("loadConfig rejects non-string shared_context entries before delegation", () => {
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const yaml = readFileSync(cfgPath, "utf8").replace(
+    "shared-context:\n  - README.md",
+    "shared_context:\n  - path: README.md",
+  );
+  writeFileSync(cfgPath, yaml);
+
+  assert.throws(() => loadConfig(cwd), /shared_context\[0\] must be a string/);
 });
 
 test("planning block with a coder/tester warns but still loads (Phase 5.1)", () => {

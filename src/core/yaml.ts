@@ -28,8 +28,18 @@ export function parseScalar(raw: string): any {
   return value;
 }
 
+export function findUnquotedColon(text: string): number {
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if ((ch === '"' || ch === "'") && text[i - 1] !== "\\") quote = quote === ch ? null : quote || ch;
+    if (ch === ":" && !quote) return i;
+  }
+  return -1;
+}
+
 export function parseKeyValue(text: string): [string, any, boolean] {
-  const idx = text.indexOf(":");
+  const idx = findUnquotedColon(text);
   if (idx < 0) return [text.trim(), "", false];
   const rawKey = text.slice(0, idx).trim();
   const key = rawKey.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
@@ -62,7 +72,7 @@ export function parseYamlLite(raw: string): any {
         continue;
       }
 
-      if (rest.includes(":")) {
+      if (findUnquotedColon(rest) >= 0) {
         const [key, value, nested] = parseKeyValue(rest);
         const item: JsonRecord = {};
         if (nested) {

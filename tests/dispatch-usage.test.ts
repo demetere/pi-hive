@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchAgent, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { dispatchAgent, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
 import { restoreRuntimeCounters } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -25,6 +25,20 @@ function runtimeFor(name: string, sessionFile: string): AgentRuntime {
 // A scripted AgentSession: on prompt(), it replays the given turns as message_end
 // events (live accumulation), then an agent_end, to the subscriber. getSessionStats
 // returns the authoritative lifetime aggregate that dispatch OVERWRITES with.
+test("resolveWorkerSkillPaths flattens skill refs so delegate setup never passes objects to path.resolve", () => {
+  const cwd = "/repo";
+  assert.deepEqual(
+    resolveWorkerSkillPaths(cwd, [
+      { path: ".pi/hive/skills/imed-repo-map/SKILL.md", useWhen: "planning" },
+      { path: { path: ".pi/hive/skills/imed-frontend-map/SKILL.md" } },
+    ] as any),
+    [
+      "/repo/.pi/hive/skills/imed-repo-map/SKILL.md",
+      "/repo/.pi/hive/skills/imed-frontend-map/SKILL.md",
+    ],
+  );
+});
+
 function scriptedSession(opts: {
   turns: Array<{ input: number; output: number; cacheRead?: number; cacheWrite?: number; reasoning?: number; cost: number }>;
   stats: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; reasoning?: number };
