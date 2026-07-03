@@ -31,6 +31,30 @@ default:
   @just --list --unsorted
 
 # =============================================================================
+# ALIASES
+# =============================================================================
+# Short shortcuts + back-compat names. Recipes are grouped by prefix
+# (dashboard-*, pi-*); these aliases keep old names (referenced in package.json,
+# README, CLAUDE.md) working and add quick shortcuts.
+
+# Short shortcuts.
+alias v := verify
+alias db := dashboard-build
+
+# Back-compat for the pre-prefix names.
+alias build-dashboard := dashboard-build
+alias dev-dashboard := dashboard-dev
+alias install-dashboard := dashboard-install
+alias typecheck-dashboard := dashboard-typecheck
+alias verify-dashboard := dashboard-verify
+alias vendor-plannotator := dashboard-vendor
+alias run-dev := run
+alias dev := pi-dev
+alias reload := pi-reload
+alias symlink := pi-symlink
+alias reload-dry-run := pi-reload-dry-run
+
+# =============================================================================
 # SETUP & INFO
 # =============================================================================
 
@@ -55,44 +79,21 @@ install:
   cd {{dashboard_dir}} && npm install
   @printf "{{GREEN}}Install complete.{{NC}}\n"
 
-# Install dashboard dependencies only.
-[group('setup')]
-[group('dashboard')]
-install-dashboard:
-  cd {{dashboard_dir}} && npm install
-
-# Run this checkout as a temporary Pi extension for manual testing.
-[group('setup')]
-[group('pi')]
-dev:
-  pi -e .
-
 # Project the dashboard points at when run standalone. Defaults to the demo
 # playground so `just run` shows the seeded OpenSpec changes out of the box.
 project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-playground")
 
-# Serve the telemetry dashboard standalone (Bun serves the committed dist/ bundle
-# + the API + the /pl-review review surface) against PROJECT. One process; open
-# http://127.0.0.1:{{telemetry_port}} and click the Plans tab. Ctrl+C stops it.
-#   just run                      # against the playground
-#   PROJECT=/path/to/proj just run
+# Run this checkout as a temporary Pi extension for manual testing. (alias: dev)
 [group('pi')]
+pi-dev:
+  pi -e .
+
+# Vite proxies /api, /plans, /pl-review, /stream, … to the Bun server; edit
+# ui/web/src/** and see changes live (Ctrl+C stops both). Vite binds to
+# localhost/::1, not 127.0.0.1. Usage: `just run`  or  `PROJECT=/path just run`.
+# Run EVERYTHING: Bun server (API + /pl-review) + Vite HMR frontend. Open http://localhost:43192. (alias: run-dev)
 [group('dashboard')]
 run:
-  @printf "{{BLUE}}pi-hive dashboard{{NC}}\n"
-  @printf "  project:   %s\n" "{{project}}"
-  @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (Plans tab)\n"
-  HIVE_TELEMETRY_HOST="{{telemetry_host}}" HIVE_TELEMETRY_PORT="{{telemetry_port}}" \
-    HIVE_PROJECT_CWD="{{project}}" HIVE_TELEMETRY_DB="{{project}}/.telemetry/telemetry.db" \
-    bun src/observability/server/index.ts
-
-# UI-dev mode: run the Bun dashboard server (backend/API + review surface) AND
-# the Vite dev server (frontend with hot-reload) concurrently; Ctrl+C stops both.
-# Vite proxies /api, /plans, /pl-review, /stream, … to the Bun server. Edit
-# ui/web/src/** and see changes live. Open the frontend at http://localhost:43192
-# (Vite binds to localhost/::1, not 127.0.0.1).
-[group('dashboard')]
-run-dev:
   cd {{dashboard_dir}} && npm install
   @printf "{{BLUE}}pi-hive dashboard (dev){{NC}}\n"
   @printf "  project:  %s\n" "{{project}}"
@@ -102,12 +103,20 @@ run-dev:
     "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} HIVE_TELEMETRY_DB={{project}}/.telemetry/telemetry.db bun src/observability/server/index.ts" \
     "cd {{dashboard_dir}} && HIVE_TELEMETRY_PORT={{telemetry_port}} npm run dev"
 
-# Copy this checkout into the user-level Pi extension directory, then restart
-# the local telemetry dashboard so it serves the newly synced bundle.
-# Mirrors Pi's /reload workflow: sync here, then run /reload in Pi for commands/hooks.
-[group('setup')]
+# Serve the dashboard standalone: ONE Bun process (API + built dist/ + /pl-review), no Vite/HMR. For a quick check of the built UI.
+[group('dashboard')]
+dashboard-serve:
+  @printf "{{BLUE}}pi-hive dashboard (serve){{NC}}\n"
+  @printf "  project:   %s\n" "{{project}}"
+  @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (Plans tab)\n"
+  HIVE_TELEMETRY_HOST="{{telemetry_host}}" HIVE_TELEMETRY_PORT="{{telemetry_port}}" \
+    HIVE_PROJECT_CWD="{{project}}" HIVE_TELEMETRY_DB="{{project}}/.telemetry/telemetry.db" \
+    bun src/observability/server/index.ts
+
+# Restart the dashboard so it serves the synced bundle; then run /reload in Pi.
+# Sync this checkout into the user extension dir + reload. (alias: reload)
 [group('pi')]
-reload:
+pi-reload:
   mkdir -p "{{extension_dir}}"
   rsync -a --delete \
     --exclude '.git/' \
@@ -122,11 +131,10 @@ reload:
   node scripts/restart-dashboard.mjs "{{extension_dir}}"
   @printf "Run /reload in Pi to load the synced extension commands/hooks.\n"
 
-# Symlink this checkout into the user-level Pi extension directory for live development.
 # Moves an existing copied extension aside once, then points Pi at this repo.
-[group('setup')]
+# Symlink this checkout into the user extension dir for live development. (alias: symlink)
 [group('pi')]
-symlink:
+pi-symlink:
   #!/usr/bin/env bash
   set -euo pipefail
   target="{{extension_dir}}"
@@ -161,7 +169,7 @@ symlink:
 
 # Show what reload would copy/delete without changing the live extension.
 [group('pi')]
-reload-dry-run:
+pi-reload-dry-run:
   mkdir -p "{{extension_dir}}"
   rsync -ani --delete \
     --exclude '.git/' \
@@ -177,19 +185,23 @@ reload-dry-run:
 # DASHBOARD
 # =============================================================================
 
-# Rebuild the committed dashboard bundle and stamp dist/.
+# Install dashboard dependencies only. (alias: install-dashboard)
 [group('dashboard')]
-build-dashboard:
+dashboard-install:
+  cd {{dashboard_dir}} && npm install
+
+# Rebuild the committed dashboard bundle and stamp dist/. (aliases: build-dashboard, db)
+[group('dashboard')]
+dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
 
-# Refresh the committed, vendored Plannotator review UI from the pinned dev
-# dependency. plannotator.html is a self-contained single-file build (all JS/CSS
-# inlined), so it needs no build step — we host it statically on the dashboard
-# server. Committed like ui/web/dist/; bumping the pinned @plannotator version is
-# a deliberate, tested step because the committed HTML must match the /api/*
-# contract in src/engine/review.ts.
+# plannotator.html is a self-contained single-file build (no build step); we host
+# it statically. Committed like ui/web/dist/; bumping the pinned @plannotator
+# version is a deliberate, tested step — the HTML must match the /api/* contract
+# in src/engine/review.ts.
+# Refresh the committed, vendored Plannotator review UI from the pinned dev dep. (alias: vendor-plannotator)
 [group('dashboard')]
-vendor-plannotator:
+dashboard-vendor:
   npm install
   mkdir -p {{dashboard_dir}}/vendor
   cp node_modules/@plannotator/pi-extension/plannotator.html {{dashboard_dir}}/vendor/plannotator.html
@@ -202,17 +214,17 @@ typecheck-core:
 
 # Run the dashboard type checker.
 [group('dashboard')]
-typecheck-dashboard:
+dashboard-typecheck:
   cd {{dashboard_dir}} && npm run typecheck
 
 # Verify the committed dashboard bundle matches source.
 [group('dashboard')]
-verify-dashboard:
+dashboard-verify:
   node scripts/check-dashboard-fresh.mjs
 
 # Start the dashboard Vite dev server.
 [group('dashboard')]
-dev-dashboard:
+dashboard-dev:
   cd {{dashboard_dir}} && npm run dev
 
 # =============================================================================
@@ -224,9 +236,9 @@ dev-dashboard:
 test:
   node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
 
-# Run the Bun-only test suite (plan-store SQLite layer, dashboard security).
-# Kept separate from `test` because db.ts uses bun:sqlite and the core must load
-# without Bun. Named *.spec.ts so the Node runner never picks them up.
+# Separate from `test` because db.ts uses bun:sqlite and the core must load
+# without Bun (*.spec.ts so the Node runner never picks them up).
+# Run the Bun-only test suite (SQLite layer, dashboard security).
 [group('quality')]
 test-db:
   bun test ./tests/*.spec.ts
@@ -238,12 +250,12 @@ verify-package:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck-core typecheck-dashboard test test-db verify-dashboard verify-package
+verify: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck-core typecheck-dashboard test test-db verify-dashboard verify-package pack-dry-run
+ci: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================
@@ -252,12 +264,12 @@ ci: typecheck-core typecheck-dashboard test test-db verify-dashboard verify-pack
 
 # Rebuild dashboard and run package verification, matching package prepack.
 [group('package')]
-prepack: build-dashboard verify-package
+prepack: dashboard-build verify-package
   @printf "{{GREEN}}Prepack checks passed.{{NC}}\n"
 
 # Run publish-time checks.
 [group('package')]
-prepublish: test verify-dashboard verify-package
+prepublish: test dashboard-verify verify-package
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.
