@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  bootCwd, fetchPlanDetail, fetchPlans,
+  bootCwd, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
 } from "../api";
 import { useHive } from "../store";
@@ -37,6 +37,9 @@ function artifactFile(a: ArtifactState, files: string[]): string {
 }
 function ridFor(changeId: string, a: ArtifactState, files: string[]): string {
   return `${changeId}#${artifactFile(a, files)}`;
+}
+function artifactPathFromRid(rid: string): string {
+  return rid.includes("#") ? rid.slice(rid.indexOf("#") + 1) : "proposal.md";
 }
 
 // A chip for an AUTHORED artifact (exists on disk). Two-stage review state:
@@ -92,6 +95,7 @@ export default function Plans(props: { search: string }) {
   const [detail, setDetail] = useState<PlanDetail | null>(null);
   const [rid, setRid] = useState<string>("");
   const [fullscreen, setFullscreen] = useState(false);
+  const [readOnlyMarkdown, setReadOnlyMarkdown] = useState<string | null>(null);
 
   // Esc exits the fullscreen review.
   useEffect(() => {
@@ -128,6 +132,31 @@ export default function Plans(props: { search: string }) {
   }, [plans, props.search]);
 
   const reviewSrc = rid ? `/pl-review/?rid=${encodeURIComponent(rid)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}` : "";
+  const selectedArtifact = useMemo(() => (detail?.artifacts || []).find((a) => ridFor(detail!.changeId, a, detail!.files) === rid), [detail, rid]);
+  const selectedReview = useMemo(() => detail?.artifactReview.find((r) => r.id === selectedArtifact?.id), [detail, selectedArtifact]);
+  const reviewFinal = selectedReview?.humanVerdict === "green" || selectedReview?.humanVerdict === "red";
+  const artifactPath = artifactPathFromRid(rid);
+
+  useEffect(() => {
+    let cancelled = false;
+    setReadOnlyMarkdown(null);
+    if (!detail || !rid || !cwd || !reviewFinal) return;
+    void fetchPlanFile(detail.changeId, artifactPath, cwd).then((file) => {
+      if (!cancelled) setReadOnlyMarkdown(file.content ?? "_Unable to load reviewed artifact._");
+    });
+    return () => { cancelled = true; };
+  }, [artifactPath, cwd, detail, reviewFinal, rid]);
+
+  // The embedded review UI cannot notify this React tree after approve/deny
+  // because it is a vendored iframe. Poll while the selected artifact is awaiting
+  // human review, then swap to read-only markdown as soon as the verdict lands.
+  useEffect(() => {
+    if (!detail || !selectedReview?.humanReviewReady || selectedReview.humanVerdict || !selected) return;
+    const timer = window.setInterval(() => {
+      void fetchPlanDetail(selected, cwd).then((d) => { if (d) setDetail(d); });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [cwd, detail, selected, selectedReview]);
 
   // Only AUTHORED artifacts (on disk) are reviewable; the single next unwritten
   // one is surfaced as an "up next" hint. OpenSpec's "specs" delta is what makes
@@ -207,20 +236,33 @@ export default function Plans(props: { search: string }) {
               {reviewSrc ? (
                 <>
                   <div className="plan-review-bar">
-                    <span className="plan-review-rid mono">{rid.split("#")[1]}</span>
+                    <div className="plan-review-title">
+                      <span className="plan-review-rid mono">{artifactPath}</span>
+                      {reviewFinal && selectedReview?.humanVerdict && (
+                        <span className={`plan-review-final verdict-${selectedReview.humanVerdict}`}>
+                          {selectedReview.humanVerdict === "green" ? "approved" : "changes requested"}
+                        </span>
+                      )}
+                    </div>
                     <div className="plan-review-actions">
-                      <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New tab</a>
+                      {!reviewFinal && <a className="plan-review-btn" href={reviewSrc} target="_blank" rel="noreferrer" title="Open in a new tab">↗ New tab</a>}
                       <button type="button" className="plan-review-btn" title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"} onClick={() => setFullscreen((v) => !v)}>
                         {fullscreen ? "✕ Close" : "⤢ Fullscreen"}
                       </button>
                     </div>
                   </div>
-                  <iframe
-                    key={rid}
-                    title="Plan review"
-                    src={reviewSrc}
-                    className="plan-review-iframe"
-                  />
+                  {reviewFinal ? (
+                    <div className="plan-review-readonly">
+                      <pre>{readOnlyMarkdown ?? "Loading reviewed artifact…"}</pre>
+                    </div>
+                  ) : (
+                    <iframe
+                      key={rid}
+                      title="Plan review"
+                      src={reviewSrc}
+                      className="plan-review-iframe"
+                    />
+                  )}
                 </>
               ) : <div className="empty">Select an authored artifact to review.</div>}
             </div>

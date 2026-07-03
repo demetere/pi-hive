@@ -553,13 +553,20 @@
   .plan-issue-warning { @apply text-warn; }
   .plan-review-frame { @apply p-0 overflow-hidden flex flex-col; }
   .plan-review-bar { @apply flex items-center justify-between px-3 py-2 border-b border-border; }
+  .plan-review-title { @apply flex items-center gap-2; }
   .plan-review-rid { @apply text-[11.5px] text-muted; }
+  .plan-review-final { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
+  .plan-review-final.verdict-green { @apply text-ok bg-ok-soft; }
+  .plan-review-final.verdict-red { @apply text-crit; background: var(--crit-soft); }
   .plan-review-actions { @apply flex items-center gap-1.5; }
   .plan-review-btn { @apply text-[11.5px] text-fg2 bg-chip border border-border rounded-lg px-2.5 py-1 cursor-pointer no-underline transition-all duration-[.12s]; font: inherit; }
   .plan-review-btn:hover { @apply text-fg border-accent-border bg-hover; }
   .plan-review-iframe { @apply w-full block border-0 bg-app-bg; height: 72vh; min-height: 480px; }
+  .plan-review-readonly { @apply overflow-auto bg-app-bg; height: 72vh; min-height: 480px; }
+  .plan-review-readonly pre { @apply m-0 p-5 text-[12.5px] leading-6 text-fg whitespace-pre-wrap; font-family: var(--font-mono); }
   .plan-review-frame.fullscreen { @apply fixed inset-0 z-[100] rounded-none border-0; }
-  .plan-review-frame.fullscreen .plan-review-iframe { @apply flex-1; height: auto; }
+  .plan-review-frame.fullscreen .plan-review-iframe,
+  .plan-review-frame.fullscreen .plan-review-readonly { @apply flex-1; height: auto; }
 }
 @media (max-width: 1000px) { .plans-layout { grid-template-columns: 1fr !important; } }
 @media (max-width: 900px) { .review-box { grid-template-columns: 1fr !important; } .review-actions { justify-content: flex-end !important; } }
