@@ -563,7 +563,22 @@
   .plan-review-btn:hover { @apply text-fg border-accent-border bg-hover; }
   .plan-review-iframe { @apply w-full block border-0 bg-app-bg; height: 72vh; min-height: 480px; }
   .plan-review-readonly { @apply overflow-auto bg-app-bg; height: 72vh; min-height: 480px; }
-  .plan-review-readonly pre { @apply m-0 p-5 text-[12.5px] leading-6 text-fg whitespace-pre-wrap; font-family: var(--font-mono); }
+  .plan-markdown { @apply p-6 max-w-[980px] text-[13px] leading-6 text-fg; }
+  .plan-markdown h1 { @apply text-[24px] leading-8 font-bold mb-4 mt-0; }
+  .plan-markdown h2 { @apply text-[18px] leading-7 font-bold mt-7 mb-3 pb-1 border-b border-border; }
+  .plan-markdown h3 { @apply text-[15px] leading-6 font-semibold mt-5 mb-2; }
+  .plan-markdown p { @apply my-3 text-fg2; }
+  .plan-markdown ul { @apply my-3 pl-5; list-style: disc; }
+  .plan-markdown ol { @apply my-3 pl-5; list-style: decimal; }
+  .plan-markdown li { @apply my-1; }
+  .plan-markdown blockquote { @apply my-4 pl-4 border-l-4 border-accent-border text-muted; }
+  .plan-markdown code { @apply px-1 py-0.5 rounded bg-chip text-fg; font-family: var(--font-mono); }
+  .plan-markdown pre { @apply my-4 p-4 rounded-xl overflow-auto bg-chip border border-border; }
+  .plan-markdown pre code { @apply p-0 bg-transparent; }
+  .plan-markdown table { @apply my-4 border-collapse text-[12px]; }
+  .plan-markdown th, .plan-markdown td { @apply border border-border px-3 py-2 align-top; }
+  .plan-markdown th { @apply bg-chip text-fg font-semibold; }
+  .plan-markdown a { @apply text-accent underline; }
   .plan-review-frame.fullscreen { @apply fixed inset-0 z-[100] rounded-none border-0; }
   .plan-review-frame.fullscreen .plan-review-iframe,
   .plan-review-frame.fullscreen .plan-review-readonly { @apply flex-1; height: auto; }

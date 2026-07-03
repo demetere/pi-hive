@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   bootCwd, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
@@ -72,6 +72,100 @@ function ArtifactChip({
       {st.label && <span className="plan-artifact-review">{st.label}</span>}
     </button>
   );
+}
+
+function inlineMarkdown(text: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const re = /(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    const token = m[0];
+    const key = `${m.index}-${token}`;
+    if (token.startsWith("`")) parts.push(<code key={key}>{token.slice(1, -1)}</code>);
+    else if (token.startsWith("**")) parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    else {
+      const close = token.indexOf("](");
+      const label = token.slice(1, close);
+      const href = token.slice(close + 2, -1);
+      parts.push(<a key={key} href={href} target="_blank" rel="noreferrer">{label}</a>);
+    }
+    last = m.index + token.length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function MarkdownView({ markdown }: { markdown: string }) {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const nodes: ReactNode[] = [];
+  let i = 0;
+  const paragraph = (start: number) => {
+    const acc: string[] = [];
+    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|[-*]\s+|\d+\.\s+|>\s?|```|\|)/.test(lines[i].trim())) acc.push(lines[i++].trim());
+    nodes.push(<p key={`p-${start}`}>{inlineMarkdown(acc.join(" "))}</p>);
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    const key = `${i}-${trimmed.slice(0, 12)}`;
+    if (!trimmed) { i++; continue; }
+    if (trimmed.startsWith("```")) {
+      const lang = trimmed.slice(3).trim();
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) code.push(lines[i++]);
+      if (i < lines.length) i++;
+      nodes.push(<pre key={key}><code data-lang={lang || undefined}>{code.join("\n")}</code></pre>);
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (heading) {
+      const level = heading[1].length;
+      const children = inlineMarkdown(heading[2]);
+      nodes.push(level === 1 ? <h1 key={key}>{children}</h1> : level === 2 ? <h2 key={key}>{children}</h2> : <h3 key={key}>{children}</h3>);
+      i++;
+      continue;
+    }
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: ReactNode[] = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
+        items.push(<li key={i}>{inlineMarkdown(lines[i].trim().replace(/^[-*]\s+/, ""))}</li>);
+        i++;
+      }
+      nodes.push(<ul key={key}>{items}</ul>);
+      continue;
+    }
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: ReactNode[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+        items.push(<li key={i}>{inlineMarkdown(lines[i].trim().replace(/^\d+\.\s+/, ""))}</li>);
+        i++;
+      }
+      nodes.push(<ol key={key}>{items}</ol>);
+      continue;
+    }
+    if (trimmed.startsWith(">")) {
+      const quote: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) quote.push(lines[i++].trim().replace(/^>\s?/, ""));
+      nodes.push(<blockquote key={key}>{inlineMarkdown(quote.join(" "))}</blockquote>);
+      continue;
+    }
+    if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].trim().startsWith("|") && lines[i].trim().endsWith("|")) {
+        const cells = lines[i].trim().slice(1, -1).split("|").map((c) => c.trim());
+        if (!cells.every((c) => /^:?-{3,}:?$/.test(c))) rows.push(cells);
+        i++;
+      }
+      const [head, ...body] = rows;
+      nodes.push(<table key={key}><thead><tr>{(head || []).map((c, n) => <th key={n}>{inlineMarkdown(c)}</th>)}</tr></thead><tbody>{body.map((r, n) => <tr key={n}>{r.map((c, x) => <td key={x}>{inlineMarkdown(c)}</td>)}</tr>)}</tbody></table>);
+      continue;
+    }
+    paragraph(i);
+  }
+  return <div className="plan-markdown">{nodes}</div>;
 }
 
 export default function Plans(props: { search: string }) {
@@ -253,7 +347,7 @@ export default function Plans(props: { search: string }) {
                   </div>
                   {reviewFinal ? (
                     <div className="plan-review-readonly">
-                      <pre>{readOnlyMarkdown ?? "Loading reviewed artifact…"}</pre>
+                      {readOnlyMarkdown === null ? <div className="empty">Loading reviewed artifact…</div> : <MarkdownView markdown={readOnlyMarkdown} />}
                     </div>
                   ) : (
                     <iframe
