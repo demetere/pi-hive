@@ -68,3 +68,25 @@ test("ask_user (headless) promotes the question and records the trail", async ()
   assert.match(readFileSync(join(dir, "dashboard-actions.jsonl"), "utf8"), /"type":"question"/);
   assert.match(readFileSync(join(dir, "openspec", "changes", "add-auth", "questions.md"), "utf8"), /Which DB\?/);
 });
+
+test("ask_user (delegated planner) uses the main session's native ui.input directly", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-q-direct-"));
+  const state = stateWith(dir, [runtime("Planner", { agentType: "planner" })]);
+  // Simulate the visible main session's TUI context: a delegated planner's own
+  // ctx is headless, but it reaches this via state.widgetCtx (in-process).
+  let asked = "";
+  state.widgetCtx = {
+    mode: "tui",
+    ui: { input: async (_title: string, placeholder?: string) => { asked = placeholder || ""; return "PostgreSQL"; } },
+  } as any;
+  const tool = buildHiveTools(state, "Planner").find((t) => t.name === "ask_user")!;
+  const ctx = { cwd: dir, hasUI: false } as any; // worker ctx: no ui of its own
+  const res = await runWithChange("add-auth", () => (tool.execute as any)("id", { question: "Which DB?" }, undefined, undefined, ctx));
+  // Answered directly via the main session's dialog — no relay, no promotion.
+  assert.equal(res.details.ok, true);
+  assert.equal(res.details.answer, "PostgreSQL");
+  assert.equal(asked, "Which DB?");
+  assert.equal(existsSync(join(dir, "dashboard-actions.jsonl")), false); // no bridge used
+  // The answer is still recorded in the file-backed trail.
+  assert.match(readFileSync(join(dir, "openspec", "changes", "add-auth", "questions.md"), "utf8"), /PostgreSQL/);
+});
