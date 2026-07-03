@@ -82,6 +82,8 @@ info:
 # Install all local development dependencies.
 [group('setup')]
 install:
+  @printf "{{YELLOW}}Installing extension dependencies...{{NC}}\n"
+  npm install
   @printf "{{YELLOW}}Installing dashboard dependencies...{{NC}}\n"
   cd {{dashboard_dir}} && npm install
   @printf "{{GREEN}}Install complete.{{NC}}\n"
