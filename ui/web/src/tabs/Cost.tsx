@@ -45,7 +45,9 @@ export default function Cost() {
       const cur = ensure(a.session_id, a.name);
       cur.snapCost += a.cost; cur.snapTok += a.tokens;
       if (a.color && !colorOf.has(a.name)) colorOf.set(a.name, a.color);
-      if (a.model && !modelOf.has(a.name)) modelOf.set(a.name, shortModel(a.model));
+      // R4.3: skip the "inherit" placeholder as a model label (align with ModelMix),
+      // so an agent without a resolved model doesn't show the literal "inherit".
+      if (a.model && a.model !== "inherit" && !modelOf.has(a.name)) modelOf.set(a.name, shortModel(a.model));
     }
     // Per (session,agent): max(delta, snapshot). Then sum across sessions per agent.
     const byName = new Map<string, { name: string; color: string; model: string; cost: number; tokens: number }>();
@@ -79,7 +81,10 @@ export default function Cost() {
           <div style={{ padding: "14px 16px", flex: 1, overflow: "auto" }}>
             {breakdown.rows.length ? breakdown.rows.map((r, i) => (
               <div className="bar-row" key={i}>
-                <span className="bar-name"><span className="cdot" style={{ background: r.color }} />{r.name}</span>
+                <span className="bar-name">
+                  <span className="cdot" style={{ background: r.color }} />{r.name}
+                  {r.model && <span className="text-ink-dim font-mono text-[10px] ml-1.5">{r.model}</span>}
+                </span>
                 <span className="bar-track"><span className="bar-fill" style={{ width: `${(r.cost / breakdown.max) * 100}%`, background: r.color }} /></span>
                 <span className="bar-val">{fmtCost(r.cost)}</span>
               </div>

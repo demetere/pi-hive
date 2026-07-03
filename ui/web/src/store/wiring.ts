@@ -57,14 +57,20 @@ export async function refreshDelegations(reset = false): Promise<void> {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const rows = await fetchDelegations({ after, limit: DELEGATIONS_PAGE });
+      if (!rows.length) break; // reached the tail
+      const beforeCursor = after;
       for (const d of rows) {
         if (!seen.has(d.cursor)) { merged.push(d); seen.add(d.cursor); addedAny = true; }
         if (d.cursor > maxCursor) maxCursor = d.cursor;
         if (d.cursor > after) after = d.cursor;
       }
-      // A short page means we've reached the tail; stop. (A full page means there
-      // may be more rows past `after`, so loop again from the advanced cursor.)
-      if (rows.length < DELEGATIONS_PAGE) break;
+      // R4.3: keep paging as long as the cursor ADVANCES, not while pages are
+      // "full". The client page size equals the server clamp (db.ts) exactly, so a
+      // "rows.length < PAGE ⇒ tail" rule would silently stop after one short page if
+      // the clamp were ever lowered below our request. The no-progress guard is also
+      // a hard backstop: if the server ever returns rows whose cursor doesn't
+      // advance past what we asked after, stop rather than spin forever.
+      if (after <= beforeCursor) break;
     }
     if (!addedAny && !reset) return;
     merged.sort((a, b) => a.cursor - b.cursor);

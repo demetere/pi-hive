@@ -7,6 +7,7 @@ import { HIVE_AGENTS_DIR, TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
 import { normalizeMentalModelSpine } from "../core/mental-model";
 import type { AgentRuntime, HiveState } from "../core/types";
 import {
+  boundedDiagnostics,
   ensureDir,
   modelFrom,
   normalizeWorkerTools,
@@ -349,14 +350,10 @@ export async function dispatchAgent(
         if (!firstResponseId) firstResponseId = rid;
         lastResponseId = rid;
       }
-      if (Array.isArray(message?.diagnostics)) {
-        for (const d of message.diagnostics) {
-          if (diagnostics.length >= MAX_DIAGNOSTICS) break;
-          diagnostics.push({
-            type: d?.type ? String(d.type) : undefined,
-            message: d?.error?.message ? truncateMiddle(String(d.error.message), 300) : undefined,
-          });
-        }
+      if (diagnostics.length < MAX_DIAGNOSTICS) {
+        // R4.3: shared bounded/undefined-omitting normalizer, capped across the run.
+        const norm = boundedDiagnostics(message?.diagnostics, MAX_DIAGNOSTICS - diagnostics.length);
+        if (norm) diagnostics.push(...norm);
       }
       if (message?.stopReason) lastStopReason = String(message.stopReason);
       const usage = message?.usage;

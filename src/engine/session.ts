@@ -179,7 +179,7 @@ export function restoreRuntimeCounters(state: HiveState) {
 
   // latest runtime snapshot keyed by agent name (file order is chronological, so a
   // later row overwrites an earlier one), plus the monotonic max runCount.
-  const latest = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; runs: number; tools: number }>();
+  const latest = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; cost: number; runs: number; tools: number }>();
   for (const line of text.split("\n")) {
     if (!line.trim() || !line.includes("delegation_end")) continue;
     let ev: any;
@@ -194,6 +194,10 @@ export function restoreRuntimeCounters(state: HiveState) {
       output: Number(rt.outputTokens || 0),
       cacheRead: Number(rt.cacheReadTokens || 0),
       cacheWrite: Number(rt.cacheWriteTokens || 0),
+      // R4.3: restore reasoning too, else lifetime reasoning drops to 0 after a
+      // mode switch / reloadTeam (the runtime summary carries it; it was just never
+      // read back). Per-run deltas were unaffected; this fixes the live total.
+      reasoning: Number(rt.reasoningTokens || 0),
       cost: Number(rt.costUsd || 0),
       // Monotonic: never let a later row lower the run count.
       runs: Math.max(priorRuns, Number(rt.runCount || 0)),
@@ -208,6 +212,7 @@ export function restoreRuntimeCounters(state: HiveState) {
     runtime.outputTokens = p.output;
     runtime.cacheReadTokens = p.cacheRead;
     runtime.cacheWriteTokens = p.cacheWrite;
+    runtime.reasoningTokens = p.reasoning;
     runtime.costUsd = p.cost;
     runtime.runCount = p.runs;
     runtime.toolCount = p.tools;

@@ -62,6 +62,29 @@ export function truncateMiddle(text: string, max: number): string {
   return `${text.slice(0, head)}\n\n... [truncated] ...\n\n${text.slice(text.length - tail)}`;
 }
 
+// Bounded, truncated view of an AssistantMessage's diagnostics for telemetry
+// (Item 9). Caps the count, truncates each message, and OMITS absent fields
+// (R4.3) — an entry never carries `message: undefined`, and an entry with neither
+// type nor message is dropped. Returns undefined when there is nothing to record.
+export function boundedDiagnostics(
+  diagnostics: unknown,
+  max = 20,
+): Array<{ type?: string; message?: string }> | undefined {
+  if (!Array.isArray(diagnostics) || !diagnostics.length) return undefined;
+  const out: Array<{ type?: string; message?: string }> = [];
+  for (const d of diagnostics) {
+    if (out.length >= max) break;
+    const type = (d as any)?.type ? String((d as any).type) : undefined;
+    const message = (d as any)?.error?.message ? truncateMiddle(String((d as any).error.message), 300) : undefined;
+    if (!type && !message) continue;
+    const entry: { type?: string; message?: string } = {};
+    if (type) entry.type = type;
+    if (message) entry.message = message;
+    out.push(entry);
+  }
+  return out.length ? out : undefined;
+}
+
 // Clip to a head slice and report whether clipping happened, so callers can
 // stamp a machine-readable `truncated` flag on the telemetry payload (J6) rather
 // than having downstream code re-infer truncation from a length threshold.

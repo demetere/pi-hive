@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
-import { clip, configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
+import { boundedDiagnostics, clip, configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
@@ -319,12 +319,7 @@ ${catalog}`,
         provider: message?.provider ? String(message.provider) : undefined,
         api: message?.api ? String(message.api) : undefined,
         responseId: message?.responseId ? String(message.responseId) : undefined,
-        diagnostics: Array.isArray(message?.diagnostics) && message.diagnostics.length
-          ? message.diagnostics.slice(0, 20).map((d: any) => ({
-              type: d?.type ? String(d.type) : undefined,
-              message: d?.error?.message ? truncateMiddle(String(d.error.message), 300) : undefined,
-            }))
-          : undefined,
+        diagnostics: boundedDiagnostics(message?.diagnostics),
         usage: u ? { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, reasoning: u.reasoning, cost: u.cost } : undefined,
       }, "Orchestrator");
     }

@@ -173,7 +173,7 @@ export default function Agents(props: { search: string }) {
           <tr>
             <th>Agent</th><th>Role</th><th>Type</th><th>Domain</th><th>Status</th><th>Model</th>
             <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Runs</th><th className="num">Tools</th>
-            <th className="num" title="Average per-turn latency (main session only)">Turn</th>
+            <th className="num" title="Average per-turn latency of the main session, over turn events in the loaded window. In multi-session scopes each turn is attributed to every session's main row (turn events carry no session key), so the average is an approximation across sessions.">Turn</th>
             {!collapsed && <th className="num">Context</th>}
           </tr>
         </thead>

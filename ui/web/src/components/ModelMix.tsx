@@ -31,26 +31,37 @@ export default function ModelMix() {
   }, [scopedDelegations]);
 
   const data = useMemo(() => {
-    // R3-2.1: weight the donut from the typed delegation DELTAS (additive,
-    // untruncated), per-agent SUMMED, with the live snapshot as a max() top-up —
-    // the same authoritative-delta + live-snapshot basis Cost uses. The old
-    // scopedAgents[].tokens = max(snapshot, raw-window) distorted the donut for
-    // sessions outside the loaded window, and after W1.1 a fresh re-run's snapshot
-    // covers only its latest run, undercounting the donut specifically.
+    // R3-2.1 / R4.1: weight the donut from the typed delegation DELTAS (additive,
+    // untruncated), with the live snapshot as a top-up — the EXACT same
+    // per-(session,agent) max(delta, snapshot) then sum-across-sessions basis Cost
+    // uses (Cost.tsx). Keying only by agent name (as R3 did) diverged from Cost in
+    // multi-session scopes: legacy session A (snapshot) + delta session B would take
+    // a scope-level max instead of adding the two sessions, so the donut undercounted
+    // exactly where Cost was correct. Per-cell max never double-counts and matches
+    // Cost figure-for-figure. The old scopedAgents[].tokens = max(snapshot,
+    // raw-window) also distorted sessions outside the loaded window.
     //
     // Segments key on shortModel() as a CONSCIOUS choice (R3-2.1): the donut is a
     // coarse model-FAMILY view, so same-named models from different providers merge
     // into one segment. Keying by full "provider/id" would fragment the ramp for a
     // distinction the widget doesn't otherwise surface. Provider-level identity
     // lives in the Activity/Cost detail, not here.
-    const tokByAgent = new Map<string, number>();
+    const cell = new Map<string, { name: string; del: number; snap: number }>();
+    const ensureCell = (session: string, name: string) => {
+      const k = `${session}::${name}`;
+      let c = cell.get(k);
+      if (!c) { c = { name, del: 0, snap: 0 }; cell.set(k, c); }
+      return c;
+    };
     for (const d of scopedDelegations) {
       if (!d.agent) continue;
-      tokByAgent.set(d.agent, (tokByAgent.get(d.agent) || 0) + (d.inputTokens || 0) + (d.outputTokens || 0));
+      ensureCell(d.sessionId, d.agent).del += (d.inputTokens || 0) + (d.outputTokens || 0);
     }
-    // Snapshot top-up: an in-flight run's tokens aren't in a delegation row yet.
-    for (const a of scopedAgents) {
-      if (a.tokens > (tokByAgent.get(a.name) || 0)) tokByAgent.set(a.name, a.tokens);
+    for (const a of scopedAgents) ensureCell(a.session_id, a.name).snap += a.tokens;
+    // Per (session,agent): max(delta, snapshot). Then sum across sessions per name.
+    const tokByAgent = new Map<string, number>();
+    for (const c of cell.values()) {
+      tokByAgent.set(c.name, (tokByAgent.get(c.name) || 0) + Math.max(c.del, c.snap));
     }
 
     const colorOf = new Map<string, string>();

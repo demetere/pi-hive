@@ -140,8 +140,9 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 # frontmatter. A node is a lead if it is top-level or has `members`; a leaf is a
 # member. Delegation = a node to its direct reports only. Roles are derived, not declared.
 #
-# Two team blocks: `hive:` (execution, active in hive mode) and `planning:`
-# (optional, active in plan mode). Each has a `main:` (the main session's identity
+# Two REQUIRED team blocks: `hive:` (execution, active in hive mode) and
+# `planning:` (active in plan mode). The loader hard-throws unless both are present.
+# Each has a `main:` (the main session's identity
 # for that mode) plus `agents:` (its reports). `main` IS the visible main
 # session — give the planning main agent-type: planner (or lead) and the hive main
 # agent-type: lead in their .md frontmatter.
