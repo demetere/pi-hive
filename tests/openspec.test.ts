@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as openspec from "../src/engine/openspec.ts";
-import { parseRid, ridFromReferer } from "../src/engine/review.ts";
+import { parseRid, renderReviewInput, ridFromReferer } from "../src/engine/review.ts";
 import { resolveHiveSddStatus } from "../src/engine/sdd.ts";
 import type { HiveState } from "../src/core/types.ts";
 
@@ -53,15 +53,83 @@ test("hasTasks detects checkbox items only", () => {
   assert.equal(openspec.hasTasks(cwd, "add-auth"), true);
 });
 
-test("execution approval sidecar round-trips and gates execution", () => {
+test("per-artifact approval ledger round-trips and gates execution", () => {
   const cwd = scratch();
   const dir = join(cwd, "openspec", "changes", "add-auth");
   mkdirSync(dir, { recursive: true });
   assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
-  openspec.setExecutionApproval(cwd, "add-auth", true);
+  openspec.setArtifactApproval(cwd, "add-auth", "tasks.md", "green");
+  assert.equal(openspec.isArtifactApproved(cwd, "add-auth", "tasks"), true);
   assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
-  openspec.setExecutionApproval(cwd, "add-auth", false);
+  openspec.setArtifactApproval(cwd, "add-auth", "tasks", "red");
   assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+});
+
+test("legacy flat sidecar {approved:true} maps to tasks green", () => {
+  const cwd = scratch();
+  const dir = join(cwd, "openspec", "changes", "add-auth");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".pi-hive-approval.json"), JSON.stringify({ approved: true }));
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+});
+
+test("denying an upstream artifact invalidates everything downstream", () => {
+  const cwd = scratch();
+  const dir = join(cwd, "openspec", "changes", "add-auth");
+  mkdirSync(dir, { recursive: true });
+  // Approve the whole chain.
+  for (const a of ["proposal", "design", "specs", "tasks"]) openspec.setArtifactApproval(cwd, "add-auth", a, "green");
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+  // Deny design — only tasks depends on design (specs is a sibling), so tasks is
+  // revoked but specs and proposal are untouched.
+  openspec.setArtifactApproval(cwd, "add-auth", "design", "red");
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "design"), "red");
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "tasks"), null);
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "specs"), "green"); // sibling, untouched
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), "green"); // upstream, untouched
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+
+  // Deny proposal — everything downstream (design, specs, tasks) is revoked.
+  for (const a of ["proposal", "design", "specs", "tasks"]) openspec.setArtifactApproval(cwd, "add-auth", a, "green");
+  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "red");
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "design"), null);
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "specs"), null);
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "tasks"), null);
+});
+
+test("isAwaitingHumanApproval halts the pipeline until the human decides", () => {
+  const cwd = scratch();
+  const dir = join(cwd, "openspec", "changes", "add-auth");
+  mkdirSync(dir, { recursive: true });
+  // Nothing authored yet → nothing pending.
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
+  // Author proposal, no human verdict yet → pipeline awaits approval of proposal.
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), "proposal");
+  // Human approves proposal → no longer awaiting.
+  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green");
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
+  // Author design, then human DENIES it → a denied artifact does NOT block
+  // (revising it is the intended next planner action).
+  writeFileSync(join(dir, "design.md"), "# d\n");
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), "design");
+  openspec.setArtifactApproval(cwd, "add-auth", "design", "red");
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
+});
+
+test("canAuthorArtifact enforces upstream approval; nextAuthorable walks the pipeline", () => {
+  const cwd = scratch();
+  const dir = join(cwd, "openspec", "changes", "add-auth");
+  mkdirSync(dir, { recursive: true });
+  // Nothing approved: only proposal (no upstream deps) is authorable.
+  assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "proposal"), true);
+  assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "design"), false);
+  assert.equal(openspec.nextAuthorableArtifact(cwd, "add-auth"), "proposal");
+  // Author + approve proposal → design and specs become authorable.
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green");
+  assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "design"), true);
+  assert.equal(openspec.nextAuthorableArtifact(cwd, "add-auth"), "design");
 });
 
 // --- review rid parsing ---
@@ -71,6 +139,22 @@ test("parseRid splits change#artifact and defaults artifact", () => {
   assert.deepEqual(parseRid("add-auth"), { change: "add-auth", artifact: "proposal.md" });
   assert.equal(parseRid("../evil#x"), null);
   assert.equal(parseRid(""), null);
+});
+
+test("renderReviewInput threads inline annotations into anchored feedback", () => {
+  const out = renderReviewInput({
+    feedback: "Overall: tighten the scope.",
+    annotations: [
+      { type: "comment", quote: "session cookies", comment: "specify SameSite" },
+      { type: "comment", quote: "", comment: "add a rollback plan" },
+      { type: "looks_good", quote: "", comment: "" }, // empty → skipped
+    ],
+  });
+  assert.match(out, /Overall: tighten the scope\./);
+  assert.match(out, /on "session cookies": specify SameSite/);
+  assert.match(out, /- add a rollback plan/);
+  // The empty annotation contributes nothing.
+  assert.equal(out.split("\n").length, 3);
 });
 
 test("ridFromReferer extracts rid only for the review mount", () => {

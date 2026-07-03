@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, readIfSmall } from "../core/fs";
@@ -347,37 +347,162 @@ export function readArtifact(cwd: string, name: string, relPath: string): string
 
 const APPROVAL_FILE = ".pi-hive-approval.json";
 
+// The four spec-driven artifacts, in dependency order, and each artifact's
+// direct upstream deps (mirrors what `openspec status --json` reports). A human
+// approval of an artifact is only meaningful while its upstream artifacts remain
+// approved, so DENYING an upstream artifact invalidates everything downstream.
+export const ARTIFACT_ORDER = ["proposal", "design", "specs", "tasks"] as const;
+export type ArtifactId = (typeof ARTIFACT_ORDER)[number];
+const UPSTREAM: Record<ArtifactId, ArtifactId[]> = {
+  proposal: [],
+  design: ["proposal"],
+  specs: ["proposal"],
+  tasks: ["design", "specs"],
+};
+
+// The set of artifacts that (transitively) depend on `artifact` — the ones whose
+// approval must be revoked when `artifact` is denied.
+function downstreamOf(artifact: ArtifactId): ArtifactId[] {
+  const out: ArtifactId[] = [];
+  for (const id of ARTIFACT_ORDER) {
+    if (id === artifact) continue;
+    // Walk id's upstream chain; if it reaches `artifact`, it's downstream.
+    const seen = new Set<ArtifactId>();
+    const stack = [...UPSTREAM[id]];
+    while (stack.length) {
+      const dep = stack.pop()!;
+      if (dep === artifact) { out.push(id); break; }
+      if (!seen.has(dep)) { seen.add(dep); stack.push(...UPSTREAM[dep]); }
+    }
+  }
+  return out;
+}
+
+export type ArtifactVerdict = "green" | "red" | null;
+// Per-artifact approval ledger — pi-hive's own gate state, independent of
+// OpenSpec, persisted as a sidecar the CORE can read without SQLite.
+export type ApprovalLedger = Partial<Record<ArtifactId, ArtifactVerdict>>;
+
 function approvalPath(cwd: string, name: string): string | null {
   if (!isSafeChangeId(name)) return null;
   return join(cwd, "openspec", "changes", name, APPROVAL_FILE);
 }
 
-// True once the change's tasks artifact has been approved via the review
-// surface. This is pi-hive's own gate state, independent of OpenSpec.
-export function isApprovedForExecution(cwd: string, name: string): boolean {
+function toArtifactId(artifact: string): ArtifactId | null {
+  const id = artifact.replace(/\.md$/, "").replace(/^specs.*/, "specs");
+  return (ARTIFACT_ORDER as readonly string[]).includes(id) ? (id as ArtifactId) : null;
+}
+
+// Read the ledger. Back-compat: the old flat shape {approved:true} maps to
+// {tasks:"green"} so pre-existing sidecars keep gating execution.
+export function readApprovalLedger(cwd: string, name: string): ApprovalLedger {
+  const p = approvalPath(cwd, name);
+  if (!p) return {};
+  const raw = readIfSmall(p, 16_000);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as { approved?: boolean; artifacts?: ApprovalLedger };
+    if (parsed.artifacts) return parsed.artifacts;
+    if (parsed.approved === true) return { tasks: "green" }; // legacy flat shape
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+// Atomic write (temp + rename) so the core dispatch gate never reads a
+// half-written ledger. Single writer (the dashboard review surface); the core
+// only reads.
+function writeApprovalLedger(cwd: string, name: string, ledger: ApprovalLedger, by: string): boolean {
   const p = approvalPath(cwd, name);
   if (!p) return false;
-  const raw = readIfSmall(p, 8_000);
-  if (!raw) return false;
   try {
-    return (JSON.parse(raw) as { approved?: boolean })?.approved === true;
+    ensureDir(dirname(p));
+    const tmp = `${p}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ artifacts: ledger, by, at: new Date().toISOString() }, null, 2)}\n`);
+    renameSync(tmp, p);
+    return true;
   } catch {
     return false;
   }
 }
 
-// Record (or clear) pi-hive's execution approval for a change. Called by the
-// review surface when the tasks artifact is approved/denied.
-export function setExecutionApproval(cwd: string, name: string, approved: boolean, by = "ui"): boolean {
-  const p = approvalPath(cwd, name);
-  if (!p) return false;
-  try {
-    ensureDir(dirname(p));
-    writeFileSync(p, `${JSON.stringify({ approved, by, at: new Date().toISOString() })}\n`);
-    return true;
-  } catch {
-    return false;
+// Record a human verdict for one artifact. On a DENY (red), also revoke the
+// approval of every downstream artifact — work built on a rejected upstream
+// artifact can no longer be trusted, so the pipeline rewinds.
+export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui"): boolean {
+  const id = toArtifactId(artifact);
+  if (!id) return false;
+  const ledger = readApprovalLedger(cwd, name);
+  ledger[id] = verdict;
+  if (verdict === "red") {
+    for (const down of downstreamOf(id)) ledger[down] = null;
   }
+  return writeApprovalLedger(cwd, name, ledger, by);
+}
+
+export function artifactVerdict(cwd: string, name: string, artifact: string): ArtifactVerdict {
+  const id = toArtifactId(artifact);
+  if (!id) return null;
+  return readApprovalLedger(cwd, name)[id] ?? null;
+}
+
+export function isArtifactApproved(cwd: string, name: string, artifact: string): boolean {
+  return artifactVerdict(cwd, name, artifact) === "green";
+}
+
+// An artifact may be AUTHORED (by a planner) only when every one of its upstream
+// dependencies has a standing green approval. This is the per-artifact planning
+// gate the dispatch guard consults (H2).
+export function canAuthorArtifact(cwd: string, name: string, artifact: string): boolean {
+  const id = toArtifactId(artifact);
+  if (!id) return false;
+  const ledger = readApprovalLedger(cwd, name);
+  return UPSTREAM[id].every((dep) => ledger[dep] === "green");
+}
+
+// The next artifact the planning team should author: the first in dependency
+// order that is not yet on disk and whose upstream deps are all approved.
+export function nextAuthorableArtifact(cwd: string, name: string): ArtifactId | null {
+  const files = new Set(listArtifacts(cwd, name).map((f) => f.replace(/\.md$/, "")));
+  const hasSpecs = existsSync(join(cwd, "openspec", "changes", name, "specs"));
+  for (const id of ARTIFACT_ORDER) {
+    const present = id === "specs" ? hasSpecs : files.has(id);
+    if (!present && canAuthorArtifact(cwd, name, id)) return id;
+  }
+  return null;
+}
+
+// True once the tasks artifact is human-approved. Retained name for the
+// execution-gate callers; now backed by the per-artifact ledger.
+export function isApprovedForExecution(cwd: string, name: string): boolean {
+  return isArtifactApproved(cwd, name, "tasks");
+}
+
+// The most-recently-authored artifact that the human has NOT YET decided on
+// (ledger entry is absent — not green, not red). A red entry means the human
+// asked for a revision, which is a permitted planner action, so it does not
+// count as "awaiting". Returns null when there is nothing waiting on the human.
+export function pendingReviewArtifact(cwd: string, name: string): ArtifactId | null {
+  const files = new Set(listArtifacts(cwd, name).map((f) => f.replace(/\.md$/, "")));
+  const hasSpecs = existsSync(join(cwd, "openspec", "changes", name, "specs"));
+  const ledger = readApprovalLedger(cwd, name);
+  let pending: ArtifactId | null = null;
+  for (const id of ARTIFACT_ORDER) {
+    const present = id === "specs" ? hasSpecs : files.has(id);
+    if (present && ledger[id] == null) pending = id; // authored, human has not decided
+  }
+  return pending;
+}
+
+// The core hard-stop planning gate: once an artifact is authored and awaiting
+// the human's first decision, the planning team may NOT author the next one
+// until the human approves. Returns the artifact holding the pipeline, or null
+// when planning may proceed (nothing authored-and-undecided). A DENIED artifact
+// does not block — revising it is exactly what the planner should do next.
+// Ledger+files only (core-readable, no SQLite).
+export function isAwaitingHumanApproval(cwd: string, name: string): ArtifactId | null {
+  return pendingReviewArtifact(cwd, name);
 }
 
 // The .md artifact files present at the top level of a change folder.

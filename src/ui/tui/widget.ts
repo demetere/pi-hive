@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HIVE_TOOL_NAMES } from "../../core/constants";
 import { canonicalMode } from "../../core/types";
@@ -35,10 +35,32 @@ const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team
 const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "ask_user"];
 const HIVE_MODE_TOOLS = COMMON_HIVE_TOOLS;
 
+// The bridge cursor is persisted BESIDE the action queue so it survives an
+// accidental close/reopen of the same session: on re-entry we resume from the
+// last consumed byte instead of seeding to file-end, so feedback enqueued by the
+// dashboard while the session was down gets replayed and delivered.
+function cursorFile(sessionDir: string): string {
+  return join(sessionDir, "dashboard-actions.cursor");
+}
+function readCursor(sessionDir: string): number {
+  try {
+    const n = Number(readFileSync(cursorFile(sessionDir), "utf8").trim());
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+function writeCursor(sessionDir: string, offset: number): void {
+  try { writeFileSync(cursorFile(sessionDir), String(offset)); } catch { /* best-effort */ }
+}
+
 function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
   if (!state.session || state.dashboardActionTimer) return;
-  const file = join(state.session.sessionDir, "dashboard-actions.jsonl");
-  try { state.dashboardActionOffset = existsSync(file) ? statSync(file).size : 0; } catch { state.dashboardActionOffset = 0; }
+  const dir = state.session.sessionDir;
+  const file = join(dir, "dashboard-actions.jsonl");
+  // Resume from the durable cursor (not file-end), so anything enqueued while
+  // this session was closed is replayed on reopen.
+  state.dashboardActionOffset = readCursor(dir);
   state.dashboardActionTimer = setInterval(() => {
     if (!state.session) return;
     try {
@@ -47,13 +69,16 @@ function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
       const offset = state.dashboardActionOffset || 0;
       if (text.length <= offset) return;
       state.dashboardActionOffset = text.length;
+      writeCursor(dir, text.length);
       for (const line of text.slice(offset).split("\n")) {
         if (!line.trim()) continue;
         const action = JSON.parse(line);
         if (action.type === "plan_review_approved" && action.changeId) {
           const next = action.readyToExecute
             ? `The plan-review UI approved the tasks artifact for change "${action.changeId}". The plan is validated and ready; summarize readiness and ask whether to run /hive-execute ${action.changeId}.`
-            : `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Continue with the next ready artifact (proposal → design/specs → tasks) with the planning team.`;
+            : action.nextArtifact
+              ? `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Author the next artifact (${action.nextArtifact}) with the planning team, then submit it for review.`
+              : `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Continue with the planning team.`;
           state.pi.sendUserMessage(action.feedback ? `${next}\n\nReviewer note:\n${action.feedback}` : next);
         } else if (action.type === "plan_review_denied" && action.changeId) {
           state.pi.sendUserMessage(`The plan-review UI rejected the ${action.artifact || "artifact"} for change "${action.changeId}":\n\n${action.feedback || "(no feedback given)"}\n\nRevise that artifact with the planning team, then re-submit it for review before continuing.`);

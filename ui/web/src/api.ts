@@ -319,9 +319,17 @@ export interface PlanSummary {
 }
 export type ArtifactStatus = "done" | "ready" | "blocked";
 export interface ArtifactState { id: string; outputPath: string; status: ArtifactStatus; missingDeps: string[]; }
+export interface ArtifactReview {
+  id: string;
+  authored: boolean;
+  agentCleared: boolean;
+  humanVerdict: "green" | "red" | null;
+  humanReviewReady: boolean;
+}
 export interface PlanDetail {
   changeId: string;
   artifacts: ArtifactState[];
+  artifactReview: ArtifactReview[];
   nextReady: string | null;
   files: string[];
   validation: { passed: boolean; failed: number; issues: Array<{ level: string; path: string; message: string }> };

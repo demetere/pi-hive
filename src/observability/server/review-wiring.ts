@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { handleReviewSurface, registerReviewSurface, type ReviewContext, type ReviewSurface } from "../../engine/review";
+import { handleReviewSurface, registerReviewSurface, renderReviewInput, type ReviewContext, type ReviewInput, type ReviewSurface } from "../../engine/review";
 import { parseRid } from "../../engine/review";
 import * as openspec from "../../engine/openspec";
 import { insertPlanVerdict } from "./db";
@@ -15,10 +15,6 @@ import { enqueueDashboardAction, resolveProjectCwd } from "./plan-bridge";
 // store + validator; approval is pi-hive state.
 
 const PLAN_REVIEW_MOUNT = "/pl-review/";
-
-function isTasksArtifact(artifact: string): boolean {
-  return artifact === "tasks.md" || artifact === "tasks";
-}
 
 function recordVerdict(ctx: ReviewContext, verdict: "green" | "red", feedback: string): void {
   insertPlanVerdict({
@@ -42,33 +38,43 @@ const surface: ReviewSurface | null = registerReviewSurface({
       if (!cwd || !openspec.changeExists(cwd, parsed.change)) return null;
       return { cwd, change: parsed.change, artifact: parsed.artifact };
     },
-    onApprove(ctx, feedback) {
+    onApprove(ctx, input) {
+      const feedback = renderReviewInput(input);
       recordVerdict(ctx, "green", feedback);
-      // Approving the tasks artifact opens pi-hive's execution gate (the sidecar
-      // the core dispatch gate reads). Other artifacts just advance the planning
-      // loop.
-      if (isTasksArtifact(ctx.artifact)) openspec.setExecutionApproval(ctx.cwd, ctx.change, true);
+      // Record the human's per-artifact approval in the ledger. This both
+      // advances the planning gate (the next artifact becomes authorable) and,
+      // for tasks, opens the execution gate.
+      openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "green");
       // Unblock the live session: the artifact's gate is satisfied; the planner
-      // proceeds to the next ready artifact (or /hive-execute once tasks pass).
+      // proceeds to the next authorable artifact (or /hive-execute once tasks
+      // pass validation).
+      const tasks = openspec.isArtifactApproved(ctx.cwd, ctx.change, "tasks");
       enqueueDashboardAction(ctx.cwd, {
         type: "plan_review_approved",
         changeId: ctx.change,
         artifact: ctx.artifact,
-        readyToExecute: isTasksArtifact(ctx.artifact) && openspec.isReadyToExecute(ctx.cwd, ctx.change),
+        nextArtifact: openspec.nextAuthorableArtifact(ctx.cwd, ctx.change),
+        readyToExecute: tasks && openspec.isReadyToExecute(ctx.cwd, ctx.change),
         feedback: feedback || undefined,
       });
     },
-    onDeny(ctx, feedback) {
+    onDeny(ctx, input) {
+      // Structured feedback: the top-level note PLUS each inline annotation
+      // ("on <quote>: <comment>") so the planner gets anchored, per-location
+      // guidance instead of a single blob.
+      const feedback = renderReviewInput(input);
       recordVerdict(ctx, "red", feedback);
-      // Denying the tasks artifact revokes execution approval; the gate holds
-      // until a revised artifact is re-approved.
-      if (isTasksArtifact(ctx.artifact)) openspec.setExecutionApproval(ctx.cwd, ctx.change, false);
-      // Route feedback back to the planning agent.
+      // Record the human's per-artifact denial. This revokes the artifact's
+      // approval AND (in the ledger) every downstream artifact's approval, since
+      // work built on a rejected upstream artifact can no longer be trusted.
+      openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "red");
+      // Route the structured feedback back to the planning agent.
       enqueueDashboardAction(ctx.cwd, {
         type: "plan_review_denied",
         changeId: ctx.change,
         artifact: ctx.artifact,
         feedback: feedback || "Artifact rejected by reviewer.",
+        annotationCount: input.annotations.length,
       });
     },
   },

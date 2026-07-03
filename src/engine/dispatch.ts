@@ -27,7 +27,7 @@ import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extrac
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { workerResourceLoader } from "./worker-extension";
-import { isExecutionGateOpen } from "./openspec";
+import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
 
 function resolveModel(ctx: ExtensionContext, modelString: string): any {
   const [provider, ...idParts] = modelString.split("/");
@@ -87,6 +87,18 @@ export async function dispatchAgent(
   // (they mutate; that needs an approved plan + hive/execute mode).
   if (state.mode === "plan" && !["planner", "lead", "reviewer"].includes(runtime.config.agentType || "")) {
     return { output: `Delegation blocked: plan mode may only delegate to planners, leads, or reviewers; ${runtime.config.name} is agent-type "${runtime.config.agentType || "unknown"}". Switch to hive mode or use /hive-execute after tasks approval for execution.`, exitCode: 1, elapsed: 0 };
+  }
+  // Hard per-artifact planning stop: once a planner has authored an artifact and
+  // it is awaiting the human's review, the pipeline HALTS — no planner may author
+  // the next artifact until the human approves the pending one in the review UI.
+  // Reviewers still run (their agent review is what happens during the wait); a
+  // denied artifact does not block (revising it is the intended next action).
+  if (state.mode === "plan" && runtime.config.agentType === "planner") {
+    const changeId = currentChangeId() || state.activeChangeId || "";
+    const pending = changeId ? isAwaitingHumanApproval(ctx.cwd, changeId) : null;
+    if (pending) {
+      return { output: `Delegation blocked: the "${pending}" artifact for change "${changeId}" is authored and awaiting human review in the dashboard. The planning pipeline holds until it is approved (or denied for revision). Ask the human to review it at the Plans tab; reviewers may still run.`, exitCode: 1, elapsed: 0 };
+    }
   }
   if (state.mode === "hive" && (runtime.config.agentType === "coder" || runtime.config.agentType === "tester")) {
     const changeId = currentChangeId() || state.activeChangeId || "";

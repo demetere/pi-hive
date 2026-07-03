@@ -38,9 +38,37 @@ export interface ReviewHooks {
   // Returns null when the change is unknown or the cwd is not a known project.
   resolveContext(rid: string, cwdParam: string | null): ReviewContext | null;
   // Record an approve verdict (pi-hive owns the gate) and unblock the planner.
-  onApprove(ctx: ReviewContext, feedback: string): void;
+  onApprove(ctx: ReviewContext, input: ReviewInput): void;
   // Record a deny verdict and route feedback back to the planner; gate holds.
-  onDeny(ctx: ReviewContext, feedback: string): void;
+  onDeny(ctx: ReviewContext, input: ReviewInput): void;
+}
+
+// One inline annotation the human left on a specific span of the artifact.
+export interface ReviewAnnotation {
+  type?: string;    // comment | deletion | looks_good | …
+  quote?: string;   // the anchored text span
+  comment?: string; // the human's note on that span
+}
+
+// The reviewer's input on a decision: a top-level note plus any per-location
+// inline annotations, so a denial can carry precise "line X: fix this" feedback.
+export interface ReviewInput {
+  feedback: string;
+  annotations: ReviewAnnotation[];
+}
+
+// Render structured review input into the message a planner receives, so the
+// anchored comments survive the round-trip to the agent.
+export function renderReviewInput(input: ReviewInput): string {
+  const parts: string[] = [];
+  if (input.feedback.trim()) parts.push(input.feedback.trim());
+  for (const a of input.annotations) {
+    const note = (a.comment || "").trim();
+    const quote = (a.quote || "").trim();
+    if (!note && !quote) continue;
+    parts.push(quote ? `- on "${quote.slice(0, 120)}": ${note || "(marked)"}` : `- ${note}`);
+  }
+  return parts.join("\n");
 }
 
 export interface ReviewSurface {
@@ -165,12 +193,34 @@ function planPayload(ctx: ReviewContext): Response {
   });
 }
 
-async function readFeedback(req: Request): Promise<string> {
+function parseReviewBody(body: Record<string, unknown>): ReviewInput {
+  const feedback = typeof body?.feedback === "string" ? body.feedback : "";
+  const annotations: ReviewAnnotation[] = Array.isArray(body?.annotations)
+    ? body.annotations
+        .filter((a): a is Record<string, unknown> => !!a && typeof a === "object")
+        .map((a) => ({
+          type: typeof a.type === "string" ? a.type : undefined,
+          quote: typeof a.quote === "string" ? a.quote : typeof a.originalText === "string" ? a.originalText : undefined,
+          comment: typeof a.comment === "string" ? a.comment : typeof a.body === "string" ? a.body : typeof a.note === "string" ? a.note : undefined,
+        }))
+    : [];
+  return { feedback, annotations };
+}
+
+async function readReviewInput(req: Request): Promise<ReviewInput> {
   try {
-    const body = (await req.json()) as { feedback?: unknown };
-    return typeof body?.feedback === "string" ? body.feedback : "";
+    return parseReviewBody((await req.json()) as Record<string, unknown>);
   } catch {
-    return "";
+    return { feedback: "", annotations: [] };
+  }
+}
+
+async function readDecision(req: Request): Promise<{ approved: boolean; input: ReviewInput }> {
+  try {
+    const body = (await req.json()) as { approved?: unknown } & Record<string, unknown>;
+    return { approved: body?.approved === true, input: parseReviewBody(body) };
+  } catch {
+    return { approved: false, input: { feedback: "", annotations: [] } };
   }
 }
 
@@ -203,12 +253,21 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
     }
     if (p === "/api/approve" && req.method === "POST") {
       if (!ctx) return json({ error: "unknown review" }, 404);
-      hooks.onApprove(ctx, await readFeedback(req));
+      hooks.onApprove(ctx, await readReviewInput(req));
       return json({ ok: true });
     }
     if (p === "/api/deny" && req.method === "POST") {
       if (!ctx) return json({ error: "unknown review" }, 404);
-      hooks.onDeny(ctx, await readFeedback(req));
+      hooks.onDeny(ctx, await readReviewInput(req));
+      return json({ ok: true });
+    }
+    // The plan surface can also settle a decision via /api/feedback, which
+    // carries an `approved` flag + annotations. Route it to the right hook.
+    if (p === "/api/feedback" && req.method === "POST") {
+      if (!ctx) return json({ error: "unknown review" }, 404);
+      const { approved, input } = await readDecision(req);
+      if (approved) hooks.onApprove(ctx, input);
+      else hooks.onDeny(ctx, input);
       return json({ ok: true });
     }
     // Benign stubs for the boot probes + everything else the bundle may call.

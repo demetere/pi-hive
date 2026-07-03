@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   bootCwd, fetchPlanDetail, fetchPlans,
-  type ArtifactState, type PlanDetail, type PlanSummary,
+  type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
 } from "../api";
 import { useHive } from "../store";
 import RelTime from "../hooks/RelTime";
@@ -39,23 +39,34 @@ function ridFor(changeId: string, a: ArtifactState, files: string[]): string {
   return `${changeId}#${artifactFile(a, files)}`;
 }
 
-// A chip for an AUTHORED artifact (exists on disk). Only authored artifacts are
-// shown + clickable; unwritten ones (OpenSpec "ready"/"blocked") are surfaced as
-// a separate "up next" hint, since "ready" there means "cleared to author", not
-// "ready to review".
+// A chip for an AUTHORED artifact (exists on disk). Two-stage review state:
+// awaiting the reviewer AGENT, ready for the HUMAN, approved, or denied. Only
+// authored artifacts are shown; unwritten ones surface as an "up next" hint,
+// since OpenSpec "ready" means "cleared to author", not "ready to review".
+function reviewState(r?: ArtifactReview): { label: string; cls: string } {
+  if (!r) return { label: "", cls: "" };
+  if (r.humanVerdict === "green") return { label: "approved", cls: "state-approved" };
+  if (r.humanVerdict === "red") return { label: "changes requested", cls: "state-denied" };
+  if (r.humanReviewReady) return { label: "review now", cls: "state-review" };
+  if (r.authored && !r.agentCleared) return { label: "agent review", cls: "state-agent" };
+  return { label: "", cls: "" };
+}
+
 function ArtifactChip({
-  a, changeId, files, selectedRid, onSelect,
-}: { a: ArtifactState; changeId: string; files: string[]; selectedRid: string; onSelect: (rid: string) => void }) {
+  a, review, changeId, files, selectedRid, onSelect,
+}: { a: ArtifactState; review?: ArtifactReview; changeId: string; files: string[]; selectedRid: string; onSelect: (rid: string) => void }) {
   const rid = ridFor(changeId, a, files);
+  const st = reviewState(review);
   return (
     <button
       type="button"
-      className={`plan-artifact ${selectedRid === rid ? "active" : ""}`}
+      className={`plan-artifact ${st.cls} ${selectedRid === rid ? "active" : ""}`}
       aria-pressed={selectedRid === rid}
       title="Open in the review UI"
       onClick={() => onSelect(rid)}
     >
       <span className="plan-artifact-id mono">{a.id}</span>
+      {st.label && <span className="plan-artifact-review">{st.label}</span>}
     </button>
   );
 }
@@ -178,7 +189,7 @@ export default function Plans(props: { search: string }) {
               </div>
               <div className="plan-artifacts">
                 {authored.length ? authored.map((a) => (
-                  <ArtifactChip key={a.id} a={a} changeId={detail.changeId} files={detail.files} selectedRid={rid} onSelect={setRid} />
+                  <ArtifactChip key={a.id} a={a} review={detail.artifactReview.find((r) => r.id === a.id)} changeId={detail.changeId} files={detail.files} selectedRid={rid} onSelect={setRid} />
                 )) : <span className="plan-artifact-none">No artifacts authored yet.</span>}
                 {upNext && <span className="plan-artifact-next">up next: {upNext.id}</span>}
               </div>

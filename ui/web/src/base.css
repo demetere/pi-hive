@@ -538,6 +538,11 @@
   .plan-artifact:hover { @apply bg-hover text-fg; }
   .plan-artifact.active { @apply bg-accent-soft text-accent border-accent-border; }
   .plan-artifact-id { @apply font-semibold; }
+  .plan-artifact-review { @apply text-[9.5px] uppercase tracking-[.35px] opacity-80; }
+  .plan-artifact.state-approved { @apply text-ok border-ok-border bg-ok-soft; }
+  .plan-artifact.state-denied { @apply text-crit; border-color: var(--err); background: var(--crit-soft); }
+  .plan-artifact.state-review { @apply text-accent border-accent-border bg-accent-soft; }
+  .plan-artifact.state-agent { @apply opacity-60; }
   .plan-artifact-next { @apply text-[11px] text-muted italic px-1; }
   .plan-artifact-none { @apply text-[11.5px] text-muted; }
   .plan-issues { @apply mt-3 pl-[18px] text-[11.5px]; list-style: disc; }

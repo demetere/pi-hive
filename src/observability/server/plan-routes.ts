@@ -25,9 +25,21 @@ export function listPlans(cwd: string): PlanSummary[] {
   }));
 }
 
+// Per-artifact review state encoding the two-stage flow: the reviewer AGENT
+// vets an authored artifact first (a non-"ui" verdict), and only once it clears
+// does the artifact become ready for the HUMAN to sign off in the dashboard.
+export interface ArtifactReview {
+  id: string;                 // proposal | design | specs | tasks
+  authored: boolean;          // exists on disk
+  agentCleared: boolean;      // reviewer agent gave a standing green
+  humanVerdict: "green" | "red" | null; // the human's per-artifact ledger entry
+  humanReviewReady: boolean;  // authored + agent-cleared + not yet human-approved
+}
+
 export interface PlanDetail {
   changeId: string;
   artifacts: openspec.ArtifactState[];
+  artifactReview: ArtifactReview[];
   nextReady: string | null;
   files: string[];
   validation: { passed: boolean; failed: number; issues: openspec.ValidateIssue[] };
@@ -35,14 +47,39 @@ export interface PlanDetail {
   verdicts: ReturnType<typeof listVerdicts>;
 }
 
+// The reviewer AGENT's standing verdict for a change (its most recent non-"ui"
+// verdict). Change-level, but with the per-artifact hard stop only one artifact
+// is under review at a time, so a standing agent green means "the agent has
+// cleared the artifact currently up for human review".
+function agentClearedChange(cwd: string, changeId: string): boolean {
+  const verdicts = listVerdicts(changeId, cwd).filter((v) => v.reviewer !== "ui");
+  if (!verdicts.length) return false;
+  // listVerdicts is newest-first; the latest agent verdict must be green/yellow
+  // (not red) to count as cleared.
+  return verdicts[0].verdict === "green" || verdicts[0].verdict === "yellow";
+}
+
 export function planDetail(cwd: string, changeId: string): PlanDetail | null {
   if (!openspec.changeExists(cwd, changeId)) return null;
   const detail = openspec.changeDetail(cwd, changeId);
   if (!detail) return null;
   const validation = openspec.validate(cwd, changeId);
+  const agentCleared = agentClearedChange(cwd, changeId);
+  const artifactReview: ArtifactReview[] = detail.artifacts.map((a) => {
+    const authored = a.status === "done";
+    const humanVerdict = openspec.artifactVerdict(cwd, changeId, a.id);
+    return {
+      id: a.id,
+      authored,
+      agentCleared: authored && agentCleared,
+      humanVerdict,
+      humanReviewReady: authored && agentCleared && humanVerdict !== "green",
+    };
+  });
   return {
     changeId,
     artifacts: detail.artifacts,
+    artifactReview,
     nextReady: detail.nextReady,
     files: openspec.listArtifacts(cwd, changeId),
     validation,
