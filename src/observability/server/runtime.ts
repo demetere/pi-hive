@@ -394,11 +394,22 @@ function ingestEvent(event: HiveTelemetryEvent): { event: HiveTelemetryEvent; cu
 }
 
 function modelKeyParts(model: unknown): { provider: string; modelId: string } | undefined {
+  if (model && typeof model === "object") {
+    const m = model as any;
+    if (typeof m.provider === "string" && typeof m.id === "string" && m.provider && m.id) {
+      return { provider: m.provider, modelId: m.id };
+    }
+  }
   const raw = String(model || "").trim();
   if (!raw || raw === "inherit") return undefined;
   const slash = raw.indexOf("/");
   if (slash <= 0 || slash === raw.length - 1) return undefined;
   return { provider: raw.slice(0, slash), modelId: raw.slice(slash + 1) };
+}
+
+function modelKeyString(model: unknown): string | undefined {
+  const key = modelKeyParts(model);
+  return key ? `${key.provider}/${key.modelId}` : undefined;
 }
 
 function recordAuthoritativeThinkingLevels(model: unknown, levels: unknown, ts: string) {
@@ -437,7 +448,7 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
   switch (event.type) {
     case "delegation_start":
       materializeDelegationStart({
-        eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.to, parent: p.from, startedAt: event.ts, model: p.model,
+        eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.to, parent: p.from, startedAt: event.ts, model: modelKeyString(p.model),
       });
       recordAuthoritativeThinkingLevels(p.model, p.thinkingLevels, event.ts);
       break;
@@ -460,7 +471,7 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
         costUsd: Number((isDelta ? d.costUsd : rt.costUsd ?? p.costUsd) ?? 0),
         schemaVersion: isDelta ? 1 : 0,
         status: p.type, stopReason: p.stopReason,
-        model: Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model,
+        model: modelKeyString(Array.isArray(p.models) && p.models.length ? p.models[p.models.length - 1] : p.model),
       });
       break;
     }

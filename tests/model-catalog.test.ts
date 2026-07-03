@@ -35,18 +35,22 @@ const noEmit = (obsLog: string) => !existsSync(obsLog) || readFileSync(obsLog, "
 const REGISTRY: any = {
   getAll: () => [
     { provider: "anthropic", id: "claude-opus-4-8", name: "Opus 4.8", reasoning: true, thinkingLevelMap: { low: {}, high: {}, off: null } as any },
-    { provider: "openai-codex", id: "gpt-5.5", name: "GPT-5.5", reasoning: true },
+    { provider: "openai-codex", id: "gpt-5.5", name: "GPT-5.5", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", minimal: "low" } as any },
     { provider: "google", id: "gemini-3.5-flash", name: "Gemini Flash", reasoning: false },
   ],
 };
 
-function catalogModels(obsLog: string): string[] {
+function catalogPayloadModels(obsLog: string): any[] {
   const raw = readFileSync(obsLog, "utf8").trim();
   if (!raw) return [];
   const events = raw.split("\n").map((l: string) => JSON.parse(l)).filter((e: any) => e.type === "model_catalog");
   assert.ok(events.length >= 1, "expected a model_catalog event");
   const last = events[events.length - 1];
-  return (last.payload.models || []).map((m: any) => `${m.provider}/${m.modelId}`);
+  return last.payload.models || [];
+}
+
+function catalogModels(obsLog: string): string[] {
+  return catalogPayloadModels(obsLog).map((m: any) => `${m.provider}/${m.modelId}`);
 }
 
 test("no catalog is emitted when config declares no models and none is passed", () => {
@@ -76,4 +80,16 @@ test("an explicit 'inherit' effective model is ignored (not a real model id)", (
   emitModelCatalog(state, REGISTRY, "inherit");
   // "inherit" is not a resolvable model → the wanted set stays empty → no emit.
   assert.ok(noEmit(obsLog));
+});
+
+test("model catalog mirrors pi-ai thinking level semantics", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-catalog4-"));
+  const obsLog = join(dir, "e.jsonl");
+  const state = stateWithInheritWorkers(obsLog);
+  emitModelCatalog(state, REGISTRY, "openai-codex/gpt-5.5");
+  const model = catalogPayloadModels(obsLog).find((m: any) => m.provider === "openai-codex" && m.modelId === "gpt-5.5");
+  assert.deepEqual(model.thinkingLevels, ["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+  const anthropic = catalogPayloadModels(obsLog).find((m: any) => m.provider === "anthropic" && m.modelId === "claude-opus-4-8");
+  assert.equal(anthropic, undefined, "only wanted models should be emitted");
 });

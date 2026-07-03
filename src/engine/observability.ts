@@ -209,17 +209,19 @@ export function emitModelCatalog(state: HiveState, registry: any, effectiveModel
   try { all = registry.getAll() || []; } catch { return; }
   const VOCAB = ["off", "minimal", "low", "medium", "high", "xhigh"];
   const thinkingLevelsOf = (model: any): string[] => {
+    if (!model?.reasoning) return ["off"];
     const map = model?.thinkingLevelMap;
-    // No map: reasoning models expose the full thinking ladder (no explicit
-    // "off"); non-reasoning models expose only "off".
-    if (!map || typeof map !== "object") {
-      return model?.reasoning ? VOCAB.filter((l) => l !== "off") : ["off"];
-    }
-    // With a map: a level is supported when its key is present and non-null
-    // (explicit null marks it unsupported; pi-ai types.d.ts:576-577). The
-    // authoritative per-worker answer comes from getAvailableThinkingLevels().
-    const levels = VOCAB.filter((level) => level in map && map[level] !== null);
-    return levels.length ? levels : (model?.reasoning ? VOCAB.filter((l) => l !== "off") : ["off"]);
+    // Mirror pi-ai's getSupportedThinkingLevels() semantics exactly. The model
+    // registry is the source of truth; this function is only the telemetry
+    // projection used by the dashboard cache. In pi-ai, an explicit null marks a
+    // level unsupported, most missing entries remain supported, and xhigh is the
+    // one level that must be explicitly mapped.
+    return VOCAB.filter((level) => {
+      const mapped = map && typeof map === "object" ? map[level] : undefined;
+      if (mapped === null) return false;
+      if (level === "xhigh") return mapped !== undefined;
+      return true;
+    });
   };
   // Never-drop: iterate the config's wanted models (source of truth) rather than
   // filtering the registry down to them. A registry hit enriches the row; a miss

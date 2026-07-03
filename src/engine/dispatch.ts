@@ -37,6 +37,11 @@ function resolveModel(ctx: ExtensionContext, modelString: string): any {
   return (ctx as any).modelRegistry?.find(provider, idParts.join("/"));
 }
 
+function modelKey(model: any, fallback: string): string {
+  if (model?.provider && model?.id) return `${model.provider}/${model.id}`;
+  return fallback;
+}
+
 function publishRuntimeUpdate(state: HiveState) {
   state.onRuntimeUpdate?.(state);
 }
@@ -195,6 +200,8 @@ export async function dispatchAgent(
     return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
   }
 
+  const resolvedModelKey = modelKey(resolvedModel, model);
+
   runtime.status = "running";
   runtime.task = task;
   runtime.lastWork = task;
@@ -251,9 +258,9 @@ export async function dispatchAgent(
     to: runtime.config.name,
     task,
     fresh,
-    // Store the effective model, not the raw config value (which may be
-    // "inherit"), so downstream telemetry has one resolvable capability key.
-    model: resolvedModel,
+    // Store the effective model key, not the raw config value (which may be
+    // "inherit") or the full SDK object, so telemetry stays JSON/SQLite-safe.
+    model: resolvedModelKey,
     configuredModel: model,
     tools,
     thinking,
