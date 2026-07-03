@@ -86,7 +86,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     // declared (M1). Fall back to ctx.model if the event shape lacks it.
     const m = event?.model || (ctx as any).model;
     const effectiveModel = m?.provider && m?.id ? `${m.provider}/${m.id}` : undefined;
-    try { emitModelCatalog(state, (ctx as any).modelRegistry, effectiveModel); } catch { /* best-effort */ }
+    try { emitModelCatalog(state, state.modelRegistry ?? ctx.modelRegistry, effectiveModel); } catch { /* best-effort */ }
     // Phase 4.4: emit the SWITCH itself (not just the catalog re-emit) so the
     // main session's model changes are an observable event, with provenance.
     const prev = event?.previousModel;
@@ -333,6 +333,10 @@ ${catalog}`,
 
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
     state.widgetCtx = ctx;
+    // Capture the ModelRegistry from the full session_start ctx — the reliable
+    // handle. The mode-switch ctx that used to feed emitModelCatalog could lack
+    // it, leaving model_versions empty and the topology dial without pillars.
+    state.modelRegistry = ctx.modelRegistry;
     state.onRuntimeUpdate = () => updateWidget(state);
     state.onRuntimeFinish = (runtime, finishCtx) => {
       if (finishCtx.hasUI) finishCtx.ui.notify(`${runtime.config.name} ${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s`, runtime.status === "done" ? "success" : "error");

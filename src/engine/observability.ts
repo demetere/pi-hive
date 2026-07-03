@@ -214,24 +214,50 @@ export function emitModelCatalog(state: HiveState, registry: any, effectiveModel
     const levels = VOCAB.filter((level) => level in map && map[level] !== null);
     return levels.length ? levels : (model?.reasoning ? VOCAB.filter((l) => l !== "off") : ["off"]);
   };
-  const models = all
-    .filter((model) => wanted.has(`${model.provider}/${model.id}`))
-    .map((model) => ({
-      provider: model.provider,
-      modelId: model.id,
-      name: model.name,
-      api: model.api,
-      reasoning: Boolean(model.reasoning),
-      thinkingLevels: thinkingLevelsOf(model),
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-      costRates: model.cost ? {
-        input: model.cost.input,
-        output: model.cost.output,
-        cacheRead: model.cost.cacheRead,
-        cacheWrite: model.cost.cacheWrite,
-      } : undefined,
-    }));
+  // Never-drop: iterate the config's wanted models (source of truth) rather than
+  // filtering the registry down to them. A registry hit enriches the row; a miss
+  // still persists a best-effort row so the dashboard has a record for every
+  // config model — an empty ladder degrades to plain text, not a missing dial.
+  const byKey = new Map<string, any>();
+  for (const model of all) byKey.set(`${model.provider}/${model.id}`, model);
+  const models = [...wanted].map((key) => {
+    const model = byKey.get(key);
+    if (model) {
+      return {
+        provider: model.provider,
+        modelId: model.id,
+        name: model.name,
+        api: model.api,
+        reasoning: Boolean(model.reasoning),
+        thinkingLevels: thinkingLevelsOf(model),
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+        costRates: model.cost ? {
+          input: model.cost.input,
+          output: model.cost.output,
+          cacheRead: model.cost.cacheRead,
+          cacheWrite: model.cost.cacheWrite,
+        } : undefined,
+      };
+    }
+    // Miss: the registry doesn't know this model. Split provider/id from the
+    // config string and emit a minimal row. The per-worker
+    // getAvailableThinkingLevels() path can enrich thinking_levels later.
+    const slash = key.indexOf("/");
+    const provider = slash >= 0 ? key.slice(0, slash) : key;
+    const modelId = slash >= 0 ? key.slice(slash + 1) : key;
+    return {
+      provider,
+      modelId,
+      name: undefined,
+      api: undefined,
+      reasoning: false,
+      thinkingLevels: [] as string[],
+      contextWindow: undefined,
+      maxTokens: undefined,
+      costRates: undefined,
+    };
+  });
   if (models.length) emitHiveEvent(state, "model_catalog", { models }, "System");
 }
 
@@ -251,6 +277,11 @@ export function startHiveTelemetrySession(state: HiveState, cwd: string) {
     observabilityLog: state.session.observabilityLog,
   }, "System");
   writeHiveStateSnapshot(state);
+  // Emit the model catalog at the first stable point where telemetry is live
+  // (session set, mode no longer normal, log open). Uses the registry handle
+  // captured from the full session_start ctx, so the pillar dial always has
+  // level data. Idempotent by content hash, so re-running per session is cheap.
+  emitModelCatalog(state, state.modelRegistry);
 }
 
 export function emitHiveEvent(state: HiveState, type: HiveObsEventType, payload: JsonRecord = {}, actor = currentAgentName()) {

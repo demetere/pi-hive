@@ -37,6 +37,7 @@ import {
   stampSessionTopology,
   fillNodeThinkingLevels,
   upsertModel,
+  listModels,
   topologyVersion,
   topologyNodes,
   statesWithEmbeddedTopologies,
@@ -175,6 +176,13 @@ function agentSummary(agent: AgentConfig): TopologyNode {
     thinking: agent.thinking,
     consultWhen: agent.consultWhen,
     routingTags: agent.routingTags || [],
+    // C2: mirror the extension-side summary (engine/observability.ts) so the
+    // config-parse fallback path (configuredTopologies, used when a snapshot
+    // lacks topologies) fills domain/commit/responsibilities too — otherwise
+    // those columns could never populate on that path.
+    domain: (agent.domain || []).map((scope) => scope.path),
+    commit: Boolean(agent.commit && agent.commit.trim()),
+    responsibilities: (agent.responsibilities || []).join("\n") || undefined,
     children: [...(agent.members || []), ...(agent.children || [])].map(agentSummary),
   };
 }
@@ -218,7 +226,7 @@ function enrichSnapshotTopologies(snapshot: HiveStateSnapshot): HiveStateSnapsho
 function topologyNodeRows(hash: string, topologies: HiveStateSnapshot["topologies"]): TopologyNodeRow[] {
   return explodeTopology(topologies).map(({ team, nodeId, parentId, node }) => ({
     topologyHash: hash, team, nodeId, parentId, name: node.name,
-    role: node.role, agentType: node.agentType, model: node.model, thinking: node.thinking,
+    agentType: node.agentType, model: node.model, thinking: node.thinking,
     thinkingLevels: node.thinkingLevels, color: node.color, group: node.group, tools: node.tools,
     domain: node.domain, stages: node.stages, commitAllowed: node.commit === true,
     routingTags: node.routingTags, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
@@ -240,6 +248,26 @@ function versionTopology(snapshot: HiveStateSnapshot): string | undefined {
   for (const agent of snapshot.agents || []) {
     if (agent.name && Array.isArray(agent.thinkingLevels) && agent.thinkingLevels.length) {
       fillNodeThinkingLevels(hash, agent.name, agent.thinkingLevels);
+    }
+  }
+  // C3: backfill any node still lacking thinking_levels from model_versions,
+  // soft-joined on the node's `provider/model_id` string. The per-worker fill
+  // above is authoritative but empty in sessions that never delegate; the
+  // model_catalog (Workstream A) now populates model_versions on mode entry, so
+  // this fallback fills the node column from the same soft join the dial uses.
+  const nodesNeedingLevels = topologyNodes(hash).filter(
+    (n) => n.model && (!n.thinkingLevels || !n.thinkingLevels.length),
+  );
+  if (nodesNeedingLevels.length) {
+    const levelsByModel = new Map<string, string[]>();
+    for (const m of listModels()) {
+      if (Array.isArray(m.thinkingLevels) && m.thinkingLevels.length) {
+        levelsByModel.set(`${m.provider}/${m.modelId}`, m.thinkingLevels);
+      }
+    }
+    for (const node of nodesNeedingLevels) {
+      const levels = levelsByModel.get(node.model as string);
+      if (levels) fillNodeThinkingLevels(hash, node.name, levels);
     }
   }
   return hash;
@@ -460,7 +488,7 @@ export function topologyDetail(hash: string): any {
     const byId = new Map<number, any>();
     for (const r of teamRows) {
       byId.set(r.nodeId, {
-        name: r.name, role: r.role, agentType: r.agentType, model: r.model, thinking: r.thinking,
+        name: r.name, agentType: r.agentType, model: r.model, thinking: r.thinking,
         thinkingLevels: r.thinkingLevels, color: r.color, group: r.group, tools: r.tools,
         domain: r.domain, stages: r.stages, commit: r.commitAllowed, routingTags: r.routingTags,
         consultWhen: r.consultWhen, responsibilities: r.responsibilities, children: [] as any[],

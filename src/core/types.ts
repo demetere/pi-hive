@@ -241,6 +241,10 @@ export interface HiveState {
   session: SessionState | null;
   runtimes: Map<string, AgentRuntime>;
   widgetCtx: ExtensionContext | null;
+  // The SDK ModelRegistry handle, captured from the full session_start ctx (the
+  // reliable one). Feeds emitModelCatalog so the model_catalog lands on a stable
+  // lifecycle point instead of the fragile mode-switch ctx that may lack it.
+  modelRegistry?: unknown;
   activeRuns: number;
   // The current session mode. Normal = plain Pi; plan = planning team; hive =
   // execution team. (Was `teamMode`; renamed for the three-mode model.)

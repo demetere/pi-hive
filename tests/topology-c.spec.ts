@@ -57,7 +57,7 @@ test("hash changes when an identity field changes (C1)", () => {
 test("explode -> version -> reassemble round-trips the tree (C2/C5)", () => {
   const h = hash.topologyHash(TOPO as any);
   const nodes = hash.explodeTopology(TOPO as any).map(({ team, nodeId, parentId, node }) => ({
-    topologyHash: h, team, nodeId, parentId, name: node.name, role: node.role, agentType: (node as any).agentType,
+    topologyHash: h, team, nodeId, parentId, name: node.name, agentType: (node as any).agentType,
     model: node.model, thinking: node.thinking, domain: (node as any).domain, tools: (node as any).tools, commitAllowed: (node as any).commit === true,
   }));
   db.upsertTopologyVersion({ hash: h, cwd: "/proj", topologyJson: hash.canonicalTopologyJson(TOPO as any), ts: "2026-07-02T00:00:00.000Z", nodes: nodes as any });
@@ -87,7 +87,7 @@ test("version insert is hash-idempotent — no duplicate rows on re-ingest (C3)"
 test("upsertTopologyVersion self-heals a partial node tree on re-ingest (I2)", () => {
   const h = hash.topologyHash(TOPO as any);
   const nodes = hash.explodeTopology(TOPO as any).map(({ team, nodeId, parentId, node }) => ({
-    topologyHash: h, team, nodeId, parentId, name: node.name, role: node.role, agentType: (node as any).agentType,
+    topologyHash: h, team, nodeId, parentId, name: node.name, agentType: (node as any).agentType,
     model: node.model, thinking: node.thinking, domain: (node as any).domain, tools: (node as any).tools, commitAllowed: (node as any).commit === true,
   }));
   const full = db.topologyNodes(h).length;
@@ -112,10 +112,42 @@ test("thinking_levels sidecar fills without changing the hash (C3/A10)", () => {
   expect(hash.topologyHash(TOPO as any)).toBe(h);
 });
 
+test("thinking_levels backfills from model_versions via the model soft-join (C3)", () => {
+  // A node whose model exists in model_versions but whose per-worker sidecar
+  // never filled (no delegation) must backfill from the catalog's soft join.
+  const topo = {
+    active: "hive" as const,
+    hive: {
+      orchestrator: { name: "SoloLead", role: "orchestrator" as const, model: "vendor/reasoner", thinking: "high" },
+      agents: [],
+    },
+    planning: { orchestrator: undefined, agents: [] },
+  };
+  const h = hash.topologyHash(topo as any);
+  const nodes = hash.explodeTopology(topo as any).map(({ team, nodeId, parentId, node }) => ({
+    topologyHash: h, team, nodeId, parentId, name: node.name, agentType: (node as any).agentType,
+    model: node.model, thinking: node.thinking,
+  }));
+  db.upsertTopologyVersion({ hash: h, cwd: "/c3", topologyJson: hash.canonicalTopologyJson(topo as any), ts: "2026-07-02T04:00:00.000Z", nodes: nodes as any });
+  // No sidecar yet.
+  expect(db.topologyNodes(h).find((r) => r.name === "SoloLead")!.thinkingLevels).toBeUndefined();
+
+  // Catalog lands (Workstream A path), then the backfill soft-joins by model.
+  db.upsertModel({ provider: "vendor", modelId: "reasoner", reasoning: true, thinkingLevels: ["off", "low", "high"] }, "2026-07-02T04:01:00.000Z");
+  const levelsByModel = new Map(db.listModels().map((m) => [`${m.provider}/${m.modelId}`, m.thinkingLevels] as const));
+  for (const node of db.topologyNodes(h)) {
+    if (node.model && (!node.thinkingLevels || !node.thinkingLevels.length)) {
+      const lv = levelsByModel.get(node.model);
+      if (lv?.length) db.fillNodeThinkingLevels(h, node.name, lv as string[]);
+    }
+  }
+  expect(db.topologyNodes(h).find((r) => r.name === "SoloLead")!.thinkingLevels).toEqual(["off", "low", "high"]);
+});
+
 test("explode → topologyDetail reassembles the exact tree + canonical JSON (L2)", () => {
   const h = hash.topologyHash(TOPO as any);
   const nodes = hash.explodeTopology(TOPO as any).map(({ team, nodeId, parentId, node }) => ({
-    topologyHash: h, team, nodeId, parentId, name: node.name, role: node.role, agentType: (node as any).agentType,
+    topologyHash: h, team, nodeId, parentId, name: node.name, agentType: (node as any).agentType,
     model: node.model, thinking: node.thinking, domain: (node as any).domain, tools: (node as any).tools, commitAllowed: (node as any).commit === true,
   }));
   db.upsertTopologyVersion({ hash: h, cwd: "/l2", topologyJson: hash.canonicalTopologyJson(TOPO as any), ts: "2026-07-02T03:00:00.000Z", nodes: nodes as any });

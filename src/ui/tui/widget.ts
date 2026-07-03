@@ -6,7 +6,7 @@ import { HIVE_TOOL_NAMES } from "../../core/constants";
 import { canonicalMode } from "../../core/types";
 import type { HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
-import { emitModelCatalog, startHiveTelemetrySession } from "../../engine/observability";
+import { startHiveTelemetrySession } from "../../engine/observability";
 import { installHiveFooter, requestHiveFooterRender } from "./footer";
 
 // Common hive tools are active in both plan and execution mode. Plan lifecycle
@@ -112,7 +112,6 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
   }
 
   startHiveTelemetrySession(state, ctx.cwd);
-  emitModelCatalog(state, (ctx as any).modelRegistry);
   startDashboardActionPoller(state, ctx);
   state.pi.setActiveTools(mode === "plan" ? PLAN_MODE_TOOLS : HIVE_MODE_TOOLS);
   updateWidget(state);

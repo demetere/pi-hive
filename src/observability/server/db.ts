@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS events (
   pid INTEGER,
   cwd TEXT,
   telemetry_log TEXT,
-  payload_json TEXT NOT NULL
+  -- JSONB BLOB (SQLite has no JSONB column type; jsonb() produces a BLOB). Reads
+  -- go through json() which decodes both new BLOBs and legacy TEXT-JSON rows.
+  payload_json BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_hive_events_session_seq ON events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_hive_events_ts ON events(ts);
@@ -61,7 +63,7 @@ CREATE TABLE IF NOT EXISTS states (
   cwd TEXT,
   session_dir TEXT,
   telemetry_log TEXT,
-  state_json TEXT NOT NULL
+  state_json BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS plan_verdicts (
   id            TEXT PRIMARY KEY,
@@ -69,9 +71,9 @@ CREATE TABLE IF NOT EXISTS plan_verdicts (
   reviewer      TEXT NOT NULL,
   verdict       TEXT NOT NULL,
   summary       TEXT,
-  evidence_json TEXT,
-  concerns_json TEXT,
-  blockers_json TEXT,
+  evidence_json BLOB,
+  concerns_json BLOB,
+  blockers_json BLOB,
   session_id    TEXT,
   cwd           TEXT,
   created_at    TEXT NOT NULL
@@ -165,7 +167,7 @@ CREATE TABLE IF NOT EXISTS ingest_sources (
 CREATE TABLE IF NOT EXISTS topology_versions (
   hash          TEXT PRIMARY KEY,
   cwd           TEXT NOT NULL,
-  topology_json TEXT NOT NULL,
+  topology_json BLOB NOT NULL,
   first_seen_at TEXT NOT NULL,
   last_seen_at  TEXT NOT NULL
 );
@@ -179,20 +181,21 @@ CREATE TABLE IF NOT EXISTS topology_nodes (
   node_id         INTEGER NOT NULL,
   parent_id       INTEGER,
   name            TEXT NOT NULL,
-  role            TEXT,
   agent_type      TEXT,
   model           TEXT,
   thinking        TEXT,
-  thinking_levels TEXT,
+  thinking_levels BLOB,
   color           TEXT,
   group_name      TEXT,
+  -- tools_json holds a raw comma-string (not JSON), so it stays TEXT and is
+  -- excluded from the JSONB migration (see the write/read paths).
   tools_json      TEXT,
-  domain_json     TEXT,
-  stages_json     TEXT,
+  domain_json     BLOB,
+  stages_json     BLOB,
   commit_allowed  INTEGER NOT NULL DEFAULT 0,
-  routing_tags_json TEXT,
+  routing_tags_json BLOB,
   consult_when    TEXT,
-  responsibilities_json TEXT,
+  responsibilities_json BLOB,
   PRIMARY KEY (topology_hash, team, node_id)
 );
 CREATE INDEX IF NOT EXISTS idx_topology_nodes_name ON topology_nodes(topology_hash, name);
@@ -211,7 +214,7 @@ CREATE TABLE IF NOT EXISTS model_versions (
   name            TEXT,
   api             TEXT,
   reasoning       INTEGER NOT NULL DEFAULT 0,
-  thinking_levels TEXT NOT NULL,
+  thinking_levels BLOB NOT NULL,
   context_window  INTEGER,
   max_tokens      INTEGER,
   cost_input REAL, cost_output REAL, cost_cache_read REAL, cost_cache_write REAL,
@@ -294,7 +297,7 @@ export const insertEvent = db.query(`
   INSERT OR IGNORE INTO events
     (event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json)
   VALUES
-    ($event_id, $session_id, $seq, $ts, $type, $actor, $pid, $cwd, $telemetry_log, $payload_json)
+    ($event_id, $session_id, $seq, $ts, $type, $actor, $pid, $cwd, $telemetry_log, jsonb($payload_json))
 `);
 
 // Per-event session upsert. event_count uses arithmetic (+1) instead of the old
@@ -347,7 +350,7 @@ export const ensureSession = db.query(`
 
 export const upsertState = db.query(`
   INSERT INTO states (session_id, updated_at, cwd, session_dir, telemetry_log, state_json)
-  VALUES ($session_id, $updated_at, $cwd, $session_dir, $telemetry_log, $state_json)
+  VALUES ($session_id, $updated_at, $cwd, $session_dir, $telemetry_log, jsonb($state_json))
   ON CONFLICT(session_id) DO UPDATE SET
     updated_at = excluded.updated_at,
     cwd = COALESCE(excluded.cwd, states.cwd),
@@ -414,7 +417,9 @@ function rowToEventWithCursor(row: any): HiveTelemetryEvent & { cursor: number }
   return { ...rowToEvent(row), cursor: Number(row.rowid) };
 }
 
-const EVENT_COLS = `rowid, event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json`;
+// json(payload_json) decodes BOTH new JSONB BLOBs and legacy TEXT-JSON rows to
+// canonical TEXT, so rowToEvent's JSON.parse works uniformly across the migration.
+const EVENT_COLS = `rowid, event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, json(payload_json) AS payload_json`;
 
 // Paginated, cursor-ordered event reads (B5). Replaces the boot-time
 // load-everything-into-memory path. `after` is an events.rowid; results are
@@ -461,7 +466,7 @@ export function maxEventCursor(): number {
 }
 
 export function loadPersistedStates(): HiveStateSnapshot[] {
-  const stateRows = db.query(`SELECT state_json FROM states`).all() as any[];
+  const stateRows = db.query(`SELECT json(state_json) AS state_json FROM states`).all() as any[];
   const states: HiveStateSnapshot[] = [];
   for (const row of stateRows) {
     try {
@@ -605,7 +610,28 @@ export function materializeToolEnd(input: { sessionId: string; toolCallId?: stri
   });
 }
 
-export function queryDelegations(q: { session?: string; cwd?: string; after?: number; limit?: number; deltasOnly?: boolean }): any[] {
+export interface DelegationRow {
+  cursor: number;
+  sessionId: string;
+  cwd?: string;
+  agent?: string;
+  parent?: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  costUsd?: number;
+  schemaVersion: number;
+  status?: string;
+  stopReason?: string;
+  model?: string;
+}
+
+export function queryDelegations(q: { session?: string; cwd?: string; after?: number; limit?: number; deltasOnly?: boolean }): DelegationRow[] {
   const where: string[] = ["ended_at IS NOT NULL"];
   const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
@@ -625,7 +651,22 @@ export function queryDelegations(q: { session?: string; cwd?: string; after?: nu
   }));
 }
 
-export function queryToolCalls(q: { session?: string; after?: number; limit?: number }): any[] {
+export interface ToolCallRow {
+  cursor: number;
+  sessionId: string;
+  cwd?: string;
+  agent?: string;
+  toolName?: string;
+  toolCallId?: string;
+  argsPreview?: string;
+  resultPreview?: string;
+  isError: boolean;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+}
+
+export function queryToolCalls(q: { session?: string; after?: number; limit?: number }): ToolCallRow[] {
   const where: string[] = [];
   const params: any = { $limit: Math.min(Math.max(1, q.limit || 1000), 5000) };
   if (q.session) { where.push(`session_id = $session`); params.$session = q.session; }
@@ -639,14 +680,31 @@ export function queryToolCalls(q: { session?: string; after?: number; limit?: nu
 
 // ── SQL-backed session summaries (B2) ─────────────────────────────────────────
 
-export function querySessionSummaries(): any[] {
-  const rows = db.query(`
+// Raw snake_case session row — the caller (runtime.sessionSummaries) projects it
+// into the camelCase TelemetrySessionSummary and folds in live snapshot counts.
+export interface SessionSummaryRow {
+  session_id: string;
+  cwd: string | null;
+  session_dir: string | null;
+  telemetry_log: string | null;
+  first_ts: string | null;
+  last_ts: string | null;
+  event_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  topology_hash: string | null;
+}
+
+export function querySessionSummaries(): SessionSummaryRow[] {
+  return db.query(`
     SELECT session_id, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count,
            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, topology_hash
     FROM sessions
     ORDER BY last_ts DESC
-  `).all() as any[];
-  return rows;
+  `).all() as SessionSummaryRow[];
 }
 
 export function knownCwds(): string[] {
@@ -734,22 +792,22 @@ export function pruneOlderThan(cutoffIso: string): { events: number; sessions: n
 
 const upsertTopologyVersionStmt = db.query(`
   INSERT INTO topology_versions (hash, cwd, topology_json, first_seen_at, last_seen_at)
-  VALUES ($hash, $cwd, $topology_json, $ts, $ts)
+  VALUES ($hash, $cwd, jsonb($topology_json), $ts, $ts)
   ON CONFLICT(hash) DO UPDATE SET
     last_seen_at = CASE WHEN excluded.last_seen_at > topology_versions.last_seen_at THEN excluded.last_seen_at ELSE topology_versions.last_seen_at END
 `);
 
 const insertTopologyNodeStmt = db.query(`
   INSERT OR IGNORE INTO topology_nodes
-    (topology_hash, team, node_id, parent_id, name, role, agent_type, model, thinking, thinking_levels,
+    (topology_hash, team, node_id, parent_id, name, agent_type, model, thinking, thinking_levels,
      color, group_name, tools_json, domain_json, stages_json, commit_allowed, routing_tags_json, consult_when, responsibilities_json)
   VALUES
-    ($topology_hash, $team, $node_id, $parent_id, $name, $role, $agent_type, $model, $thinking, $thinking_levels,
-     $color, $group_name, $tools_json, $domain_json, $stages_json, $commit_allowed, $routing_tags_json, $consult_when, $responsibilities_json)
+    ($topology_hash, $team, $node_id, $parent_id, $name, $agent_type, $model, $thinking, jsonb($thinking_levels),
+     $color, $group_name, $tools_json, jsonb($domain_json), jsonb($stages_json), $commit_allowed, jsonb($routing_tags_json), $consult_when, jsonb($responsibilities_json))
 `);
 
 const updateNodeThinkingLevelsStmt = db.query(`
-  UPDATE topology_nodes SET thinking_levels = $thinking_levels
+  UPDATE topology_nodes SET thinking_levels = jsonb($thinking_levels)
   WHERE topology_hash = $topology_hash AND name = $name AND (thinking_levels IS NULL OR thinking_levels = '')
 `);
 
@@ -759,7 +817,7 @@ export function topologyVersionExists(hash: string): boolean {
 
 export interface TopologyNodeRow {
   topologyHash: string; team: string; nodeId: number; parentId: number | null; name: string;
-  role?: string; agentType?: string; model?: string; thinking?: string; thinkingLevels?: string[];
+  agentType?: string; model?: string; thinking?: string; thinkingLevels?: string[];
   color?: string; group?: string; tools?: string; domain?: string[]; stages?: string[];
   commitAllowed?: boolean; routingTags?: string[]; consultWhen?: string; responsibilities?: string;
 }
@@ -781,7 +839,7 @@ export function upsertTopologyVersion(input: { hash: string; cwd: string; topolo
     for (const n of input.nodes) {
       insertTopologyNodeStmt.run({
         $topology_hash: n.topologyHash, $team: n.team, $node_id: n.nodeId, $parent_id: n.parentId,
-        $name: n.name, $role: n.role ?? null, $agent_type: n.agentType ?? null, $model: n.model ?? null,
+        $name: n.name, $agent_type: n.agentType ?? null, $model: n.model ?? null,
         $thinking: n.thinking ?? null, $thinking_levels: n.thinkingLevels ? JSON.stringify(n.thinkingLevels) : null,
         $color: n.color ?? null, $group_name: n.group ?? null, $tools_json: n.tools ?? null,
         $domain_json: n.domain ? JSON.stringify(n.domain) : null, $stages_json: n.stages ? JSON.stringify(n.stages) : null,
@@ -808,7 +866,7 @@ function parseJsonMaybe(value: unknown): any {
 function topologyNodeRow(r: any): TopologyNodeRow {
   return {
     topologyHash: r.topology_hash, team: r.team, nodeId: r.node_id, parentId: r.parent_id,
-    name: r.name, role: r.role || undefined, agentType: r.agent_type || undefined, model: r.model || undefined,
+    name: r.name, agentType: r.agent_type || undefined, model: r.model || undefined,
     thinking: r.thinking || undefined, thinkingLevels: parseJsonMaybe(r.thinking_levels),
     color: r.color || undefined, group: r.group_name || undefined, tools: r.tools_json || undefined,
     domain: parseJsonMaybe(r.domain_json), stages: parseJsonMaybe(r.stages_json),
@@ -817,8 +875,16 @@ function topologyNodeRow(r: any): TopologyNodeRow {
   };
 }
 
+// Explicit column list so json() decodes the JSONB (or legacy TEXT) JSON columns
+// to canonical TEXT for parseJsonMaybe. tools_json is a raw string, not JSON, so
+// it is read verbatim (excluded from the JSONB migration — see the write path).
+const TOPOLOGY_NODE_COLS = `topology_hash, team, node_id, parent_id, name, agent_type, model, thinking,
+  json(thinking_levels) AS thinking_levels, color, group_name, tools_json,
+  json(domain_json) AS domain_json, json(stages_json) AS stages_json, commit_allowed,
+  json(routing_tags_json) AS routing_tags_json, consult_when, json(responsibilities_json) AS responsibilities_json`;
+
 export function topologyNodes(hash: string): TopologyNodeRow[] {
-  const rows = db.query(`SELECT * FROM topology_nodes WHERE topology_hash = $hash ORDER BY team, node_id`).all({ $hash: hash }) as any[];
+  const rows = db.query(`SELECT ${TOPOLOGY_NODE_COLS} FROM topology_nodes WHERE topology_hash = $hash ORDER BY team, node_id`).all({ $hash: hash }) as any[];
   return rows.map(topologyNodeRow);
 }
 
@@ -836,18 +902,18 @@ export function listTopologies(cwd?: string): Array<{ hash: string; firstSeenAt:
 }
 
 export function topologyVersion(hash: string): { hash: string; cwd: string; topologyJson: string; firstSeenAt: string; lastSeenAt: string } | null {
-  const r = db.query(`SELECT * FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }) as any;
+  const r = db.query(`SELECT hash, cwd, json(topology_json) AS topology_json, first_seen_at, last_seen_at FROM topology_versions WHERE hash = $hash`).get({ $hash: hash }) as any;
   return r ? { hash: r.hash, cwd: r.cwd, topologyJson: r.topology_json, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at } : null;
 }
 
 // States that still carry embedded topologies (pre-slim). Used by the C4 backfill.
 export function statesWithEmbeddedTopologies(): Array<{ sessionId: string; cwd?: string; updatedAt: string; stateJson: string }> {
-  const rows = db.query(`SELECT session_id, cwd, updated_at, state_json FROM states`).all() as any[];
+  const rows = db.query(`SELECT session_id, cwd, updated_at, json(state_json) AS state_json FROM states`).all() as any[];
   return rows.map((r) => ({ sessionId: r.session_id, cwd: r.cwd || undefined, updatedAt: r.updated_at, stateJson: r.state_json }));
 }
 
 export function rewriteStateJson(sessionId: string, stateJson: string): void {
-  db.run(`UPDATE states SET state_json = $json WHERE session_id = $id`, { $json: stateJson, $id: sessionId } as any);
+  db.run(`UPDATE states SET state_json = jsonb($json) WHERE session_id = $id`, { $json: stateJson, $id: sessionId } as any);
 }
 
 export function stampSessionTopology(sessionId: string, hash: string): void {
@@ -857,7 +923,7 @@ export function stampSessionTopology(sessionId: string, hash: string): void {
 const insertModelVersionStmt = db.query(`
   INSERT INTO model_versions (model_hash, provider, model_id, name, api, reasoning, thinking_levels,
     context_window, max_tokens, cost_input, cost_output, cost_cache_read, cost_cache_write, first_seen_at, last_seen_at)
-  VALUES ($model_hash, $provider, $model_id, $name, $api, $reasoning, $thinking_levels,
+  VALUES ($model_hash, $provider, $model_id, $name, $api, $reasoning, jsonb($thinking_levels),
     $context_window, $max_tokens, $cost_input, $cost_output, $cost_cache_read, $cost_cache_write, $ts, $ts)
   ON CONFLICT(model_hash) DO UPDATE SET
     last_seen_at = CASE WHEN excluded.last_seen_at > model_versions.last_seen_at THEN excluded.last_seen_at ELSE model_versions.last_seen_at END
@@ -898,7 +964,28 @@ export function upsertModel(input: ModelInput, ts: string): string {
   return hash;
 }
 
-function modelRow(r: any) {
+// mv-qualified so it serves both the single-table and the latest-per-model JOIN
+// query. json(thinking_levels) decodes new JSONB BLOBs and legacy TEXT alike.
+const MODEL_VERSION_COLS = `mv.model_hash, mv.provider, mv.model_id, mv.name, mv.api, mv.reasoning,
+  json(mv.thinking_levels) AS thinking_levels, mv.context_window, mv.max_tokens,
+  mv.cost_input, mv.cost_output, mv.cost_cache_read, mv.cost_cache_write, mv.first_seen_at, mv.last_seen_at`;
+
+export interface ModelVersionRow {
+  modelHash: string;
+  provider: string;
+  modelId: string;
+  name?: string;
+  api?: string;
+  reasoning: boolean;
+  thinkingLevels: string[];
+  contextWindow?: number;
+  maxTokens?: number;
+  costRates: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null };
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+function modelRow(r: any): ModelVersionRow {
   return {
     modelHash: r.model_hash, provider: r.provider, modelId: r.model_id, name: r.name || undefined, api: r.api || undefined,
     reasoning: !!r.reasoning, thinkingLevels: parseJsonMaybe(r.thinking_levels) || [],
@@ -910,13 +997,13 @@ function modelRow(r: any) {
 
 // Latest capability version per (provider, model_id) — the current answer for
 // the UI's capability lookup (thinking dial). Pass allVersions=true for history.
-export function listModels(allVersions = false): any[] {
+export function listModels(allVersions = false): ModelVersionRow[] {
   if (allVersions) {
-    const rows = db.query(`SELECT * FROM model_versions ORDER BY provider, model_id, last_seen_at DESC`).all() as any[];
+    const rows = db.query(`SELECT ${MODEL_VERSION_COLS} FROM model_versions mv ORDER BY provider, model_id, last_seen_at DESC`).all() as any[];
     return rows.map(modelRow);
   }
   const rows = db.query(`
-    SELECT mv.* FROM model_versions mv
+    SELECT ${MODEL_VERSION_COLS} FROM model_versions mv
     JOIN (SELECT provider, model_id, MAX(last_seen_at) AS mx FROM model_versions GROUP BY provider, model_id) latest
       ON mv.provider = latest.provider AND mv.model_id = latest.model_id AND mv.last_seen_at = latest.mx
     ORDER BY mv.provider, mv.model_id
@@ -930,7 +1017,7 @@ const insertPlanVerdictStmt = db.query(`
   INSERT OR IGNORE INTO plan_verdicts
     (id, change_id, reviewer, verdict, summary, evidence_json, concerns_json, blockers_json, session_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $reviewer, $verdict, $summary, $evidence_json, $concerns_json, $blockers_json, $session_id, $cwd, $created_at)
+    ($id, $change_id, $reviewer, $verdict, $summary, jsonb($evidence_json), jsonb($concerns_json), jsonb($blockers_json), $session_id, $cwd, $created_at)
 `);
 
 const insertPlanApprovalStmt = db.query(`
@@ -1046,7 +1133,20 @@ function parseJsonArray(value: unknown): string[] {
   }
 }
 
-function verdictRow(row: any) {
+export interface PlanVerdictRow {
+  id: string;
+  changeId: string;
+  reviewer: string;
+  verdict: string;
+  summary: string;
+  evidence: string[];
+  concerns: string[];
+  blockers: string[];
+  sessionId?: string;
+  createdAt: string;
+}
+
+function verdictRow(row: any): PlanVerdictRow {
   return {
     id: row.id,
     changeId: row.change_id,
@@ -1070,19 +1170,35 @@ function cwdFilter(cwd: string | undefined, params: any): string {
   return ` AND (cwd = $cwd OR cwd IS NULL)`;
 }
 
-export function listVerdicts(changeId: string, cwd?: string) {
+// json() decodes new JSONB BLOBs and legacy TEXT-JSON alike for parseJsonArray.
+const PLAN_VERDICT_COLS = `id, change_id, reviewer, verdict, summary,
+  json(evidence_json) AS evidence_json, json(concerns_json) AS concerns_json, json(blockers_json) AS blockers_json,
+  session_id, cwd, created_at`;
+
+export function listVerdicts(changeId: string, cwd?: string): PlanVerdictRow[] {
   const params: any = { $id: changeId };
-  const rows = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
+  const rows = db.query(`SELECT ${PLAN_VERDICT_COLS} FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
   return rows.map(verdictRow);
 }
 
-export function latestVerdict(changeId: string, cwd?: string) {
+export function latestVerdict(changeId: string, cwd?: string): PlanVerdictRow | null {
   const params: any = { $id: changeId };
-  const row = db.query(`SELECT * FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at DESC LIMIT 1`).get(params) as any;
+  const row = db.query(`SELECT ${PLAN_VERDICT_COLS} FROM plan_verdicts WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at DESC LIMIT 1`).get(params) as any;
   return row ? verdictRow(row) : null;
 }
 
-export function listApprovals(changeId: string, cwd?: string) {
+export interface PlanApprovalRow {
+  id: string;
+  changeId: string;
+  phase: string;
+  approvedBy: string;
+  actor?: string;
+  summary: string;
+  sessionId?: string;
+  createdAt: string;
+}
+
+export function listApprovals(changeId: string, cwd?: string): PlanApprovalRow[] {
   const params: any = { $id: changeId };
   const rows = db.query(`SELECT * FROM plan_approvals WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
   return rows.map((row) => ({
@@ -1097,7 +1213,20 @@ export function listApprovals(changeId: string, cwd?: string) {
   }));
 }
 
-export function listComments(changeId: string, cwd?: string) {
+export interface PlanCommentRow {
+  id: string;
+  changeId: string;
+  file?: string;
+  anchor?: string;
+  author?: string;
+  body: string;
+  annotationType?: string;
+  originalText?: string;
+  sessionId?: string;
+  createdAt: string;
+}
+
+export function listComments(changeId: string, cwd?: string): PlanCommentRow[] {
   const params: any = { $id: changeId };
   const rows = db.query(`SELECT * FROM plan_comments WHERE change_id = $id${cwdFilter(cwd, params)} ORDER BY created_at ASC`).all(params) as any[];
   return rows.map((row) => ({
