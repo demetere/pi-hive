@@ -242,8 +242,11 @@
   .g-bg { fill: var(--surface); stroke: var(--line); stroke-width: 1; transition: stroke .2s; }
   .g-node.lead .g-bg { stroke: var(--line); }
   .g-node.orchestrator .g-bg { stroke: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+  .g-node.running .g-bg { stroke: color-mix(in srgb, var(--run) 70%, var(--line)); animation: gNodePulse 1.6s var(--ease) infinite; }
   .g-node.clickable .g-bg:hover { stroke: color-mix(in srgb, var(--brand) 55%, var(--line)); }
   .g-node:focus-visible .g-bg { stroke: var(--brand); filter: drop-shadow(0 0 6px color-mix(in srgb, var(--brand) 40%, transparent)); }
+
+  @keyframes gNodePulse { 0%, 100% { filter: drop-shadow(0 0 0 color-mix(in srgb, var(--run) 0%, transparent)); } 50% { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--run) 34%, transparent)); } }
 
   .g-dot.running { fill: var(--run); }
   .g-dot.waiting, .g-dot.idle { fill: var(--wait); }

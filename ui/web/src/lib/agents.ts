@@ -49,16 +49,15 @@ function normLevel(v: string | undefined): string {
 
 // The levels the dial should show. When the (already-resolved) supported levels
 // are known — node sidecar, or a /models lookup by effective model (K3) — the
-// dial shows exactly those, in canonical order, no invented ladder. When they
-// are NOT known, this returns [] so the caller renders the chosen level as plain
-// text instead of fabricating a full 6-level scale (Decision 6).
+// dial shows exactly those, in canonical order. When they are NOT known, fall
+// back to the canonical Pi-wide scale so cards still render the signal bars.
 export function thinkScale(supportedLevels?: string[]): string[] {
   if (supportedLevels && supportedLevels.length) {
     const set = new Set(supportedLevels.map((l) => normLevel(l)));
     const ordered = THINK_ORDER.filter((l) => set.has(l));
     if (ordered.length) return ordered;
   }
-  return [];
+  return [...THINK_ORDER];
 }
 
 // A free-form `thinking` string → index into the canonical scale. Unknown → 0.
@@ -76,8 +75,6 @@ export interface ThinkBar { w: number; h: number; on: boolean; }
 // shows exactly that many bars (minus "off"); otherwise the full canonical scale.
 export function thinkBars(supportedLevels: string[] | undefined, level: number, tier: "lead" | "worker"): ThinkBar[] {
   const scale = thinkScale(supportedLevels);
-  // Unknown capabilities → no bars; the caller renders the level as plain text.
-  if (!scale.length) return [];
   const n = Math.max(1, scale.filter((l) => l !== "off").length); // exclude "off"
   const boxW = tier === "lead" ? 34 : 20;
   const gap = tier === "lead" ? 2 : 1.2;
@@ -101,8 +98,7 @@ export function thinkName(_model: string | undefined, level: number): string {
 //   2. the runtime's thinkingLevels sidecar (from the live snapshot),
 //   3. a /models lookup by the effective model string (full "provider/id" or
 //      bare id, lowercased — the two keys refreshModels indexes),
-//   4. undefined → the caller renders the chosen level as plain text.
-// Never fabricates a ladder.
+//   4. undefined → the caller falls back to the canonical Pi-wide scale.
 export function resolveDialLevels(
   nodeLevels: string[] | undefined,
   rtLevels: string[] | undefined,

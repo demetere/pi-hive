@@ -423,13 +423,8 @@ function Node(props: {
 
       {/* Row 3: THINK dial · TOK/S · TOTAL */}
       <text className="g-cap" x="12" y="63" style={{ fontSize: 7 }}>THINK</text>
-      {resolvedLevels && resolvedLevels.length
-        ? <ThinkDial x={12} y={66} levels={resolvedLevels} level={level} tier={tier} />
-        // K3: unknown capabilities → plain text of the chosen level, no ladder.
-        : <text className="g-val" x="12" y="75" style={{ fontSize: 9 }}>{thinkName(model, level).toUpperCase()}</text>}
-      {resolvedLevels && resolvedLevels.length
-        ? <text className="g-cap" x="12" y="84" style={{ fontSize: 6.5 }}>{thinkName(model, level).toUpperCase()}</text>
-        : null}
+      <ThinkDial x={12} y={66} levels={resolvedLevels} level={level} tier={tier} />
+      <text className="g-cap" x="12" y="84" style={{ fontSize: 6.5 }}>{thinkName(model, level).toUpperCase()}</text>
 
       <text className="g-cap" x={W / 2} y="63" textAnchor="middle" style={{ fontSize: 7 }}>TOK/S</text>
       <text className="g-val" x={W / 2} y="78" textAnchor="middle" style={{ fontSize: 10.5 }}>{tps ? Math.round(tps) : "—"}</text>
