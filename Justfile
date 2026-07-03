@@ -67,6 +67,41 @@ install-dashboard:
 dev:
   pi -e .
 
+# Project the dashboard points at when run standalone. Defaults to the demo
+# playground so `just run` shows the seeded OpenSpec changes out of the box.
+project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-playground")
+
+# Serve the telemetry dashboard standalone (Bun serves the committed dist/ bundle
+# + the API + the /pl-review review surface) against PROJECT. One process; open
+# http://127.0.0.1:{{telemetry_port}} and click the Plans tab. Ctrl+C stops it.
+#   just run                      # against the playground
+#   PROJECT=/path/to/proj just run
+[group('pi')]
+[group('dashboard')]
+run:
+  @printf "{{BLUE}}pi-hive dashboard{{NC}}\n"
+  @printf "  project:   %s\n" "{{project}}"
+  @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (Plans tab)\n"
+  HIVE_TELEMETRY_HOST="{{telemetry_host}}" HIVE_TELEMETRY_PORT="{{telemetry_port}}" \
+    HIVE_PROJECT_CWD="{{project}}" HIVE_TELEMETRY_DB="{{project}}/.telemetry/telemetry.db" \
+    bun src/observability/server/index.ts
+
+# UI-dev mode: run the Bun dashboard server (backend/API + review surface) AND
+# the Vite dev server (frontend with hot-reload) concurrently; Ctrl+C stops both.
+# Vite proxies /api, /plans, /pl-review, /stream, … to the Bun server. Edit
+# ui/web/src/** and see changes live. Open the frontend at http://localhost:43192
+# (Vite binds to localhost/::1, not 127.0.0.1).
+[group('dashboard')]
+run-dev:
+  cd {{dashboard_dir}} && npm install
+  @printf "{{BLUE}}pi-hive dashboard (dev){{NC}}\n"
+  @printf "  project:  %s\n" "{{project}}"
+  @printf "  frontend: http://localhost:43192  (HMR — open this)\n"
+  @printf "  api:      http://{{telemetry_host}}:{{telemetry_port}}\n"
+  npx concurrently --kill-others --names "api,web" --prefix-colors "blue,green" \
+    "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} HIVE_TELEMETRY_DB={{project}}/.telemetry/telemetry.db bun src/observability/server/index.ts" \
+    "cd {{dashboard_dir}} && HIVE_TELEMETRY_PORT={{telemetry_port}} npm run dev"
+
 # Copy this checkout into the user-level Pi extension directory, then restart
 # the local telemetry dashboard so it serves the newly synced bundle.
 # Mirrors Pi's /reload workflow: sync here, then run /reload in Pi for commands/hooks.
