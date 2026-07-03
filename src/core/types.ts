@@ -87,6 +87,10 @@ export interface DomainScope {
 }
 
 export interface AgentConfig {
+  // Stable machine identifier. If omitted, derived from `name` as a kebab slug.
+  // Tool calls, telemetry joins, filenames, and delegation policy should use
+  // this; `name` remains the human display label.
+  slug?: string;
   name: string;
   path: string;
   color?: string;
@@ -96,7 +100,7 @@ export interface AgentConfig {
   consultWhen?: string;
   routingTags?: string[];
   responsibilities?: string[];
-  // DERIVED, not user-configured (H1/Decision 7): the names of this node's direct
+  // DERIVED, not user-configured (H1/Decision 7): the slugs of this node's direct
   // reports, computed from members/children during config load. A user-set
   // `allowedAgents` in hive-config.yaml is ignored (with a warning) — this is
   // purely the internal delegation-scope field.
@@ -220,6 +224,11 @@ export interface OrchestratorRuntime {
   reasoningTokens: number;
   costUsd: number;
   toolCount: number;
+  status?: AgentRuntime["status"];
+  startedAt?: number;
+  elapsedMs?: number;
+  runStartInputTokens?: number;
+  runStartOutputTokens?: number;
   // Live context-window fill for the MAIN session (Phase 4.3), mirroring the
   // per-worker poll. Read from ctx.getContextUsage(); null until first response.
   contextPct?: number;

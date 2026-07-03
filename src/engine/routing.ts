@@ -1,8 +1,9 @@
 import type { HiveState } from "../core/types";
+import { agentSlug } from "../core/utils";
 import { currentAgentName } from "./session";
 import { canDelegateTo } from "./domain";
 
-export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ name: string; group: string; score: number; reasons: string[] }> {
+export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ slug: string; name: string; group: string; score: number; reasons: string[] }> {
   const terms = task.toLowerCase().split(/[^a-z0-9_-]+/).filter((term) => term.length > 2);
   const caller = currentAgentName();
   const scored = Array.from(state.runtimes.values())
@@ -10,7 +11,7 @@ export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ 
     // Plan mode routing surfaces planners, leads, and reviewers (Phase 5.1) —
     // mirrors the dispatch guard; reviewers are delegable in planning (read-only).
     .filter((runtime) => state.mode !== "plan" || ["planner", "lead", "reviewer"].includes(runtime.config.agentType || ""))
-    .filter((runtime) => canDelegateTo(state, caller, runtime.config.name).ok)
+    .filter((runtime) => canDelegateTo(state, caller, agentSlug(runtime.config)).ok)
     .map((runtime) => {
       const searchableParts = [
         runtime.config.name,
@@ -66,7 +67,7 @@ export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ 
         score += 4;
         reasons.push("sdd-verify");
       }
-      return { name: runtime.config.name, group: runtime.config.groupName || "", score, reasons: Array.from(new Set(reasons)).slice(0, 5) };
+      return { slug: agentSlug(runtime.config), name: runtime.config.name, group: runtime.config.groupName || "", score, reasons: Array.from(new Set(reasons)).slice(0, 5) };
     })
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));

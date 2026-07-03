@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
-import { boundedDiagnostics, clip, configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
+import { agentSlug, boundedDiagnostics, clip, configuredChildAgents, extractUsage, safeJson, textFromMessage, textOfResult, truncateMiddle } from "../core/utils";
 import { logRecord } from "../engine/state";
 import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
@@ -12,6 +12,7 @@ import { applyMode, captureNormalTools, installHeader, updateWidget } from "../u
 import { installHiveFooter, registerFooterHooks } from "../ui/tui/footer";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
+import { resolveRuntime } from "../engine/agent-lookup";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -35,6 +36,22 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       try { writeHiveStateSnapshot(state); } catch { /* best-effort */ }
     }, 2000);
     orchestratorSnapshotTimer.unref?.();
+  };
+
+  const setOrchestratorStatus = (status: "idle" | "running" | "done" | "error") => {
+    const orch = state.orchestratorRuntime;
+    if (!orch) return;
+    orch.status = status;
+    if (status === "running") {
+      orch.startedAt = Date.now();
+      orch.elapsedMs = 0;
+      orch.runStartInputTokens = orch.inputTokens;
+      orch.runStartOutputTokens = orch.outputTokens;
+    } else if (orch.startedAt) {
+      orch.elapsedMs = Date.now() - orch.startedAt;
+      orch.startedAt = undefined;
+    }
+    try { writeHiveStateSnapshot(state); } catch { /* best-effort */ }
   };
 
   pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
@@ -127,6 +144,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   const MAX_TRACKED_TURNS = 64;
   pi.on("turn_start", async (event: any) => {
     if (state.mode === "normal") return;
+    setOrchestratorStatus("running");
     if (typeof event?.turnIndex !== "number") return;
     turnStartedAt.set(event.turnIndex, Date.now());
     while (turnStartedAt.size > MAX_TRACKED_TURNS) {
@@ -137,6 +155,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   });
   pi.on("turn_end", async (event: any) => {
     if (state.mode === "normal") return;
+    setOrchestratorStatus("done");
     const started = typeof event?.turnIndex === "number" ? turnStartedAt.get(event.turnIndex) : undefined;
     if (typeof event?.turnIndex === "number") turnStartedAt.delete(event.turnIndex);
     emitHiveEvent(state, "turn", {
@@ -219,15 +238,15 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     const catalog = state.config.agents.map((root) => {
       const lines: string[] = [];
       const renderCatalogAgent = (agent: AgentConfig, depth: number) => {
-        const runtime = state.runtimes.get(agent.name.toLowerCase());
+        const runtime = resolveRuntime(state, agent.slug || agent.name);
         const agentConfig = runtime?.config || agent;
         const tags = agentConfig.routingTags?.length ? ` [${agentConfig.routingTags.join(", ")}]` : "";
         const indent = "  ".repeat(depth);
-        lines.push(`${indent}- ${agentConfig.name}${tags}: ${agentConfig.consultWhen || "team work"}`);
+        lines.push(`${indent}- ${agentSlug(agentConfig)} — ${agentConfig.name}${tags}: ${agentConfig.consultWhen || "team work"}`);
         for (const child of configuredChildAgents(agent)) renderCatalogAgent(child, depth + 1);
       };
       configuredChildAgents(root).forEach((child) => renderCatalogAgent(child, 1));
-      return `## ${root.name}\n- ${root.name}${root.routingTags?.length ? ` [${root.routingTags.join(", ")}]` : ""}: ${root.consultWhen || "team work"}\n${lines.join("\n")}`;
+      return `## ${root.name}\n- ${agentSlug(root)} — ${root.name}${root.routingTags?.length ? ` [${root.routingTags.join(", ")}]` : ""}: ${root.consultWhen || "team work"}\n${lines.join("\n")}`;
     }).join("\n\n");
 
     const planBlock = planMode
@@ -244,6 +263,7 @@ You are running as the visible main session in PLAN mode. Your job is to produce
 ${planBlock}${buildOrchestratorPrompt(state, _ctx)}
 
 Use route_agent when the best specialist is not obvious, delegate to specialists with delegate_agent, then synthesize their findings.
+When calling delegate_agent, ALWAYS provide both required arguments: {"agent":"<exact name from the roster below>","task":"<focused task, paths, and expected output>"}. Never call delegate_agent with {} or omit task/agent.
 Use team_status to inspect live team state and team_conversation(agent: "<name>") to read one specific agent's own transcript. When stable lessons should be preserved, ask the relevant specialist to update its own mental model.
 Keep delegations focused and include enough context for the worker to act independently.
 
@@ -285,6 +305,7 @@ ${catalog}`,
       const orch = state.orchestratorRuntime;
       orch.inputTokens += u.input;
       orch.outputTokens += u.output;
+      if (orch.startedAt) orch.elapsedMs = Date.now() - orch.startedAt;
       orch.cacheReadTokens += u.cacheRead;
       orch.cacheWriteTokens += u.cacheWrite;
       orch.reasoningTokens += u.reasoning;

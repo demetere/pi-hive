@@ -18,7 +18,7 @@ export function createState(pi: ExtensionAPI): HiveState {
     sddStatus: null,
     obsSeq: 0,
     latestVerdicts: new Map(),
-    orchestratorRuntime: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, toolCount: 0 },
+    orchestratorRuntime: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, toolCount: 0, status: "idle", elapsedMs: 0 },
   };
 }
 
@@ -44,7 +44,7 @@ export function logRecord(state: HiveState, record: JsonRecord) {
   const isMainAlias = (name: string) => name === mainName || name === "Orchestrator";
   const include = from === "User" || from === "System" || isMainAlias(from) || isMainAlias(to);
   if (!include) return;
-  const runtimeFile = state.runtimes.get(mainName.toLowerCase())?.sessionFile;
+  const runtimeFile = Array.from(state.runtimes.values()).find((runtime) => runtime.config.name === mainName || runtime.config.slug === mainName)?.sessionFile;
   const mainFile = runtimeFile || `${state.session.sessionDir}/agents/${slug(mainName)}.jsonl`;
   ensureDir(dirname(mainFile));
   appendFileSync(mainFile, `${JSON.stringify(row)}\n`);

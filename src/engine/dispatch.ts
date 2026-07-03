@@ -14,6 +14,7 @@ import {
   safeJson,
   safeRead,
   slug,
+  agentSlug,
   tailLines,
   textFromMessage,
   textOfResult,
@@ -28,6 +29,7 @@ import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observa
 import { buildHiveTools } from "../agents/tools";
 import { workerResourceLoader } from "./worker-extension";
 import { isExecutionGateOpen, isAwaitingHumanApproval } from "./openspec";
+import { agentRoster, resolveRuntime } from "./agent-lookup";
 
 function resolveModel(ctx: ExtensionContext, modelString: string): any {
   const [provider, ...idParts] = modelString.split("/");
@@ -76,9 +78,9 @@ export async function dispatchAgent(
 ): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();
-  const runtime = state.runtimes.get(agentName.toLowerCase());
+  const runtime = resolveRuntime(state, agentName);
   if (!runtime) {
-    const available = Array.from(state.runtimes.values()).map((agent) => agent.config.name).join(", ");
+    const available = agentRoster(state);
     return { output: `Unknown agent "${agentName}". Available: ${available}`, exitCode: 1, elapsed: 0 };
   }
   // Plan mode delegates to planners, leads, AND reviewers (Phase 5.1 decision):
@@ -106,7 +108,7 @@ export async function dispatchAgent(
       return { output: `Delegation blocked: execution agents require an approved plan. Draft the OpenSpec change in plan mode (/opsx-propose), get the tasks artifact approved in the review UI, then run /hive-execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
     }
   }
-  const permission = canDelegateTo(state, caller, runtime.config.name);
+  const permission = canDelegateTo(state, caller, agentSlug(runtime.config));
   if (!permission.ok) {
     return { output: `Delegation blocked: ${permission.reason}`, exitCode: 1, elapsed: 0 };
   }

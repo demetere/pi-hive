@@ -141,8 +141,8 @@ test("buildOrchestratorPrompt routes to the ACTUAL configured leads, nothing har
   assert.match(prompt, /building and shipping features/);
   assert.match(prompt, /mapping requirements and specs/);
   // Routing lines are derived from the real cues → real leads.
-  assert.match(prompt, /Work matching "building and shipping features" → Shipwright\./);
-  assert.match(prompt, /Work matching "mapping requirements and specs" → Cartographer\./);
+  assert.match(prompt, /Work matching "building and shipping features" → shipwright \(Shipwright\)\./);
+  assert.match(prompt, /Work matching "mapping requirements and specs" → cartographer \(Cartographer\)\./);
   // Nothing hardcoded from the example teams leaks in.
   assert.doesNotMatch(prompt, /Engineering Lead|Planning Lead/);
 });

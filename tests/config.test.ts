@@ -155,7 +155,7 @@ test("allowedAgents in config warns but still loads (H1)", () => {
     // discarded user value.
     const agents = allConfiguredAgents(config);
     const fe = agents.find((a) => a.name === "Frontend Dev");
-    assert.deepEqual(fe?.allowedAgents, ["QA Engineer"]);
+    assert.deepEqual(fe?.allowedAgents, ["qa-engineer"]);
   } finally {
     console.warn = orig;
   }
@@ -197,9 +197,9 @@ test("allConfiguredAgents derives hierarchy roles and delegation targets", () =>
   const byName = new Map(agents.map((agent) => [agent.name, agent]));
 
   assert.equal(byName.get("Orchestrator")?.role, "orchestrator");
-  assert.deepEqual(byName.get("Orchestrator")?.allowedAgents, ["Frontend Dev"]);
+  assert.deepEqual(byName.get("Orchestrator")?.allowedAgents, ["frontend-dev"]);
   assert.equal(byName.get("Frontend Dev")?.role, "lead");
-  assert.deepEqual(byName.get("Frontend Dev")?.allowedAgents, ["QA Engineer"]);
+  assert.deepEqual(byName.get("Frontend Dev")?.allowedAgents, ["qa-engineer"]);
   assert.equal(byName.get("QA Engineer")?.role, "member");
   assert.equal(byName.get("QA Engineer")?.groupName, "Frontend Dev");
 });
@@ -225,7 +225,7 @@ hive:
       path: .pi/hive/agents/frontend.md
 `);
 
-  assert.throws(() => loadConfig(cwd), /Duplicate agent name/);
+  assert.throws(() => loadConfig(cwd), /Duplicate agent slug/);
 });
 
 test("loadConfig requires explicit domain capabilities", () => {

@@ -1,5 +1,6 @@
 import type { AgentConfig, HiveConfig } from "./types";
 import { AGENT_TYPES, PLAN_STAGES } from "./normalize";
+import { agentSlug } from "./agent-tree";
 
 function assertObject(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -54,9 +55,10 @@ function validateAgent(agent: AgentConfig, label: string, seen: Map<string, stri
   assertObject(agent, label);
   assertString(agent.name, `${label}.name`);
   assertString(agent.path, `${label}.path`);
-  const key = agent.name.toLowerCase();
+  if (agent.slug !== undefined) assertString(agent.slug, `${label}.slug`);
+  const key = agentSlug(agent);
   const prior = seen.get(key);
-  if (prior) throw new Error(`Duplicate agent name "${agent.name}" at ${label}; already used at ${prior}.`);
+  if (prior) throw new Error(`Duplicate agent slug "${key}" at ${label}; already used at ${prior}.`);
   seen.set(key, label);
   if (agent.color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(String(agent.color))) throw new Error(`${label}.color must be #rrggbb when provided.`);
   if (agent.routingTags !== undefined && !Array.isArray(agent.routingTags)) throw new Error(`${label}.routingTags must be a list.`);

@@ -2,13 +2,14 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { relative, resolve } from "node:path";
 import type { AgentRuntime, DomainScope, HiveState } from "../core/types";
 import { currentAgentName } from "./session";
+import { resolveRuntime } from "./agent-lookup";
+import { agentMatches } from "../core/utils";
 import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
 import { checkPlannerStages, checkTypePolicy, type PolicyAction } from "./policy";
 
 function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | undefined {
-  return state.runtimes.get(callerName.toLowerCase())
-    || (callerName === "Orchestrator" ? state.runtimes.get(state.config?.orchestrator?.name?.toLowerCase() || "") : undefined);
+  return resolveRuntime(state, callerName);
 }
 
 export function canDelegateTo(state: HiveState, callerName: string, targetName: string): { ok: boolean; reason?: string } {
@@ -17,7 +18,8 @@ export function canDelegateTo(state: HiveState, callerName: string, targetName: 
   // Delegation is scoped to direct reports for EVERY node, including the
   // orchestrator (whose reports are the team leads). No blanket bypass.
   const allowed = caller.config.allowedAgents;
-  if (allowed && allowed.map((name) => name.toLowerCase()).includes(targetName.toLowerCase())) return { ok: true };
+  const target = resolveRuntime(state, targetName);
+  if (allowed && target && allowed.some((id) => agentMatches(target.config, id))) return { ok: true };
   if (allowed?.length === 0 || caller.config.role === "member") {
     return { ok: false, reason: `${caller.config.name} is not configured to delegate to other agents.` };
   }

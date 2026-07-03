@@ -17,6 +17,8 @@ import { currentAgentName, currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
 import * as openspec from "../engine/openspec";
 import { enqueueQuestion, recordQuestion } from "../engine/questions";
+import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
+import { agentSlug } from "../core/utils";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
@@ -32,12 +34,12 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
   // Render an agent's name in ITS OWN configured color (matching the status
   // modal), falling back to the theme accent if no/invalid hex is configured.
   const agentColored = (name: string, theme: any): string => {
-    const color = state.runtimes.get(name.toLowerCase())?.config.color;
-    return hexAnsi(color, name) || theme.fg("accent", name);
+    const runtime = resolveRuntime(state, name);
+    const color = runtime?.config.color;
+    return hexAnsi(color, runtime?.config.name || name) || theme.fg("accent", runtime?.config.name || name);
   };
 
-  const callerRuntime = state.runtimes.get(callerName.toLowerCase())
-    || (callerName === "Orchestrator" ? state.runtimes.get(state.config?.orchestrator?.name?.toLowerCase() || "") : undefined);
+  const callerRuntime = resolveRuntime(state, callerName);
   // The visible main session's tools are registered before config/runtimes are
   // loaded, and its configured name may be "Plan Main" / "Hive Main" rather
   // than the legacy literal "Orchestrator". Treat that registered top-level
@@ -57,7 +59,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       const { task, limit } = params as { task: string; limit?: number };
       const recommendations = routeAgents(state, task, Math.max(1, Math.min(10, Number(limit || 5))));
       const text = recommendations.length
-        ? recommendations.map((entry, index) => `${index + 1}. ${entry.name}${entry.group ? ` (${entry.group})` : ""} — score ${entry.score}${entry.reasons.length ? ` — ${entry.reasons.join(", ")}` : ""}`).join("\n")
+        ? recommendations.map((entry, index) => `${index + 1}. ${entry.slug} — ${entry.name}${entry.group ? ` (${entry.group})` : ""} — score ${entry.score}${entry.reasons.length ? ` — ${entry.reasons.join(", ")}` : ""}`).join("\n")
         : "No strong route found. Delegate to the team lead whose consultWhen best matches, or ask the user to clarify scope.";
       return { content: [{ type: "text", text }], details: { task, recommendations } };
     },
@@ -70,7 +72,8 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     parameters: Type.Object({}),
     async execute() {
       const rows = Array.from(state.runtimes.values()).map((runtime) => ({
-        agent: runtime.config.name,
+        agent: agentRef(runtime),
+        name: runtime.config.name,
         group: runtime.config.groupName || "Orchestration",
         status: runtime.status,
         runs: runtime.runCount,
@@ -105,14 +108,25 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       fresh: Type.Optional(Type.Boolean({ description: "Start the agent from a clean session, discarding its prior memory. Default false (resume). Use when the previous session is irrelevant or should not influence this task." })),
     }),
     async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
-      const { agent, task, fresh } = params as { agent: string; task: string; fresh?: boolean };
+      const p = (params || {}) as { agent?: string; task?: string; fresh?: boolean };
+      const agent = String(p.agent || "").trim();
+      const task = String(p.task || "").trim();
+      const fresh = p.fresh;
+      if (!agent || !task) {
+        const available = agentRoster(state);
+        const missing = [!agent ? "agent" : "", !task ? "task" : ""].filter(Boolean).join(" and ");
+        return {
+          content: [{ type: "text", text: `delegate_agent requires ${missing}. Call it as {"agent":"<one of: ${available}>","task":"<focused task and expected output>"}.` }],
+          details: { ok: false, status: "error", reason: "missing parameters", missing, available },
+        };
+      }
       onUpdate?.({ content: [{ type: "text", text: `Delegating to ${agent}${fresh ? " (fresh session)" : ""}...` }], details: { agent, task, status: "running" } });
       const result = await dispatchAgent(state, agent, task, ctx, Boolean(fresh));
       // Fire-and-forget memory distillation on success. Non-blocking: the
       // worker's answer returns immediately; the distiller reads a snapshot, so
       // re-delegating the same agent never races it.
       if (result.exitCode === 0) {
-        const distillRuntime = state.runtimes.get(agent.toLowerCase());
+        const distillRuntime = resolveRuntime(state, agent);
         if (distillRuntime) void distillMentalModel(state, ctx, distillRuntime);
       }
       const limit = state.config?.settings.subagentOutputLimit || 12_000;
@@ -156,17 +170,17 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       // records embed full agent outputs, so an 80-line tail could be >500KB and
       // blow up the caller's context. Per-agent transcripts are bounded.
       if (!agentName) {
-        const available = Array.from(state.runtimes.values()).map((a) => a.config.name).join(", ");
-        return { content: [{ type: "text", text: `team_conversation requires an 'agent' name. Pass one of: ${available}.` }], details: { ok: false } };
+        const available = agentRoster(state);
+        return { content: [{ type: "text", text: `team_conversation requires an 'agent' slug or name. Pass one of: ${available}.` }], details: { ok: false } };
       }
-      const runtime = state.runtimes.get(agentName.toLowerCase());
+      const runtime = resolveRuntime(state, agentName);
       if (!runtime) {
-        const available = Array.from(state.runtimes.values()).map((a) => a.config.name).join(", ");
+        const available = agentRoster(state);
         return { content: [{ type: "text", text: `Unknown agent "${agentName}". Available: ${available}` }], details: { ok: false } };
       }
       const limit = state.config?.settings.subagentOutputLimit || 12_000;
       const text = truncateMiddle(tailLines(safeRead(runtime.sessionFile), lines), limit);
-      return { content: [{ type: "text", text: text || `${runtime.config.name} has no session transcript yet.` }], details: { ok: true, agent: runtime.config.name, lines } };
+      return { content: [{ type: "text", text: text || `${runtime.config.name} has no session transcript yet.` }], details: { ok: true, agent: agentSlug(runtime.config), name: runtime.config.name, lines } };
     },
   }),
 
@@ -205,12 +219,15 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       const ownUi = ctx.hasUI ? (ctx as any).ui : undefined;
       const mainUi = state.widgetCtx?.mode === "tui" ? (state.widgetCtx as any).ui : undefined;
       const ui = (ownUi?.input ? ownUi : mainUi?.input ? mainUi : undefined) as
-        | { input(title: string, placeholder?: string, opts?: { timeout?: number }): Promise<string | undefined> }
+        | { input(title: string, placeholder?: string, opts?: { timeout?: number }): Promise<string | undefined>; notify?: (message: string, level?: "info" | "warning" | "error") => void }
         | undefined;
       if (ui) {
         let answer: string | undefined;
         try {
-          answer = await ui.input(`Planning question from ${askedBy}`, question);
+          // Pi's ExtensionInputComponent currently ignores its placeholder, so
+          // the question must be visible outside the placeholder field.
+          ui.notify?.(`Planning question from ${askedBy}: ${question}`, "info");
+          answer = await ui.input(`Planning question from ${askedBy}: ${question}`, question);
         } catch {
           answer = undefined;
         }

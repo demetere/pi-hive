@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
-import { configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead } from "./utils";
+import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
 import { validateAgentTypes, validateHiveConfigShape } from "./schema";
 
 // Read an agent's .md frontmatter and copy model/thinking onto the config node
@@ -76,11 +76,12 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
   // agent-type/stages/commit live in the agent's .md frontmatter (like
   // model/thinking) but must be validated at the config layer, so copy them
   // onto the config node whenever the node itself does not already set them.
-  const needsEnrich = !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.commit === undefined;
+  const needsEnrich = !agent.slug || !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.commit === undefined;
   if (agent.path && needsEnrich) {
     const raw = safeRead(resolve(cwd, agent.path));
     if (raw) {
       const { attrs } = parseFrontmatter(raw);
+      if (!agent.slug && attrs.slug) agent.slug = slug(String(attrs.slug));
       if (!agent.model && attrs.model) agent.model = String(attrs.model).trim();
       if (!agent.thinking && attrs.thinking) agent.thinking = String(attrs.thinking).trim();
       if (agent.agentType === undefined) agent.agentType = normalizeAgentType(attrs.agentType) as AgentConfig["agentType"];
@@ -88,6 +89,7 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
     }
   }
+  agent.slug = slug(agent.slug || agent.name || agent.path || "agent");
   for (const child of agent.members || agent.children || []) enrichFromFrontmatter(cwd, child);
 }
 
@@ -195,24 +197,24 @@ export function teamForMode(config: HiveConfig, mode: HiveMode): HiveTeam {
 export function allConfiguredAgents(configOrTeam: HiveConfig | HiveTeam): AgentConfig[] {
   const main = (configOrTeam as HiveTeam).main ?? (configOrTeam as HiveConfig).orchestrator;
   const topLevel = (configOrTeam as HiveTeam).main ? (configOrTeam as HiveTeam).agents : (configOrTeam as HiveConfig).agents;
-  const topLevelNames = topLevel.map((agent) => agent.name);
-  const agents: AgentConfig[] = [{ ...flatAgentConfig(main), role: "orchestrator", allowedAgents: topLevelNames }];
-  const seen = new Set<string>([main.name.toLowerCase()]);
+  const topLevelSlugs = topLevel.map((agent) => agentSlug(agent));
+  const agents: AgentConfig[] = [{ ...flatAgentConfig(main), role: "orchestrator", allowedAgents: topLevelSlugs }];
+  const seen = new Set<string>([agentSlug(main)]);
 
   const visitAgent = (agent: AgentConfig, groupName: string, isTopLevel = false) => {
-    const key = agent.name.toLowerCase();
+    const key = agentSlug(agent);
     if (seen.has(key)) return;
     seen.add(key);
 
     const children = configuredChildAgents(agent);
-    const childNames = children.map((child) => child.name);
+    const childSlugs = children.map((child) => agentSlug(child));
     agents.push({
       ...flatAgentConfig(agent),
       // Lead-ness is derived, never declared: a node is a lead if it is a
       // top-level report or has reports of its own (sub-lead). Leaves are members.
       role: isTopLevel || children.length > 0 ? "lead" : "member",
       groupName,
-      allowedAgents: childNames,
+      allowedAgents: childSlugs,
     });
 
     for (const child of children) {

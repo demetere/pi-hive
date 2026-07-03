@@ -19,6 +19,7 @@ import {
 } from "../core/utils";
 import { allConfiguredAgents, loadConfig, teamForMode } from "../core/config";
 import { canonicalMode } from "../core/types";
+import { runtimeKey } from "./agent-lookup";
 
 export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, _cfg: HiveConfig): SessionState {
   const existing = ctx.sessionManager
@@ -50,7 +51,7 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
   const fullPath = resolve(ctx.cwd, agent.path);
   const parsed = parseFrontmatter(safeRead(fullPath));
   const attrs = parsed.attrs || {};
-  const agentSlug = slug(agent.name || attrs.name || fullPath);
+  const agentSlug = slug(String(attrs.slug || agent.slug || agent.name || attrs.name || fullPath));
   const sessionFile = join(state.session!.sessionDir, "agents", `${agentSlug}.jsonl`);
   const tools = normalizeTools(String(attrs.tools || agent.tools || cfg.settings.defaultTools), cfg.settings.defaultTools);
   // model and thinking are required for WORKER agents (they create their own
@@ -76,6 +77,7 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
     : explicitContext;
   const mergedConfig: AgentConfig = {
     ...agent,
+    slug: agentSlug,
     name: String(attrs.name || agent.name || agentSlug),
     model,
     tools,
@@ -138,7 +140,7 @@ export function activateTeamRuntimes(state: HiveState, ctx: ExtensionContext, mo
   state.runtimes = new Map();
   for (const agent of allConfiguredAgents(team)) {
     const runtime = loadAgentRuntime(state, ctx, state.config, agent);
-    state.runtimes.set(runtime.config.name.toLowerCase(), runtime);
+    state.runtimes.set(runtimeKey(runtime), runtime);
   }
   restoreRuntimeCounters(state);
 }
@@ -186,10 +188,11 @@ export function restoreRuntimeCounters(state: HiveState) {
     try { ev = JSON.parse(line); } catch { continue; }
     if (ev.type !== "delegation_end") continue;
     const rt = ev.payload?.runtime;
-    const name = rt?.name || ev.payload?.from;
+    const name = rt?.slug || rt?.name || ev.payload?.from;
     if (!name || !rt) continue;
-    const priorRuns = latest.get(name)?.runs ?? 0;
-    latest.set(name, {
+    const key = slug(String(name));
+    const priorRuns = latest.get(key)?.runs ?? 0;
+    latest.set(key, {
       input: Number(rt.inputTokens || 0),
       output: Number(rt.outputTokens || 0),
       cacheRead: Number(rt.cacheReadTokens || 0),
@@ -206,7 +209,7 @@ export function restoreRuntimeCounters(state: HiveState) {
   }
 
   for (const runtime of state.runtimes.values()) {
-    const p = latest.get(runtime.config.name);
+    const p = latest.get(runtime.config.slug || slug(runtime.config.name));
     if (!p) continue;
     runtime.inputTokens = p.input;
     runtime.outputTokens = p.output;

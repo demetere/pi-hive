@@ -17,7 +17,12 @@ async function handlePromotedQuestion(state: HiveState, ctx: ExtensionContext, a
   const { question } = action;
   let answer: string | undefined;
   if (ctx.hasUI && typeof (ctx.ui as any)?.input === "function") {
-    try { answer = await (ctx.ui as any).input(`Planning question from ${action.askedBy || "a planner"}`, question); } catch { answer = undefined; }
+    try {
+      // Pi's ExtensionInputComponent currently ignores its placeholder, so keep
+      // the question visible in the notification/title rather than only there.
+      (ctx.ui as any).notify?.(`Planning question from ${action.askedBy || "a planner"}: ${question}`, "info");
+      answer = await (ctx.ui as any).input(`Planning question from ${action.askedBy || "a planner"}: ${question}`, question);
+    } catch { answer = undefined; }
   }
   if (action.change) recordQuestion(ctx.cwd, action.change, question, answer || undefined);
   if (answer && answer.trim()) {

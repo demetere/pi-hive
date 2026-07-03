@@ -2,10 +2,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HiveState } from "../core/types";
 import { renderKnowledgeRefs } from "../core/prompting";
 import { renderSddPromptBlock } from "../engine/sdd";
+import { resolveRuntime } from "../engine/agent-lookup";
+import { agentSlug } from "../core/utils";
 
 export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext): string {
   if (!state.config) return "";
-  const runtime = state.runtimes.get(state.config.orchestrator.name.toLowerCase());
+  const runtime = resolveRuntime(state, state.config.orchestrator.slug || state.config.orchestrator.name);
   if (!runtime) return "";
   const responsibilities = runtime.config.responsibilities?.length ? runtime.config.responsibilities.map((item) => `- ${item}`).join("\n") : "- Route work to the team leads and synthesize results.";
   const context = renderKnowledgeRefs(ctx, "Orchestrator context and mental model", runtime.config.context);
@@ -18,7 +20,7 @@ export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext)
     ? `## Domain context\nThe team's file domains are enforced on the WORKERS you delegate to, not on you (you have no direct file tools). Route work to the lead whose domain covers it.`
     : "";
   const leadRoster = state.config.agents
-    .map((agent) => `- ${agent.name}: ${agent.consultWhen || agent.routingTags?.join(", ") || "team work"}`)
+    .map((agent) => `- ${agentSlug(agent)} — ${agent.name}: ${agent.consultWhen || agent.routingTags?.join(", ") || "team work"}`)
     .join("\n");
   // H3/Decision 8: build the mandatory-routing guidance from the ACTUAL
   // configured leads (their consultWhen / routing tags), not hardcoded example
@@ -26,7 +28,7 @@ export function buildOrchestratorPrompt(state: HiveState, ctx: ExtensionContext)
   const routingGuidance = state.config.agents
     .map((agent) => {
       const cue = agent.consultWhen || agent.routingTags?.join(", ") || "its area of work";
-      return `- Work matching "${cue}" → ${agent.name}.`;
+      return `- Work matching "${cue}" → ${agentSlug(agent)} (${agent.name}).`;
     })
     .join("\n");
 
@@ -51,7 +53,7 @@ whose lead best fits the request; the lead decides who under them does the work.
 ${leadRoster}
 
 ## Mandatory routing behavior
-- If the user asks you to read, inspect, analyze, compare, or find gaps in files, immediately delegate to the right team lead. Do not say you cannot read it; use delegate_agent on a lead.
+- If the user asks you to read, inspect, analyze, compare, or find gaps in files, immediately delegate to the right team lead. Do not say you cannot read it; call delegate_agent with BOTH required fields exactly like {"agent":"<lead name>","task":"<focused task, paths, and expected output>"}. Never call delegate_agent with empty arguments.
 ${routingGuidance}
 - If the user says "plan", "plan first", "spec", "approach", or "don't implement yet", switch to plan mode (or delegate to the planning lead) first and stop for user confirmation before execution.
 - For cross-cutting work, delegate to multiple leads (up to the parallel limit) and let each fan out within its team.

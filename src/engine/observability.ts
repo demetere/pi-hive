@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, AgentRuntime, HiveState, HiveTeam } from "../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TopologyNode } from "../shared/telemetry";
-import { ensureDir, truncateMiddle } from "../core/utils";
+import { agentSlug, ensureDir, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
 
 export type HiveObsEventType = HiveTelemetryEventType;
@@ -36,6 +36,7 @@ export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
 
 function agentSummary(agent: AgentConfig): TopologyNode {
   return {
+    slug: agentSlug(agent),
     name: agent.name,
     role: agent.role,
     agentType: agent.agentType,
@@ -85,6 +86,7 @@ export function hiveTeamTopologies(state: HiveState): HiveStateSnapshot["topolog
 
 export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnapshot["agents"]>[number] {
   return {
+    slug: agentSlug(runtime.config),
     name: runtime.config.name,
     group: runtime.config.groupName || "Orchestration",
     role: runtime.config.role,
@@ -130,6 +132,10 @@ function withOrchestratorUsage(
   if (!orch || summary.role !== "orchestrator") return summary;
   return {
     ...summary,
+    status: orch.status || summary.status,
+    elapsedMs: orch.elapsedMs ?? summary.elapsedMs,
+    runStartInputTokens: orch.runStartInputTokens ?? summary.runStartInputTokens,
+    runStartOutputTokens: orch.runStartOutputTokens ?? summary.runStartOutputTokens,
     toolCount: (summary.toolCount || 0) + orch.toolCount,
     inputTokens: (summary.inputTokens || 0) + orch.inputTokens,
     outputTokens: (summary.outputTokens || 0) + orch.outputTokens,

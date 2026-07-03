@@ -73,6 +73,7 @@ export interface TelemetryRegistryRow {
 }
 
 export interface TopologyNode {
+  slug?: string;
   name: string;
   role?: TelemetryAgentRole;
   agentType?: string;
@@ -107,6 +108,7 @@ export interface HiveTeamTopologies {
 }
 
 export interface TelemetryAgentRuntime {
+  slug?: string;
   name: string;
   group?: string;
   role?: TelemetryAgentRole;
