@@ -393,6 +393,42 @@ function ingestEvent(event: HiveTelemetryEvent): { event: HiveTelemetryEvent; cu
   return { event, cursor: Number(result.lastInsertRowid) };
 }
 
+function modelKeyParts(model: unknown): { provider: string; modelId: string } | undefined {
+  const raw = String(model || "").trim();
+  if (!raw || raw === "inherit") return undefined;
+  const slash = raw.indexOf("/");
+  if (slash <= 0 || slash === raw.length - 1) return undefined;
+  return { provider: raw.slice(0, slash), modelId: raw.slice(slash + 1) };
+}
+
+function recordAuthoritativeThinkingLevels(model: unknown, levels: unknown, ts: string) {
+  if (!Array.isArray(levels) || !levels.length) return;
+  const key = modelKeyParts(model);
+  if (!key) return;
+  const thinkingLevels = levels.map(String);
+  // Keep the model_versions table as the single dashboard source of truth. The
+  // SDK session probe is more authoritative than registry metadata for thinking
+  // levels, but the registry row is richer (pricing/context/name), so carry any
+  // existing fields forward instead of replacing it with a sparse row.
+  const existing = listModels().find((m) => m.provider === key.provider && m.modelId === key.modelId);
+  upsertModel({
+    provider: key.provider,
+    modelId: key.modelId,
+    name: existing?.name,
+    api: existing?.api,
+    reasoning: existing?.reasoning ?? true,
+    thinkingLevels,
+    contextWindow: existing?.contextWindow,
+    maxTokens: existing?.maxTokens,
+    costRates: existing?.costRates ? {
+      input: existing.costRates.input ?? undefined,
+      output: existing.costRates.output ?? undefined,
+      cacheRead: existing.costRates.cacheRead ?? undefined,
+      cacheWrite: existing.costRates.cacheWrite ?? undefined,
+    } : undefined,
+  }, ts);
+}
+
 // Materialize hot entities (delegations, tool_calls, and the model catalog) from
 // their source events (B3). Idempotent via event_id PK / tool_call_id uniqueness.
 function materializeTypedEvent(event: HiveTelemetryEvent) {
@@ -403,6 +439,7 @@ function materializeTypedEvent(event: HiveTelemetryEvent) {
       materializeDelegationStart({
         eventId: event.event_id, sessionId, cwd: event.cwd, agent: p.to, parent: p.from, startedAt: event.ts, model: p.model,
       });
+      recordAuthoritativeThinkingLevels(p.model, p.thinkingLevels, event.ts);
       break;
     case "delegation_end": {
       const rt = p.runtime || {};

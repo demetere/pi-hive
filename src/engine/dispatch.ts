@@ -218,7 +218,10 @@ export async function dispatchAgent(
     to: runtime.config.name,
     task,
     fresh,
-    model,
+    // Store the effective model, not the raw config value (which may be
+    // "inherit"), so downstream telemetry has one resolvable capability key.
+    model: resolvedModel,
+    configuredModel: model,
     tools,
     thinking,
     // Authoritative per-model thinking levels, captured from the session created

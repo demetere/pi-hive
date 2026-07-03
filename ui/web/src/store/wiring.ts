@@ -304,6 +304,13 @@ export function connect(): EventSource | undefined {
       // A completed delegation added a new typed row — pull it (debounced so a
       // burst of concurrent finishes triggers one catch-up fetch, not N).
       if (ev?.type === "delegation_end") scheduleDelegationsRefresh();
+      // Model capabilities have one dashboard source of truth: /models. A
+      // delegation_start may carry SDK-probed thinking levels that supersede the
+      // registry catalog, so refresh the lookup when capability-bearing events
+      // arrive instead of leaving boot-time metadata stale.
+      if (ev?.type === "model_catalog" || (ev?.type === "delegation_start" && Array.isArray(ev?.payload?.thinkingLevels))) {
+        void refreshModels();
+      }
     } catch { /* */ }
   });
   es.addEventListener("hive_state", (e) => { try { ingestSnapshot(JSON.parse((e as MessageEvent).data)); } catch { /* */ } });
