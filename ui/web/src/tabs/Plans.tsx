@@ -228,7 +228,10 @@ export default function Plans(props: { search: string }) {
   const reviewSrc = rid ? `/pl-review/?rid=${encodeURIComponent(rid)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}` : "";
   const selectedArtifact = useMemo(() => (detail?.artifacts || []).find((a) => ridFor(detail!.changeId, a, detail!.files) === rid), [detail, rid]);
   const selectedReview = useMemo(() => detail?.artifactReview.find((r) => r.id === selectedArtifact?.id), [detail, selectedArtifact]);
-  const reviewFinal = selectedReview?.humanVerdict === "green" || selectedReview?.humanVerdict === "red";
+  // A red human verdict is not final: it means feedback was requested and the
+  // same artifact should become reviewable again after the planner revises it.
+  // Only green locks the artifact into read-only mode.
+  const reviewFinal = selectedReview?.humanVerdict === "green";
   const artifactPath = artifactPathFromRid(rid);
 
   useEffect(() => {
@@ -243,9 +246,10 @@ export default function Plans(props: { search: string }) {
 
   // The embedded review UI cannot notify this React tree after approve/deny
   // because it is a vendored iframe. Poll while the selected artifact is awaiting
-  // human review, then swap to read-only markdown as soon as the verdict lands.
+  // human approval, then swap to read-only markdown only once it is approved.
+  // A red verdict stays reviewable so the revision loop can reopen Plannotator.
   useEffect(() => {
-    if (!detail || !selectedReview?.humanReviewReady || selectedReview.humanVerdict || !selected) return;
+    if (!detail || !selectedReview?.humanReviewReady || selectedReview.humanVerdict === "green" || !selected) return;
     const timer = window.setInterval(() => {
       void fetchPlanDetail(selected, cwd).then((d) => { if (d) setDetail(d); });
     }, 3000);
@@ -332,7 +336,7 @@ export default function Plans(props: { search: string }) {
                   <div className="plan-review-bar">
                     <div className="plan-review-title">
                       <span className="plan-review-rid mono">{artifactPath}</span>
-                      {reviewFinal && selectedReview?.humanVerdict && (
+                      {selectedReview?.humanVerdict && (
                         <span className={`plan-review-final verdict-${selectedReview.humanVerdict}`}>
                           {selectedReview.humanVerdict === "green" ? "approved" : "changes requested"}
                         </span>
