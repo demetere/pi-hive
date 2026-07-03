@@ -334,7 +334,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         }
         state.activeChangeId = result.changeId;
         const note = result.created ? "created" : "already existed";
-        return { content: [{ type: "text", text: `OpenSpec change "${result.changeId}" ${note} and is now the active change (openspec/changes/${result.changeId}/). Author its proposal → design/specs → tasks via /opsx-propose; keep this session focused on this change.` }], details: { ok: true, ...result } };
+        return { content: [{ type: "text", text: `OpenSpec change "${result.changeId}" ${note} and is now the active change (openspec/changes/${result.changeId}/). Author its proposal → design/specs → tasks via /opsx-propose; spec deltas go in specs/<capability>/spec.md (capability slug, not the change-id repeated). Keep this session focused on this change.` }], details: { ok: true, ...result } };
       },
     }));
 

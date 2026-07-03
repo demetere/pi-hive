@@ -53,6 +53,20 @@ test("hasTasks detects checkbox items only", () => {
   assert.equal(openspec.hasTasks(cwd, "add-auth"), true);
 });
 
+test("specs glob expands to concrete spec markdown for review", () => {
+  const cwd = scratch();
+  const dir = join(cwd, "openspec", "changes", "add-auth");
+  mkdirSync(join(dir, "specs", "auth"), { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Proposal\n");
+  writeFileSync(join(dir, "specs", "auth", "spec.md"), "# Auth spec\n\n## ADDED Requirements\n");
+  assert.deepEqual(openspec.listArtifacts(cwd, "add-auth"), ["proposal.md", "specs/auth/spec.md"]);
+  const bundled = openspec.readArtifact(cwd, "add-auth", "specs/**/*.md");
+  assert.match(bundled, /## specs\/auth\/spec\.md/);
+  assert.match(bundled, /ADDED Requirements/);
+  assert.equal(openspec.readArtifact(cwd, "add-auth", "specs/*.md"), bundled);
+  assert.match(openspec.readArtifact(cwd, "add-auth", "specs/auth"), /ADDED Requirements/);
+});
+
 test("per-artifact approval ledger round-trips and gates execution", () => {
   const cwd = scratch();
   const dir = join(cwd, "openspec", "changes", "add-auth");

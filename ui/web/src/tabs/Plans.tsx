@@ -26,13 +26,11 @@ function VerdictPill({ verdict }: { verdict: "red" | "yellow" | "green" }) {
   return <span className={`verdict-pill verdict-${verdict}`}>{verdict}</span>;
 }
 
-// Map an artifact + the change's real file list to the concrete markdown file
-// the review UI should load. Single-file artifacts (proposal/design/tasks) are
-// "<id>.md"; specs is a glob, so pick the first actual spec .md under specs/.
-function artifactFile(a: ArtifactState, files: string[]): string {
-  if (a.outputPath.includes("*")) {
-    return files.find((f) => f.startsWith("specs/") && f.endsWith(".md")) || a.outputPath;
-  }
+// Map an artifact to the markdown path the review UI should load. Single-file
+// artifacts (proposal/design/tasks) are "<id>.md"; specs stays as OpenSpec's
+// glob because the server expands it into a bounded combined review document.
+function artifactFile(a: ArtifactState, _files: string[]): string {
+  if (a.outputPath.includes("*")) return a.outputPath;
   return a.outputPath || `${a.id}.md`;
 }
 function ridFor(changeId: string, a: ArtifactState, files: string[]): string {

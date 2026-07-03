@@ -329,7 +329,15 @@ export function resolveArtifact(cwd: string, name: string, relPath: string): str
 }
 
 // Read an artifact under a change folder, path-guarded and capped at 512 KB.
+// OpenSpec reports specs as a glob (`specs/**/*.md`), not as a single file; for
+// that review artifact, concatenate the concrete spec markdown files into one
+// bounded document so the review UI has real content to render.
 export function readArtifact(cwd: string, name: string, relPath: string): string {
+  if (isSpecsGlob(relPath)) return readSpecsBundle(cwd, name);
+  // Be tolerant of agents/review links that point at an OpenSpec spec directory
+  // (e.g. specs/front-window-backend) instead of the concrete spec.md file.
+  // OpenSpec stores capability specs as directories containing markdown files.
+  if (relPath.startsWith("specs/") && !relPath.endsWith(".md")) return readSpecsBundle(cwd, name, relPath);
   const target = resolveArtifact(cwd, name, relPath);
   if (!target) return "";
   return readIfSmall(target, MAX_ARTIFACT_BYTES);
@@ -505,14 +513,59 @@ export function isAwaitingHumanApproval(cwd: string, name: string): ArtifactId |
   return pendingReviewArtifact(cwd, name);
 }
 
-// The .md artifact files present at the top level of a change folder.
+function isSpecsGlob(relPath: string): boolean {
+  return relPath.startsWith("specs/") && relPath.includes("*") && relPath.endsWith(".md");
+}
+
+function readSpecsBundle(cwd: string, name: string, relRoot = "specs"): string {
+  const parts: string[] = [];
+  let total = 0;
+  for (const file of listSpecArtifacts(cwd, name, relRoot)) {
+    const text = readArtifact(cwd, name, file);
+    if (!text) continue;
+    const chunk = `## ${file}\n\n${text.trim()}\n`;
+    total += Buffer.byteLength(chunk, "utf8");
+    if (total > MAX_ARTIFACT_BYTES) return "";
+    parts.push(chunk);
+  }
+  return parts.join("\n");
+}
+
+function listSpecArtifacts(cwd: string, name: string, relRoot = "specs"): string[] {
+  if (!isSafeChangeId(name)) return [];
+  const rootTarget = resolveArtifact(cwd, name, relRoot);
+  if (!rootTarget || !relRoot.startsWith("specs")) return [];
+  const root = rootTarget;
+  const out: string[] = [];
+  const walk = (dir: string, rel: string, depth: number) => {
+    if (depth > 8 || out.length >= 200) return;
+    let entries: FsDirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }) as FsDirent[];
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (out.length >= 200) return;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const childAbs = join(dir, entry.name);
+      if (entry.isDirectory()) walk(childAbs, childRel, depth + 1);
+      else if (entry.isFile() && entry.name.endsWith(".md")) out.push(`specs/${childRel}`);
+    }
+  };
+  walk(root, relRoot.replace(/^specs\/?/, ""), 0);
+  return out;
+}
+
+// The markdown artifact files present in a change folder. Includes top-level
+// proposal/design/tasks files plus concrete OpenSpec spec files under specs/.
 export function listArtifacts(cwd: string, name: string): string[] {
   if (!isSafeChangeId(name)) return [];
   try {
-    return (readdirSync(join(cwd, "openspec", "changes", name), { withFileTypes: true }) as FsDirent[])
+    const topLevel = (readdirSync(join(cwd, "openspec", "changes", name), { withFileTypes: true }) as FsDirent[])
       .filter((e) => e.isFile() && e.name.endsWith(".md"))
-      .map((e) => e.name)
-      .sort((a, b) => a.localeCompare(b));
+      .map((e) => e.name);
+    return [...topLevel, ...listSpecArtifacts(cwd, name)].sort((a, b) => a.localeCompare(b));
   } catch {
     return [];
   }

@@ -14,7 +14,7 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
   const lines: string[] = ["## Operating contract (agent type)"];
   switch (type) {
     case "planner": {
-      lines.push("You are a **planner**. You write only spec/requirements/design/tasks artifacts (under `.pi/hive/plans/`, plus docs). You must not modify production or test code — those edits are blocked at the tool layer.");
+      lines.push("You are a **planner**. You write only OpenSpec proposal/design/specs/tasks artifacts (under `openspec/changes/<change-id>/`, plus docs). Spec deltas belong at `specs/<capability>/spec.md` using a capability slug, not the change-id repeated; do not create bare `spec.md` or `specs/spec.md`. You must not modify production or test code — those edits are blocked at the tool layer.");
       if (runtime.config.stages?.length) lines.push(`You own these planning gates: ${runtime.config.stages.join(", ")}. You may write only those gate artifacts.`);
       break;
     }
