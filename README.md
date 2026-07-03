@@ -21,12 +21,12 @@ When installed globally, Pi auto-discovers the package for **every** project.
 For repository-first development, use `just` as the command source of truth:
 
 ```sh
-just dev            # run this checkout temporarily with pi -e .
-just reload-dry-run # preview copying this checkout to ~/.pi/agent/extensions/pi-hive
-just reload         # update the user-level extension from this checkout
+just pi-dev         # run this checkout temporarily with pi -e .
+just pi-reload-dry-run # preview copying this checkout to ~/.pi/agent/extensions/pi-hive
+just pi-reload         # update the user-level extension from this checkout
 ```
 
-After `just reload`, run `/reload` in Pi.
+After `just pi-reload`, run `/reload` in Pi.
 
 - **Activates only when a project contains `.pi/hive/hive-config.yaml`.** Without it, the extension registers nothing — no tools, no commands, no hooks — so non-hive projects are completely unaffected.
 
@@ -45,13 +45,13 @@ This extension is self-contained and ships in two ways:
 After editing anything under `ui/web/src/`, rebuild the committed bundle:
 
 ```sh
-just build-dashboard   # Vite build + stamp dist/.build-hash
+just dashboard-build   # Vite build + stamp dist/.build-hash
 ```
 
 Guard against shipping stale UI (wire into a pre-commit hook or CI):
 
 ```sh
-just verify-dashboard  # fails if dist/ is out of date with src/
+just dashboard-verify  # fails if dist/ is out of date with src/
 ```
 
 ## Build a hive in a new project
@@ -110,8 +110,8 @@ which is committed so end users need no build step. If you change anything under
 `ui/web/src/`, rebuild it:
 
 ```sh
-just install-dashboard # first time only
-just build-dashboard   # rebuild dist/ — the server picks it up on next page load
+just dashboard-install # first time only
+just dashboard-build   # rebuild dist/ — the server picks it up on next page load
 ```
 
 Before publishing or opening a release PR, run the same gates as CI:
@@ -120,7 +120,7 @@ Before publishing or opening a release PR, run the same gates as CI:
 just ci
 ```
 
-During UI development you can run `just dev-dashboard` (Vite HMR on port 43192) with a
+During UI development you can run `just dashboard-dev` (Vite HMR on port 43192) with a
 telemetry server running on `HIVE_TELEMETRY_PORT`; the dev server proxies the
 `/events`, `/states`, `/stream`, and `/health` endpoints to it.
 

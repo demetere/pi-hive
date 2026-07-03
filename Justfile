@@ -33,26 +33,10 @@ default:
 # =============================================================================
 # ALIASES
 # =============================================================================
-# Short shortcuts + back-compat names. Recipes are grouped by prefix
-# (dashboard-*, pi-*); these aliases keep old names (referenced in package.json,
-# README, CLAUDE.md) working and add quick shortcuts.
+# Recipes are grouped by prefix (dashboard-*, pi-*). Short shortcuts only.
 
-# Short shortcuts.
 alias v := verify
 alias db := dashboard-build
-
-# Back-compat for the pre-prefix names.
-alias build-dashboard := dashboard-build
-alias dev-dashboard := dashboard-dev
-alias install-dashboard := dashboard-install
-alias typecheck-dashboard := dashboard-typecheck
-alias verify-dashboard := dashboard-verify
-alias vendor-plannotator := dashboard-vendor
-alias run-dev := run
-alias dev := pi-dev
-alias reload := pi-reload
-alias symlink := pi-symlink
-alias reload-dry-run := pi-reload-dry-run
 
 # =============================================================================
 # SETUP & INFO
@@ -83,7 +67,7 @@ install:
 # playground so `just run` shows the seeded OpenSpec changes out of the box.
 project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-playground")
 
-# Run this checkout as a temporary Pi extension for manual testing. (alias: dev)
+# Run this checkout as a temporary Pi extension for manual testing.
 [group('pi')]
 pi-dev:
   pi -e .
@@ -91,7 +75,7 @@ pi-dev:
 # Vite proxies /api, /plans, /pl-review, /stream, … to the Bun server; edit
 # ui/web/src/** and see changes live (Ctrl+C stops both). Vite binds to
 # localhost/::1, not 127.0.0.1. Usage: `just run`  or  `PROJECT=/path just run`.
-# Run EVERYTHING: Bun server (API + /pl-review) + Vite HMR frontend. Open http://localhost:43192. (alias: run-dev)
+# Run EVERYTHING: Bun server (API + /pl-review) + Vite HMR frontend. Open http://localhost:43192.
 [group('dashboard')]
 run:
   cd {{dashboard_dir}} && npm install
@@ -114,7 +98,7 @@ dashboard-serve:
     bun src/observability/server/index.ts
 
 # Restart the dashboard so it serves the synced bundle; then run /reload in Pi.
-# Sync this checkout into the user extension dir + reload. (alias: reload)
+# Sync this checkout into the user extension dir + reload.
 [group('pi')]
 pi-reload:
   mkdir -p "{{extension_dir}}"
@@ -132,7 +116,7 @@ pi-reload:
   @printf "Run /reload in Pi to load the synced extension commands/hooks.\n"
 
 # Moves an existing copied extension aside once, then points Pi at this repo.
-# Symlink this checkout into the user extension dir for live development. (alias: symlink)
+# Symlink this checkout into the user extension dir for live development.
 [group('pi')]
 pi-symlink:
   #!/usr/bin/env bash
@@ -185,12 +169,12 @@ pi-reload-dry-run:
 # DASHBOARD
 # =============================================================================
 
-# Install dashboard dependencies only. (alias: install-dashboard)
+# Install dashboard dependencies only.
 [group('dashboard')]
 dashboard-install:
   cd {{dashboard_dir}} && npm install
 
-# Rebuild the committed dashboard bundle and stamp dist/. (aliases: build-dashboard, db)
+# Rebuild the committed dashboard bundle and stamp dist/. (alias: db)
 [group('dashboard')]
 dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
@@ -199,7 +183,7 @@ dashboard-build:
 # it statically. Committed like ui/web/dist/; bumping the pinned @plannotator
 # version is a deliberate, tested step — the HTML must match the /api/* contract
 # in src/engine/review.ts.
-# Refresh the committed, vendored Plannotator review UI from the pinned dev dep. (alias: vendor-plannotator)
+# Refresh the committed, vendored Plannotator review UI from the pinned dev dep.
 [group('dashboard')]
 dashboard-vendor:
   npm install

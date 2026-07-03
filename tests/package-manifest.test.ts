@@ -24,7 +24,7 @@ test("Pi runtime dependencies stay peer dependencies with wildcard ranges", () =
 
 test("package scripts delegate to Justfile commands", () => {
   assert.equal(pkg.scripts.test, "just test");
-  assert.equal(pkg.scripts["verify:dashboard"], "just verify-dashboard");
+  assert.equal(pkg.scripts["verify:dashboard"], "just dashboard-verify");
   assert.equal(pkg.scripts["verify:package"], "just verify-package");
   assert.equal(pkg.scripts.ci, "just ci");
   assert.equal(pkg.scripts.prepack, "just prepack");

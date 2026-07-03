@@ -71,12 +71,12 @@ for (const dep of requiredPeerDeps) {
 }
 
 if (!existsSync(STAMP_PATH)) {
-  failures.push("dashboard dist build stamp is missing; run just build-dashboard");
+  failures.push("dashboard dist build stamp is missing; run just dashboard-build");
 } else {
   const stamped = readFileSync(STAMP_PATH, "utf8").trim();
   const current = dashboardSourceHash();
   if (stamped !== current) {
-    failures.push("dashboard dist is stale relative to ui/web/src; run just build-dashboard");
+    failures.push("dashboard dist is stale relative to ui/web/src; run just dashboard-build");
   }
 }
 

@@ -65,5 +65,5 @@ test("renderHiveDoctor includes remedies for missing required assets", () => {
   assert.equal(result.severity, "warning");
   assert.match(result.text, /fail: Opt-in config missing/);
   assert.match(result.text, /remedy: create \.pi\/hive\/hive-config\.yaml/);
-  assert.match(result.text, /remedy: run just build-dashboard/);
+  assert.match(result.text, /remedy: run just dashboard-build/);
 });

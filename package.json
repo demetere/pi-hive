@@ -24,11 +24,11 @@
     "SETUP.md"
   ],
   "scripts": {
-    "build:dashboard": "just build-dashboard",
+    "build:dashboard": "just dashboard-build",
     "typecheck:core": "just typecheck-core",
-    "typecheck:dashboard": "just typecheck-dashboard",
+    "typecheck:dashboard": "just dashboard-typecheck",
     "test": "just test",
-    "verify:dashboard": "just verify-dashboard",
+    "verify:dashboard": "just dashboard-verify",
     "verify:package": "just verify-package",
     "ci": "just ci",
     "prepack": "just prepack",

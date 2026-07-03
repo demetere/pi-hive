@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 // The dashboard is a prebuilt React SPA under ui/web/dist. We serve its
 // index.html at "/" and its hashed assets from "/assets/*". If the build is
-// missing (developer hasn't run `just build-dashboard`), we fall back to a short
+// missing (developer hasn't run `just dashboard-build`), we fall back to a short
 // instructional page rather than a blank screen.
 export const DASHBOARD_DIR = path.resolve(import.meta.dir, "..", "..", "ui", "web", "dist");
 
@@ -44,7 +44,7 @@ export function dashboardHtml() {
      <h2 style="color:#7c6cff">pi-hive dashboard not built</h2>
      <p>The dashboard bundle is missing at <code>${DASHBOARD_DIR}</code>.</p>
      <p>Build it once from the pi-hive repository root:</p>
-     <pre style="background:#12141c;padding:12px;border-radius:8px">just build-dashboard</pre>
+     <pre style="background:#12141c;padding:12px;border-radius:8px">just dashboard-build</pre>
      <p>Then reload this page.</p></body>`,
     { status: 503, headers: { "content-type": "text/html; charset=utf-8" } },
   );

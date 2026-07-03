@@ -160,7 +160,7 @@ function serveHtml(htmlPath: string): Response {
   try {
     html = readFileSync(htmlPath, "utf8");
   } catch {
-    return new Response("review UI not vendored — run `just vendor-plannotator`", { status: 503 });
+    return new Response("review UI not vendored — run `just dashboard-vendor`", { status: 503 });
   }
   return new Response(html, {
     headers: {
