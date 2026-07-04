@@ -45,14 +45,14 @@ test("insertPlanVerdict is idempotent on the same id (replay-safe)", () => {
 });
 
 test("plan_approvals and plan_comments round-trip", () => {
-  db.insertPlanApproval({ id: "a1", changeId: "c1", phase: "proposal", approvedBy: "ui", actor: "demetre", createdAt: "2026-07-01T12:00:00.000Z" });
+  db.insertPlanApproval({ id: "a1", changeId: "c1", phase: "proposal", approvedBy: "ui", actor: "tester", createdAt: "2026-07-01T12:00:00.000Z" });
   db.insertPlanApproval({ id: "a2", changeId: "c1", phase: "design", approvedBy: "chat", createdAt: "2026-07-01T13:00:00.000Z" });
   const approvals = db.listApprovals("c1");
   expect(approvals.length).toBe(2);
   expect(approvals[0].phase).toBe("proposal");
   expect(approvals[1].approvedBy).toBe("chat");
 
-  db.insertPlanComment({ id: "cm1", changeId: "c1", file: "design.md", anchor: "risks", author: "demetre", body: "reconsider retries", createdAt: "2026-07-01T14:00:00.000Z" });
+  db.insertPlanComment({ id: "cm1", changeId: "c1", file: "design.md", anchor: "risks", author: "tester", body: "reconsider retries", createdAt: "2026-07-01T14:00:00.000Z" });
   const comments = db.listComments("c1");
   expect(comments.length).toBe(1);
   expect(comments[0].file).toBe("design.md");
