@@ -159,7 +159,14 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
 
   installHeader(state, ctx);
   installHiveFooter(state, ctx);
-  if (ctx.hasUI) ctx.ui.setStatus("hive", modeStatusText(state, mode));
+  if (ctx.hasUI) {
+    ctx.ui.setStatus("hive", modeStatusText(state, mode));
+    // Hive has its own live activity widget. Pi's generic streaming loader can
+    // briefly stack several "Working..." rows during nested delegation before
+    // the TUI reconciles them, which makes the start of a run look noisy. Hide
+    // that generic row only while Hive/Plan mode is active; restore it in normal.
+    if (ctx.mode === "tui") ctx.ui.setWorkingVisible(mode === "normal");
+  }
   requestHiveFooterRender();
 
   if (mode === "normal") {

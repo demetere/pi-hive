@@ -423,6 +423,9 @@ ${catalog}`,
       ctx.ui.setWidget("hive-tree", undefined);
       clearHiveActivityWidget(state);
     }
-    if (ctx.hasUI) ctx.ui.setStatus("hive", undefined);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("hive", undefined);
+      if (ctx.mode === "tui") ctx.ui.setWorkingVisible(true);
+    }
   });
 }

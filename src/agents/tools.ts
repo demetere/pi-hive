@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
 import {
@@ -22,6 +22,10 @@ import { agentSlug } from "../core/utils";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
+
+function emptyToolRender(): Component {
+  return { render: () => [], invalidate() {} };
+}
 
 // Builds pi-hive's five custom tools as plain, reusable ToolDefinition objects
 // (defineTool() does no registration — it's a pure identity/typing wrapper).
@@ -145,7 +149,11 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     renderResult(result: any, options: ToolRenderOptions, theme: any) {
       const details = result.details as any;
       const agent = details?.agent || "agent";
-      if (options.isPartial || details?.status === "running") return new Text(theme.fg("accent", "● ") + agentColored(agent, theme) + theme.fg("accent", " working..."), 0, 0);
+      // While a delegation is running, the persistent Hive activity widget is
+      // the single source of live progress. Rendering "working..." for every
+      // nested delegate_agent call creates the repeated rows seen above the
+      // editor, so keep the tool call line but suppress this interim result row.
+      if (options.isPartial || details?.status === "running") return emptyToolRender();
       const ok = details?.status === "done";
       const header = theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} `) + agentColored(agent, theme) + theme.fg("dim", ` ${Math.round((details?.elapsed || 0) / 1000)}s`);
       if (options.expanded && details?.outputPreview) return new Text(`${header}\n${theme.fg("muted", truncateMiddle(details.outputPreview, 4000))}`, 0, 0);

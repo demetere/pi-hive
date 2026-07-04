@@ -1,11 +1,12 @@
 import type { AgentConfig, HiveActivityEntry, HiveState } from "../../core/types";
 import { agentSlug, configuredChildAgents, truncateMiddle } from "../../core/utils";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const WIDGET_ID = "hive-activity";
 const MAX_ENTRIES = 40;
-const MAX_RENDERED_ROWS = 4;
+const MAX_RENDERED_ROWS = 3;
 const MAX_ENTRY_TEXT = 72;
+const MAX_BOX_WIDTH = 88;
 
 function nowIso() {
   return new Date().toISOString();
@@ -69,6 +70,27 @@ function renderEntry(entry: HiveActivityEntry, theme: any, depths: Map<string, n
   return `${theme.fg(color, `${indent}${icon(status)} `)}${parent}${theme.fg(color, label)}${tool}${theme.fg("muted", text)}`;
 }
 
+function padToWidth(line: string, width: number): string {
+  return `${line}${" ".repeat(Math.max(0, width - visibleWidth(line)))}`;
+}
+
+function renderCompactBox(body: string[], width: number, theme: any): string[] {
+  const boxWidth = Math.max(20, Math.min(width, MAX_BOX_WIDTH));
+  const contentWidth = Math.max(0, boxWidth - 4);
+  const title = ` Hive activity `;
+  const topPlain = `╭─${title}${"─".repeat(Math.max(0, boxWidth - title.length - 3))}╮`;
+  const bottomPlain = `╰${"─".repeat(Math.max(0, boxWidth - 2))}╯`;
+  const rows = body.map((line) => {
+    const content = truncateToWidth(line, contentWidth, theme.fg("dim", "…"));
+    return theme.fg("dim", "│ ") + padToWidth(content, contentWidth) + theme.fg("dim", " │");
+  });
+  return [
+    theme.fg("dim", "╭─") + theme.fg("accent", theme.bold(title)) + theme.fg("dim", topPlain.slice(2 + title.length)),
+    ...rows,
+    theme.fg("dim", bottomPlain),
+  ].map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+}
+
 export function addHiveActivity(state: HiveState, entry: Omit<HiveActivityEntry, "ts"> & { ts?: string }) {
   if (state.mode === "normal") return;
   const full: HiveActivityEntry = { ...entry, ts: entry.ts || nowIso() };
@@ -113,12 +135,10 @@ export function updateHiveActivityWidget(state: HiveState) {
           .map((entry) => renderEntry(entry, theme, depths));
         const body = [...active, ...recent].slice(0, MAX_RENDERED_ROWS);
         if (!body.length) return [];
-        const title = theme.fg("dim", "╭─ ") + theme.fg("accent", theme.bold("Hive activity")) + theme.fg("dim", " ─ delegated + nested work");
-        const lines = [title, ...body.map((line) => theme.fg("dim", "│ ") + line)];
-        return lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+        return renderCompactBox(body, width, theme);
       },
     };
-  }, { placement: "belowEditor" });
+  });
 }
 
 export function clearHiveActivityWidget(state: HiveState) {

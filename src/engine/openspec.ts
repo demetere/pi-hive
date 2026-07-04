@@ -291,11 +291,13 @@ export function validate(cwd: string, name?: string): ValidateResult {
 // Execution readiness gate
 // ---------------------------------------------------------------------------
 
-// tasks.md exists and contains at least one checkbox item.
+// tasks.md exists and contains at least one checkbox item. Accept both common
+// Markdown task-list bullets (`- [ ]`) and ordered task lists (`1. [ ]`), since
+// OpenSpec plans may use sprint-numbered checkboxes.
 export function hasTasks(cwd: string, name: string): boolean {
   if (!isSafeChangeId(name)) return false;
   const raw = readIfSmall(join(cwd, "openspec", "changes", name, "tasks.md"), MAX_ARTIFACT_BYTES);
-  return /^\s*[-*]\s*\[[ xX]\]/m.test(raw);
+  return /^\s*(?:[-*]|\d+\.)\s*\[[ xX]\]/m.test(raw);
 }
 
 // Artifact-side readiness: the artifacts are materially complete (tasks

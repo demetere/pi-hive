@@ -106,9 +106,11 @@ function inferArtifactFromReviewTask(task: string): ArtifactId | null {
 
 function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> | null {
   const text = output.trim();
-  if (/^(PASS|GREEN)\b/i.test(text)) return "green";
-  if (/^(YELLOW)\b/i.test(text)) return "yellow";
-  if (/^(FAIL|RED)\b/i.test(text)) return "red";
+  const match = text.match(/^\s*(?:#{1,6}\s*)?(?:verdict\s*[:—-]\s*)?(PASS|GREEN|YELLOW|FAIL|RED)\b/i);
+  const verdict = match?.[1]?.toLowerCase();
+  if (verdict === "pass" || verdict === "green") return "green";
+  if (verdict === "yellow") return "yellow";
+  if (verdict === "fail" || verdict === "red") return "red";
   return null;
 }
 
