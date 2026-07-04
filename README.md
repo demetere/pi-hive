@@ -1,19 +1,31 @@
 # pi-hive
 
-A globally-installed Pi extension that runs a **hierarchical team of agents** (a "hive") on a project: an Orchestrator delegates to team Leads, each Lead fans work out to its Members, each agent runs as its own `pi` subprocess with scoped tools and enforced filesystem domains, and a status view shows the live tree.
+A globally-installed extension for [Pi](https://github.com/earendil-works/pi-coding-agent), the coding agent by Earendil Works. `pi-hive` runs a **hierarchical team of agents** (a "hive") on a project: an Orchestrator delegates to team Leads, each Lead fans work out to its Members, each agent runs as its own `pi` subprocess with scoped tools and enforced filesystem domains, and a status view shows the live tree.
+
+> **Note:** This is a Pi *host extension*, not a standalone Node library — it is loaded by Pi via `pi.extensions`, not `import`ed directly.
+
+![pi-hive telemetry dashboard — live session topology, KPIs, and streaming activity](docs/assets/dashboard-overview.png)
+
+*The `/hive-observe` dashboard: live session topology (orchestrator → leads → members), per-session KPIs, streaming activity, cost, and model mix.*
 
 ## Install location & activation
 
-For local development from this checkout:
+Install from GitHub (recommended):
 
 ```sh
-pi -e /Users/demetere/Projects/pi-hive
+pi install github:demetere/pi-hive
 ```
 
-For package installation after this repository is pushed/tagged, use `pi install` with the final GitHub/package spec. For local path installation, use:
+Or install from a local checkout by path:
 
 ```sh
-pi install /Users/demetere/Projects/pi-hive
+pi install /path/to/pi-hive
+```
+
+For local development, load a checkout temporarily without installing:
+
+```sh
+pi -e .        # from the repository root
 ```
 
 When installed globally, Pi auto-discovers the package for **every** project.
@@ -29,6 +41,15 @@ just pi-reload         # update the user-level extension from this checkout
 After `just pi-reload`, run `/reload` in Pi.
 
 - **Activates only when a project contains `.pi/hive/hive-config.yaml`.** Without it, the extension registers nothing — no tools, no commands, no hooks — so non-hive projects are completely unaffected.
+
+## Quickstart
+
+1. Install the extension (see above), so Pi discovers it for every project.
+2. In the project you want to run a hive on, create `.pi/hive/hive-config.yaml`. This file is the opt-in trigger and defines the team tree — the fastest way to author it is to point an agent at [SETUP.md](./SETUP.md) and let it interview you (see [Build a hive in a new project](#build-a-hive-in-a-new-project) below).
+3. Start Pi in that project and press `Ctrl+Alt+T` (or run `/hive`) to enter hive mode; the visible session becomes a Lead that delegates to its team.
+4. Run `/hive-observe` to open the live telemetry dashboard at `http://127.0.0.1:43191`.
+
+`/hive-doctor` runs read-only diagnostics if anything looks off.
 
 ## Requirements
 
