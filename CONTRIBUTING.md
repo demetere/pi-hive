@@ -3,6 +3,12 @@
 Thanks for your interest in improving `pi-hive`. This guide covers the toolchain,
 the local workflow, and the gates your change must pass.
 
+New here? Read the [README](./README.md) "What this is" section for the concepts
+(config-first ownership, the plan → hive flow, OpenSpec, Plannotator) and
+[SETUP.md](./SETUP.md) for how a hive is authored. The extension is config-first:
+it registers nothing until a project has `.pi/hive/hive-config.yaml`, so keep that
+opt-in guarantee intact in any change.
+
 ## Prerequisites
 
 Install these before building:

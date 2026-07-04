@@ -8,6 +8,54 @@ A globally-installed extension for [Pi](https://github.com/earendil-works/pi-cod
 
 *The `/hive-observe` dashboard: live session topology (orchestrator → leads → members), per-session KPIs, streaming activity, cost, and model mix.*
 
+## What this is
+
+Most agent frameworks hand you a fixed swarm and a black box. `pi-hive` is the
+opposite: **it's config-first, and you own the whole tree.** Nothing runs until
+*you* describe the team.
+
+- **Config-first — you own everything.** The extension does nothing until a
+  project contains `.pi/hive/hive-config.yaml`. That one file is both the opt-in
+  trigger *and* the team definition: you declare the agents, their models, their
+  tools, their filesystem domains, and their nesting. Roles aren't magic — a node
+  is a **lead** if it has members and a **member** if it doesn't, and an agent may
+  delegate **only to its own direct reports**. You express permissions by nesting,
+  not by writing policy. Every agent's prompt, knowledge, and skills live as plain
+  files under `.pi/hive/` in your repo, versioned with your code. See
+  **[SETUP.md](./SETUP.md)** for the full authoring guide.
+
+- **A real hierarchy, not a flat swarm.** The visible session is an *orchestrator*
+  that routes but never edits. It delegates to team **leads**, each lead fans work
+  out to its **members**, and each agent runs as its own isolated `pi` subprocess
+  with a scoped tool allow-list and **enforced write domains** — a worker
+  physically cannot edit files outside the scope its lead granted it. Nesting goes
+  arbitrarily deep.
+
+- **Plan first, then execute — two separate teams.** The session runs in one of
+  three modes (`normal → plan → hive`, cycled with `Ctrl+Alt+T`). **Plan mode**
+  activates a `planning:` team that produces a full spec and writes *no code*.
+  **Hive mode** activates a separate `hive:` team that executes an already-approved
+  spec. They're distinct trees in your config so a project can never silently run
+  planning against its coding tree.
+
+- **Spec-driven, backed by OpenSpec.** Non-trivial work flows through fixed gates —
+  `proposal → requirements → design → tasks` — stored under
+  `.pi/hive/plans/<change-id>/`. [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+  (a CLI dependency) is the store and validator: it owns the artifact dependency
+  graph and reports per-artifact readiness. Execution is hard-gated — `/hive-execute`
+  refuses to run until `tasks.md` exists and its gate is approved.
+
+- **Human-in-the-loop plan review, self-hosted.** `pi-hive` embeds a
+  [Plannotator](https://github.com/backnotprop/plannotator) review surface **directly in its own
+  dashboard** — no per-review server. You annotate, approve, or deny each plan
+  artifact in the browser; approval unblocks the planner, a denial routes your
+  feedback back and holds the gate. Verdicts persist to local SQLite.
+
+- **Local, private telemetry.** Every session streams its own tailored event log to
+  `.pi/hive/sessions/`, and `/hive-observe` opens a local Solid + Vite dashboard
+  (`127.0.0.1:43191`) showing live topology, delegation lifecycle, tokens, and cost
+  across every project and session. Nothing is sent to any third party.
+
 ## Install location & activation
 
 Install from GitHub (recommended):
