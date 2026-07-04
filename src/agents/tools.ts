@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Text, type Component } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
 import {
@@ -23,7 +23,10 @@ import { agentSlug } from "../core/utils";
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
 
-function emptyToolRender(): Component {
+// Structural Component shape. Avoid importing pi-tui's `Component` type: its
+// barrel re-exports it with a `.ts` specifier that tsc (moduleResolution
+// "Bundler") cannot resolve, so `import { type Component }` fails to typecheck.
+function emptyToolRender(): { render: (width: number) => string[]; invalidate: () => void } {
   return { render: () => [], invalidate() {} };
 }
 

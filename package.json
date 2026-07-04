@@ -3,6 +3,19 @@
   "version": "0.1.0",
   "description": "Hierarchical multi-agent orchestration extension for the Pi coding agent, with a live Solid + Vite telemetry dashboard.",
   "type": "module",
+  "author": "Demetre Dzmanashvili <demetre@pleiful.ai>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/demetere/pi-hive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/demetere/pi-hive/issues"
+  },
+  "homepage": "https://github.com/demetere/pi-hive#readme",
+  "engines": {
+    "node": ">=20",
+    "bun": ">=1.1"
+  },
   "main": "index.ts",
   "exports": {
     ".": "./index.ts"
@@ -11,6 +24,7 @@
     "extensions": ["./index.ts"]
   },
   "files": [
+    "LICENSE",
     "index.ts",
     "src/",
     "ui/web/src/",
