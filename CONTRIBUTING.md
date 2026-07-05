@@ -107,8 +107,12 @@ git commit -am "chore: release vX.Y.Z" && git push
 gh release create vX.Y.Z --generate-notes
 ```
 
-The release tag (e.g. `v0.1.0`) must match `package.json`'s version, and `just ci`
-must pass, or the workflow fails before publishing — so a broken or mistagged build
+You can also publish an existing tag manually (e.g. if the release event doesn't
+fire): `gh workflow run Release -f tag=vX.Y.Z`, or via the Actions tab → Release →
+"Run workflow".
+
+The tag (e.g. `v0.1.0`) must match `package.json`'s version, and `just ci` must
+pass, or the workflow fails before publishing — so a broken or mistagged build
 cannot ship. The published tarball ships only the `files` allowlist (runtime code +
 the prebuilt `ui/web/dist/`); dependency folders never ship.
 
