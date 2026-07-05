@@ -88,6 +88,26 @@ editing.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logging,
   no unexplained temporary behavior.
 
+## Releasing (maintainers)
+
+`pi-hive` is distributed two ways, and publishing to npm is what lists it in the
+[pi.dev package gallery](https://pi.dev/packages) (the gallery indexes npm packages
+carrying the `pi-package` keyword — there is no separate submission step).
+
+To cut a release:
+
+```sh
+just ci                      # all gates must be green
+npm version <patch|minor>    # bumps package.json + creates a git tag
+git push && git push --tags  # publish the tag (enables git:...@vX.Y.Z pinning)
+npm publish                  # prepublishOnly runs `just prepublish` first
+```
+
+`npm publish` is gated by `prepublishOnly` (`just prepublish`: tests, dashboard
+freshness, and package-manifest verification), so a broken or stale build cannot
+ship. The published tarball ships only the `files` allowlist (runtime code + the
+prebuilt `ui/web/dist/`); dependency folders never ship.
+
 ## Security
 
 Do not report vulnerabilities in public issues or PRs. See
