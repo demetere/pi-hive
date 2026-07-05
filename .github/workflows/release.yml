@@ -1,13 +1,20 @@
 name: Release
 
-# Publishes to npm when a GitHub Release is published. Cut a release with:
+# Publishes to npm. Trigger either by publishing a GitHub Release:
 #   gh release create v0.1.0 --generate-notes
-# The release tag must match the package.json version, or the job fails before
-# publishing.
+# or manually, passing the existing tag:
+#   gh workflow run Release -f tag=v0.1.0
+# The tag must match the package.json version, or the job fails before publishing.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,10 +24,17 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: echo "value=${RELEASE_TAG:-$INPUT_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ steps.tag.outputs.value }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -46,14 +60,14 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf https://just.systems/install.sh | bash -s -- --to "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Verify release tag matches package.json version
+      - name: Verify tag matches package.json version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           TAG="${RELEASE_TAG#v}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$PKG" ]; then
-            echo "::error::Release tag $RELEASE_TAG does not match package.json version $PKG"
+            echo "::error::Tag $RELEASE_TAG does not match package.json version $PKG"
             exit 1
           fi
           echo "Releasing v$PKG"
