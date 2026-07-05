@@ -10,7 +10,7 @@ it. Reports of ways to bypass that boundary are taken seriously.
 **Please do not open a public issue for security reports.**
 
 - Preferred: open a private [GitHub security advisory](https://github.com/demetere/pi-hive/security/advisories/new).
-- Alternatively, email **demetre@pleiful.ai** with a description, affected version/commit, and a minimal reproduction.
+- Alternatively, email **demetredzmanashvili@gmail.com** with a description, affected version/commit, and a minimal reproduction.
 
 Please allow a reasonable window for a fix before any public disclosure. There is no
 bug-bounty program; acknowledgement in the release notes is offered for valid reports
