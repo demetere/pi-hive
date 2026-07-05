@@ -94,19 +94,23 @@ editing.
 [pi.dev package gallery](https://pi.dev/packages) (the gallery indexes npm packages
 carrying the `pi-package` keyword — there is no separate submission step).
 
-To cut a release:
+Releases are **tag-triggered**: pushing a `v*` tag runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which re-runs
+`just ci` and then `npm publish --provenance`.
 
 ```sh
-just ci                      # all gates must be green
-npm version <patch|minor>    # bumps package.json + creates a git tag
-git push && git push --tags  # publish the tag (enables git:...@vX.Y.Z pinning)
-npm publish                  # prepublishOnly runs `just prepublish` first
+npm version <patch|minor|major>   # bumps package.json + creates the matching git tag
+git push --follow-tags            # pushes the commit and the tag → triggers Release
 ```
 
-`npm publish` is gated by `prepublishOnly` (`just prepublish`: tests, dashboard
-freshness, and package-manifest verification), so a broken or stale build cannot
-ship. The published tarball ships only the `files` allowlist (runtime code + the
-prebuilt `ui/web/dist/`); dependency folders never ship.
+The workflow fails before publishing if the tag doesn't match `package.json`'s
+version, and `just ci` must pass, so a broken or mistagged build cannot ship. The
+published tarball ships only the `files` allowlist (runtime code + the prebuilt
+`ui/web/dist/`); dependency folders never ship.
+
+**One-time setup:** add an npm **automation** access token as the `NPM_TOKEN`
+repository secret (Settings → Secrets and variables → Actions). Publishing to npm
+is what makes the package appear in the gallery.
 
 ## Security
 
