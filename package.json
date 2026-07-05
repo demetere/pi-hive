@@ -21,7 +21,11 @@
     ".": "./index.ts"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "image": "https://raw.githubusercontent.com/demetere/pi-hive/main/docs/assets/dashboard-overview.png"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "LICENSE",
