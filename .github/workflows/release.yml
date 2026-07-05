@@ -1,13 +1,13 @@
 name: Release
 
-# Publishes to npm when a version tag (v*) is pushed. Cut a release with:
-#   npm version <patch|minor|major> && git push --follow-tags
-# The tag must match the package.json version, or the job fails before publishing.
+# Publishes to npm when a GitHub Release is published. Cut a release with:
+#   gh release create v0.1.0 --generate-notes
+# The release tag must match the package.json version, or the job fails before
+# publishing.
 
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -44,12 +46,14 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf https://just.systems/install.sh | bash -s -- --to "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Verify tag matches package.json version
+      - name: Verify release tag matches package.json version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE_TAG#v}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$PKG" ]; then
-            echo "::error::Tag v$TAG does not match package.json version $PKG"
+            echo "::error::Release tag $RELEASE_TAG does not match package.json version $PKG"
             exit 1
           fi
           echo "Releasing v$PKG"
