@@ -75,7 +75,12 @@ function padToWidth(line: string, width: number): string {
 }
 
 function renderCompactBox(body: string[], width: number, theme: any): string[] {
-  const boxWidth = Math.max(20, Math.min(width, MAX_BOX_WIDTH));
+  // Pi places extension widgets inside an already-indented content region. Keep
+  // a small safety margin so our decorative border never collides with the
+  // terminal edge or draws through the editor/footer on narrow layouts.
+  const safeWidth = Math.max(0, width - 2);
+  if (safeWidth < 8) return [];
+  const boxWidth = Math.min(Math.max(20, safeWidth), MAX_BOX_WIDTH);
   const contentWidth = Math.max(0, boxWidth - 4);
   const title = ` Hive activity `;
   const topPlain = `╭─${title}${"─".repeat(Math.max(0, boxWidth - title.length - 3))}╮`;
