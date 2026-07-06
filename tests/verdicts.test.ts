@@ -97,3 +97,20 @@ test("team_status surfaces the latest verdict", async () => {
   assert.match(res.content[0].text, /latest verdicts:/);
   assert.match(res.content[0].text, /add-auth: GREEN by Rev/);
 });
+
+test("team_status surfaces context fill and fresh/resume advice", async () => {
+  const builder = runtime("Builder", { agentType: "coder" });
+  builder.contextPct = 86.25;
+  builder.contextTokens = 172_500;
+  builder.contextWindow = 200_000;
+  const state = stateWith([builder]);
+
+  const status = buildHiveTools(state, "Orchestrator").find((t) => t.name === "team_status")!;
+  const res = await (status.execute as any)("id", {});
+
+  assert.match(res.content[0].text, /ctx=86\.3% \(173k\/200k\) fresh-recommended/);
+  assert.equal(res.details.agents[0].contextPct, 86.25);
+  assert.equal(res.details.agents[0].contextTokens, 172_500);
+  assert.equal(res.details.agents[0].contextWindow, 200_000);
+  assert.equal(res.details.agents[0].contextAdvice, "fresh-recommended");
+});

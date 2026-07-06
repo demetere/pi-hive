@@ -32,6 +32,11 @@ import { isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, ty
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 
+// Dashboard activity should show reviewer/worker conclusions without confusing
+// middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
+// telemetry rows if an agent accidentally returns a huge dump.
+const DELEGATION_EVENT_MESSAGE_LIMIT = 64_000;
+
 function resolveModel(ctx: ExtensionContext, modelString: string): any {
   const [provider, ...idParts] = modelString.split("/");
   return (ctx as any).modelRegistry?.find(provider, idParts.join("/"));
@@ -97,13 +102,20 @@ export function isPendingArtifactRevisionTask(task: string, pending: ArtifactId)
   return ARTIFACT_TARGET_MARKERS[pending].test(task);
 }
 
+export function inferChangeIdFromReviewTask(task: string): string | null {
+  const pathMatch = task.match(/openspec\/changes\/([a-z0-9]+(?:-[a-z0-9]+)*)\//i);
+  if (pathMatch) return pathMatch[1];
+  const quotedMatch = task.match(/OpenSpec change [`"]([a-z0-9]+(?:-[a-z0-9]+)*)[`"]|change [`"]([a-z0-9]+(?:-[a-z0-9]+)*)[`"]|change\s+([a-z0-9]+(?:-[a-z0-9]+)*)\b/i);
+  return quotedMatch?.[1] || quotedMatch?.[2] || quotedMatch?.[3] || null;
+}
+
 export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
   // Prefer the explicit review target. Review prompts often contain negative
   // scope clauses like "Do not consider design/specs/tasks"; a plain keyword
   // scan would otherwise tag a proposal review as tasks/specs/design.
   if (/\breview\s+only\s+the\s+requirements\s+gate\b/i.test(task)) return null;
   const explicit = task.match(/\breview\s+only\s+the\s+(proposal|design|specs?|tasks)\s+gate\b/i);
-  if (explicit) return explicit[1].toLowerCase().replace(/s$/, "s") as ArtifactId;
+  if (explicit) return explicit[1].toLowerCase().startsWith("spec") ? "specs" : (explicit[1].toLowerCase() as ArtifactId);
 
   const pathMatch = task.match(/openspec\/changes\/[^\s`'"]+\/((?:proposal|design|tasks)\.md|specs\/[^\s`'"]+|specs\/\*\*\/\*\.md)/i);
   if (pathMatch) return pathMatch[1].startsWith("specs/") ? "specs" : (pathMatch[1].replace(/\.md$/i, "") as ArtifactId);
@@ -249,6 +261,7 @@ export async function dispatchAgent(
   const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
   const chunks: string[] = [];
+  let streamedSnapshot = "";
   const sessionManager = SessionManager.open(runtime.sessionFile);
 
   const { session } = await createSession({
@@ -348,10 +361,18 @@ export async function dispatchAgent(
   const unsubscribe = session.subscribe((event: any) => {
     if (event.type === "message_update") {
       const delta = event.assistantMessageEvent;
-      const text = delta?.delta || delta?.text || "";
-      if (delta?.type === "text_delta" && text) {
-        chunks.push(text);
-        const last = chunks.join("").split("\n").filter((line: string) => line.trim()).pop();
+      if (delta?.type === "text_delta") {
+        // The documented SDK contract exposes incremental text on `delta`. Some
+        // event shapes also carry `text`/`message` as the full accumulated
+        // snapshot; appending that snapshot duplicates every prefix in the final
+        // worker result (e.g. "P", "Pl", "Ple" as separate lines in the TUI).
+        // Keep snapshots only for live status/fallback output, never as chunks.
+        const deltaText = typeof delta.delta === "string" ? delta.delta : "";
+        if (deltaText) chunks.push(deltaText);
+        const snapshot = textFromMessage(event.message) || (typeof delta.text === "string" ? delta.text : "");
+        if (snapshot) streamedSnapshot = snapshot;
+        const live = chunks.length ? chunks.join("") : streamedSnapshot;
+        const last = live.split("\n").filter((line: string) => line.trim()).pop();
         if (last) runtime.lastWork = last;
       }
     } else if (event.type === "tool_execution_start") {
@@ -469,7 +490,7 @@ export async function dispatchAgent(
       const last = [...messages].reverse().find((message: any) => message.role === "assistant");
       // Keep the chunks fallback for output text; the usage-add block that used
       // to live here is deleted (double-count fix, Decision 1).
-      if (last && !chunks.length) chunks.push(textFromMessage(last));
+      if (last && !chunks.length && !streamedSnapshot) chunks.push(textFromMessage(last));
     }
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
@@ -570,12 +591,13 @@ export async function dispatchAgent(
   session.dispose();
   runtime.session = undefined;
 
-  const output = chunks.join("").trim() || errorMessage || "[no output]";
+  const output = chunks.join("").trim() || streamedSnapshot.trim() || errorMessage || "[no output]";
   runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
-  // The shared log keeps only a bounded summary of the result — the full
-  // output is returned to the caller and persisted in this agent's own
-  // transcript (agents/<slug>.jsonl). Logging the whole thing here is what
-  // turned the shared log into a multi-hundred-KB-per-line firehose.
+  // The shared log keeps a bounded copy of the result for the dashboard. The
+  // cap is intentionally high enough that normal review verdicts are not
+  // middle-elided in the web UI, while still protecting the shared telemetry log
+  // from accidental multi-hundred-KB rows.
+  const completionMessage = truncateMiddle(output, DELEGATION_EVENT_MESSAGE_LIMIT);
   const completion = {
     from: runtime.config.name,
     // The real delegation parent: the ALS caller (A6). For top-level
@@ -583,7 +605,7 @@ export async function dispatchAgent(
     // delegations now record the truthful parent instead of a hardcoded root.
     to: caller,
     type: runtime.status,
-    message: truncateMiddle(output, 2_000),
+    message: completionMessage,
     costUsd: runtime.costUsd,
     inputTokens: runtime.inputTokens,
     outputTokens: runtime.outputTokens,
@@ -607,8 +629,13 @@ export async function dispatchAgent(
     reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
-  if (state.mode === "plan" && runtime.config.agentType === "reviewer") {
-    const changeId = currentChangeId() || state.activeChangeId || "";
+  if (runtime.config.agentType === "reviewer") {
+    // Persist per-artifact reviewer clearance whenever a review prompt is
+    // explicit enough to identify its target. Some dashboard-triggered review
+    // turns can run without plan-mode ambient state after a session restore; in
+    // that case, derive the change id from the OpenSpec paths in the task so the
+    // Plans UI does not reject a freshly PASSed artifact as "not ready".
+    const changeId = currentChangeId() || state.activeChangeId || inferChangeIdFromReviewTask(task) || "";
     const artifact = inferArtifactFromReviewTask(task);
     const verdict = inferReviewVerdict(output);
     if (changeId && artifact && verdict) setAgentReviewVerdict(ctx.cwd, changeId, artifact, verdict, runtime.config.name);
@@ -616,7 +643,7 @@ export async function dispatchAgent(
 
   emitHiveEvent(state, "delegation_end", {
     ...completion,
-    truncated: output.length > 2_000,
+    truncated: output.length > DELEGATION_EVENT_MESSAGE_LIMIT,
     exitCode,
     stopReason: lastStopReason,
     errorMessage: errorMessage ? truncateMiddle(errorMessage, 500) : undefined,
@@ -678,12 +705,17 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
   });
 
   const chunks: string[] = [];
+  let streamedSnapshot = "";
   session.subscribe((event: any) => {
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-      chunks.push(event.assistantMessageEvent.delta || event.assistantMessageEvent.text || "");
+      const delta = event.assistantMessageEvent;
+      const deltaText = typeof delta.delta === "string" ? delta.delta : "";
+      if (deltaText) chunks.push(deltaText);
+      const snapshot = textFromMessage(event.message) || (typeof delta.text === "string" ? delta.text : "");
+      if (snapshot) streamedSnapshot = snapshot;
     } else if (event.type === "agent_end") {
       const last = [...(event.messages || [])].reverse().find((m: any) => m.role === "assistant");
-      if (last && !chunks.length) chunks.push(textFromMessage(last));
+      if (last && !chunks.length && !streamedSnapshot) chunks.push(textFromMessage(last));
     }
   });
 
@@ -694,7 +726,7 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
   } finally {
     session.dispose();
   }
-  return chunks.join("").trim();
+  return chunks.join("").trim() || streamedSnapshot.trim();
 }
 
 export async function distillMentalModel(state: HiveState, ctx: ExtensionContext, runtime: AgentRuntime): Promise<void> {

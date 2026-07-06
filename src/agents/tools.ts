@@ -44,6 +44,36 @@ function boundedToolRender(lines: string[] | (() => string[]), ellipsis: string)
   };
 }
 
+function formatTokens(count: number): string {
+  if (!Number.isFinite(count) || count < 0) return "?";
+  if (count < 1000) return Math.round(count).toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
+function formatContextFill(row: { contextPct?: number; contextTokens?: number; contextWindow?: number }): string {
+  const pct = Number(row.contextPct);
+  const pctText = Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "?";
+  const tokens = Number(row.contextTokens);
+  const window = Number(row.contextWindow);
+  const tokenText = Number.isFinite(tokens) && Number.isFinite(window) && window > 0
+    ? ` (${formatTokens(tokens)}/${formatTokens(window)})`
+    : Number.isFinite(window) && window > 0
+      ? ` (of ${formatTokens(window)})`
+      : "";
+  return `${pctText}${tokenText}`;
+}
+
+function contextAdvice(contextPct?: number): "resume-ok" | "consider-fresh" | "fresh-recommended" {
+  const pct = Number(contextPct);
+  if (!Number.isFinite(pct)) return "resume-ok";
+  if (pct >= 85) return "fresh-recommended";
+  if (pct >= 75) return "consider-fresh";
+  return "resume-ok";
+}
+
 // Builds pi-hive's five custom tools as plain, reusable ToolDefinition objects
 // (defineTool() does no registration — it's a pure identity/typing wrapper).
 // The SAME definitions are used for the orchestrator's own pi.registerTool()
@@ -89,7 +119,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
   defineTool({
     name: "team_status",
     label: "Team Status",
-    description: "Return the current hive session, log path, active workers, and per-agent state.",
+    description: "Return the current hive session, log path, active workers, per-agent state, and context-window fill so leads can decide whether to resume or use fresh=true.",
     parameters: Type.Object({}),
     async execute() {
       const rows = Array.from(state.runtimes.values()).map((runtime) => ({
@@ -102,6 +132,10 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         lastWork: runtime.lastWork,
         costUsd: runtime.costUsd,
         tokens: runtime.inputTokens + runtime.outputTokens,
+        contextPct: runtime.contextPct,
+        contextTokens: runtime.contextTokens,
+        contextWindow: runtime.contextWindow,
+        contextAdvice: contextAdvice(runtime.contextPct),
       }));
       const verdicts = Array.from((state.latestVerdicts || new Map()).values());
       const verdictLines = verdicts.length
@@ -112,7 +146,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         `conversation: ${state.session?.conversationLog || "n/a"}`,
         `active_runs: ${state.activeRuns}`,
         "",
-        ...rows.map((row) => `- ${row.agent} [${row.group}] ${row.status}, runs=${row.runs}, tokens=${row.tokens}, cost=$${row.costUsd.toFixed(3)}${row.task ? ` — ${row.task.slice(0, 120)}` : ""}`),
+        ...rows.map((row) => `- ${row.agent} [${row.group}] ${row.status}, runs=${row.runs}, ctx=${formatContextFill(row)} ${row.contextAdvice}, tokens=${row.tokens}, cost=$${row.costUsd.toFixed(3)}${row.task ? ` — ${row.task.slice(0, 120)}` : ""}`),
         ...verdictLines,
       ].join("\n");
       return { content: [{ type: "text", text }], details: { session: state.session, activeRuns: state.activeRuns, agents: rows, verdicts } };
@@ -294,7 +328,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     typeScopedTools.push(defineTool({
       name: "submit_review_verdict",
       label: "Submit Review Verdict",
-      description: "Submit your FINAL structured review verdict (red/yellow/green). green = clean approval; yellow = approve with non-blocking concerns (proceed, surface them); red = blocked, list blockers. This is how a reviewer reports its conclusion — do not put the verdict only in chat text.",
+      description: "Submit your FINAL structured review verdict (red/yellow/green). green = clean approval; yellow = approve with non-blocking concerns (proceed, surface them); red = blocked, list blockers. Reviewers MUST call this before their final answer; do not put the verdict only in chat text.",
       parameters: Type.Object({
         verdict: Type.Union([Type.Literal("red"), Type.Literal("yellow"), Type.Literal("green")], { description: "red = blocked (populate blockers); yellow = approve with non-blocking concerns; green = clean approval." }),
         summary: Type.String({ description: "One- or two-sentence summary of the review conclusion." }),
@@ -302,7 +336,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         concerns: Type.Optional(Type.Array(Type.String(), { description: "Yellow: non-blocking follow-ups to surface to the human." })),
         blockers: Type.Optional(Type.Array(Type.String(), { description: "Red: must-fix items before proceeding." })),
         changeId: Type.Optional(Type.String({ description: "The change-id under review. Defaults to the active change if one is set." })),
-        artifact: Type.Optional(Type.String({ description: "The OpenSpec artifact under review, e.g. proposal.md, design.md, specs/**/*.md, or tasks.md." })),
+        artifact: Type.Optional(Type.String({ description: "The OpenSpec artifact under review, e.g. proposal.md, design.md, specs/**/*.md, or tasks.md. Required for OpenSpec plan-review gates." })),
       }),
       async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
         const p = params as { verdict: ReviewVerdictLevel; summary: string; evidence?: string[]; concerns?: string[]; blockers?: string[]; changeId?: string; artifact?: string };
