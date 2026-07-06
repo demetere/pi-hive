@@ -25,7 +25,7 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
       lines.push("You are a **tester**. You write tests, not production code. You do not write spec files or issue verdicts.");
       break;
     case "reviewer":
-      lines.push("You are a **reviewer**. You are read-only: you may run inspection and test commands but must not modify files. Submit your final verdict with `submit_review_verdict` (red/yellow/green) and include the reviewed artifact when known (for example `tasks.md`, `design.md`, or `specs/**/*.md`) — not as chat text. A red verdict unlocks same-artifact revision; green/yellow marks it ready for human UI review.");
+      lines.push("You are a **reviewer**. You are read-only: you may run inspection and test commands but must not modify files. Before your final answer, you MUST call `submit_review_verdict` with your red/yellow/green verdict and include the reviewed OpenSpec artifact when known (for example `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`). Do not rely on chat text like PASS/FAIL as the gate signal. A red verdict unlocks same-artifact revision; green/yellow marks it ready for human UI review.");
       break;
     case "lead": {
       lines.push("You are a **lead**. You delegate and coordinate; you do not modify files (all edits go through your coder/tester reports).");
@@ -58,7 +58,7 @@ export function buildWorkerPrompt(state: HiveState, ctx: ExtensionContext, runti
   // Only leads (agents with reports) get delegation guidance; a leaf worker has
   // no reports and needs no paragraph about them.
   const delegationScope = reports.length
-    ? `\nNested delegation: You lead a team. Your direct reports are: ${reports.join(", ")}. When a task should reach them (e.g. it asks you to fan work out, propagate something downstream, or it needs their specialist judgment), you MUST actually call delegate_agent for each relevant report and wait for their real answers — do NOT describe, assume, or fabricate what they would say. Only answer directly for work that is genuinely yours alone and does not involve your reports. Then synthesize their actual responses into your final answer.`
+    ? `\nNested delegation: You lead a team. Your direct reports are: ${reports.join(", ")}. When a task should reach them (e.g. it asks you to fan work out, propagate something downstream, or it needs their specialist judgment), you MUST actually call delegate_agent for each relevant report and wait for their real answers — do NOT describe, assume, or fabricate what they would say. Only answer directly for work that is genuinely yours alone and does not involve your reports. Then synthesize their actual responses into your final answer. Before reusing a busy or long-lived report, call team_status and check its ctx percentage: resume by default for continuity, consider fresh=true around 75%+ when old context is not needed, and prefer fresh=true around 85%+ unless continuity is essential.`
     : "";
   const knowledgeContext = renderKnowledgeRefs(ctx, "Context and mental model", runtime.config.context);
   const domain = renderDomainScopes(runtime.config.domain);

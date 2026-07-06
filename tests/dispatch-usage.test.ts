@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchAgent, inferArtifactFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { dispatchAgent, inferArtifactFromReviewTask, inferChangeIdFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
 import { restoreRuntimeCounters } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -35,8 +35,15 @@ test("pending artifact revision tasks may bypass the human-review authoring hold
 
 test("review artifact inference ignores negative scope clauses", () => {
   assert.equal(inferArtifactFromReviewTask("Review ONLY the proposal gate. Do not consider design/specs/tasks."), "proposal");
+  assert.equal(inferArtifactFromReviewTask("Review ONLY the specs gate for OpenSpec change `integrate-front-window-registration-workspace-frontend`."), "specs");
+  assert.equal(inferArtifactFromReviewTask("Review ONLY the spec gate for OpenSpec change `integrate-front-window-registration-workspace-frontend`."), "specs");
   assert.equal(inferArtifactFromReviewTask("Review ONLY the requirements gate before design. Do not modify files."), null);
   assert.equal(inferArtifactFromReviewTask("Audit `openspec/changes/add-auth/proposal.md` for readiness. Do not consider design/specs/tasks."), "proposal");
+});
+
+test("review change inference uses explicit OpenSpec change references", () => {
+  assert.equal(inferChangeIdFromReviewTask("Review ONLY the specs gate for OpenSpec change `integrate-front-window-registration-workspace-frontend`."), "integrate-front-window-registration-workspace-frontend");
+  assert.equal(inferChangeIdFromReviewTask("Inputs: `openspec/changes/add-auth/specs/auth/spec.md`"), "add-auth");
 });
 
 test("resolveWorkerSkillPaths flattens skill refs so delegate setup never passes objects to path.resolve", () => {
@@ -82,6 +89,49 @@ function scriptedSession(opts: {
     dispose() { /* noop */ },
   };
 }
+
+test("dispatchAgent treats message_update.text as snapshot, not appended delta", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-snapshot-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", id: "model" }) } } as any;
+  let handler: ((e: any) => void) | undefined;
+  const create: CreateAgentSession = (async () => ({ session: {
+    subscribe(cb: (e: any) => void): () => void { handler = cb; return () => { handler = undefined; }; },
+    getAvailableThinkingLevels(): string[] { return ["off"]; },
+    getContextUsage(): { percent: number } { return { percent: 0 }; },
+    getSessionStats(): any { return { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, cost: { total: 0 } }; },
+    state: { errorMessage: undefined },
+    async prompt(): Promise<void> {
+      for (const text of ["- P", "- Pl", "- Please approve"]) {
+        handler?.({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", text },
+          message: { role: "assistant", content: [{ type: "text", text }] },
+        });
+      }
+      handler?.({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "- Please approve" }] }] });
+    },
+    dispose(): void { /* noop */ },
+  } } as any)) as any;
+
+  const result = await dispatchAgent(state, "Builder", "review", ctx, false, create);
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.output, "- Please approve");
+});
 
 test("dispatchAgent abort signal cancels the worker session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-abort-"));
