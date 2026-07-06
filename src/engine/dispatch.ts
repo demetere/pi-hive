@@ -97,11 +97,27 @@ export function isPendingArtifactRevisionTask(task: string, pending: ArtifactId)
   return ARTIFACT_TARGET_MARKERS[pending].test(task);
 }
 
-function inferArtifactFromReviewTask(task: string): ArtifactId | null {
-  for (const id of ["tasks", "specs", "design", "proposal"] as const) {
-    if (ARTIFACT_TARGET_MARKERS[id].test(task)) return id;
+export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
+  // Prefer the explicit review target. Review prompts often contain negative
+  // scope clauses like "Do not consider design/specs/tasks"; a plain keyword
+  // scan would otherwise tag a proposal review as tasks/specs/design.
+  if (/\breview\s+only\s+the\s+requirements\s+gate\b/i.test(task)) return null;
+  const explicit = task.match(/\breview\s+only\s+the\s+(proposal|design|specs?|tasks)\s+gate\b/i);
+  if (explicit) return explicit[1].toLowerCase().replace(/s$/, "s") as ArtifactId;
+
+  const pathMatch = task.match(/openspec\/changes\/[^\s`'"]+\/((?:proposal|design|tasks)\.md|specs\/[^\s`'"]+|specs\/\*\*\/\*\.md)/i);
+  if (pathMatch) return pathMatch[1].startsWith("specs/") ? "specs" : (pathMatch[1].replace(/\.md$/i, "") as ArtifactId);
+
+  const positiveText = task
+    .split(/(?<=[.!?])\s+|\n+/)
+    .filter((sentence) => !/\bdo not\b|\bdon't\b|\bno\s+(?:design|specs|tasks|proposal)\b/i.test(sentence))
+    .join("\n");
+  let best: { id: ArtifactId; index: number } | null = null;
+  for (const id of ["proposal", "design", "specs", "tasks"] as const) {
+    const match = positiveText.match(ARTIFACT_TARGET_MARKERS[id]);
+    if (match?.index != null && (!best || match.index < best.index)) best = { id, index: match.index };
   }
-  return null;
+  return best?.id ?? null;
 }
 
 function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> | null {

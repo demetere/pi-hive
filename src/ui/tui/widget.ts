@@ -88,6 +88,8 @@ function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
           state.pi.sendUserMessage(action.feedback ? `${next}\n\nReviewer note:\n${action.feedback}` : next);
         } else if (action.type === "plan_review_denied" && action.changeId) {
           state.pi.sendUserMessage(`The plan-review UI rejected the ${action.artifact || "artifact"} for change "${action.changeId}":\n\n${action.feedback || "(no feedback given)"}\n\nRevise that artifact with the planning team, then re-submit it for review before continuing.`);
+        } else if (action.type === "plan_review_not_ready" && action.changeId) {
+          state.pi.sendUserMessage(`The plan-review UI could not approve the ${action.artifact || "artifact"} for change "${action.changeId}" yet:\n\n${action.feedback || "Automated plan reviewer has not marked this artifact ready for human approval yet."}\n\nRun or wait for the automated reviewer to clear this artifact before approving it.`);
         } else if (action.type === "question" && action.question) {
           // WS-D: a delegated planner promoted a clarifying question to the main
           // session. Surface it to the human (inline dialog when we have a UI),

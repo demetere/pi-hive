@@ -47,15 +47,17 @@ export interface PlanDetail {
   verdicts: ReturnType<typeof listVerdicts>;
 }
 
-// The reviewer AGENT's standing verdict for a change (its most recent non-"ui"
-// verdict). Change-level, but with the per-artifact hard stop only one artifact
-// is under review at a time, so a standing agent green means "the agent has
-// cleared the artifact currently up for human review".
-function agentClearedChange(cwd: string, changeId: string): boolean {
+// The reviewer AGENT's standing verdict for an artifact. The sidecar is the
+// source of truth for new reviews because it is keyed by artifact and readable
+// by the core dispatch gate. Fall back to old change-level SQLite verdicts only
+// when no sidecar agent-review state exists at all (legacy sessions).
+function agentClearedArtifact(cwd: string, changeId: string, artifact: string): boolean {
+  const sidecarVerdict = openspec.agentReviewVerdict(cwd, changeId, artifact);
+  if (sidecarVerdict) return sidecarVerdict === "green" || sidecarVerdict === "yellow";
+  if (Object.keys(openspec.readAgentReviewLedger(cwd, changeId)).length > 0) return false;
+
   const verdicts = listVerdicts(changeId, cwd).filter((v) => v.reviewer !== "ui");
   if (!verdicts.length) return false;
-  // listVerdicts is newest-first; the latest agent verdict must be green/yellow
-  // (not red) to count as cleared.
   return verdicts[0].verdict === "green" || verdicts[0].verdict === "yellow";
 }
 
@@ -64,14 +66,14 @@ export function planDetail(cwd: string, changeId: string): PlanDetail | null {
   const detail = openspec.changeDetail(cwd, changeId);
   if (!detail) return null;
   const validation = openspec.validate(cwd, changeId);
-  const agentCleared = agentClearedChange(cwd, changeId);
   const artifactReview: ArtifactReview[] = detail.artifacts.map((a) => {
     const authored = a.status === "done";
     const humanVerdict = openspec.artifactVerdict(cwd, changeId, a.id);
+    const agentCleared = authored && agentClearedArtifact(cwd, changeId, a.id);
     return {
       id: a.id,
       authored,
-      agentCleared: authored && agentCleared,
+      agentCleared,
       humanVerdict,
       humanReviewReady: authored && agentCleared && humanVerdict !== "green",
     };
