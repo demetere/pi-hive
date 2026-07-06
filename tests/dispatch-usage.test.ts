@@ -83,6 +83,48 @@ function scriptedSession(opts: {
   };
 }
 
+test("dispatchAgent abort signal cancels the worker session", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-abort-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+  const controller = new AbortController();
+  let abortCalled = false;
+  let releasePrompt: (() => void) | undefined;
+  const create: CreateAgentSession = (async () => ({ session: {
+    subscribe(): () => void { return () => undefined; },
+    getAvailableThinkingLevels(): string[] { return ["off"]; },
+    getContextUsage(): { percent: number } { return { percent: 0 }; },
+    getSessionStats(): any { return { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: { total: 0 } }; },
+    state: { errorMessage: undefined },
+    async prompt(): Promise<void> { await new Promise<void>((resolve) => { releasePrompt = resolve; }); },
+    async abort(): Promise<void> { abortCalled = true; releasePrompt?.(); },
+    dispose(): void { /* noop */ },
+  } } as any)) as any;
+
+  const resultPromise = dispatchAgent(state, "Builder", "build slowly", ctx, false, create, controller.signal);
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await resultPromise;
+
+  assert.equal(abortCalled, true);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output, /aborted/);
+  assert.equal(state.activeRuns, 0);
+});
+
 test("dispatchAgent totals equal getSessionStats exactly — no message_end/agent_end double-count (L1)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-dispatch-"));
   const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
