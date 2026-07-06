@@ -133,6 +133,7 @@ function inferReviewVerdict(output: string): Exclude<AgentReviewVerdict, null> |
 export async function dispatchAgent(
   state: HiveState, agentName: string, task: string, ctx: ExtensionContext, fresh = false,
   createSession: CreateAgentSession = createAgentSession,
+  abortSignal?: AbortSignal,
 ): Promise<{ output: string; exitCode: number; elapsed: number }> {
   if (!state.config || !state.session) throw new Error("hive is not initialized");
   const caller = currentAgentName();
@@ -261,6 +262,16 @@ export async function dispatchAgent(
     resourceLoader: workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths),
   });
   runtime.session = session;
+
+  let abortedByParent = false;
+  const abortWorker = (): void => {
+    abortedByParent = true;
+    runtime.lastWork = "cancelling";
+    addHiveActivity(state, { kind: "delegation_end", parent: caller, agent: runtime.config.name, status: "error", text: "cancel requested" });
+    void session.abort?.().catch((): undefined => undefined);
+  };
+  if (abortSignal?.aborted) abortWorker();
+  else abortSignal?.addEventListener("abort", abortWorker, { once: true });
 
   // Authoritative per-model thinking levels for this worker's effective model.
   // This is the SDK's own answer — no ModelRegistry plumbing needed (A10).
@@ -483,8 +494,9 @@ export async function dispatchAgent(
     // unless a more specific one is set. state.activeChangeId is the persistent
     // selection; currentChangeId() carries an already-scoped value into nesting.
     const scopedChangeId = currentChangeId() ?? state.activeChangeId;
+    if (abortedByParent) throw new Error("aborted");
     await runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(task)));
-    errorMessage = session.state.errorMessage;
+    errorMessage = abortedByParent ? "aborted" : session.state.errorMessage;
     // The 1s timer polls this too, but relying on it alone can miss the final,
     // most accurate reading if the last tick landed moments before completion.
     // Refresh the raw tokens/window alongside the percent (Phase 4.7) so the
@@ -548,6 +560,7 @@ export async function dispatchAgent(
     }
   } catch { /* keep incremental values if stats is unavailable */ }
 
+  abortSignal?.removeEventListener("abort", abortWorker);
   unsubscribe();
   if (runtime.timer) clearInterval(runtime.timer);
   runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
