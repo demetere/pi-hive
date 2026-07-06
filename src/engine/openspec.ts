@@ -291,13 +291,20 @@ export function validate(cwd: string, name?: string): ValidateResult {
 // Execution readiness gate
 // ---------------------------------------------------------------------------
 
-// tasks.md exists and contains at least one checkbox item. Accept both common
-// Markdown task-list bullets (`- [ ]`) and ordered task lists (`1. [ ]`), since
-// OpenSpec plans may use sprint-numbered checkboxes.
+// tasks.md exists and is materially authored. Prefer checkbox/task-list items
+// when present, but accept execution-ready sprint plans too: the planning gate
+// may produce dependency-ordered sprint sections with acceptance criteria rather
+// than Markdown checkboxes, and /hive-execute should not report that such a file
+// is missing.
 export function hasTasks(cwd: string, name: string): boolean {
   if (!isSafeChangeId(name)) return false;
   const raw = readIfSmall(join(cwd, "openspec", "changes", name, "tasks.md"), MAX_ARTIFACT_BYTES);
-  return /^\s*(?:[-*]|\d+\.)\s*\[[ xX]\]/m.test(raw);
+  if (!raw.trim()) return false;
+  if (/^\s*(?:[-*]|\d+\.)\s*\[[ xX]\]/m.test(raw)) return true;
+  const hasTasksHeading = /^#\s+Tasks\b/im.test(raw);
+  const sprintSections = raw.match(/^##\s+\d+\.\s+Sprint\b/gim)?.length ?? 0;
+  const hasAcceptanceCriteria = /\*\*Acceptance criteria:\*\*/i.test(raw);
+  return hasTasksHeading && sprintSections > 0 && hasAcceptanceCriteria;
 }
 
 // Artifact-side readiness: the artifacts are materially complete (tasks

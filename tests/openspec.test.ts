@@ -43,13 +43,15 @@ test("resolveArtifact blocks traversal outside the change dir", () => {
   assert.ok(ok && ok.endsWith("/openspec/changes/add-auth/proposal.md"));
 });
 
-test("hasTasks detects checkbox items only", () => {
+test("hasTasks detects checklist and sprint-plan tasks", () => {
   const cwd = scratch();
   const dir = join(cwd, "openspec", "changes", "add-auth");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\nno checkboxes here\n");
+  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\nno checkboxes or sprint sections here\n");
   assert.equal(openspec.hasTasks(cwd, "add-auth"), false);
   writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [ ] one\n- [x] two\n");
+  assert.equal(openspec.hasTasks(cwd, "add-auth"), true);
+  writeFileSync(join(dir, "tasks.md"), "# Tasks: add-auth\n\n## 1. Sprint 1 — Foundation\n\n**Acceptance criteria:**\n\n- Foundation is reviewer-testable.\n");
   assert.equal(openspec.hasTasks(cwd, "add-auth"), true);
 });
 
