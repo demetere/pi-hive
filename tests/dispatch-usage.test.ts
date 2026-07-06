@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchAgent, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { dispatchAgent, inferArtifactFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
 import { restoreRuntimeCounters } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -31,6 +31,12 @@ test("pending artifact revision tasks may bypass the human-review authoring hold
   assert.equal(isPendingArtifactRevisionTask("Author the next artifact (tasks) with the planning team", "tasks"), false);
   assert.equal(isPendingArtifactRevisionTask("Continue planning after human approval", "tasks"), false);
   assert.equal(isPendingArtifactRevisionTask("Spec reviewer failed. Revise specs/front-window/spec.md", "specs"), true);
+});
+
+test("review artifact inference ignores negative scope clauses", () => {
+  assert.equal(inferArtifactFromReviewTask("Review ONLY the proposal gate. Do not consider design/specs/tasks."), "proposal");
+  assert.equal(inferArtifactFromReviewTask("Review ONLY the requirements gate before design. Do not modify files."), null);
+  assert.equal(inferArtifactFromReviewTask("Audit `openspec/changes/add-auth/proposal.md` for readiness. Do not consider design/specs/tasks."), "proposal");
 });
 
 test("resolveWorkerSkillPaths flattens skill refs so delegate setup never passes objects to path.resolve", () => {

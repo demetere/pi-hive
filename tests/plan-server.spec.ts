@@ -3,7 +3,7 @@
 // Run: bun test ./tests/plan-server.spec.ts
 import { expect, test, beforeAll } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,9 @@ function osx(args: string[]) {
 
 let routes: typeof import("../src/observability/server/plan-routes");
 let bridge: typeof import("../src/observability/server/plan-bridge");
+let review: typeof import("../src/observability/server/review-wiring");
+let db: typeof import("../src/observability/server/db");
+let openspec: typeof import("../src/engine/openspec");
 
 beforeAll(async () => {
   if (OSX) {
@@ -37,6 +40,9 @@ beforeAll(async () => {
   }
   routes = await import("../src/observability/server/plan-routes");
   bridge = await import("../src/observability/server/plan-bridge");
+  review = await import("../src/observability/server/review-wiring");
+  db = await import("../src/observability/server/db");
+  openspec = await import("../src/engine/openspec");
 });
 
 test.if(OSX)("listPlans returns OpenSpec change summaries", () => {
@@ -70,4 +76,96 @@ test("resolveProjectCwd rejects an unknown cwd and echoes a known one", () => {
   const fallback = bridge.resolveProjectCwd(null);
   expect(typeof fallback).toBe("string");
   expect(bridge.resolveProjectCwd(fallback)).toBe(fallback);
+});
+
+async function approveProposal(changeId: string, activeProject: string) {
+  const rid = encodeURIComponent(`${changeId}#proposal.md`);
+  const cwd = encodeURIComponent(activeProject);
+  const req = new Request("http://127.0.0.1:43191/api/approve", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      referer: `http://127.0.0.1:43191/pl-review/?rid=${rid}&cwd=${cwd}`,
+    },
+    body: JSON.stringify({ feedback: "looks good" }),
+  });
+  return review.handlePlanReview(req, new URL(req.url));
+}
+
+test("review approval honors legacy SQLite-only agent verdicts", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "legacy-agent-green";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Legacy agent green\n\nReady.\n");
+  db.insertPlanVerdict({
+    id: "legacy-agent-green-verdict",
+    changeId,
+    reviewer: "Plan Reviewer",
+    verdict: "green",
+    summary: "ready for human review",
+    cwd: activeProject,
+    createdAt: new Date().toISOString(),
+  });
+
+  try {
+    const res = await approveProposal(changeId, activeProject);
+    expect(res?.status).toBe(200);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBe("green");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review approval does not borrow SQLite verdicts when sidecar targets another artifact", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "sidecar-mismatch";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Sidecar mismatch\n\nReady.\n");
+  db.insertPlanVerdict({
+    id: "sidecar-mismatch-green-verdict",
+    changeId,
+    reviewer: "Plan Reviewer",
+    verdict: "green",
+    summary: "change-level green should not clear proposal when sidecar exists for tasks",
+    cwd: activeProject,
+    createdAt: new Date().toISOString(),
+  });
+  openspec.setAgentReviewVerdict(activeProject, changeId, "tasks", "green", "Plan Reviewer");
+
+  try {
+    const res = await approveProposal(changeId, activeProject);
+    expect(res?.status).toBe(200);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBeNull();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test.if(OSX)("planDetail does not show review-now for artifacts missing sidecar verdicts", () => {
+  const changeId = "sidecar-mismatch-detail";
+  osx(["new", "change", changeId]);
+  const dir = join(PROJECT, "openspec", "changes", changeId);
+  writeFileSync(join(dir, "proposal.md"), "# Sidecar mismatch detail\n\nReady.\n");
+  db.insertPlanVerdict({
+    id: "sidecar-mismatch-detail-green-verdict",
+    changeId,
+    reviewer: "Plan Reviewer",
+    verdict: "green",
+    summary: "legacy change-level green",
+    cwd: PROJECT,
+    createdAt: new Date().toISOString(),
+  });
+  openspec.setAgentReviewVerdict(PROJECT, changeId, "tasks", "green", "Plan Reviewer");
+
+  try {
+    const detail = routes.planDetail(PROJECT, changeId)!;
+    const proposal = detail.artifactReview.find((a) => a.id === "proposal")!;
+    expect(proposal.authored).toBe(true);
+    expect(proposal.agentCleared).toBe(false);
+    expect(proposal.humanReviewReady).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { handleReviewSurface, registerReviewSurface, renderReviewInput, type ReviewContext, type ReviewInput, type ReviewSurface } from "../../engine/review";
 import { parseRid } from "../../engine/review";
 import * as openspec from "../../engine/openspec";
-import { insertPlanVerdict } from "./db";
+import { insertPlanVerdict, listVerdicts } from "./db";
 import { enqueueDashboardAction, resolveProjectCwd } from "./plan-bridge";
 
 // Bun-side wiring for the self-hosted Plannotator plan-review surface. Builds the
@@ -28,6 +28,22 @@ function recordVerdict(ctx: ReviewContext, verdict: "green" | "red", feedback: s
   });
 }
 
+function latestAgentVerdict(ctx: ReviewContext): openspec.AgentReviewVerdict {
+  const sidecarVerdict = openspec.agentReviewVerdict(ctx.cwd, ctx.change, ctx.artifact);
+  if (sidecarVerdict) return sidecarVerdict;
+
+  // If any structured per-artifact review state exists, absence for THIS
+  // artifact is meaningful: do not fall back to a change-level SQLite verdict
+  // from another artifact. That mismatch is what made proposal approval look
+  // available and then reject in the live session.
+  if (Object.keys(openspec.readAgentReviewLedger(ctx.cwd, ctx.change)).length > 0) return null;
+
+  // Older reviewer flows may have only persisted a change-level SQLite verdict.
+  // Use it only for fully legacy changes with no sidecar agent-review state.
+  const verdict = listVerdicts(ctx.change, ctx.cwd).find((v) => v.reviewer !== "ui")?.verdict;
+  return verdict === "green" || verdict === "yellow" || verdict === "red" ? verdict : null;
+}
+
 const surface: ReviewSurface | null = registerReviewSurface({
   mountPath: PLAN_REVIEW_MOUNT,
   hooks: {
@@ -40,18 +56,20 @@ const surface: ReviewSurface | null = registerReviewSurface({
     },
     onApprove(ctx, input) {
       const feedback = renderReviewInput(input);
-      const agentVerdict = openspec.agentReviewVerdict(ctx.cwd, ctx.change, ctx.artifact);
+      const agentVerdict = latestAgentVerdict(ctx);
       if (agentVerdict !== "green" && agentVerdict !== "yellow") {
         const gateFeedback = agentVerdict === "red"
           ? "Automated plan reviewer marked this artifact RED. Revise it before human approval."
           : "Automated plan reviewer has not marked this artifact ready for human approval yet.";
-        recordVerdict(ctx, "red", gateFeedback);
+        // This is NOT a human rejection of the artifact; it is an invalid/early
+        // approve attempt. Do not persist a red UI verdict and do not route it as
+        // planner revision feedback, or the live session falsely says the human
+        // rejected the plan.
         enqueueDashboardAction(ctx.cwd, {
-          type: "plan_review_denied",
+          type: "plan_review_not_ready",
           changeId: ctx.change,
           artifact: ctx.artifact,
           feedback: gateFeedback,
-          annotationCount: 0,
         });
         return;
       }
