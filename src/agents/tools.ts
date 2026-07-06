@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
 import {
@@ -26,8 +26,22 @@ type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
 // Structural Component shape. Avoid importing pi-tui's `Component` type: its
 // barrel re-exports it with a `.ts` specifier that tsc (moduleResolution
 // "Bundler") cannot resolve, so `import { type Component }` fails to typecheck.
-function emptyToolRender(): { render: (width: number) => string[]; invalidate: () => void } {
+type ToolRenderComponent = { render: (width: number) => string[]; invalidate: () => void };
+
+function emptyToolRender(): ToolRenderComponent {
   return { render: () => [], invalidate() {} };
+}
+
+function boundedToolRender(lines: string[] | (() => string[]), ellipsis: string): ToolRenderComponent {
+  return {
+    invalidate() {},
+    render(width: number): string[] {
+      const safeWidth = Math.max(0, width - 2);
+      if (safeWidth <= 0) return [];
+      const rendered = typeof lines === "function" ? lines() : lines;
+      return rendered.map((line) => truncateToWidth(line, safeWidth, ellipsis));
+    },
+  };
 }
 
 // Builds pi-hive's five custom tools as plain, reusable ToolDefinition objects
@@ -146,8 +160,11 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     },
     renderCall(args: unknown, theme: any) {
       const agent = (args as any).agent || "?";
-      const task = String((args as any).task || "");
-      return new Text(theme.fg("toolTitle", theme.bold("delegate_agent ")) + agentColored(agent, theme) + theme.fg("dim", ` — ${task.slice(0, 80)}`), 0, 0);
+      const task = truncateMiddle(String((args as any).task || ""), 500);
+      const line = theme.fg("toolTitle", theme.bold("delegate_agent ")) +
+        agentColored(agent, theme) +
+        theme.fg("dim", task ? ` — ${task}` : "");
+      return boundedToolRender([line], theme.fg("dim", "…"));
     },
     renderResult(result: any, options: ToolRenderOptions, theme: any) {
       const details = result.details as any;
@@ -159,8 +176,11 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       if (options.isPartial || details?.status === "running") return emptyToolRender();
       const ok = details?.status === "done";
       const header = theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} `) + agentColored(agent, theme) + theme.fg("dim", ` ${Math.round((details?.elapsed || 0) / 1000)}s`);
-      if (options.expanded && details?.outputPreview) return new Text(`${header}\n${theme.fg("muted", truncateMiddle(details.outputPreview, 4000))}`, 0, 0);
-      return new Text(header, 0, 0);
+      if (options.expanded && details?.outputPreview) {
+        const preview = theme.fg("muted", truncateMiddle(details.outputPreview, 4000));
+        return boundedToolRender([header, preview], theme.fg("dim", "…"));
+      }
+      return boundedToolRender([header], theme.fg("dim", "…"));
     },
   }),
 
