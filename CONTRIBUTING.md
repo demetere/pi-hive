@@ -88,6 +88,40 @@ editing.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logging,
   no unexplained temporary behavior.
 
+## Releasing (maintainers)
+
+`pi-hive` is distributed two ways, and publishing to npm is what lists it in the
+[pi.dev package gallery](https://pi.dev/packages) (the gallery indexes npm packages
+carrying the `pi-package` keyword — there is no separate submission step).
+
+Releases are triggered by **publishing a GitHub Release**. That runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which checks out
+the release tag, re-runs `just ci`, and then `npm publish --provenance`.
+
+```sh
+# 1. Bump the version and push the commit (no tag yet):
+npm version <patch|minor|major> --no-git-tag-version
+git commit -am "chore: release vX.Y.Z" && git push
+
+# 2. Publish a GitHub Release whose tag matches the new version:
+gh release create vX.Y.Z --generate-notes
+```
+
+You can also publish an existing tag manually (e.g. if the release event doesn't
+fire): `gh workflow run Release -f tag=vX.Y.Z`, or via the Actions tab → Release →
+"Run workflow".
+
+The tag (e.g. `v0.1.0`) must match `package.json`'s version, and `just ci` must
+pass, or the workflow fails before publishing — so a broken or mistagged build
+cannot ship. The published tarball ships only the `files` allowlist (runtime code +
+the prebuilt `ui/web/dist/`); dependency folders never ship.
+
+**One-time setup:** add an npm access token that can publish in CI — a **granular**
+token with "bypass 2FA" enabled, or a classic **automation** token — as the
+`NPM_TOKEN` repository secret (Settings → Secrets and variables → Actions). A plain
+publish token fails with a 403 when the account has 2FA-on-publish enabled.
+Publishing to npm is what makes the package appear in the gallery.
+
 ## Security
 
 Do not report vulnerabilities in public issues or PRs. See

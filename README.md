@@ -58,16 +58,26 @@ opposite: **it's config-first, and you own the whole tree.** Nothing runs until
 
 ## Install location & activation
 
-Install from GitHub (recommended):
+Install from GitHub with `pi install` (recommended):
 
 ```sh
-pi install github:demetere/pi-hive
+pi install git:github.com/demetere/pi-hive          # latest main
+pi install git:github.com/demetere/pi-hive@v0.1.0   # pin a tag/commit
 ```
 
-Or install from a local checkout by path:
+`pi install` also accepts the full HTTPS or SSH URL, e.g.
+`pi install https://github.com/demetere/pi-hive` or
+`pi install ssh://git@github.com/demetere/pi-hive`. Pi runs `npm install` for the
+package, so the extension's runtime dependency
+([OpenSpec](https://github.com/Fission-AI/OpenSpec)) is fetched automatically; the
+Pi host packages are declared as peer dependencies and provided by Pi at load time.
 
-```sh
-pi install /path/to/pi-hive
+You can also add it declaratively in Pi's `settings.json`:
+
+```json
+{
+  "packages": ["git:github.com/demetere/pi-hive"]
+}
 ```
 
 For local development, load a checkout temporarily without installing:
@@ -76,7 +86,7 @@ For local development, load a checkout temporarily without installing:
 pi -e .        # from the repository root
 ```
 
-When installed globally, Pi auto-discovers the package for **every** project.
+When installed, Pi auto-discovers the package for **every** project.
 
 For repository-first development, use `just` as the command source of truth:
 
