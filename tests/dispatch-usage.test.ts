@@ -535,3 +535,93 @@ test("first-run delegation_start carries thinkingLevels + effective model (J4/M8
   // The effective model is present (not undefined) on the very first run.
   assert.equal(first.payload.model, "test/model");
 });
+
+// Fix #3 regression: the assembled worker context built by buildWorkerPrompt must
+// be passed to session.prompt() on new/fresh session starts. On resumed sessions
+// (fresh=false, existing transcript) only the lean task must be passed — the
+// transcript already carries the context via pi-hive's native persistence.
+
+// Helper: scripted session that captures the argument passed to prompt().
+// Fires no events (output is "[no output]", exitCode 0) — the test cares only
+// about what reached prompt(), not the session's output.
+function capturePromptSession(): { session: any; getPromptArg: () => string | undefined } {
+  let captured: string | undefined;
+  const session = {
+    subscribe(_cb: (e: any) => void): () => void { return () => undefined; },
+    getAvailableThinkingLevels(): string[] { return ["off"]; },
+    getContextUsage(): { percent: number } { return { percent: 0 }; },
+    getSessionStats(): any { return { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, cost: { total: 0 } }; },
+    state: { errorMessage: undefined as string | undefined },
+    async prompt(arg: string): Promise<void> { captured = arg; },
+    dispose(): void { /* noop */ },
+  };
+  return { session, getPromptArg: () => captured };
+}
+
+test("new session (no prior transcript) receives assembled worker context — shared_context and hive markers present (fix #3a)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-fix3-new-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  // No prior transcript: builder.jsonl does not exist → isNewSession = true.
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      // Inline shared context (no path separator, no extension) so buildSharedContext
+      // renders it as "## Inline shared context\n<text>" — verifiable in the prompt.
+      sharedContext: ["fix3 shared context sentinel"],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", id: "model" }) } } as any;
+  const { session, getPromptArg } = capturePromptSession();
+  const create: CreateAgentSession = (async () => ({ session })) as any;
+
+  await dispatchAgent(state, "Builder", "the-lean-task", ctx, false, create);
+
+  const received = getPromptArg();
+  // The assembled prompt carries the hive operating context header — absent from
+  // any raw task. Proves fix #3 injected the full context on a new session.
+  assert.ok(received?.includes("## Hive operating context"), `assembled context header missing; got: ${received?.slice(0, 300)}`);
+  // Shared context is also present (proves shared_context reaches workers via fix #3).
+  assert.ok(received?.includes("fix3 shared context sentinel"), "shared context sentinel missing from injected prompt");
+  // The lean task is still present, embedded inside the assembled prompt.
+  assert.ok(received?.includes("the-lean-task"), "lean task must be embedded inside the assembled prompt");
+});
+
+test("resumed session (fresh=false, existing transcript) receives only the lean task — no context re-injection (fix #3b)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-fix3-resume-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  // Materialize a valid prior transcript so SessionManager.open() accepts it and
+  // isNewSession resolves to false (resume path). The first JSONL line must be a
+  // pi session header: {type:"session", id:<string>}.
+  writeFileSync(worker.sessionFile, '{"type":"session","id":"prior-session-id","version":"1"}\n');
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config],
+      sharedContext: ["fix3 shared context sentinel"],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]),
+    widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [],
+    sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", id: "model" }) } } as any;
+  const { session, getPromptArg } = capturePromptSession();
+  const create: CreateAgentSession = (async () => ({ session })) as any;
+
+  await dispatchAgent(state, "Builder", "the-lean-task", ctx, false, create);
+
+  const received = getPromptArg();
+  // Resume path: only the lean task must reach session.prompt(). The transcript
+  // already carries the assembled context from the original session start.
+  assert.equal(received, "the-lean-task", "resumed session must receive only the lean task, not the assembled context");
+  assert.ok(!received?.includes("## Hive operating context"), "assembled context must not be re-injected on a resumed session");
+});
