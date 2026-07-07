@@ -264,6 +264,16 @@ export async function dispatchAgent(
   let streamedSnapshot = "";
   const sessionManager = SessionManager.open(runtime.sessionFile);
 
+  // createAgentSession only calls reload() when it creates its own resource
+  // loader (sdk.js). When a loader is supplied by the caller, the SDK skips
+  // reload, leaving extensionsResult empty (constructor default). Without
+  // reload the extensionFactories never run, runner.hasHandlers("tool_call")
+  // is false, beforeToolCall short-circuits, and domain enforcement is silently
+  // bypassed for every worker tool call. Call reload() here so the factory
+  // registers the tool_call handler before the session starts.
+  const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths);
+  await workerLoader.reload();
+
   const { session } = await createSession({
     cwd: ctx.cwd,
     model: resolvedModel,
@@ -272,7 +282,7 @@ export async function dispatchAgent(
     tools: toolNames,
     customTools: hiveTools,
     sessionManager,
-    resourceLoader: workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths),
+    resourceLoader: workerLoader,
   });
   runtime.session = session;
 
