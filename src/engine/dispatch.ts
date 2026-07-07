@@ -195,6 +195,12 @@ export async function dispatchAgent(
   const model = modelFrom(ctx, runtime.config.model);
   const tools = normalizeWorkerTools(runtime.config.tools, state.config.settings.defaultTools);
   const thinking = runtime.config.thinking!;
+  // Fix #3: capture whether a prior transcript exists BEFORE the archive step.
+  // This determines whether this dispatch is a new session (no prior transcript)
+  // or a resume (existing transcript the SDK will replay on prompt()). The value
+  // is used below to decide which input to pass to session.prompt(): the full
+  // assembled worker context (new/fresh) or the lean task alone (resume).
+  const sessionFileExisted = existsSync(runtime.sessionFile);
   // fresh=true starts this agent's conversation clean. Rather than DELETE the
   // prior session (which would lose the transcript of earlier runs while their
   // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
@@ -526,7 +532,16 @@ export async function dispatchAgent(
     // selection; currentChangeId() carries an already-scoped value into nesting.
     const scopedChangeId = currentChangeId() ?? state.activeChangeId;
     if (abortedByParent) throw new Error("aborted");
-    await runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(task)));
+    // Fix #3: inject the assembled worker context on new/fresh session starts.
+    // fresh=true always starts clean (prior transcript archived above, if any).
+    // A first-ever session for this agent (no prior transcript file) also needs
+    // the full context so shared_context and the domain boundary reach the worker.
+    // Resumed sessions (fresh=false, existing transcript) receive the lean task
+    // only — pi-hive's native transcript persistence already carries the context
+    // forward, so re-injecting would duplicate it on every resumed delegation.
+    // Deliberate non-goal: distiller re-injection into resumed workers (P4).
+    const isNewSession = fresh || !sessionFileExisted;
+    await runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task)));
     errorMessage = abortedByParent ? "aborted" : session.state.errorMessage;
     // The 1s timer polls this too, but relying on it alone can miss the final,
     // most accurate reading if the last tick landed moments before completion.
