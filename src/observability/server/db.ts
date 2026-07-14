@@ -36,7 +36,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
+  -- verified = entirely event-derived; legacy-unverified = includes a one-time
+  -- floor captured from pre-projection snapshots whose overlap is unknowable.
+  usage_status TEXT NOT NULL DEFAULT 'verified',
   topology_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -141,6 +145,28 @@ CREATE TABLE IF NOT EXISTS delegations (
 );
 CREATE INDEX IF NOT EXISTS idx_delegations_session ON delegations(session_id, ended_at);
 CREATE INDEX IF NOT EXISTS idx_delegations_cwd ON delegations(cwd, ended_at);
+-- Additive usage ledger. Every authoritative worker delta and orchestrator
+-- message is recorded once by event_id. accounted=0 rows were backfilled at
+-- the legacy cutover and are represented by the session's captured floor; new
+-- rows are accounted directly and make the SQL session totals monotonic.
+CREATE TABLE IF NOT EXISTS usage_events (
+  event_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  source TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  accounted INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id, ts);
+CREATE TABLE IF NOT EXISTS schema_metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tool_calls (
   event_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -262,7 +288,9 @@ try { db.run(`ALTER TABLE sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFA
 try { db.run(`ALTER TABLE sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN usage_status TEXT NOT NULL DEFAULT 'verified'`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN topology_hash TEXT`); } catch { /* column already exists */ }
 // Canonical project identity. Legacy rows are backfilled below from their cwd;
 // malformed or vanished roots remain NULL and therefore cannot be targeted by a
@@ -419,18 +447,12 @@ export const upsertSession = db.query(`
     event_count = sessions.event_count + 1
 `);
 
-// Authoritative token/cost totals for a session, summed across all its agents
-// from the latest state snapshot (B2). Kept separate from the per-event upsert
-// so counters reflect the snapshot's ground truth, not per-event guesses. Never
-// inserts a bare row — a session always exists via the event path first; this
-// only updates an existing row (no-op if the session hasn't been seen yet).
+// Snapshot ingestion updates liveness/topology metadata only. Historical usage
+// is projected from additive usage_events and must never be overwritten by an
+// active runtime snapshot (fresh runs and mode switches can legitimately carry
+// smaller counters than earlier completed runs).
 export const updateSessionStats = db.query(`
   UPDATE sessions SET
-    input_tokens = $input_tokens,
-    output_tokens = $output_tokens,
-    cache_read_tokens = $cache_read_tokens,
-    cache_write_tokens = $cache_write_tokens,
-    cost_usd = $cost_usd,
     topology_hash = COALESCE($topology_hash, topology_hash),
     last_ts = CASE WHEN last_ts IS NULL OR $updated_at > last_ts THEN $updated_at ELSE last_ts END,
     project_id = COALESCE(project_id, $project_id),
@@ -467,6 +489,7 @@ const deleteStateStmt = db.query(`DELETE FROM states WHERE session_id = $id`);
 const deleteSessionStmt = db.query(`DELETE FROM sessions WHERE session_id = $id`);
 const deleteDelegationsStmt = db.query(`DELETE FROM delegations WHERE session_id = $id`);
 const deleteToolCallsStmt = db.query(`DELETE FROM tool_calls WHERE session_id = $id`);
+const deleteUsageEventsStmt = db.query(`DELETE FROM usage_events WHERE session_id = $id`);
 const deleteIngestSourcesStmt = db.query(`DELETE FROM ingest_sources WHERE session_id = $id`);
 
 export function dbEventRow(event: HiveTelemetryEvent) {
@@ -593,6 +616,7 @@ export function deleteSessionRows(ids: string[]): void {
       deleteStateStmt.run({ $id: id });
       deleteDelegationsStmt.run({ $id: id });
       deleteToolCallsStmt.run({ $id: id });
+      deleteUsageEventsStmt.run({ $id: id });
       deleteIngestSourcesStmt.run({ $id: id });
       deleteSessionStmt.run({ $id: id });
     }
@@ -760,6 +784,153 @@ export function materializeDelegationEnd(input: {
   if (res.changes === 0) insertDelegationEndStmt.run(params);
 }
 
+interface UsageProjectionInput {
+  eventId: string;
+  sessionId: string;
+  ts: string;
+  type: string;
+  payload: any;
+}
+
+const insertUsageEventStmt = db.query(`
+  INSERT OR IGNORE INTO usage_events
+    (event_id, session_id, ts, source, input_tokens, output_tokens, cache_read_tokens,
+     cache_write_tokens, reasoning_tokens, cost_usd, accounted)
+  VALUES
+    ($event_id, $session_id, $ts, $source, $input_tokens, $output_tokens,
+     $cache_read_tokens, $cache_write_tokens, $reasoning_tokens, $cost_usd, $accounted)
+`);
+
+const incrementSessionUsageStmt = db.query(`
+  UPDATE sessions SET
+    input_tokens = input_tokens + $input_tokens,
+    output_tokens = output_tokens + $output_tokens,
+    cache_read_tokens = cache_read_tokens + $cache_read_tokens,
+    cache_write_tokens = cache_write_tokens + $cache_write_tokens,
+    reasoning_tokens = reasoning_tokens + $reasoning_tokens,
+    cost_usd = cost_usd + $cost_usd
+  WHERE session_id = $session_id
+`);
+
+function nonnegativeUsage(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// Project only additive, authoritative usage sources. Legacy delegation_end
+// runtime snapshots are cumulative and intentionally excluded. Returns true
+// when this event type carried a usable projection (including all-zero usage).
+export function projectUsageEvent(input: UsageProjectionInput, accounted = true): boolean {
+  const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
+  let usage: any;
+  let source: string;
+  if (input.type === "delegation_end") {
+    const delta = payload.delta;
+    if (Number(payload.delegationsSchema) < 1 || !delta || typeof delta !== "object") return false;
+    usage = delta;
+    source = "worker_delta";
+  } else if (input.type === "orchestrator_message") {
+    if (!payload.usage || typeof payload.usage !== "object") return false;
+    usage = payload.usage;
+    source = "orchestrator_message";
+  } else {
+    return false;
+  }
+  const values = {
+    inputTokens: nonnegativeUsage(usage.inputTokens ?? usage.input),
+    outputTokens: nonnegativeUsage(usage.outputTokens ?? usage.output),
+    cacheReadTokens: nonnegativeUsage(usage.cacheReadTokens ?? usage.cacheRead),
+    cacheWriteTokens: nonnegativeUsage(usage.cacheWriteTokens ?? usage.cacheWrite),
+    reasoningTokens: nonnegativeUsage(usage.reasoningTokens ?? usage.reasoning),
+    costUsd: nonnegativeUsage(usage.costUsd ?? usage.cost),
+  };
+  const inserted = insertUsageEventStmt.run({
+    $event_id: input.eventId,
+    $session_id: input.sessionId,
+    $ts: input.ts,
+    $source: source,
+    $input_tokens: values.inputTokens,
+    $output_tokens: values.outputTokens,
+    $cache_read_tokens: values.cacheReadTokens,
+    $cache_write_tokens: values.cacheWriteTokens,
+    $reasoning_tokens: values.reasoningTokens,
+    $cost_usd: values.costUsd,
+    $accounted: accounted ? 1 : 0,
+  });
+  if (inserted.changes > 0 && accounted) {
+    incrementSessionUsageStmt.run({
+      $session_id: input.sessionId,
+      $input_tokens: values.inputTokens,
+      $output_tokens: values.outputTokens,
+      $cache_read_tokens: values.cacheReadTokens,
+      $cache_write_tokens: values.cacheWriteTokens,
+      $reasoning_tokens: values.reasoningTokens,
+      $cost_usd: values.costUsd,
+    });
+  }
+  return true;
+}
+
+// One-time cutover for databases created before the event-derived projection.
+// Historical authoritative rows are retained in usage_events for audit/prune,
+// but marked unaccounted because they may overlap the old snapshot totals. The
+// session receives the larger of the old snapshot and known-event totals as an
+// explicitly unverified floor; all post-cutover rows then add monotonically.
+function backfillUsageProjection(): void {
+  const done = db.query(`SELECT value FROM schema_metadata WHERE key = 'usage_projection_v1'`).get() as any;
+  if (done) return;
+  const tx = db.transaction(() => {
+    const existingSessions = db.query(`
+      SELECT session_id, event_count, input_tokens, output_tokens, cache_read_tokens,
+             cache_write_tokens, reasoning_tokens, cost_usd FROM sessions
+    `).all() as any[];
+    const events = db.query(`
+      SELECT event_id, session_id, ts, type, json(payload_json) AS payload_json
+      FROM events WHERE type IN ('delegation_end', 'orchestrator_message') ORDER BY rowid
+    `).all() as any[];
+    for (const event of events) {
+      let payload: any = {};
+      try { payload = JSON.parse(event.payload_json || "{}"); } catch { /* corrupt legacy payload: not verifiable */ }
+      projectUsageEvent({
+        eventId: event.event_id, sessionId: event.session_id, ts: event.ts,
+        type: event.type, payload,
+      }, false);
+    }
+    for (const session of existingSessions) {
+      const known = db.query(`
+        SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+               COALESCE(SUM(output_tokens),0) AS output_tokens,
+               COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
+               COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,
+               COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
+               COALESCE(SUM(cost_usd),0) AS cost_usd
+        FROM usage_events WHERE session_id = $session_id
+      `).get({ $session_id: session.session_id }) as any;
+      db.run(`
+        UPDATE sessions SET
+          input_tokens = $input_tokens, output_tokens = $output_tokens,
+          cache_read_tokens = $cache_read_tokens, cache_write_tokens = $cache_write_tokens,
+          reasoning_tokens = $reasoning_tokens, cost_usd = $cost_usd,
+          usage_status = 'legacy-unverified'
+        WHERE session_id = $session_id
+      `, {
+        $session_id: session.session_id,
+        $input_tokens: Math.max(nonnegativeUsage(session.input_tokens), nonnegativeUsage(known?.input_tokens)),
+        $output_tokens: Math.max(nonnegativeUsage(session.output_tokens), nonnegativeUsage(known?.output_tokens)),
+        $cache_read_tokens: Math.max(nonnegativeUsage(session.cache_read_tokens), nonnegativeUsage(known?.cache_read_tokens)),
+        $cache_write_tokens: Math.max(nonnegativeUsage(session.cache_write_tokens), nonnegativeUsage(known?.cache_write_tokens)),
+        $reasoning_tokens: Math.max(nonnegativeUsage(session.reasoning_tokens), nonnegativeUsage(known?.reasoning_tokens)),
+        $cost_usd: Math.max(nonnegativeUsage(session.cost_usd), nonnegativeUsage(known?.cost_usd)),
+      } as any);
+    }
+    db.run(`INSERT INTO schema_metadata (key, value) VALUES ('usage_projection_v1', $value)`, {
+      $value: new Date().toISOString(),
+    } as any);
+  });
+  tx();
+}
+backfillUsageProjection();
+
 export function materializeToolStart(input: { eventId: string; sessionId: string; cwd?: string; agent?: string; toolName?: string; toolCallId?: string; argsPreview?: string; startedAt: string }): void {
   insertToolStartStmt.run({
     $event_id: input.eventId, $session_id: input.sessionId, $cwd: input.cwd ?? null, $agent: input.agent ?? null,
@@ -861,14 +1032,17 @@ export interface SessionSummaryRow {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  reasoning_tokens: number;
   cost_usd: number;
+  usage_status: string;
   topology_hash: string | null;
 }
 
 export function querySessionSummaries(): SessionSummaryRow[] {
   return db.query(`
     SELECT session_id, project_id, canonical_root, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count,
-           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, topology_hash
+           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+           cost_usd, usage_status, topology_hash
     FROM sessions
     ORDER BY last_ts DESC
   `).all() as SessionSummaryRow[];
@@ -947,7 +1121,21 @@ export function pruneOlderThan(cutoffIso: string): { events: number; sessions: n
     events = Number(before?.n || 0);
     db.run(`DELETE FROM delegations WHERE ended_at IS NOT NULL AND ended_at < $cutoff`, { $cutoff: cutoffIso } as any);
     db.run(`DELETE FROM tool_calls WHERE started_at IS NOT NULL AND started_at < $cutoff`, { $cutoff: cutoffIso } as any);
+    db.run(`DELETE FROM usage_events WHERE ts < $cutoff`, { $cutoff: cutoffIso } as any);
     db.run(`DELETE FROM events WHERE ts < $cutoff`, { $cutoff: cutoffIso } as any);
+    // Prune is the one operation allowed to lower historical totals. Once old
+    // rows are intentionally removed, normalize every remaining usage row into
+    // the projection and rebuild session totals exactly from that retained set.
+    db.run(`UPDATE usage_events SET accounted = 1`);
+    db.run(`
+      UPDATE sessions SET
+        input_tokens = COALESCE((SELECT SUM(u.input_tokens) FROM usage_events u WHERE u.session_id = sessions.session_id), 0),
+        output_tokens = COALESCE((SELECT SUM(u.output_tokens) FROM usage_events u WHERE u.session_id = sessions.session_id), 0),
+        cache_read_tokens = COALESCE((SELECT SUM(u.cache_read_tokens) FROM usage_events u WHERE u.session_id = sessions.session_id), 0),
+        cache_write_tokens = COALESCE((SELECT SUM(u.cache_write_tokens) FROM usage_events u WHERE u.session_id = sessions.session_id), 0),
+        reasoning_tokens = COALESCE((SELECT SUM(u.reasoning_tokens) FROM usage_events u WHERE u.session_id = sessions.session_id), 0),
+        cost_usd = COALESCE((SELECT SUM(u.cost_usd) FROM usage_events u WHERE u.session_id = sessions.session_id), 0)
+    `);
   });
   tx();
   if (sessionsToDelete.length) deleteSessionRows(sessionsToDelete);

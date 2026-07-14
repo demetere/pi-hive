@@ -181,6 +181,8 @@ export interface TelemetrySessionSummary {
   tokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  reasoningTokens?: number;
   cost: number;
+  usageStatus?: "verified" | "legacy-unverified";
   topologyHash?: string;
 }
