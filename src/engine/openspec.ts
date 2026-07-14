@@ -378,6 +378,13 @@ export type ApprovalAuthority = "automated-review" | "human";
 export type ApprovalLedger = Partial<Record<ArtifactId, ArtifactVerdict>>;
 export type AgentReviewLedger = Partial<Record<ArtifactId, AgentReviewVerdict>>;
 
+export class StaleArtifactApprovalError extends Error {
+  constructor(artifactId: ArtifactId) {
+    super(`Artifact ${artifactId} changed after the review session was created`);
+    this.name = "StaleArtifactApprovalError";
+  }
+}
+
 export interface ApprovalRecord {
   schemaVersion: typeof APPROVAL_SCHEMA_VERSION;
   authority: ApprovalAuthority;
@@ -596,7 +603,7 @@ export function readAgentReviewLedger(cwd: string, name: string): AgentReviewLed
 // This function is called only from the trusted dashboard review hook. A green
 // human approval requires a current eligible automated record and current green
 // approvals for every direct upstream artifact.
-export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui"): boolean {
+export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui", expectedArtifactHash?: string): boolean {
   const id = toArtifactId(artifact);
   if (!id || !isSafeChangeId(name)) throw new Error(`Invalid approval target: ${name}/${artifact}`);
   if (verdict === null) {
@@ -608,6 +615,7 @@ export function setArtifactApproval(cwd: string, name: string, artifact: string,
   const identity = approvalIdentity(cwd);
   const hash = artifactHash(cwd, name, id);
   if (!hash) throw new Error(`Cannot approve missing, unsafe, or oversized artifact: ${id}`);
+  if (expectedArtifactHash && hash !== expectedArtifactHash) throw new StaleArtifactApprovalError(id);
   const automated = currentAutomatedRecord(cwd, name, id);
   if (verdict === "green") {
     if (!automated || (automated.verdict !== "green" && automated.verdict !== "yellow")) {

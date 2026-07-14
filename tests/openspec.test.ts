@@ -127,6 +127,20 @@ test("content-bound automated and human records are separate and versioned", () 
   assert.ok(Number.isFinite(Date.parse(human.timestamp)));
 });
 
+test("approval persistence rejects a review-session hash after concurrent content change", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# reviewed\n");
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "green", "Plan Reviewer");
+  const reviewedHash = openspec.artifactHash(cwd, "add-auth", "proposal")!;
+  writeFileSync(join(dir, "proposal.md"), "# changed concurrently\n");
+  assert.throws(
+    () => openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green", "dashboard-human", reviewedHash),
+    openspec.StaleArtifactApprovalError,
+  );
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), null);
+});
+
 test("legacy project sidecars never open execution", () => {
   const cwd = scratch();
   const dir = changeDir(cwd);

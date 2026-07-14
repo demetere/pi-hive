@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { handleReviewSurface, registerReviewSurface, renderReviewInput, type ReviewContext, type ReviewInput, type ReviewSurface } from "../../engine/review";
+import { handleReviewSurface, isAuthorizedReviewMutation, registerReviewSurface, renderReviewInput, type ReviewContext, type ReviewInput, type ReviewSurface } from "../../engine/review";
 import { parseRid } from "../../engine/review";
 import * as openspec from "../../engine/openspec";
 import { insertPlanVerdict } from "./db";
@@ -45,7 +45,7 @@ const surface: ReviewSurface | null = registerReviewSurface({
       if (!cwd || !openspec.changeExists(cwd, parsed.change)) return null;
       return { cwd, change: parsed.change, artifact: parsed.artifact };
     },
-    onApprove(ctx, input) {
+    onApprove(ctx, input, expectedArtifactHash) {
       const feedback = renderReviewInput(input);
       const agentVerdict = latestAgentVerdict(ctx);
       if (agentVerdict !== "green" && agentVerdict !== "yellow") {
@@ -56,18 +56,12 @@ const surface: ReviewSurface | null = registerReviewSurface({
         // approve attempt. Do not persist a red UI verdict and do not route it as
         // planner revision feedback, or the live session falsely says the human
         // rejected the plan.
-        enqueueDashboardAction(ctx.cwd, {
-          type: "plan_review_not_ready",
-          changeId: ctx.change,
-          artifact: ctx.artifact,
-          feedback: gateFeedback,
-        });
-        return;
+        return { ok: false as const, error: gateFeedback };
       }
       // Persist authority first. If the atomic write fails, the exception
       // reaches the request handler; no success verdict or unblock action is
       // recorded. This both advances planning and, for tasks, may open execution.
-      openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "green");
+      openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "green", "dashboard-human", expectedArtifactHash);
       recordVerdict(ctx, "green", feedback);
       // Unblock the live session: the artifact's gate is satisfied; the planner
       // proceeds to the next authorable artifact (or /hive-execute once tasks
@@ -81,15 +75,16 @@ const surface: ReviewSurface | null = registerReviewSurface({
         readyToExecute: tasks && openspec.isReadyToExecute(ctx.cwd, ctx.change),
         feedback: feedback || undefined,
       });
+      return { ok: true as const };
     },
-    onDeny(ctx, input) {
+    onDeny(ctx, input, expectedArtifactHash) {
       // Structured feedback: the top-level note PLUS each inline annotation
       // ("on <quote>: <comment>") so the planner gets anchored, per-location
       // guidance instead of a single blob.
       const feedback = renderReviewInput(input);
       // Persist authority before display history or planner actions. A denial
       // removes downstream human records; write failures propagate fail-closed.
-      openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "red");
+      openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "red", "dashboard-human", expectedArtifactHash);
       recordVerdict(ctx, "red", feedback);
       // Route the structured feedback back to the planning agent.
       enqueueDashboardAction(ctx.cwd, {
@@ -99,6 +94,7 @@ const surface: ReviewSurface | null = registerReviewSurface({
         feedback: feedback || "Artifact rejected by reviewer.",
         annotationCount: input.annotations.length,
       });
+      return { ok: true as const };
     },
   },
 });
@@ -108,9 +104,13 @@ export function planReviewAvailable(): boolean {
   return surface !== null;
 }
 
-// Dispatch a request to the plan-review surface. Returns null if the path is not
-// part of the surface (server continues its own routing). Applies no token check
-// — the surface enforces same-origin at the caller; see review.ts.
+// Capability check used by the server's method gate before routing review
+// mutations. Full freshness/body validation and nonce consumption happen in the
+// handler itself.
+export function isAuthorizedPlanReviewMutation(req: Request, url: URL): boolean {
+  return surface ? isAuthorizedReviewMutation(surface, req, url) : false;
+}
+
 export async function handlePlanReview(req: Request, url: URL): Promise<Response | null> {
   if (!surface) return null;
   return handleReviewSurface(surface, req, url);

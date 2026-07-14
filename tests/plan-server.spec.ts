@@ -79,15 +79,22 @@ test("resolveProjectCwd rejects an unknown cwd and echoes a known one", () => {
   expect(bridge.resolveProjectCwd(fallback)).toBe(fallback);
 });
 
+const REVIEW_ORIGIN = "http://127.0.0.1:43191";
+const REVIEW_HEADERS = { host: "127.0.0.1:43191", origin: REVIEW_ORIGIN };
+
 async function approveProposal(changeId: string, activeProject: string) {
-  const rid = encodeURIComponent(`${changeId}#proposal.md`);
-  const cwd = encodeURIComponent(activeProject);
-  const req = new Request("http://127.0.0.1:43191/api/approve", {
+  const rid = `${changeId}#proposal.md`;
+  const mint = new Request(`${REVIEW_ORIGIN}/review-sessions`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      referer: `http://127.0.0.1:43191/pl-review/?rid=${rid}&cwd=${cwd}`,
-    },
+    headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}/` },
+    body: JSON.stringify({ rid, cwd: activeProject }),
+  });
+  const minted = await review.handlePlanReview(mint, new URL(mint.url));
+  expect(minted?.status).toBe(201);
+  const { reviewUrl } = await minted!.json() as { reviewUrl: string };
+  const req = new Request(`${REVIEW_ORIGIN}/api/approve`, {
+    method: "POST",
+    headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}${reviewUrl}` },
     body: JSON.stringify({ feedback: "looks good" }),
   });
   return review.handlePlanReview(req, new URL(req.url));
@@ -111,7 +118,7 @@ test("review approval ignores legacy SQLite-only agent verdicts", async () => {
 
   try {
     const res = await approveProposal(changeId, activeProject);
-    expect(res?.status).toBe(200);
+    expect(res?.status).toBe(409);
     expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBeNull();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -153,7 +160,7 @@ test("review approval does not borrow SQLite verdicts for another artifact", asy
 
   try {
     const res = await approveProposal(changeId, activeProject);
-    expect(res?.status).toBe(200);
+    expect(res?.status).toBe(409);
     expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBeNull();
   } finally {
     rmSync(dir, { recursive: true, force: true });

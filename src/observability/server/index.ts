@@ -25,7 +25,7 @@ import {
 } from "./runtime";
 import { listPlans, planDetail, planFile } from "./plan-routes";
 import { resolveProjectCwd } from "./plan-bridge";
-import { handlePlanReview } from "./review-wiring";
+import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wiring";
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
 
 function json(data: unknown, status = 200) {
@@ -56,33 +56,22 @@ Bun.serve({
   async fetch(req: Request) {
     const url = new URL(req.url);
 
-    // Self-hosted Plannotator plan-review surface (/pl-review/ + its /api/*).
-    // Handled BEFORE the bearer-token write gate because the prebuilt review
-    // client hardcodes absolute /api/... fetches and cannot attach our token;
-    // the surface is instead guarded by same-origin (the iframe is on our own
-    // origin) and only claims /api/* whose Referer is the review mount. A
-    // cross-origin caller is rejected here so the token exemption stays scoped
-    // to genuine same-origin review traffic.
-    if (url.pathname === "/pl-review/" || url.pathname.startsWith("/pl-review/") || url.pathname.startsWith("/api/")) {
-      if (!isSameOriginRequest(req, url)) {
-        // Only block if this actually belongs to the review surface; otherwise
-        // fall through so the normal API keeps its own gates.
-        const review = url.pathname.startsWith("/pl-review/")
-          ? json({ error: "cross-origin blocked" }, 403)
-          : null;
-        if (review) return review;
-      } else {
-        const review = await handlePlanReview(req, url);
-        if (review) return review;
-      }
-    }
+    // Method-based write gate: every mutation clears authentication before any
+    // route hook runs. Review decisions may use a previously bearer-minted,
+    // content-bound capability; there is no pre-gate review API bypass.
+    const reviewCapability = isAuthorizedPlanReviewMutation(req, url);
 
     // Method-based write gate (J7/Decision 3), in one testable helper (M8c): any
     // method other than GET/HEAD must clear same-origin + the bearer token, once,
     // before any routing — closing the hole where a future PUT/PATCH endpoint
     // would land outside a per-route check.
-    const gated = writeGateResponse(req, url, DAEMON_TOKEN, (error, status) => json({ error }, status));
+    const gated = writeGateResponse(req, url, DAEMON_TOKEN, (error, status) => json({ error }, status), reviewCapability);
     if (gated) return gated;
+
+    // Review HTML, session minting, and the vendored client's /api/* requests
+    // are routed only after the method gate. Non-review /api requests fall through.
+    const review = await handlePlanReview(req, url);
+    if (review) return review;
 
     if (req.method === "POST") {
       // POST /prune  { olderThanDays }  — explicit age-based cleanup (J1).
@@ -155,7 +144,11 @@ Bun.serve({
     // Same-origin bootstrap: hand the write token to the app (Phase D). Safe as
     // a same-origin GET — the token never appears in a URL or in cached HTML.
     // The browser attaches it as the Bearer header on POST/DELETE.
-    if (url.pathname === "/bootstrap.json") return json({ token: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null });
+    if (url.pathname === "/bootstrap.json") {
+      const response = json({ token: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null });
+      response.headers.set("cache-control", "no-store");
+      return response;
+    }
 
     if (url.pathname === "/health") return json({
       ok: true,

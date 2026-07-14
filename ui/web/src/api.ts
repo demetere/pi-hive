@@ -364,3 +364,21 @@ export async function fetchPlanFile(changeId: string, path: string, cwd?: string
     return { content: null, error: true };
   }
 }
+
+export interface ReviewSessionResult { reviewUrl: string; expiresAt: string; }
+export async function createReviewSession(rid: string, cwd?: string): Promise<ReviewSessionResult | null> {
+  try {
+    const res = await writeFetch("/review-sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rid, cwd }),
+    });
+    if (!res.ok) return null;
+    const body = await res.json() as Partial<ReviewSessionResult>;
+    return typeof body.reviewUrl === "string" && typeof body.expiresAt === "string"
+      ? { reviewUrl: body.reviewUrl, expiresAt: body.expiresAt }
+      : null;
+  } catch {
+    return null;
+  }
+}
