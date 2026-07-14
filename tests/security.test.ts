@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite, writeGateResponse } from "../src/observability/security.ts";
+import { hasExpectedHost, isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite, writeGateResponse } from "../src/observability/security.ts";
 
 function req(headers: Record<string, string> = {}): Request {
   return new Request("http://127.0.0.1:43191/events", { headers });
@@ -12,6 +12,13 @@ function reqM(method: string, headers: Record<string, string> = {}, path = "/eve
 }
 
 const url = new URL("http://127.0.0.1:43191/events");
+
+test("dashboard Host guard rejects alternate authorities and headerless requests", () => {
+  assert.equal(hasExpectedHost(req({ host: "127.0.0.1:43191" }), "127.0.0.1:43191"), true);
+  assert.equal(hasExpectedHost(req({ host: "localhost:43191" }), "127.0.0.1:43191"), false);
+  assert.equal(hasExpectedHost(req({ host: "evil.example:43191" }), "127.0.0.1:43191"), false);
+  assert.equal(hasExpectedHost(req(), "127.0.0.1:43191"), false);
+});
 
 test("dashboard same-origin guard allows local/direct requests", () => {
   assert.equal(isSameOriginRequest(req(), url), true);

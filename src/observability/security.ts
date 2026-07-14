@@ -1,3 +1,8 @@
+export function hasExpectedHost(req: Request, expectedHost: string): boolean {
+  const actual = req.headers.get("host")?.trim().toLowerCase();
+  return Boolean(actual) && actual === expectedHost.trim().toLowerCase();
+}
+
 export function isSameOriginRequest(req: Request, url: URL): boolean {
   const origin = req.headers.get("origin");
   if (origin && origin !== url.origin) return false;

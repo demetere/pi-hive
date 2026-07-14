@@ -209,7 +209,10 @@ This is not wired to a third-party observability server. See [`SECURITY.md`](SEC
 Runtime knobs are hive-specific:
 
 - `HIVE_TELEMETRY_PORT` — dashboard port, default `43191`
-- `HIVE_TELEMETRY_HOST` — dashboard host, default `127.0.0.1`
+- `HIVE_TELEMETRY_HOST` — dashboard host, default `127.0.0.1`; non-loopback values are rejected
+- `HIVE_TELEMETRY_ALLOW_NON_LOOPBACK=1` — dangerous explicit opt-in for network binding; use only with an understood exposure model
 - `HIVE_TELEMETRY_NO_OPEN=1` — start the server without opening a browser
 - `HIVE_TELEMETRY_REGISTRY` — override the global session registry path
 - `HIVE_TELEMETRY_DB` — override the local SQLite database path
+
+Dashboard startup is serialized across Pi processes. A session adopts a daemon only when `/health` reports the same protocol, package/build, registry, and database identity; compatible upgrades restart stale same-storage daemons, while a daemon using different storage is never adopted. Host headers must exactly match the configured listener origin.
