@@ -84,10 +84,10 @@ function warnOnPlanningExecutionAgents(planning: HiveTeam | undefined): void {
 
 function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): void {
   if (!agent) return;
-  // agent-type/stages/commit live in the agent's .md frontmatter (like
+  // agent-type/stages/network/commit live in the agent's .md frontmatter (like
   // model/thinking) but must be validated at the config layer, so copy them
   // onto the config node whenever the node itself does not already set them.
-  const needsEnrich = !agent.slug || !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.commit === undefined;
+  const needsEnrich = !agent.slug || !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.network === undefined || agent.commit === undefined;
   if (agent.path && needsEnrich) {
     const promptPath = resolveProjectPath(cwd, agent.path);
     const raw = promptPath ? safeRead(promptPath.canonicalPath) : "";
@@ -98,6 +98,7 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       if (!agent.thinking && attrs.thinking) agent.thinking = String(attrs.thinking).trim();
       if (agent.agentType === undefined) agent.agentType = normalizeAgentType(attrs.agentType) as AgentConfig["agentType"];
       if (agent.stages === undefined) agent.stages = normalizePlanStages(attrs.stages) as AgentConfig["stages"];
+      if (agent.network === undefined && attrs.network !== undefined) agent.network = attrs.network;
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
     }
   }

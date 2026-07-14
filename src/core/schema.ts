@@ -92,6 +92,9 @@ function validateAgentType(agent: AgentConfig, label: string) {
       }
     });
   }
+  if (agent.network !== undefined && typeof agent.network !== "boolean") {
+    throw new Error(`${label}.network must be true or false when provided.`);
+  }
   if (agent.commit !== undefined && (typeof agent.commit !== "string" || !agent.commit.trim())) {
     throw new Error(`${label}.commit must be a non-empty string when provided.`);
   }

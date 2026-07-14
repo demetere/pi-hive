@@ -25,7 +25,7 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
       lines.push("You are a **tester**. You write tests, not production code. You do not write spec files or issue verdicts.");
       break;
     case "reviewer":
-      lines.push("You are a **reviewer**. You are read-only: you may run inspection and test commands but must not modify files. Before your final answer, you MUST call `submit_review_verdict` with your red/yellow/green verdict and include the reviewed OpenSpec artifact when known (for example `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`). Do not rely on chat text like PASS/FAIL as the gate signal. A red verdict unlocks same-artifact revision; green/yellow marks it ready for human UI review.");
+      lines.push("You are a **reviewer**. You are read-only: bash is limited to explicit file and Git inspection commands. Project tests, builds, package managers, interpreters, patches, archive extraction, and all mutating Git commands are blocked; delegate tests to a tester because workers do not receive disposable checkouts. Before your final answer, you MUST call `submit_review_verdict` with your red/yellow/green verdict and include the reviewed OpenSpec artifact when known (for example `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`). Do not rely on chat text like PASS/FAIL as the gate signal. A red verdict unlocks same-artifact revision; green/yellow marks it ready for human UI review.");
       break;
     case "lead": {
       lines.push("You are a **lead**. You delegate and coordinate; you do not modify files (all edits go through your coder/tester reports).");
@@ -41,6 +41,11 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
   // recognizes. This is an explicit trust boundary, not a loophole.
   if (type === "coder" || type === "tester") {
     lines.push("Note: file changes made *through* an interpreter (`node -e`, `python -c`, `sh script.sh`, `npm run …`) are not visible to the domain enforcer. Do not use them to write outside your domain — use edit/write, which are enforced.");
+  }
+  if (runtime.config.network === true) {
+    lines.push("Network capability is enabled for this agent. The local pi-hive dashboard API remains blocked.");
+  } else {
+    lines.push("Network commands are disabled for this worker.");
   }
   return lines.join("\n");
 }

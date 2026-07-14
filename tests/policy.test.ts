@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classify } from "../src/engine/file-class.ts";
 import { checkPlannerStages, checkTypePolicy } from "../src/engine/policy.ts";
-import { bashMutationKind, enforceDomainForTool, isCommitCommand } from "../src/engine/domain.ts";
+import { bashMutationKind, enforceDomainForTool, isCommitCommand, readOnlyCommandDecision } from "../src/engine/domain.ts";
 import { runAsAgent } from "../src/engine/session.ts";
 import { buildOperatingContract } from "../src/engine/prompts.ts";
 import type { AgentRuntime, AgentType, HiveState, PlanStage } from "../src/core/types.ts";
@@ -141,6 +141,7 @@ test("isCommitCommand closes the parsing bypasses (G2)", () => {
   assert.equal(isCommitCommand("git -C /repo commit -m x"), true);
   assert.equal(isCommitCommand("git -c user.name=x commit -m y"), true);
   assert.equal(isCommitCommand("git --git-dir=/r/.git commit"), true);
+  assert.equal(isCommitCommand("git --git-dir /r/.git --work-tree /r commit"), true);
   assert.equal(isCommitCommand("git -C /repo -c a=b push"), true);
   // command / env wrappers.
   assert.equal(isCommitCommand("command git commit"), true);
@@ -167,6 +168,12 @@ test("bashMutationKind classifies the previously-missed mutators (G1)", () => {
   assert.equal(bashMutationKind("rsync -a src/ dst/"), "upsert");
   assert.equal(bashMutationKind("install -m 0755 bin/x /usr/local/bin/x"), "upsert");
   assert.equal(bashMutationKind("awk -i inplace '{print}' file.txt"), "upsert");
+  for (const command of [
+    "git merge feature", "command git merge feature", "env GIT_OPTIONAL_LOCKS=0 git rebase main", "git cherry-pick abc", "git revert abc",
+    "git reset --hard", "git checkout main", "git switch main", "git stash", "git apply fix.patch",
+    "git -C ./repo am fix.patch", "git --git-dir=./repo/.git --work-tree=./repo add .",
+    "patch -p1 ./fix.patch", "tar -xf ./bundle.tar", "tar xf ./bundle.tar", "unzip ./bundle.zip", "7z x ./bundle.7z", "npm install", "cargo install ripgrep",
+  ]) assert.equal(bashMutationKind(command), "upsert", command);
   // Read-only stays read.
   assert.equal(bashMutationKind("git status"), "read");
   assert.equal(bashMutationKind("find . -name '*.ts'"), "read");
@@ -247,24 +254,70 @@ test("enforce: both layers must pass — in-domain but wrong type still blocked,
   assert.match(block(state, "Dev", { toolName: "write", input: { path: "server/x.ts" } }) ?? "", /cannot modify/); // domain layer
 });
 
-test("enforce: commit gate blocks without commit field, allows with it", () => {
-  const noCommit = stateWith([runtime("Lead", { agentType: "lead", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
-  assert.match(block(noCommit, "Lead", { toolName: "bash", input: { command: "git commit -m wip" } }) ?? "", /cannot run commit\/publish/);
+test("enforce: commit gate requires both a write-capable type and commit guidance", () => {
+  const noCommit = stateWith([runtime("Dev", { agentType: "coder", domain: [{ path: ".", read: true, upsert: true, delete: false }] })]);
+  assert.match(block(noCommit, "Dev", { toolName: "bash", input: { command: "git commit -m wip" } }) ?? "", /cannot run commit\/publish/);
 
-  const withCommit = stateWith([runtime("Lead", { agentType: "lead", commit: "commit when green", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
-  assert.equal(block(withCommit, "Lead", { toolName: "bash", input: { command: "git commit -m wip" } }), undefined);
+  const withCommit = stateWith([runtime("Dev", { agentType: "coder", commit: "commit when green", domain: [{ path: ".", read: true, upsert: true, delete: false }] })]);
+  assert.equal(block(withCommit, "Dev", { toolName: "bash", input: { command: "git commit -m wip" } }), undefined);
+
+  const readOnly = stateWith([runtime("Lead", { agentType: "lead", commit: "commit when green", domain: [{ path: ".", read: true, upsert: true, delete: true }] })]);
+  assert.match(block(readOnly, "Lead", { toolName: "bash", input: { command: "git commit -m wip" } }) ?? "", /not an allowed inspection operation/);
 });
 
-test("enforce: git merge allowed regardless of commit field", () => {
-  const state = stateWith([runtime("Lead", { agentType: "lead", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
-  // git merge is non-mutating from a commit standpoint and reads only → allowed.
-  assert.equal(block(state, "Lead", { toolName: "bash", input: { command: "git merge feature" } }), undefined);
+test("enforce: read-only agents allow inspection Git and deny repository mutations", () => {
+  const domain = [{ path: ".", read: true, upsert: false, delete: false }];
+  for (const agentType of ["reviewer", "lead"] as const) {
+    const state = stateWith([runtime("Audit", { agentType, domain })]);
+    for (const command of ["git status", "git diff -- ./src", "git -C . log -5", "git --git-dir . --work-tree . status"]) {
+      assert.equal(block(state, "Audit", { toolName: "bash", input: { command } }), undefined, `${agentType} should inspect: ${command}`);
+    }
+    for (const command of ["git merge feature", "git rebase main", "git cherry-pick abc", "git revert abc", "git reset --hard", "git checkout main", "git switch main", "git stash", "git apply fix.patch", "git am fix.patch", "git clean -fd", "git restore ./src/app.ts"]) {
+      assert.match(block(state, "Audit", { toolName: "bash", input: { command } }) ?? "", /not an allowed inspection operation/, `${agentType} must block: ${command}`);
+    }
+  }
 });
 
-test("enforce: reviewer may run non-mutating inspection bash but not mutating bash", () => {
+test("enforce: reviewer shell surface is an explicit inspection allowlist", () => {
   const state = stateWith([runtime("Rev", { agentType: "reviewer", domain: [{ path: ".", read: true, upsert: false, delete: false }] })]);
-  assert.equal(block(state, "Rev", { toolName: "bash", input: { command: "grep -r foo ./src" } }), undefined);
-  assert.match(block(state, "Rev", { toolName: "bash", input: { command: "touch src/x.ts" } }) ?? "", /may not upsert/);
+  assert.equal(block(state, "Rev", { toolName: "bash", input: { command: "grep -r foo ./src | head -20" } }), undefined);
+  for (const command of ["touch src/x.ts", "node -e 'inspect()'", "npm test", "just test", "patch -p1 ./fix.patch", "tar xf ./bundle.tar", "unzip ./bundle.zip", "npm install", "mystery ./src", "", "echo $(cat ./src/x.ts)"]) {
+    assert.match(block(state, "Rev", { toolName: "bash", input: { command } }) ?? "", /cannot run this shell command/, `must block: ${command}`);
+  }
+});
+
+ test("read-only command classifier is table-driven and fail-closed", () => {
+  const cases: Array<[string, boolean]> = [
+    ["ls -la ./src", true],
+    ["find ./src -name '*.ts'", true],
+    ["git show HEAD:src/app.ts", true],
+    ["git -C ./nested diff", true],
+    ["git --git-dir=./.git --work-tree=. ls-files", true],
+    ["git -c alias.status='!touch /tmp/pwn' status", false],
+    ["git diff --output=./diff.txt", false],
+    ["git diff --textconv", false],
+    ["find ./src -exec touch {} ;", false],
+    ["sort -o ./sorted ./input", false],
+    ["less ./src/x.ts", false],
+    ["python -c 'print(1)'", false],
+    ["sh ./script.sh", false],
+    ["cat ./src/x.ts > ./copy.ts", false],
+    ["gc", false],
+  ];
+  for (const [command, expected] of cases) {
+    assert.equal(readOnlyCommandDecision(command).ok, expected, command);
+  }
+});
+
+ test("network capability is opt-in and dashboard loopback remains blocked", () => {
+  const domain = [{ path: ".", read: true, upsert: false, delete: false }];
+  const denied = stateWith([runtime("Rev", { agentType: "reviewer", domain })]);
+  assert.match(block(denied, "Rev", { toolName: "bash", input: { command: "curl -fsS https://example.com/status" } }) ?? "", /network access is not enabled/);
+
+  const allowed = stateWith([runtime("Rev", { agentType: "reviewer", network: true, domain })]);
+  assert.equal(block(allowed, "Rev", { toolName: "bash", input: { command: "curl -fsS https://example.com/status" } }), undefined);
+  assert.match(block(allowed, "Rev", { toolName: "bash", input: { command: "curl http://127.0.0.1:43191/api/sessions" } }) ?? "", /dashboard loopback API/);
+  assert.match(block(allowed, "Rev", { toolName: "bash", input: { command: "curl -o ./out https://example.com" } }) ?? "", /limited to read-only/);
 });
 
 test("enforce: pathless mutating bash is blocked fail-safe (L3)", () => {
@@ -276,7 +329,7 @@ test("enforce: pathless mutating bash is blocked fail-safe (L3)", () => {
   assert.match(reason ?? "", /without explicit in-domain paths/);
   // A reviewer hits the type layer first (no mutation at all), also blocked.
   const rev = stateWith([runtime("Rev", { agentType: "reviewer", domain: codeDomain })]);
-  assert.match(block(rev, "Rev", { toolName: "bash", input: { command: "rm -rf *" } }) ?? "", /may not/);
+  assert.match(block(rev, "Rev", { toolName: "bash", input: { command: "rm -rf *" } }) ?? "", /cannot run this shell command/);
   // Sanity: a mutating bash WITH an in-domain path is allowed for the coder.
   assert.equal(block(state, "Dev", { toolName: "bash", input: { command: "rm -rf src/tmp" } }), undefined);
 });
