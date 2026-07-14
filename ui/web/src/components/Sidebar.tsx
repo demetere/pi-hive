@@ -107,14 +107,14 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex flex-col gap-[3px]" role="tablist" aria-label="Dashboard sections">
+      <nav className="flex flex-col gap-[3px]" aria-label="Dashboard sections">
         {nav.map((t) => {
           const on = activeTab === t.id;
           return (
             <button
               key={t.id}
-              role="tab"
-              aria-selected={on}
+              type="button"
+              aria-current={on ? "page" : undefined}
               onClick={() => setActiveTab(t.id)}
               className={`flex items-center gap-[11px] px-[11px] py-2.5 rounded-[11px] text-[13.5px] cursor-pointer text-left border-0 transition-[background,color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 ${
                 on ? "text-brand bg-brand-bg font-semibold" : "text-ink-dim bg-transparent font-medium hover:text-ink hover:bg-well"
@@ -151,7 +151,9 @@ export default function Sidebar() {
           const on = theme === mode;
           return (
             <button
+              type="button"
               key={mode}
+              aria-pressed={on}
               onClick={() => setTheme(mode)}
               className={`flex-1 text-center py-[7px] rounded-lg cursor-pointer border-0 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50 ${
                 on ? "bg-raise text-ink font-semibold" : "bg-transparent text-ink-dim font-medium"

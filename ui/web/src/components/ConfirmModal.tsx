@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 import { useHive } from "../store";
 import { clearConfirm } from "../store/raw";
@@ -9,6 +9,8 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 export default function ConfirmModal() {
   const state = useHive((s) => s.confirm);
   const [busy, setBusy] = useState(false);
+  const titleId = useId();
+  const messageId = useId();
   const trapRef = useFocusTrap<HTMLDivElement>(!!state);
 
   function close() { if (!busy) clearConfirm(); }
@@ -22,7 +24,6 @@ export default function ConfirmModal() {
     function onKey(e: KeyboardEvent) {
       if (!state) return;
       if (e.key === "Escape") { if (!busy) clearConfirm(); }
-      if (e.key === "Enter") go();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -35,13 +36,13 @@ export default function ConfirmModal() {
   if (!state) return null;
   return createPortal(
     <div className="modal-backdrop confirm-backdrop" onClick={close}>
-      <div ref={trapRef} className="confirm-card" role="alertdialog" aria-modal="true" aria-label={state.title} onClick={(e) => e.stopPropagation()}>
-        <div className={`confirm-icon ${state.danger ? "danger" : ""}`}>{state.danger ? "🗑" : "?"}</div>
-        <h3 className="confirm-title">{state.title}</h3>
-        <div className="confirm-msg">{state.message}</div>
+      <div ref={trapRef} className="confirm-card" role="alertdialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={messageId} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
+        <div className={`confirm-icon ${state.danger ? "danger" : ""}`} aria-hidden="true">{state.danger ? "🗑" : "?"}</div>
+        <h3 id={titleId} className="confirm-title">{state.title}</h3>
+        <div id={messageId} className="confirm-msg">{state.message}</div>
         <div className="confirm-actions">
-          <button className="btn pill" disabled={busy} onClick={close}>Cancel</button>
-          <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={busy} onClick={go}>
+          <button type="button" className="btn pill" disabled={busy} onClick={close}>Cancel</button>
+          <button type="button" className={`btn ${state.danger ? "danger" : "primary"}`} disabled={busy} onClick={go}>
             {busy ? "Deleting…" : (state.confirmLabel || "Confirm")}
           </button>
         </div>

@@ -13,7 +13,7 @@ export default function Replay({ sessionId }: { sessionId: string }) {
   if (!active) {
     return (
       <div className="flex items-center gap-2">
-        <button className="rounded-lg border border-line bg-well px-3 py-1.5 text-[12px] font-medium text-ink hover:bg-panel" onClick={() => void enterReplay(sessionId)}>
+        <button type="button" className="rounded-lg border border-line bg-well px-3 py-1.5 text-[12px] font-medium text-ink hover:bg-panel" onClick={() => void enterReplay(sessionId)}>
           ▶ Replay session
         </button>
       </div>
@@ -32,7 +32,7 @@ function ReplayControls() {
       <div className="rounded-xl border border-line bg-panel p-4">
         <div className="flex items-center justify-between">
           <b className="text-[13px]">Loading replay…</b>
-          <button className="text-ink-dim text-[12px] hover:text-ink" onClick={exitReplay}>✕ close</button>
+          <button type="button" className="text-ink-dim text-[12px] hover:text-ink" onClick={exitReplay}>✕ close</button>
         </div>
         <div className="text-ink-dim text-[12px] mt-2">{loadedCount} events loaded</div>
       </div>
@@ -44,7 +44,7 @@ function ReplayControls() {
       <div className="rounded-xl border border-line bg-panel p-4">
         <div className="flex items-center justify-between">
           <b className="text-[13px]">No events to replay</b>
-          <button className="text-ink-dim text-[12px] hover:text-ink" onClick={exitReplay}>✕ close</button>
+          <button type="button" className="text-ink-dim text-[12px] hover:text-ink" onClick={exitReplay}>✕ close</button>
         </div>
       </div>
     );
@@ -57,7 +57,7 @@ function ReplayControls() {
     <div className="rounded-xl border border-line bg-panel p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <b className="text-[13px]">Replay transport · event {cursor + 1} / {events.length}</b>
-        <button className="text-ink-dim text-[12px] hover:text-ink" onClick={exitReplay}>✕ exit replay</button>
+        <button type="button" className="text-ink-dim text-[12px] hover:text-ink" onClick={exitReplay}>✕ exit replay</button>
       </div>
 
       {truncatedStart && (
@@ -68,12 +68,12 @@ function ReplayControls() {
 
       {/* Transport controls */}
       <div className="flex items-center gap-3">
-        <button className="rounded-md border border-line bg-well px-3 py-1 text-[13px] font-mono" onClick={() => (playing ? pauseReplay() : playReplay())}>
-          {playing ? "❚❚" : "▶"}
+        <button type="button" aria-label={playing ? "Pause replay" : "Play replay"} className="rounded-md border border-line bg-well px-3 py-1 text-[13px] font-mono" onClick={() => (playing ? pauseReplay() : playReplay())}>
+          <span aria-hidden="true">{playing ? "❚❚" : "▶"}</span>
         </button>
         <div className="flex items-center gap-1">
           {([1, 10, 60] as const).map((sp) => (
-            <button key={sp} className={`rounded-md px-2 py-1 text-[11px] font-mono ${speed === sp ? "bg-brand text-white" : "bg-well text-ink-dim"}`} onClick={() => setReplaySpeed(sp)}>
+            <button type="button" key={sp} aria-pressed={speed === sp} aria-label={`Replay speed ${sp} times`} className={`replay-speed rounded-md px-2 py-1 text-[11px] font-mono ${speed === sp ? "active bg-brand" : "bg-well text-ink-dim"}`} onClick={() => setReplaySpeed(sp)}>
               {sp}×
             </button>
           ))}
@@ -90,6 +90,7 @@ function ReplayControls() {
         onChange={(e) => seekReplay(Number(e.target.value))}
         className="w-full accent-[var(--brand)]"
         aria-label="Replay position"
+        aria-valuetext={`Event ${cursor + 1} of ${events.length}${curTs ? `, ${curTs.toLocaleTimeString()}` : ""}`}
       />
     </div>
   );
