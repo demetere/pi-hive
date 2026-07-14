@@ -9,7 +9,6 @@ import { reloadTeam } from "../engine/session";
 import { enforceDomainForTool } from "../engine/domain";
 import { buildOrchestratorPrompt } from "../agents/prompts";
 import { applyMode, captureNormalTools, installHeader, updateWidget } from "../ui/tui/widget";
-import { installHiveFooter, registerFooterHooks } from "../ui/tui/footer";
 import { clearHiveActivityWidget } from "../ui/tui/activity";
 import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
@@ -19,8 +18,6 @@ import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engi
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export function registerHooks(pi: ExtensionAPI, state: HiveState) {
-  registerFooterHooks(pi, state);
-
   // toolCallId → startedAt for the orchestrator's own tool calls, so
   // orchestrator_tool_end can carry durationMs the same way workers do (J5).
   // Bounded by in-flight calls: entries are deleted on tool_result.
@@ -369,11 +366,6 @@ ${catalog}`,
       logRecord(state, { from: "System", type: "system", message: "Session started" });
       captureNormalTools(state);
       applyMode(state, ctx, "normal", { notify: false });
-      // Other globally-installed footer extensions may also handle session_start.
-      // Reinstall Hive's footer after the session_start dispatch settles so
-      // hive-configured projects keep the Hive-extended footer instead of the
-      // last generic footer that happened to register.
-      if (ctx.mode === "tui") setTimeout(() => installHiveFooter(state, ctx), 0);
       // Ensure the shared, global telemetry dashboard daemon is running. This
       // hook only fires for hive-opted-in projects (the extension registers
       // nothing otherwise), so the opt-in gate is satisfied. Fire-and-forget and
@@ -419,7 +411,6 @@ ${catalog}`,
     state.onRuntimeFinish = undefined;
     if (ctx.mode === "tui") {
       ctx.ui.setHeader(undefined);
-      ctx.ui.setFooter(undefined);
       ctx.ui.setWidget("hive-tree", undefined);
       clearHiveActivityWidget(state);
     }

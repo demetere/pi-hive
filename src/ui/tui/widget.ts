@@ -8,7 +8,6 @@ import type { HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
 import { startHiveTelemetrySession } from "../../engine/observability";
 import { recordQuestion } from "../../engine/questions";
-import { installHiveFooter, requestHiveFooterRender } from "./footer";
 import { updateHiveActivityWidget } from "./activity";
 
 // Surface a delegated planner's promoted clarifying question to the human. With
@@ -160,7 +159,6 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
   }
 
   installHeader(state, ctx);
-  installHiveFooter(state, ctx);
   if (ctx.hasUI) {
     ctx.ui.setStatus("hive", modeStatusText(state, mode));
     // Hive has its own live activity widget. Pi's generic streaming loader can
@@ -169,7 +167,6 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     // that generic row only while Hive/Plan mode is active; restore it in normal.
     if (ctx.mode === "tui") ctx.ui.setWorkingVisible(mode === "normal");
   }
-  requestHiveFooterRender();
 
   if (mode === "normal") {
     state.pi.setActiveTools(state.normalToolNames);
@@ -225,7 +222,6 @@ export function updateWidget(state: HiveState) {
   state.widgetCtx.ui.setWidget("hive-tree", undefined);
   updateHiveActivityWidget(state);
   installHeader(state, state.widgetCtx);
-  requestHiveFooterRender();
 }
 
 // Cycle normal → plan → hive → normal.
