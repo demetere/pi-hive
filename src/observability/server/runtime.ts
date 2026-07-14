@@ -27,6 +27,7 @@ import {
   materializeDelegationStart,
   materializeToolEnd,
   materializeToolStart,
+  projectUsageEvent,
   maxEventCursor,
   querySessionSummaries,
   recentEvents,
@@ -382,12 +383,8 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
   snapshots.set(snapshot.session_id, snapshot);
   const topologyHashValue = versionTopology(snapshot);
   if (topologyHashValue) (snapshot as any).topology_hash = topologyHashValue;
-  // Authoritative token/cost totals: sum across ALL agents (never Math.max —
-  // that was the bug at runtime.ts:293). The main session and in-flight agents
-  // are included via the snapshot's agents list (A5).
-  const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
-  const sum = (pick: (a: HiveStateSnapshot["agents"] extends (infer T)[] ? T : never) => number) =>
-    agents.reduce((total, agent) => total + (pick(agent as any) || 0), 0);
+  // Runtime counters stay in the snapshot for live agent detail only. Historical
+  // session totals are projected from completed worker/message usage events.
   // Slim the persisted state: store runtime counters + topology_hash instead of
   // the embedded topologies (C3). Read-time rehydration joins topology_versions,
   // so rendering always uses the version the session actually ran under (this
@@ -427,11 +424,6 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
     });
     updateSessionStats.run({
       $session_id: snapshot.session_id,
-      $input_tokens: sum((a) => Number(a.inputTokens)),
-      $output_tokens: sum((a) => Number(a.outputTokens)),
-      $cache_read_tokens: sum((a) => Number(a.cacheReadTokens)),
-      $cache_write_tokens: sum((a) => Number(a.cacheWriteTokens)),
-      $cost_usd: sum((a) => Number(a.costUsd)),
       $topology_hash: topologyHashValue || null,
       $updated_at: snapshot.updated_at,
       $project_id: snapshot.project_id || null,
@@ -504,6 +496,13 @@ function ingestEvent(event: HiveTelemetryEvent): { event: HiveTelemetryEvent; cu
   upsertSession.run(dbSessionRowFromEvent(event));
   materializePlanEvent(event);
   materializeTypedEvent(event);
+  projectUsageEvent({
+    eventId: event.event_id,
+    sessionId: event.session_id || "unknown",
+    ts: event.ts,
+    type: event.type,
+    payload: event.payload,
+  });
   return { event, cursor: Number(result.lastInsertRowid) };
 }
 
@@ -727,7 +726,9 @@ export function sessionSummaries(): TelemetrySessionSummary[] {
       tokens: Number(row.input_tokens || 0) + Number(row.output_tokens || 0),
       cacheReadTokens: Number(row.cache_read_tokens || 0),
       cacheWriteTokens: Number(row.cache_write_tokens || 0),
+      reasoningTokens: Number(row.reasoning_tokens || 0),
       cost: Number(row.cost_usd || 0),
+      usageStatus: row.usage_status === "legacy-unverified" ? "legacy-unverified" : "verified",
       topologyHash: row.topology_hash || undefined,
     };
   });

@@ -148,7 +148,9 @@ export interface SessionSummary {
   tokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  reasoningTokens?: number;
   cost?: number;
+  usageStatus?: "verified" | "legacy-unverified";
   topologyHash?: string;
 }
 export async function fetchSessionSummaries(): Promise<SessionSummary[]> {

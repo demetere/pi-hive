@@ -162,8 +162,12 @@ export default function Sessions(props: { search: string }) {
               <td className="muted-cell">{absTime(s.first_ts)}</td>
               <td className="num">{s.running}</td>
               <td className="num">{countOf(s)}</td>
-              <td className="num">{fmtNum(s.tokens)}</td>
-              <td className="num">{fmtCost(s.cost)}</td>
+              <td className="num" title={s.usageStatus === "legacy-unverified" ? "Legacy estimate: pre-migration totals could not be fully verified" : "Event-derived historical total"}>
+                {s.usageStatus === "legacy-unverified" ? "≈" : ""}{fmtNum(s.tokens)}
+              </td>
+              <td className="num" title={s.usageStatus === "legacy-unverified" ? "Legacy estimate: pre-migration totals could not be fully verified" : "Event-derived historical total"}>
+                {s.usageStatus === "legacy-unverified" ? "≈" : ""}{fmtCost(s.cost)}
+              </td>
               <td className="num muted-cell"><RelTime ts={s.last_ts} /></td>
               <td className="del-col" onClick={(e) => e.stopPropagation()}>
                 <button className="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>

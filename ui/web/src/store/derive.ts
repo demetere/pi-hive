@@ -1,6 +1,6 @@
 import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView } from "../types";
 import { projectName, sessionSlug } from "../lib/format";
-import { applyHistoryToRuntime, buildHistoryBySession, historyTotals as totalsFromHistory, type HistPeak } from "./history";
+import { applyHistoryToRuntime, buildHistoryBySession, type HistPeak } from "./history";
 import { buildEventStatus } from "./status";
 import { buildAgents, flattenTopology } from "./topology";
 import { sessionStore, sessionUpdatedAt } from "./identity";
@@ -47,7 +47,7 @@ function projectFields(source: ProjectFields, sessionId: string) {
   return { key, label };
 }
 
-function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, ProjectFields & { first_ts?: string; last_ts?: string; event_count?: number; tokens?: number; cost?: number }>): SessionView[] {
+function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, ProjectFields & { first_ts?: string; last_ts?: string; event_count?: number; tokens?: number; cost?: number; usageStatus?: "verified" | "legacy-unverified" }>): SessionView[] {
   const present = new Set<string>();
 
   const ensure = (id: string, source: ProjectFields = {}, ts?: string): SessionView => {
@@ -121,27 +121,19 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
   // tokens/cost/event_count come straight from the DB. Skipped once real
   // events/snapshots arrive for it (ensure() already created the richer row).
   for (const [id, sum] of summaries) {
-    if (sessionStore.has(id) && present.has(id)) {
-      const current = ensure(id, sum, sum.last_ts || sum.first_ts);
-      if (sum.project_root) current.project_root = sum.project_root;
-      if (sum.project_label) current.project_label = sum.project_label;
-      continue;
-    }
     const v = ensure(id, sum, sum.last_ts || sum.first_ts);
+    if (sum.project_root) v.project_root = sum.project_root;
+    if (sum.project_label) v.project_label = sum.project_label;
     if (!v.cwd && sum.cwd) v.cwd = sum.cwd;
     if (sum.first_ts && (!v.first_ts || sum.first_ts < v.first_ts)) v.first_ts = sum.first_ts;
     if (sum.last_ts && sum.last_ts > v.last_ts) v.last_ts = sum.last_ts;
-    if (!v.event_count && sum.event_count) v.event_count = sum.event_count;
-    if (!v.tokens && sum.tokens) v.tokens = sum.tokens;
-    if (!v.cost && sum.cost) v.cost = sum.cost;
-  }
-
-  // history backstop (never under-report vs the persisted log)
-  for (const id of present) {
-    const v = sessionStore.get(id)!;
-    const h = totalsFromHistory(historyBySession, id);
-    v.tokens = Math.max(v.tokens, h.tokens);
-    v.cost = Math.max(v.cost, h.cost);
+    if (sum.event_count != null) v.event_count = sum.event_count;
+    // SQL usage_events is the sole historical authority. Live snapshots remain
+    // useful for per-agent status, but fresh runs/mode switches may reset their
+    // counters and must never lower or replace completed historical usage.
+    if (sum.tokens != null) v.tokens = sum.tokens;
+    if (sum.cost != null) v.cost = sum.cost;
+    v.usageStatus = sum.usageStatus;
   }
 
   // Event-driven status overlay: the topology reflects events instantly. Apply

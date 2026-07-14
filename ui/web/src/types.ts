@@ -39,6 +39,7 @@ export interface SessionView {
   active?: number; // running + waiting (used for liveness)
   tokens: number;
   cost: number;
+  usageStatus?: "verified" | "legacy-unverified";
   live: boolean;
   topology?: Topology;
   topologies?: TeamTopologies;

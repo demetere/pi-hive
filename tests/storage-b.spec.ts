@@ -112,17 +112,22 @@ test("queryDelegations/queryToolCalls honor the after cursor (I1)", () => {
   expect(tPage2.every((r) => r.cursor > tPage1[tPage1.length - 1].cursor)).toBe(true);
 });
 
-test("session stats update sums (never Math.max) and is SQL-readable (B2)", () => {
+test("session usage is event-derived while snapshots update metadata only (B2/T14)", () => {
   db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "x", session_id: "s2", ts: "2026-07-01T02:00:00.000Z", cwd: "/proj2", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.projectUsageEvent({
+    eventId: "s2-worker", sessionId: "s2", ts: "2026-07-01T02:05:00.000Z", type: "delegation_end",
+    payload: { delegationsSchema: 1, delta: { inputTokens: 300, outputTokens: 80, cacheReadTokens: 400, cacheWriteTokens: 10, costUsd: 0.08 } },
+  });
   db.updateSessionStats.run({
-    $session_id: "s2", $input_tokens: 300, $output_tokens: 80, $cache_read_tokens: 400, $cache_write_tokens: 10,
-    $cost_usd: 0.08, $topology_hash: "hash123", $updated_at: "2026-07-01T02:10:00.000Z", $project_id: null, $canonical_root: null, $cwd: "/proj2", $session_dir: null, $telemetry_log: null,
+    $session_id: "s2", $topology_hash: "hash123", $updated_at: "2026-07-01T02:10:00.000Z",
+    $project_id: null, $canonical_root: null, $cwd: "/proj2", $session_dir: null, $telemetry_log: null,
   });
   const summary = db.querySessionSummaries().find((s) => s.session_id === "s2")!;
   expect(summary.input_tokens).toBe(300);
   expect(summary.output_tokens).toBe(80);
   expect(summary.cache_read_tokens).toBe(400);
   expect(summary.cost_usd).toBeCloseTo(0.08);
+  expect(summary.usage_status).toBe("verified");
   expect(summary.topology_hash).toBe("hash123");
 });
 
