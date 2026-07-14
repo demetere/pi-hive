@@ -4,7 +4,7 @@ import { closeSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { withCrossProcessFileLock } from "../src/core/file-lock.ts";
+import { withCrossProcessFileLock, withCrossProcessFileLockAsync } from "../src/core/file-lock.ts";
 
 function runWriter(resource: string, value: string): Promise<void> {
   const script = `
@@ -31,6 +31,19 @@ test("cross-process file lock preserves every concurrent registry-style append",
   await Promise.all(Array.from({ length: 8 }, (_, index) => runWriter(resource, `row-${index}`)));
   const rows = readFileSync(resource, "utf8").trim().split("\n").sort();
   assert.deepEqual(rows, Array.from({ length: 8 }, (_, index) => `row-${index}`).sort());
+});
+
+test("async file lock serializes same-process awaiters without blocking the holder", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-lock-async-"));
+  const resource = join(dir, "daemon-startup");
+  const order: number[] = [];
+  await Promise.all(Array.from({ length: 10 }, (_, index) =>
+    withCrossProcessFileLockAsync(resource, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      order.push(index);
+    }, { timeoutMs: 2_000 })));
+  assert.equal(order.length, 10);
+  assert.equal(new Set(order).size, 10);
 });
 
 test("cross-process file lock recovers stale locks and times out on active locks", () => {

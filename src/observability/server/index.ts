@@ -1,6 +1,10 @@
-import { isSameOriginRequest, writeGateResponse } from "../security";
+import { hasExpectedHost, isSameOriginRequest, writeGateResponse } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
-import { BOOT_SESSION_ID, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST, PORT, PROJECT_CWD, REGISTRY_PATH } from "./config";
+import {
+  BOOT_SESSION_ID, BUILD_HASH, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST,
+  PACKAGE_VERSION, PORT, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH,
+  STARTUP_NONCE, expectedHostHeader,
+} from "./config";
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
 import type { Subscriber } from "./types";
 import {
@@ -56,6 +60,11 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req: Request) {
     const url = new URL(req.url);
+
+    // Reject DNS-rebinding and alternate-host requests before any route,
+    // including health/bootstrap and static assets. The configured listener
+    // origin is the only accepted Host authority.
+    if (!hasExpectedHost(req, expectedHostHeader())) return json({ error: "invalid host" }, 403);
 
     // Method-based write gate: every mutation clears authentication before any
     // route hook runs. Review decisions may use a previously bearer-minted,
@@ -158,6 +167,14 @@ Bun.serve({
       sessions: sessionSummaries().length,
       events: maxEventCursor(),
       cursor: maxEventCursor(),
+      pid: process.pid,
+      protocolVersion: PROTOCOL_VERSION,
+      packageVersion: PACKAGE_VERSION,
+      buildHash: BUILD_HASH,
+      registryPath: REGISTRY_PATH,
+      dbPath: DB_PATH,
+      startupNonce: STARTUP_NONCE,
+      // Legacy display aliases; adoption uses the versioned fields above.
       registry: REGISTRY_PATH,
       db: DB_PATH,
       sources: sourcePaths(),

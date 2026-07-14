@@ -12,6 +12,10 @@ function sleepSync(ms: number): void {
   Atomics.wait(sleepBuffer, 0, 0, ms);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Short cross-process critical sections for shared local metadata. The lock is
 // an adjacent O_EXCL file, so unrelated resources do not block one another.
 // Stale lock recovery handles a process dying between acquire and cleanup.
@@ -52,6 +56,52 @@ export function withCrossProcessFileLock<T>(resourcePath: string, fn: () => T, o
 
   try {
     return fn();
+  } finally {
+    try { closeSync(fd); } catch { /* best effort */ }
+    try { unlinkSync(lockPath); } catch { /* best effort */ }
+  }
+}
+
+// Async variant for startup/lifecycle critical sections. Retry waits yield the
+// event loop, so concurrent callers in the same process cannot deadlock the
+// lock holder while it awaits health checks or subprocess readiness.
+export async function withCrossProcessFileLockAsync<T>(resourcePath: string, fn: () => Promise<T>, options: FileLockOptions = {}): Promise<T> {
+  const lockPath = `${resourcePath}.lock`;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const staleMs = options.staleMs ?? 30_000;
+  const retryMs = options.retryMs ?? 25;
+  const deadline = Date.now() + timeoutMs;
+  let fd: number | undefined;
+
+  while (fd === undefined) {
+    try {
+      const candidate = openSync(lockPath, "wx", 0o600);
+      try {
+        writeFileSync(candidate, `${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`);
+        fd = candidate;
+      } catch (error) {
+        try { closeSync(candidate); } catch { /* best effort */ }
+        try { unlinkSync(lockPath); } catch { /* best effort */ }
+        throw error;
+      }
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > staleMs) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch (statError: any) {
+        if (statError?.code === "ENOENT") continue;
+        throw statError;
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for file lock: ${lockPath}`);
+      await sleep(retryMs);
+    }
+  }
+
+  try {
+    return await fn();
   } finally {
     try { closeSync(fd); } catch { /* best effort */ }
     try { unlinkSync(lockPath); } catch { /* best effort */ }
