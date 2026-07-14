@@ -1,6 +1,6 @@
 # Security model
 
-This document defines pi-hive's security and compatibility invariants. They are release requirements, not claims that every item is already enforced while the audit remediation backlog remains open. Known implementation gaps are tracked in [`docs/AUDIT_REMEDIATION_TASKS.md`](docs/AUDIT_REMEDIATION_TASKS.md).
+This document defines pi-hive's security and compatibility invariants. They are release requirements, not claims that every item is already enforced while the audit remediation backlog remains open. Known implementation gaps remain tracked in the project's local remediation notes until they are resolved.
 
 ## Trust boundaries
 
