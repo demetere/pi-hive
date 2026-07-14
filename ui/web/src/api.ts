@@ -62,6 +62,14 @@ async function jsonOr<T>(request: Promise<Response>, fallback: T): Promise<T> {
   }
 }
 
+async function jsonRequired<T>(request: Promise<Response>, fallbackMessage: string): Promise<T> {
+  const response = await request;
+  let body: any;
+  try { body = await response.json(); } catch { body = null; }
+  if (!response.ok) throw new Error(typeof body?.error === "string" ? body.error : `${fallbackMessage} (${response.status})`);
+  return body as T;
+}
+
 export async function fetchInitialData(): Promise<InitialData> {
   const [ev, st] = await Promise.all([
     jsonOr<Partial<EventPage> & { cursor?: number }>(fetch("/events"), { events: [], nextCursor: 0, highWaterCursor: 0, hasMore: false }),
@@ -428,13 +436,18 @@ export interface PlanDetail {
 
 const cwdQuery = (cwd?: string) => (cwd ? `?cwd=${encodeURIComponent(cwd)}` : "");
 
-export async function fetchPlans(cwd?: string): Promise<PlanSummary[]> {
-  const data = await jsonOr<{ plans: PlanSummary[] }>(fetch(`/plans${cwdQuery(cwd)}`), { plans: [] });
+export async function fetchPlans(cwd?: string, signal?: AbortSignal): Promise<PlanSummary[]> {
+  const data = await jsonRequired<{ plans: PlanSummary[] }>(fetch(`/plans${cwdQuery(cwd)}`, { signal }), "Unable to load OpenSpec changes");
   return data.plans || [];
 }
 
-export async function fetchPlanDetail(changeId: string, cwd?: string): Promise<PlanDetail | null> {
-  return jsonOr<PlanDetail | null>(fetch(`/plans/${encodeURIComponent(changeId)}${cwdQuery(cwd)}`), null);
+export async function fetchPlanDetail(changeId: string, cwd?: string, signal?: AbortSignal): Promise<PlanDetail | null> {
+  try {
+    return await jsonRequired<PlanDetail>(fetch(`/plans/${encodeURIComponent(changeId)}${cwdQuery(cwd)}`, { signal }), "Unable to load OpenSpec change");
+  } catch (error: any) {
+    if (String(error?.message || "").includes("not found")) return null;
+    throw error;
+  }
 }
 
 export interface PlanFileResult { content: string | null; truncated?: boolean; size?: number; error?: boolean; }

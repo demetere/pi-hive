@@ -32,12 +32,25 @@ import { listPlans, planDetail, planFile } from "./plan-routes";
 import { resolveProjectCwd } from "./plan-bridge";
 import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wiring";
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
+import { OpenSpecCommandError } from "../../engine/openspec";
 
 function json(data: unknown, status = 200) {
   return applyBrowserSecurityHeaders(new Response(JSON.stringify(data), {
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store" },
   }), "api");
+}
+
+function openSpecFailure(error: unknown): Response {
+  if (error instanceof OpenSpecCommandError) {
+    const status = error.code === "timeout" ? 504
+      : error.code === "cancelled" ? 499
+        : error.code === "unavailable" ? 503
+          : error.code === "output-limit" ? 413
+            : 502;
+    return json({ error: error.message, code: error.code }, status);
+  }
+  return json({ error: "OpenSpec request failed", code: "failed" }, 500);
 }
 
 function fleetPage(url: URL): { offset: number; limit: number } {
@@ -313,7 +326,10 @@ const server = Bun.serve({
     if (url.pathname === "/plans" || url.pathname.startsWith("/plans/")) {
       const cwd = resolveProjectCwd(url.searchParams.get("cwd"));
       if (!cwd) return json({ error: "unknown project cwd", plans: [] }, url.pathname === "/plans" ? 200 : 400);
-      if (url.pathname === "/plans") return json({ cwd, plans: listPlans(cwd) });
+      if (url.pathname === "/plans") {
+        try { return json({ cwd, plans: await listPlans(cwd, { signal: req.signal }) }); }
+        catch (error) { return openSpecFailure(error); }
+      }
       const fileMatch = url.pathname.match(/^\/plans\/([^/]+)\/file$/);
       if (fileMatch) {
         const changeId = decodeURIComponent(fileMatch[1]);
@@ -324,8 +340,10 @@ const server = Bun.serve({
       const detailMatch = url.pathname.match(/^\/plans\/([^/]+)$/);
       if (detailMatch) {
         const changeId = decodeURIComponent(detailMatch[1]);
-        const detail = planDetail(cwd, changeId);
-        return detail ? json(detail) : json({ error: "not found" }, 404);
+        try {
+          const detail = await planDetail(cwd, changeId, { signal: req.signal });
+          return detail ? json(detail) : json({ error: "not found" }, 404);
+        } catch (error) { return openSpecFailure(error); }
       }
     }
     if (url.pathname === "/stream") {

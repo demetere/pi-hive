@@ -39,8 +39,8 @@ export interface ReviewHooks {
   // Returns null when the change is unknown or the cwd is not a known project.
   resolveContext(rid: string, cwdParam: string | null): ReviewContext | null;
   // A non-ok result means the artifact is not ready and maps to HTTP 409.
-  onApprove(ctx: ReviewContext, input: ReviewInput, expectedArtifactHash: string): ReviewHookResult;
-  onDeny(ctx: ReviewContext, input: ReviewInput, expectedArtifactHash: string): ReviewHookResult;
+  onApprove(ctx: ReviewContext, input: ReviewInput, expectedArtifactHash: string, signal?: AbortSignal): ReviewHookResult | Promise<ReviewHookResult>;
+  onDeny(ctx: ReviewContext, input: ReviewInput, expectedArtifactHash: string, signal?: AbortSignal): ReviewHookResult | Promise<ReviewHookResult>;
 }
 
 // One inline annotation the human left on a specific span of the artifact.
@@ -487,14 +487,18 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
         // into persistence to close the external-writer race between validation
         // and the atomic approval write.
         if (!sessionIsCurrent(session)) return respond(json({ error: "review artifact changed" }, 409, true));
-        const result = approve
-          ? hooks.onApprove(ctx, parsed.value, session.artifactHash)
-          : hooks.onDeny(ctx, parsed.value, session.artifactHash);
+        const result = await (approve
+          ? hooks.onApprove(ctx, parsed.value, session.artifactHash, req.signal)
+          : hooks.onDeny(ctx, parsed.value, session.artifactHash, req.signal));
         if (result.ok === false) return respond(json({ error: result.error }, 409, true));
         session.used = true;
         return respond(json({ ok: true }, 200, true));
       } catch (error) {
         if (error instanceof openspec.StaleArtifactApprovalError) return respond(json({ error: error.message }, 409, true));
+        if (error instanceof openspec.OpenSpecCommandError) {
+          const status = error.code === "timeout" ? 504 : error.code === "cancelled" ? 499 : error.code === "unavailable" ? 503 : 502;
+          return respond(json({ error: error.message, code: error.code }, status, true));
+        }
         return respond(json({ error: "review persistence failed" }, 500, true));
       }
     }
