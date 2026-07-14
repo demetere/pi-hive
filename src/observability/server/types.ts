@@ -8,4 +8,12 @@ export type Source = {
   meta: TelemetryRegistryRow;
   statePath: string;
   stateMtimeMs: number;
+  device?: number;
+  inode?: number;
+  checkpoint?: string;
+  corruptLines: number;
+  pendingTailBytes: number;
+  sourceLagBytes: number;
+  lastSuccessfulIngest?: string;
+  lastError?: string;
 };

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
@@ -18,7 +19,7 @@ import {
   knownCwds,
   type StorageBreakdown,
   ensureSession,
-  getIngestOffset,
+  getIngestSource,
   insertEvent,
   insertPlanVerdict,
   loadPersistedStates,
@@ -29,6 +30,7 @@ import {
   maxEventCursor,
   querySessionSummaries,
   recentEvents,
+  setIngestIdentity,
   setIngestOffset,
   updateSessionStats,
   upsertSession,
@@ -47,6 +49,7 @@ import {
 import { canonicalTopologyJson, explodeTopology, topologyHash } from "./topology-hash";
 import { broadcastEvent, broadcastEventWithId } from "./sse";
 import type { Source } from "./types";
+import { scanJsonlFile } from "./jsonl-reader";
 
 const sources = new Map<string, Source>();
 // Hot cache: latest snapshot per session, for contextPct/lastWork ephemera and
@@ -55,8 +58,41 @@ const sources = new Map<string, Source>();
 const snapshots = new Map<string, HiveStateSnapshot>();
 let started = false;
 
+function fileCheckpoint(file: string, offset: number): string | undefined {
+  if (offset <= 0) return undefined;
+  const length = Math.min(64, offset);
+  const buffer = Buffer.allocUnsafe(length);
+  const fd = fs.openSync(file, "r");
+  try {
+    const bytesRead = fs.readSync(fd, buffer, 0, length, offset - length);
+    if (bytesRead !== length) return undefined;
+    return `${length}:${createHash("sha256").update(buffer).digest("hex")}`;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function sourcePaths(): string[] {
   return Array.from(sources.keys());
+}
+
+export function ingestionHealth() {
+  const rows = Array.from(sources.values()).map((source) => ({
+    path: source.logPath,
+    offset: source.offset,
+    corrupt_lines: source.corruptLines,
+    pending_tail_bytes: source.pendingTailBytes,
+    source_lag_bytes: source.sourceLagBytes,
+    last_successful_ingest: source.lastSuccessfulIngest,
+    last_error: source.lastError,
+  }));
+  return {
+    corrupt_lines: rows.reduce((sum, row) => sum + row.corrupt_lines, 0),
+    pending_tail_bytes: rows.reduce((sum, row) => sum + row.pending_tail_bytes, 0),
+    source_lag_bytes: rows.reduce((sum, row) => sum + row.source_lag_bytes, 0),
+    last_successful_ingest: rows.map((row) => row.last_successful_ingest).filter(Boolean).sort().at(-1),
+    sources: rows,
+  };
 }
 
 // Cursor-ordered event reads, SQL-backed and paginated (B5). No in-memory
@@ -76,9 +112,23 @@ export function addSource(logPath: string, meta: TelemetryRegistryRow = {}) {
     return;
   }
   const statePath = path.resolve(meta.state_file || path.join(path.dirname(abs), "hive-state.json"));
-  // Resume from the persisted byte offset (B4) so boot re-reads only new bytes
-  // instead of replaying the whole JSONL. INSERT OR IGNORE heals any overlap.
-  sources.set(abs, { logPath: abs, offset: getIngestOffset(abs), meta, statePath, stateMtimeMs: 0 });
+  // Resume from the last COMPLETE newline. The persisted device/inode pair lets
+  // readSource distinguish append from rotation, including after daemon restart.
+  const cursor = getIngestSource(abs);
+  sources.set(abs, {
+    logPath: abs,
+    offset: cursor.offset,
+    meta,
+    statePath,
+    stateMtimeMs: 0,
+    device: cursor.device,
+    inode: cursor.inode,
+    checkpoint: cursor.checkpoint,
+    corruptLines: 0,
+    pendingTailBytes: 0,
+    sourceLagBytes: 0,
+    lastSuccessfulIngest: cursor.updatedAt,
+  });
   try {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.closeSync(fs.openSync(abs, "a"));
@@ -109,40 +159,85 @@ export function readRegistry() {
 export function readSource(logPath: string) {
   const source = sources.get(path.resolve(logPath));
   if (!source || !fs.existsSync(source.logPath)) return;
-  const stat = fs.statSync(source.logPath);
-  // Truncation/rewrite (offset past EOF) resets to 0; INSERT OR IGNORE heals the
-  // re-read idempotently.
-  if (stat.size < source.offset) source.offset = 0;
-  if (stat.size === source.offset) return;
-  const fd = fs.openSync(source.logPath, "r");
-  let endOffset = source.offset;
-  try {
-    const len = stat.size - source.offset;
-    const buf = Buffer.alloc(len);
-    fs.readSync(fd, buf, 0, len, source.offset);
-    endOffset = stat.size;
-    const parsed: HiveTelemetryEvent[] = [];
-    for (const line of buf.toString("utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try { parsed.push(enrichEvent(JSON.parse(line), source)); } catch { /* ignore partial/corrupt lines */ }
+  let stat: fs.Stats;
+  try { stat = fs.statSync(source.logPath); }
+  catch (error: any) { source.lastError = String(error?.message || error); return; }
+
+  const missingIdentity = source.device == null || source.inode == null;
+  const rotated = !missingIdentity && (source.device !== stat.dev || source.inode !== stat.ino);
+  const truncated = stat.size < source.offset;
+  let rewritten = false;
+  if (!rotated && source.checkpoint && source.offset > 0 && stat.size >= source.offset) {
+    try { rewritten = fileCheckpoint(source.logPath, source.offset) !== source.checkpoint; }
+    catch { rewritten = true; }
+  }
+  if (rotated || rewritten || truncated) {
+    source.offset = 0;
+    source.checkpoint = undefined;
+  }
+  source.device = stat.dev;
+  source.inode = stat.ino;
+  source.sourceLagBytes = Math.max(0, stat.size - source.offset);
+  source.pendingTailBytes = source.sourceLagBytes;
+
+  // Persist identity even when there are no unread bytes. This makes a future
+  // same-path rotation detectable after a daemon restart without pretending an
+  // event offset advanced outside its insertion transaction.
+  if (stat.size === source.offset) {
+    const needsIdentityPersist = missingIdentity || rotated || rewritten || truncated || (source.offset > 0 && !source.checkpoint);
+    if (!needsIdentityPersist) {
+      source.lastError = undefined;
+      source.pendingTailBytes = 0;
+      source.sourceLagBytes = 0;
+      return;
     }
-    // One transaction per batch: all event writes + projections + the offset
-    // advance commit or roll back together (B4). This makes boot O(new bytes)
-    // and cuts per-event fsync on bursts. New events are collected for SSE and
-    // broadcast after the transaction commits.
-    const fresh: Array<{ event: HiveTelemetryEvent; cursor: number }> = [];
-    const sessionId = source.meta?.session_id;
-    db.transaction(() => {
-      for (const event of parsed) {
-        const res = ingestEvent(event);
-        if (res) fresh.push(res);
+    try {
+      const updatedAt = source.lastSuccessfulIngest || new Date().toISOString();
+      source.checkpoint = fileCheckpoint(source.logPath, source.offset);
+      db.transaction(() => setIngestIdentity(source.logPath, source.offset, source.meta?.session_id, updatedAt, { device: stat.dev, inode: stat.ino, checkpoint: source.checkpoint }))();
+      source.lastError = undefined;
+      source.pendingTailBytes = 0;
+      source.sourceLagBytes = 0;
+    } catch (error: any) {
+      source.lastError = String(error?.message || error);
+    }
+    return;
+  }
+
+  try {
+    const result = scanJsonlFile(source.logPath, source.offset, (batch) => {
+      const parsed: HiveTelemetryEvent[] = [];
+      let corrupt = batch.oversizedLines;
+      for (const line of batch.lines) {
+        if (!line.trim()) continue;
+        try { parsed.push(enrichEvent(JSON.parse(line), source)); }
+        catch { corrupt++; }
       }
-      setIngestOffset(source.logPath, endOffset, sessionId, new Date().toISOString());
-    })();
-    source.offset = endOffset;
-    for (const { event, cursor } of fresh) broadcastEventWithId("hive", event, cursor);
-  } finally {
-    fs.closeSync(fd);
+      // Every batch's event writes, projections, and COMPLETE-newline offset are
+      // atomic. A throw leaves that batch replayable from its previous offset.
+      const fresh: Array<{ event: HiveTelemetryEvent; cursor: number }> = [];
+      const ingestedAt = new Date().toISOString();
+      const checkpoint = fileCheckpoint(source.logPath, batch.endOffset);
+      db.transaction(() => {
+        for (const event of parsed) {
+          const inserted = ingestEvent(event);
+          if (inserted) fresh.push(inserted);
+        }
+        setIngestOffset(source.logPath, batch.endOffset, source.meta?.session_id, ingestedAt, { device: stat.dev, inode: stat.ino, checkpoint });
+      })();
+      source.offset = batch.endOffset;
+      source.checkpoint = checkpoint;
+      source.corruptLines += corrupt;
+      source.lastSuccessfulIngest = ingestedAt;
+      source.lastError = undefined;
+      for (const { event, cursor } of fresh) broadcastEventWithId("hive", event, cursor);
+    });
+    source.pendingTailBytes = result.pendingTailBytes;
+    source.sourceLagBytes = Math.max(0, result.fileSize - source.offset);
+  } catch (error: any) {
+    source.lastError = String(error?.message || error);
+    source.sourceLagBytes = Math.max(0, stat.size - source.offset);
+    source.pendingTailBytes = source.sourceLagBytes;
   }
 }
 
