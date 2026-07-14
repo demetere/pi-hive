@@ -1,5 +1,4 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { AgentConfig, HiveState } from "../core/types";
@@ -14,6 +13,7 @@ import { resolveHiveSddStatus } from "../engine/sdd";
 import { ensureDashboard } from "../engine/dashboard";
 import { resolveRuntime } from "../engine/agent-lookup";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
+import { resolveProjectPath } from "../core/safe-path";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -377,7 +377,7 @@ ${catalog}`,
       }).catch(() => { /* best-effort; the dashboard is optional */ });
       const missingSkills = Array.from(state.runtimes.values()).flatMap((runtime) =>
         (runtime.config.skills || [])
-          .filter((ref) => !existsSync(ref.path.startsWith("/") ? ref.path : resolve(ctx.cwd, ref.path)))
+          .filter((ref) => !resolveProjectPath(ctx.cwd, ref.path))
           .map((ref) => `${runtime.config.name}: ${ref.path}`),
       );
       const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";

@@ -7,6 +7,7 @@ import { agentMatches } from "../core/utils";
 import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
 import { checkPlannerStages, checkTypePolicy, type PolicyAction } from "./policy";
+import { hasForeignAbsoluteSyntax, isPathInside, resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 
 function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | undefined {
   return resolveRuntime(state, callerName);
@@ -27,9 +28,7 @@ export function canDelegateTo(state: HiveState, callerName: string, targetName: 
 }
 
 export function pathWithin(parent: string, child: string): boolean {
-  const normalizedParent = resolve(parent);
-  const normalizedChild = resolve(child);
-  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}/`);
+  return isPathInside(parent, child);
 }
 
 export function resolveDomainPath(ctx: ExtensionContext, rawPath: string): string {
@@ -50,10 +49,12 @@ function excludedBy(scope: DomainScope, relativePath: string): boolean {
   return Boolean(scope.exclude?.some((pattern) => globToRegExp(pattern).test(relativePath)));
 }
 
-function domainScopeMatch(ctx: ExtensionContext, scope: DomainScope, target: string): { matches: boolean; specificity: number } {
+function domainScopeMatch(ctx: ExtensionContext, scope: DomainScope, target: string, allowMissing: boolean): { matches: boolean; specificity: number } {
   const scopePath = resolve(ctx.cwd, scope.path);
-  if (!pathWithin(scopePath, target)) return { matches: false, specificity: 0 };
-  const relativePath = toPosixPath(relative(scopePath, target) || ".");
+  if (!resolveProjectPath(ctx.cwd, scope.path, { allowMissing: true })) return { matches: false, specificity: 0 };
+  const contained = resolveContainedPath(scopePath, target, { allowMissing });
+  if (!contained) return { matches: false, specificity: 0 };
+  const relativePath = toPosixPath(relative(scopePath, contained.lexicalPath) || ".");
   if (excludedBy(scope, relativePath)) return { matches: false, specificity: 0 };
   const includeSpecificity = matchingGlobSpecificity(scope.include, relativePath);
   if (includeSpecificity === undefined) return { matches: false, specificity: 0 };
@@ -71,11 +72,12 @@ function domainScopeMatch(ctx: ExtensionContext, scope: DomainScope, target: str
 //   - On an exact specificity tie, DENY wins (fail safe).
 //   - If no scope matches, the default is DENY.
 export function domainAllows(ctx: ExtensionContext, runtime: AgentRuntime, rawPath: string, capability: "read" | "upsert" | "delete"): boolean {
+  if (hasForeignAbsoluteSyntax(rawPath)) return false;
   const target = resolveDomainPath(ctx, rawPath);
   let bestSpecificity = -1;
   let decision = false;
   for (const scope of runtime.config.domain || []) {
-    const match = domainScopeMatch(ctx, scope, target);
+    const match = domainScopeMatch(ctx, scope, target, capability === "upsert");
     if (!match.matches) continue;
     const opinion = scope[capability];
     if (match.specificity > bestSpecificity) {

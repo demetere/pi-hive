@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { allConfiguredAgents, loadConfig } from "../src/core/config.ts";
 import { normalizeDomainScopes } from "../src/core/normalize.ts";
 import { auditAgentTypes, inferAgentType } from "../src/core/agent-type-audit.ts";
-import { buildSharedContext } from "../src/core/prompting.ts";
+import { buildSharedContext, renderKnowledgeRefs } from "../src/core/prompting.ts";
 
 function fixtureProject() {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-config-"));
@@ -93,6 +93,22 @@ test("loadConfig recovers quoted inline shared_context containing a colon", () =
   const rendered = buildSharedContext({ config } as any, { cwd } as any);
   assert.match(rendered, /Inline shared context/);
   assert.match(rendered, /HIPAA-regulated: no TODOs/);
+});
+
+test("shared context and knowledge refs reject symlink escapes", () => {
+  const cwd = fixtureProject();
+  const outside = mkdtempSync(join(tmpdir(), "pi-hive-context-outside-"));
+  writeFileSync(join(outside, "secret.md"), "DO NOT LEAK");
+  symlinkSync(join(outside, "secret.md"), join(cwd, "linked-secret.md"));
+  const config = loadConfig(cwd);
+  config.sharedContext = ["linked-secret.md"];
+
+  const shared = buildSharedContext({ config } as any, { cwd } as any);
+  assert.doesNotMatch(shared, /DO NOT LEAK/);
+  assert.match(shared, /not readable/);
+  const knowledge = renderKnowledgeRefs({ cwd } as any, "Context", [{ path: "linked-secret.md" }]);
+  assert.doesNotMatch(knowledge, /DO NOT LEAK/);
+  assert.match(knowledge, /not readable/);
 });
 
 test("loadConfig rejects non-string shared_context entries before delegation", () => {

@@ -1,8 +1,9 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
 import { validateAgentTypes, validateHiveConfigShape } from "./schema";
+import { resolveProjectPath } from "./safe-path";
 
 // Read an agent's .md frontmatter and copy model/thinking onto the config node
 // when the config itself does not set them. The config tree (from hive-config.
@@ -88,7 +89,8 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
   // onto the config node whenever the node itself does not already set them.
   const needsEnrich = !agent.slug || !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.commit === undefined;
   if (agent.path && needsEnrich) {
-    const raw = safeRead(resolve(cwd, agent.path));
+    const promptPath = resolveProjectPath(cwd, agent.path);
+    const raw = promptPath ? safeRead(promptPath.canonicalPath) : "";
     if (raw) {
       const { attrs } = parseFrontmatter(raw);
       if (!agent.slug && attrs.slug) agent.slug = slug(String(attrs.slug));
@@ -131,7 +133,8 @@ function enrichTeam(cwd: string, team: HiveTeam | undefined): void {
 
 export function loadConfig(cwd: string): HiveConfig {
   const configPath = join(cwd, ".pi", "hive", "hive-config.yaml");
-  const raw = safeRead(configPath);
+  const safeConfigPath = resolveProjectPath(cwd, configPath);
+  const raw = safeConfigPath ? safeRead(safeConfigPath.canonicalPath) : "";
   if (!raw) throw new Error(`Missing config: ${configPath}`);
   const parsed = parseYamlLite(raw) as any;
 

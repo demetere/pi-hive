@@ -1,15 +1,15 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolve } from "node:path";
 import type { DomainScope, HiveState, KnowledgeRef } from "./types";
 import { readIfSmall } from "./utils";
+import { resolveProjectPath } from "./safe-path";
 
 export function buildSharedContext(state: HiveState, ctx: ExtensionContext): string {
   if (!state.config) return "";
   const blocks: string[] = [];
   for (const entry of state.config.sharedContext || []) {
     const text = String(entry);
-    const fullPath = resolve(ctx.cwd, text);
-    const content = readIfSmall(fullPath);
+    const safePath = resolveProjectPath(ctx.cwd, text);
+    const content = safePath ? readIfSmall(safePath.canonicalPath) : "";
     if (content) {
       blocks.push(`## ${text}\n${content}`);
       continue;
@@ -25,8 +25,8 @@ export function buildSharedContext(state: HiveState, ctx: ExtensionContext): str
 export function renderKnowledgeRefs(ctx: ExtensionContext, title: string, refs: KnowledgeRef[] | undefined): string {
   if (!refs?.length) return `## ${title}\nNo configured ${title.toLowerCase()}.`;
   const blocks = refs.map((ref) => {
-    const fullPath = resolve(ctx.cwd, ref.path);
-    const content = readIfSmall(fullPath, 96_000);
+    const safePath = resolveProjectPath(ctx.cwd, ref.path);
+    const content = safePath ? readIfSmall(safePath.canonicalPath, 96_000) : "";
     const body = content || `[not readable: ${ref.path}]`;
     const meta = [
       ref.useWhen ? `use when: ${ref.useWhen}` : undefined,

@@ -1,11 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { resolveContainedPath } from "../core/safe-path";
 
 // The dashboard is a prebuilt React SPA under ui/web/dist. We serve its
 // index.html at "/" and its hashed assets from "/assets/*". If the build is
 // missing (developer hasn't run `just dashboard-build`), we fall back to a short
 // instructional page rather than a blank screen.
-export const DASHBOARD_DIR = path.resolve(import.meta.dir, "..", "..", "ui", "web", "dist");
+export const DASHBOARD_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "ui", "web", "dist");
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -22,9 +24,10 @@ const MIME: Record<string, string> = {
 
 export function dashboardFile(relPath: string): Response | null {
   // Resolve safely inside DASHBOARD_DIR (no path traversal).
-  const target = path.resolve(DASHBOARD_DIR, "." + (relPath.startsWith("/") ? relPath : "/" + relPath));
-  if (!target.startsWith(DASHBOARD_DIR)) return null;
-  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return null;
+  const requested = path.resolve(DASHBOARD_DIR, "." + (relPath.startsWith("/") ? relPath : "/" + relPath));
+  const safeTarget = resolveContainedPath(DASHBOARD_DIR, requested);
+  if (!safeTarget || !fs.statSync(safeTarget.canonicalPath).isFile()) return null;
+  const target = safeTarget.canonicalPath;
   const body = fs.readFileSync(target);
   const ext = path.extname(target).toLowerCase();
   const cacheable = relPath.startsWith("/assets/");

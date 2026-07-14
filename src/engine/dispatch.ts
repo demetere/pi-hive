@@ -31,6 +31,7 @@ import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extens
 import { isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict, type ArtifactId } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
+import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 
 // Dashboard activity should show reviewer/worker conclusions without confusing
 // middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
@@ -84,7 +85,10 @@ function archivePriorRun(sessionFile: string) {
 export type CreateAgentSession = typeof createAgentSession;
 
 export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): string[] {
-  return normalizeWorkerSkillPaths(refs).map((skillPath) => resolve(cwd, skillPath));
+  return normalizeWorkerSkillPaths(refs).flatMap((skillPath) => {
+    const safe = resolveProjectPath(cwd, skillPath);
+    return safe ? [safe.canonicalPath] : [];
+  });
 }
 
 const ARTIFACT_REVISION_MARKERS = /\b(revise|revision|fix|address|correct|update|rewrite|repair|failed review|review failed|rejected|denied|blocker|blocking)\b/i;
@@ -761,8 +765,10 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
 
   // Write guard: the mental-model file must live under the agents/ root.
   const agentsRoot = resolve(ctx.cwd, HIVE_AGENTS_DIR);
-  const targetPath = resolve(ctx.cwd, target.path);
-  if (!targetPath.startsWith(agentsRoot)) return;
+  if (!resolveProjectPath(ctx.cwd, HIVE_AGENTS_DIR, { allowMissing: true })) return;
+  const safeTarget = resolveContainedPath(agentsRoot, resolve(ctx.cwd, target.path), { allowMissing: true });
+  if (!safeTarget) return;
+  const targetPath = safeTarget.canonicalPath;
 
   // Snapshot the just-finished conversation, distill from the copy, then delete
   // it — so a re-delegation of the same agent can reuse its live session freely.

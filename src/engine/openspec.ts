@@ -3,6 +3,7 @@ import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, readIfSmall } from "../core/fs";
+import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 
 // Thin, bounded wrapper around the OpenSpec CLI (@fission-ai/openspec).
 //
@@ -298,7 +299,8 @@ export function validate(cwd: string, name?: string): ValidateResult {
 // is missing.
 export function hasTasks(cwd: string, name: string): boolean {
   if (!isSafeChangeId(name)) return false;
-  const raw = readIfSmall(join(cwd, "openspec", "changes", name, "tasks.md"), MAX_ARTIFACT_BYTES);
+  const tasksPath = resolveArtifact(cwd, name, "tasks.md");
+  const raw = tasksPath ? readIfSmall(tasksPath, MAX_ARTIFACT_BYTES) : "";
   if (!raw.trim()) return false;
   if (/^\s*(?:[-*]|\d+\.)\s*\[[ xX]\]/m.test(raw)) return true;
   const hasTasksHeading = /^#\s+Tasks\b/im.test(raw);
@@ -331,10 +333,12 @@ export function isExecutionGateOpen(cwd: string, name: string): boolean {
 // plan-store.resolveArtifact.
 export function resolveArtifact(cwd: string, name: string, relPath: string): string | null {
   if (!isSafeChangeId(name)) return null;
-  const base = resolve(cwd, "openspec", "changes", name);
-  const target = resolve(base, relPath);
-  if (target !== base && !target.startsWith(`${base}/`)) return null;
-  return target;
+  const baseRequest = resolve(cwd, "openspec", "changes", name);
+  const safeBase = resolveProjectPath(cwd, baseRequest, { allowMissing: true });
+  if (!safeBase) return null;
+  const target = resolve(baseRequest, relPath);
+  const safeTarget = resolveContainedPath(baseRequest, target, { allowMissing: true });
+  return safeTarget?.canonicalPath || null;
 }
 
 // Read an artifact under a change folder, path-guarded and capped at 512 KB.
@@ -411,8 +415,7 @@ type ApprovalSidecar = {
 };
 
 function approvalPath(cwd: string, name: string): string | null {
-  if (!isSafeChangeId(name)) return null;
-  return join(cwd, "openspec", "changes", name, APPROVAL_FILE);
+  return resolveArtifact(cwd, name, APPROVAL_FILE);
 }
 
 function toArtifactId(artifact: string): ArtifactId | null {
@@ -611,7 +614,9 @@ function listSpecArtifacts(cwd: string, name: string, relRoot = "specs"): string
 export function listArtifacts(cwd: string, name: string): string[] {
   if (!isSafeChangeId(name)) return [];
   try {
-    const topLevel = (readdirSync(join(cwd, "openspec", "changes", name), { withFileTypes: true }) as FsDirent[])
+    const changeRoot = resolveArtifact(cwd, name, ".");
+    if (!changeRoot) return [];
+    const topLevel = (readdirSync(changeRoot, { withFileTypes: true }) as FsDirent[])
       .filter((e) => e.isFile() && e.name.endsWith(".md"))
       .map((e) => e.name);
     return [...topLevel, ...listSpecArtifacts(cwd, name)].sort((a, b) => a.localeCompare(b));
