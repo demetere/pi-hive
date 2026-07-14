@@ -39,10 +39,11 @@ function ProviderPressure() {
   const status = last?.payload?.status;
   return (
     <span
+      role="status"
       className="flex items-center gap-[6px] text-[11px] font-semibold tracking-[.05em] text-crit"
       title={`${recent.length} provider rate-limit/overload response${recent.length === 1 ? "" : "s"} in the last 5 min (latest ${status ?? "?"})`}
     >
-      <span className="w-2 h-2 rounded-full bg-crit animate-softblink-fast" />
+      <span className="w-2 h-2 rounded-full bg-crit animate-softblink-fast" aria-hidden="true" />
       {recent.length}× {status ?? "429/529"}
     </span>
   );
@@ -57,8 +58,9 @@ export default function Topbar() {
       <div className="ml-auto flex items-center gap-3">
         <ProviderPressure />
         {isLive && (
-          <span className="flex items-center gap-[7px] text-[11px] font-semibold tracking-[.1em] text-run">
+          <span role="status" className="flex items-center gap-[7px] text-[11px] font-semibold tracking-[.1em] text-run">
             <span
+              aria-hidden="true"
               className="w-2 h-2 rounded-full bg-run animate-softblink-fast"
               style={{ boxShadow: "0 0 0 3px color-mix(in srgb, var(--run) 22%, transparent)" }}
             />

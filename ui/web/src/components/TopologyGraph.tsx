@@ -232,18 +232,36 @@ export default function TopologyGraph(props: { kind?: TopologyKind; source?: Top
     ? "No planning topology yet. Add a planning team and start a hive session."
     : "No topology yet. Start a hive session so it emits session_start.";
 
+  function onGraphKeyDown(event: React.KeyboardEvent<SVGSVGElement>) {
+    if (event.target !== event.currentTarget) return;
+    const pan = 36;
+    if (event.key === "+" || event.key === "=") setView((v) => ({ ...v, k: Math.min(2.5, v.k * 1.15) }));
+    else if (event.key === "-") setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.15) }));
+    else if (event.key === "0" || event.key === "Home") fit();
+    else if (event.key === "ArrowLeft") setView((v) => ({ ...v, x: v.x + pan }));
+    else if (event.key === "ArrowRight") setView((v) => ({ ...v, x: v.x - pan }));
+    else if (event.key === "ArrowUp") setView((v) => ({ ...v, y: v.y + pan }));
+    else if (event.key === "ArrowDown") setView((v) => ({ ...v, y: v.y - pan }));
+    else return;
+    event.preventDefault();
+  }
+
   return (
     <div className="graph-wrap">
       <div className="graph-controls">
-        <button onClick={() => setView((v) => ({ ...v, k: Math.min(2.5, v.k * 1.15) }))} title="Zoom in">+</button>
-        <button onClick={() => setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.15) }))} title="Zoom out">−</button>
-        <button onClick={() => fit()} title="Fit to view">⤢</button>
+        <button type="button" aria-label="Zoom in" onClick={() => setView((v) => ({ ...v, k: Math.min(2.5, v.k * 1.15) }))} title="Zoom in">+</button>
+        <button type="button" aria-label="Zoom out" onClick={() => setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.15) }))} title="Zoom out">−</button>
+        <button type="button" aria-label="Fit topology to view" onClick={() => fit()} title="Fit to view">⤢</button>
       </div>
       {!layout ? <div className="g-empty">{emptyText}</div> : (
         <svg
           ref={svgRef}
           className="graph-svg"
           {...handlers}
+          role="group"
+          tabIndex={0}
+          aria-label="Agent topology. Use arrow keys to pan, plus and minus to zoom, and Home to fit. Tab to visit agents."
+          onKeyDown={onGraphKeyDown}
           style={{ cursor: grabbing ? "grabbing" : "grab" }}
         >
           <defs>
@@ -360,7 +378,11 @@ function Node(props: {
   };
   const onClick = (ev: React.MouseEvent) => { ev.stopPropagation(); openLog(); };
   const onKeyDown = (ev: React.KeyboardEvent) => {
-    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); openLog(); }
+    if (ev.key === "Enter") { ev.preventDefault(); ev.stopPropagation(); openLog(); }
+    else if (ev.key === " ") {
+      ev.preventDefault(); ev.stopPropagation();
+      if (hasKids) props.onToggle(data.name, hasKids); else openLog();
+    }
   };
 
   const W = props.nodeW, H = NODE_H;
@@ -383,7 +405,7 @@ function Node(props: {
       transform={`translate(${node.x + ox - W / 2},${node.y})`}
       role="button"
       tabIndex={0}
-      aria-label={`${data.name} — ${status}, ${ctxPct}% context, ${fmtNum(tokens)} tokens. Open transcript.`}
+      aria-label={`${data.name} — ${status}, ${ctxPct}% context, ${fmtNum(tokens)} tokens. Enter opens transcript${hasKids ? `; Space ${props.collapsed ? "expands" : "collapses"} children` : ""}.`}
       onClick={onClick}
       onKeyDown={onKeyDown}
     >
@@ -436,6 +458,7 @@ function Node(props: {
           children — clear of the TOTAL/TOK-S/THINK stats. */}
       {hasKids && (
         <g className="g-collapse" transform={`translate(${W / 2 - 8},${H - 8})`}
+           aria-hidden="true"
            onClick={(ev) => { ev.stopPropagation(); props.onToggle(data.name, hasKids); }}
            onPointerDown={(ev) => ev.stopPropagation()}>
           <rect className="g-collapse-hit" x="-4" y="-4" width="24" height="24" rx="8" />

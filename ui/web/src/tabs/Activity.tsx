@@ -269,22 +269,25 @@ export default function Activity(props: { search: string }) {
           <b>Agents in scope</b>
           <span>{agents.length}</span>
         </div>
-        <div className="team-filters" role="tablist" aria-label="Agent team filter">
-          <button className={`team-filter ${team === "all" ? "active" : ""}`} onClick={() => { setTeam("all"); setAgent(""); setPage(0); }}>All</button>
-          <button className={`team-filter ${team === "hive" ? "active" : ""}`} onClick={() => { setTeam("hive"); setAgent(""); setPage(0); }}>Hive</button>
-          <button className={`team-filter ${team === "planning" ? "active" : ""}`} onClick={() => { setTeam("planning"); setAgent(""); setPage(0); }}>Planning</button>
+        <div className="team-filters" role="group" aria-label="Agent team filter">
+          <button type="button" aria-pressed={team === "all"} className={`team-filter ${team === "all" ? "active" : ""}`} onClick={() => { setTeam("all"); setAgent(""); setPage(0); }}>All</button>
+          <button type="button" aria-pressed={team === "hive"} className={`team-filter ${team === "hive" ? "active" : ""}`} onClick={() => { setTeam("hive"); setAgent(""); setPage(0); }}>Hive</button>
+          <button type="button" aria-pressed={team === "planning"} className={`team-filter ${team === "planning" ? "active" : ""}`} onClick={() => { setTeam("planning"); setAgent(""); setPage(0); }}>Planning</button>
         </div>
         <div className="activity-agent-list">
-          <button className={`agent-filter ${agent === "" ? "active" : ""}`} onClick={() => { setAgent(""); setPage(0); }}>All activity</button>
+          <button type="button" aria-pressed={agent === ""} className={`agent-filter ${agent === "" ? "active" : ""}`} onClick={() => { setAgent(""); setPage(0); }}>All activity</button>
           {visibleAgents.map((a) => (
-            <button key={a.key} className={`agent-filter ${agent === a.name ? "active" : ""}`} onClick={() => { setAgent(a.name); setPage(0); }} onDoubleClick={() => viewAgent({ sessionId: a.session_id, name: a.name, color: a.color, status: a.status, model: a.model })}>
-              <span className="cdot" style={{ background: a.color || "var(--muted)" }} />
-              <span className="agent-filter-main">
-                <b>{a.name}</b>
-                <small>{a.role || "member"} · {a.status} · {a.sessions.size} session{a.sessions.size === 1 ? "" : "s"} · {shortModel(a.model)}</small>
-              </span>
-              <span className="agent-filter-stat"><b>{fmtNum(a.tokens)}</b><small>{a.tokSec ? `${a.tokSec.toFixed(1)} tok/s` : "— tok/s"}</small></span>
-            </button>
+            <div key={a.key} className="agent-filter-row">
+              <button type="button" aria-pressed={agent === a.name} className={`agent-filter ${agent === a.name ? "active" : ""}`} onClick={() => { setAgent(a.name); setPage(0); }}>
+                <span className="cdot" style={{ background: a.color || "var(--muted)" }} />
+                <span className="agent-filter-main">
+                  <b>{a.name}</b>
+                  <small>{a.role || "member"} · {a.status} · {a.sessions.size} session{a.sessions.size === 1 ? "" : "s"} · {shortModel(a.model)}</small>
+                </span>
+                <span className="agent-filter-stat"><b>{fmtNum(a.tokens)}</b><small>{a.tokSec ? `${a.tokSec.toFixed(1)} tok/s` : "— tok/s"}</small></span>
+              </button>
+              <button type="button" className="agent-open" aria-label={`Open ${a.name} transcript`} title="Open transcript" onClick={() => viewAgent({ sessionId: a.session_id, name: a.name, color: a.color, status: a.status, model: a.model })}>↗</button>
+            </div>
           ))}
           {!agents.length && <div className="empty">No agents yet.</div>}
         </div>
@@ -292,7 +295,7 @@ export default function Activity(props: { search: string }) {
 
       <section className="activity-feed">
         <div className="toolbar">
-          <select value={type} onChange={(e) => { setType(e.target.value); setPage(0); }}>
+          <select aria-label="Event type" value={type} onChange={(e) => { setType(e.target.value); setPage(0); }}>
             <option value="">all types</option>
             {types.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
@@ -304,12 +307,13 @@ export default function Activity(props: { search: string }) {
           )}
           <span className="muted-cell">{total ? `${clampedPage * PAGE + 1}-${Math.min(total, (clampedPage + 1) * PAGE)} of ${total}` : "no events"}</span>
           <div className="pager">
-            <button className="btn pill" disabled={clampedPage <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Newer</button>
-            <button className="btn pill" disabled={clampedPage >= pages - 1} onClick={() => setPage((p) => p + 1)}>Older</button>
+            <button type="button" className="btn pill" disabled={clampedPage <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Newer</button>
+            <button type="button" className="btn pill" disabled={clampedPage >= pages - 1} onClick={() => setPage((p) => p + 1)}>Older</button>
             {/* K7: on the last loaded page, page OLDER events in from the server
                 on demand (bounded, one page per click) rather than pre-loading
                 the whole history. */}
             <button
+              type="button"
               className="btn pill"
               disabled={loadingOlder || clampedPage < pages - 1}
               title="Fetch older events from the dashboard database"
@@ -341,7 +345,7 @@ export default function Activity(props: { search: string }) {
               const truncated = itemTruncated(item);
               return (
                 <article key={item.id} className={`activity-box ${errored ? "err" : succeeded ? "ok" : ""}`} style={{ "--agent-color": color } as React.CSSProperties}>
-                  <button className="activity-event-head" onClick={() => toggle(item.id)}>
+                  <button type="button" className="activity-event-head" aria-expanded={expanded} onClick={() => toggle(item.id)}>
                     <span className="tl-type">{item.type}</span>
                     {errored ? <span className="outcome err" title="failed">✗</span>
                       : succeeded ? <span className="outcome ok" title="succeeded">✓</span> : null}

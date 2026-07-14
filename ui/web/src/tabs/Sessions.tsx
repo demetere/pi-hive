@@ -1,9 +1,10 @@
-import { Fragment, lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useHive } from "../store";
 import { deleteSession, selectSessionScope, setActiveTab, confirmAction } from "../store/raw";
 import { ensureTopologyDetail } from "../store/wiring";
 import { useFrozenOrder } from "../hooks/useFrozenOrder";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import RelTime from "../hooks/RelTime";
 import { absTime, fmtCost, fmtNum, sessionSlug } from "../lib/format";
 import type { SessionView } from "../types";
@@ -109,22 +110,24 @@ export default function Sessions(props: { search: string }) {
   }, [sortKey, dir, countOf]);
   const rows = useFrozenOrder(filtered, idOf, resortKey, sorter);
 
-  const arrow = (k: Key) => (sortKey === k ? <span className="arrow">{dir === 1 ? "↑" : "↓"}</span> : null);
+  const arrow = (k: Key) => (sortKey === k ? <span className="arrow" aria-hidden="true">{dir === 1 ? "↑" : "↓"}</span> : null);
+  const sortAria = (k: Key): "ascending" | "descending" | "none" => sortKey === k ? (dir === 1 ? "ascending" : "descending") : "none";
+  const sortButton = (k: Key, label: string) => <button type="button" className="table-sort" onClick={() => clickSort(k)}>{label} {arrow(k)}</button>;
 
   return (
     <div className="tab-card">
       <table className="table">
         <thead>
           <tr>
-            <th onClick={() => clickSort("project")}>Project {arrow("project")}</th>
-            <th>Session</th>
-            <th onClick={() => clickSort("first_ts")}>Started {arrow("first_ts")}</th>
-            <th onClick={() => clickSort("running")} className="num">Running {arrow("running")}</th>
-            <th onClick={() => clickSort("event_count")} className="num">Events {arrow("event_count")}</th>
-            <th onClick={() => clickSort("tokens")} className="num">Tokens {arrow("tokens")}</th>
-            <th onClick={() => clickSort("cost")} className="num">Cost {arrow("cost")}</th>
-            <th onClick={() => clickSort("last_ts")} className="num">Updated {arrow("last_ts")}</th>
-            <th className="del-col" />
+            <th scope="col" aria-sort={sortAria("project")}>{sortButton("project", "Project")}</th>
+            <th scope="col">Session</th>
+            <th scope="col" aria-sort={sortAria("first_ts")}>{sortButton("first_ts", "Started")}</th>
+            <th scope="col" aria-sort={sortAria("running")} className="num">{sortButton("running", "Running")}</th>
+            <th scope="col" aria-sort={sortAria("event_count")} className="num">{sortButton("event_count", "Events")}</th>
+            <th scope="col" aria-sort={sortAria("tokens")} className="num">{sortButton("tokens", "Tokens")}</th>
+            <th scope="col" aria-sort={sortAria("cost")} className="num">{sortButton("cost", "Cost")}</th>
+            <th scope="col" aria-sort={sortAria("last_ts")} className="num">{sortButton("last_ts", "Updated")}</th>
+            <th scope="col" className="del-col"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -146,12 +149,13 @@ export default function Sessions(props: { search: string }) {
                 </td>
               </tr>
             )}
-            <tr className={selectedId === s.session_id ? "active" : ""} onClick={() => openSession(s.session_id)}>
-              <td><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{labelOf(s.project)}</b></td>
+            <tr className={selectedId === s.session_id ? "active" : ""}>
+              <td><button type="button" className="table-row-link" onClick={() => openSession(s.session_id)}><span className={`dot ${liveSet.has(s.session_id) ? "live" : "idle"}`} /><b>{labelOf(s.project)}</b><span className="sr-only">, open session {sessionSlug(s.session_id)}</span></button></td>
               <td className="mono">
                 {sessionSlug(s.session_id)}
                 {rank != null && hash && (
                   <button
+                    type="button"
                     className="ml-1.5 inline-flex items-center rounded-full bg-well border border-line px-1.5 py-[1px] text-[9px] text-ink-dim hover:text-ink hover:border-brand"
                     title="View this session's topology version"
                     onClick={(e) => { e.stopPropagation(); openTopology(hash); }}
@@ -172,7 +176,7 @@ export default function Sessions(props: { search: string }) {
               <td className="num muted-cell"><RelTime ts={s.last_ts} /></td>
               <td className="del-col" onClick={(e) => e.stopPropagation()}>
                 <a className="row-del" title="Export source JSONL" href={sourceLogExportUrl(s.session_id)} download>⇩</a>
-                <button className="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
+                <button type="button" className="row-del" aria-label={`Delete session ${sessionSlug(s.session_id)} telemetry`} title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
               </td>
             </tr>
             </Fragment>
@@ -190,6 +194,12 @@ export default function Sessions(props: { search: string }) {
 // with live statuses off (this is a historical version, not a running session).
 function TopologyVersionModal({ hash, onClose }: { hash: string; onClose: () => void }) {
   const detail = useHive((s) => s.topologyByHash.get(hash));
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
   // Reassemble the reassembled tree into the TopoSource TopologyGraph consumes.
   const source = useMemo(() => {
     if (!detail) return undefined;
@@ -203,10 +213,10 @@ function TopologyVersionModal({ hash, onClose }: { hash: string; onClose: () => 
   }, [detail]);
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="rounded-xl border border-line bg-panel p-4 w-[80vw] h-[80vh] max-w-[1100px] flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div ref={trapRef} className="rounded-xl border border-line bg-panel p-4 w-[80vw] h-[80vh] max-w-[1100px] flex flex-col" role="dialog" aria-modal="true" aria-labelledby="topology-version-title" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2 flex-none">
-          <b className="text-[13px]">Topology version <span className="font-mono text-ink-dim">{hash.slice(0, 10)}</span></b>
-          <button className="text-ink-dim text-[12px] hover:text-ink" onClick={onClose}>✕ close</button>
+          <b id="topology-version-title" className="text-[13px]">Topology version <span className="font-mono text-ink-dim">{hash.slice(0, 10)}</span></b>
+          <button type="button" className="text-ink-dim text-[12px] hover:text-ink" onClick={onClose}>✕ close</button>
         </div>
         <div className="flex-1 min-h-0">
           {!detail || !source ? <div className="empty">Loading topology…</div>

@@ -36,6 +36,7 @@ export default function AgentLog() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [exists, setExists] = useState(true);
   const [runs, setRuns] = useState<RunRef[]>([]);
   const [selectedRun, setSelectedRun] = useState("current");
@@ -59,6 +60,7 @@ export default function AgentLog() {
     // handler re-polls once when the tab comes back to the foreground.
     if (!initial && typeof document !== "undefined" && document.visibilityState === "hidden") return;
     try {
+      setLoadError("");
       const run = selectedRunRef.current;
       const paging = before != null ? `&before=${before}` : `&offset=${offset.current}`;
       const url = `/agent-log?session=${encodeURIComponent(a.sessionId)}&agent=${encodeURIComponent(a.name)}&run=${encodeURIComponent(run)}${paging}`;
@@ -87,7 +89,9 @@ export default function AgentLog() {
       const shouldTail = data.running && selectedRunRef.current === "current";
       if (shouldTail && !timer.current) timer.current = setInterval(() => poll(false), 1500);
       if (!shouldTail && timer.current) { clearInterval(timer.current); timer.current = undefined; }
-    } catch { /* transient */ }
+    } catch (error: any) {
+      setLoadError(error?.message || "Unable to load this transcript.");
+    }
     setLoading(false);
   }, [openAgent]);
 
@@ -109,7 +113,7 @@ export default function AgentLog() {
   // (re)load when the target agent changes
   useEffect(() => {
     if (timer.current) { clearInterval(timer.current); timer.current = undefined; }
-    offset.current = 0; startOffset.current = 0; setEntries([]); setHasOlder(false); setLoading(true); setExists(true); setRuns([]); setSelectedRun("current");
+    offset.current = 0; startOffset.current = 0; setEntries([]); setHasOlder(false); setLoading(true); setLoadError(""); setExists(true); setRuns([]); setSelectedRun("current");
     selectedRunRef.current = "current";
     if (openAgent) poll(true);
     return () => { if (timer.current) { clearInterval(timer.current); timer.current = undefined; } };
@@ -147,26 +151,27 @@ export default function AgentLog() {
           {a.model && <span className="log-model">{shortModel(a.model)}</span>}
           {status === "running" && <span className="log-live"><span className="w-2 h-2 rounded-full bg-ok animate-ping2" /> live</span>}
           <span className="w-tools">
-            <button className="log-bulk" onClick={() => setBulk((b) => ({ open: true, n: b.n + 1 }))} title="Expand all results">Expand all</button>
-            <button className="log-bulk" onClick={() => setBulk((b) => ({ open: false, n: b.n + 1 }))} title="Collapse all results">Collapse all</button>
-            <button onClick={closeAgent} title="Close">✕</button>
+            <button type="button" className="log-bulk" onClick={() => setBulk((b) => ({ open: true, n: b.n + 1 }))} title="Expand all results">Expand all</button>
+            <button type="button" className="log-bulk" onClick={() => setBulk((b) => ({ open: false, n: b.n + 1 }))} title="Collapse all results">Collapse all</button>
+            <button type="button" onClick={closeAgent} aria-label="Close transcript" title="Close">✕</button>
           </span>
         </div>
         {runs.length > 1 && (
-          <div className="log-runs">
+          <div className="log-runs" role="tablist" aria-label="Transcript runs">
             <span className="log-runs-label">Runs:</span>
             {runs.map((r) => (
-              <button key={r.id} className={`log-run-tab ${selectedRun === r.id ? "active" : ""}`} onClick={() => loadRun(r.id)}>{r.label}</button>
+              <button type="button" role="tab" aria-selected={selectedRun === r.id} key={r.id} className={`log-run-tab ${selectedRun === r.id ? "active" : ""}`} onClick={() => loadRun(r.id)}>{r.label}</button>
             ))}
           </div>
         )}
         <div className="log-body" ref={scroller}>
           {!loading && hasOlder && (
-            <button className="log-bulk block mx-auto my-2" onClick={() => void loadOlder()} disabled={loadingOlder}>
+            <button type="button" className="log-bulk block mx-auto my-2" onClick={() => void loadOlder()} disabled={loadingOlder}>
               {loadingOlder ? "Loading…" : "Load older transcript"}
             </button>
           )}
           {loading ? <div className="empty">Loading transcript…</div>
+            : loadError ? <div className="empty" role="alert">{loadError} <button type="button" className="btn pill" onClick={() => { setLoading(true); void poll(true); }}>Retry</button></div>
             : !exists ? <div className="empty">No transcript for this agent yet{status === "idle" ? " — it hasn't run." : "."}</div>
             : (<>
                 {invocations.map((inv, i) => <Invocation key={i} inv={inv} index={i} total={invocations.length} bulk={bulk} />)}
@@ -185,12 +190,12 @@ function Invocation(props: { inv: Invoc; index: number; total: number; bulk: { o
   const taskPreview = props.inv.task ? props.inv.task.replace(/\s+/g, " ").slice(0, 90) : "(no task text)";
   return (
     <div className={`log-inv ${open ? "open" : ""}`}>
-      <div className="log-inv-head" onClick={() => setOpen(!open)}>
-        <span className="log-inv-caret">{open ? "▾" : "▸"}</span>
+      <button type="button" className="log-inv-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="log-inv-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
         <span className="log-inv-num">{props.index === 0 ? "Invocation 1" : `↻ Invocation ${props.index + 1}`}</span>
         <span className="log-inv-task">{taskPreview}</span>
         <span className="log-inv-count">{props.inv.entries.length} msg{props.inv.entries.length === 1 ? "" : "s"}</span>
-      </div>
+      </button>
       {open && (
         <div className="log-inv-body">
           {props.inv.entries.map((e, i) => <LogEntry key={i} entry={e} bulk={props.bulk} />)}
@@ -232,12 +237,12 @@ function ToolCard(props: { name: string; args?: any; result?: string; resultErro
   const hasResult = props.result !== undefined && props.result !== null && props.result !== "";
   return (
     <div className={`log-tool ${props.resultError ? "err" : ""}`}>
-      <div className="log-tool-head" onClick={() => hasResult && setOpen(!open)}>
-        <span className="tool-ic">{props.resultError ? "✗" : "⚙"}</span>
+      <button type="button" className="log-tool-head" disabled={!hasResult} aria-expanded={hasResult ? open : undefined} onClick={() => hasResult && setOpen(!open)}>
+        <span className="tool-ic" aria-hidden="true">{props.resultError ? "✗" : "⚙"}</span>
         <b>{props.name}</b>
         {hasResult ? <span className="tool-toggle">{open ? "hide result −" : "show result +"}</span>
           : <span className="tool-toggle dim">no result</span>}
-      </div>
+      </button>
       {props.args && Object.keys(props.args).length > 0 && (
         <pre className="log-tool-args">{JSON.stringify(props.args, null, 2)}</pre>
       )}

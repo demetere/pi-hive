@@ -123,9 +123,9 @@ export default function Overview() {
         >
           <div className="topology-pane single">
             <div className="topology-pane-head">
-              <div className="topology-switch" role="tablist" aria-label="Topology team">
-                <button className={topologyView === "hive" ? "active" : ""} onClick={() => setTopologyView("hive")}>Hive</button>
-                <button className={topologyView === "planning" ? "active" : ""} onClick={() => setTopologyView("planning")}>Planning</button>
+              <div className="topology-switch" role="group" aria-label="Topology team">
+                <button type="button" aria-pressed={topologyView === "hive"} className={topologyView === "hive" ? "active" : ""} onClick={() => setTopologyView("hive")}>Hive</button>
+                <button type="button" aria-pressed={topologyView === "planning"} className={topologyView === "planning" ? "active" : ""} onClick={() => setTopologyView("planning")}>Planning</button>
               </div>
               {replaying ? <b className="text-wait">replay</b>
                 : currentSession?.live ? <b>live</b>

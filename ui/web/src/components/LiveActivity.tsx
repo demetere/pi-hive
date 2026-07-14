@@ -147,10 +147,10 @@ export default function LiveActivity(props: {
   const THINKING_SESSION_CAP = 6;
   const thinkingCapped = scopedSessions.length > THINKING_SESSION_CAP;
 
-  if (!items.length) return <div className="tl-scroll"><div className="empty">No activity yet.</div></div>;
+  if (!items.length) return <div className="tl-scroll" tabIndex={0} aria-label="Live activity feed"><div className="empty">No activity yet.</div></div>;
 
   return (
-    <div className="tl-scroll">
+    <div className="tl-scroll" tabIndex={0} aria-label="Live activity feed">
       {thinkingCapped && (
         <div className="text-[10px] text-ink-dimmer italic px-2 py-1">
           Showing agent thinking for the {THINKING_SESSION_CAP} most-recent sessions in scope.

@@ -190,9 +190,9 @@ export default function Agents(props: { search: string }) {
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.key} className="clickable" onClick={() => viewAgent({ sessionId: r.session_id, name: r.name, color: r.color, status: r.status, model: r.model })}>
+            <tr key={r.key}>
               <td>
-                <span><span className="cdot" style={{ background: r.color || "var(--muted)" }} /><b>{r.name}</b></span>
+                <button type="button" className="table-row-link" onClick={() => viewAgent({ sessionId: r.session_id, name: r.name, color: r.color, status: r.status, model: r.model })}><span className="cdot" style={{ background: r.color || "var(--muted)" }} /><b>{r.name}</b><span className="sr-only">, open transcript</span></button>
                 {r.task && <div className="muted-cell" style={{ fontSize: "11px", marginTop: "2px", maxWidth: "340px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.task}</div>}
               </td>
               <td className="muted-cell">{r.role || "member"}</td>

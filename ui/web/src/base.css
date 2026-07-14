@@ -38,9 +38,9 @@
     color-scheme: dark;
     --bg: #12141A; --surface: #1C1F28; --surface2: #17191F; --raise: #242833; --well: #0F1116;
     --line: rgba(255,255,255,.07); --line2: rgba(255,255,255,.11);
-    --ink: #EAECEF; --ink-dim: #9AA0AB; --ink-dimmer: #666C78;
-    --brand: #F4B155; --brand-bg: rgba(244,177,85,.14);
-    --run: #4FCFE6; --done: #5FD09A; --wait: #8A93A8; --warn: #ECD15A; --crit: #F47068;
+    --ink: #EAECEF; --ink-dim: #AEB4BE; --ink-dimmer: #8A919D;
+    --brand: #F4B155; --brand-bg: rgba(244,177,85,.14); --brand-contrast: #21170A;
+    --run: #4FCFE6; --done: #5FD09A; --wait: #A3ACBE; --warn: #ECD15A; --crit: #F47F78;
     --shadow: 0 16px 40px -20px rgba(0,0,0,.8), 0 2px 8px -4px rgba(0,0,0,.5);
     /* soft tints for status pills/fills (color-mix-equivalent, precomputed for width) */
     --run-soft: rgba(79,207,230,.15); --done-soft: rgba(95,208,154,.15);
@@ -53,9 +53,9 @@
     color-scheme: light;
     --bg: #EDEBE4; --surface: #FFFFFF; --surface2: #FAF8F3; --raise: #F1EEE6; --well: #F1EFE8;
     --line: rgba(28,26,20,.09); --line2: rgba(28,26,20,.14);
-    --ink: #20242B; --ink-dim: #6B7079; --ink-dimmer: #9AA0A8;
-    --brand: #C07C0E; --brand-bg: rgba(192,124,14,.13);
-    --run: #1596B0; --done: #2E9B6C; --wait: #606A7B; --warn: #977E15; --crit: #CF5A52;
+    --ink: #20242B; --ink-dim: #626873; --ink-dimmer: #6B7079;
+    --brand: #995D00; --brand-bg: rgba(153,93,0,.13); --brand-contrast: #FFFFFF;
+    --run: #087B93; --done: #247F58; --wait: #596477; --warn: #75610F; --crit: #B63F3A;
     --shadow: 0 16px 34px -20px rgba(40,38,48,.28), 0 2px 6px -3px rgba(40,38,48,.14);
     --run-soft: rgba(21,150,176,.14); --done-soft: rgba(46,155,108,.14);
     --warn-soft: rgba(151,126,21,.14); --crit-soft: rgba(207,90,82,.14);
@@ -102,7 +102,13 @@
   /* Reduced motion: one global override kills every keyframe animation
      (flow / softblink / halo / feedin / dash / gdot*), per the design spec. */
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; }
+    html { scroll-behavior: auto !important; }
+    *, *::before, *::after { animation: none !important; transition-duration: .01ms !important; transition-delay: 0ms !important; }
+  }
+
+  :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
   }
 }
 
@@ -115,7 +121,7 @@
   /* buttons */
   .btn { @apply font-semibold rounded-[10px] px-3.5 py-2 cursor-pointer border border-border bg-panel text-fg inline-flex items-center gap-[7px] transition-[transform,background,border-color] duration-[.12s]; }
   .btn:hover { @apply -translate-y-px; }
-  .btn.primary { @apply bg-accent border-accent text-white shadow-[0_6px_16px_var(--accent-glow)]; }
+  .btn.primary { @apply bg-accent border-accent shadow-[0_6px_16px_var(--accent-glow)]; color: var(--brand-contrast); }
   .btn.primary:hover { @apply bg-accent-hi; }
   .btn.ghost { @apply text-ok border-ok-border bg-ok-soft; }
   .btn.ghost.off { @apply text-muted border-border bg-panel; }
@@ -156,11 +162,13 @@
   /* tables */
   .tab-card { @apply bg-panel border border-border rounded-2xl overflow-hidden shadow-panel; }
   .table { @apply w-full border-collapse text-[12.5px]; }
-  .table th { @apply text-left text-muted font-semibold text-[11px] uppercase tracking-[.5px] px-3.5 py-3 border-b border-border cursor-pointer select-none whitespace-nowrap; }
-  .table th:hover { @apply text-fg; }
+  .table th { @apply text-left text-muted font-semibold text-[11px] uppercase tracking-[.5px] px-3.5 py-3 border-b border-border select-none whitespace-nowrap; }
+  .table th:has(.table-sort):hover { @apply text-fg; }
   .table th .arrow { @apply text-accent ml-1; }
+  .table-sort { @apply border-0 bg-transparent p-0 text-inherit uppercase tracking-[.5px] cursor-pointer; font: inherit; }
+  .table-row-link { @apply border-0 bg-transparent p-0 text-inherit cursor-pointer text-left; font: inherit; }
   .table td { @apply px-3.5 py-[11px] border-b border-border align-middle; }
-  .table tbody tr { @apply cursor-pointer transition-[background] duration-[.12s]; }
+  .table tbody tr { @apply transition-[background] duration-[.12s]; }
   .table tbody tr:hover { @apply bg-hover; }
   .table tbody tr.active { @apply bg-accent-soft; }
   .table tbody tr:last-child td { @apply border-b-0; }
@@ -188,8 +196,8 @@
 
   .del-col { @apply w-14 text-right; }
   .row-del { @apply bg-transparent border-0 cursor-pointer text-xs opacity-0 px-1.5 py-[3px] rounded-md grayscale transition-[opacity] duration-[.12s]; }
-  .table tbody tr:hover .row-del { @apply opacity-55; }
-  .row-del:hover { opacity: 1 !important; background: var(--crit-soft); filter: grayscale(0); }
+  .table tbody tr:hover .row-del, .row-del:focus-visible { @apply opacity-55; }
+  .row-del:hover, .row-del:focus-visible { opacity: 1 !important; background: var(--crit-soft); filter: grayscale(0); }
 
   .toolbar { @apply flex items-center gap-2.5 mb-3; }
   .toolbar select, .toolbar input { @apply bg-panel border border-border text-fg rounded-[9px] px-[11px] py-2 text-[12.5px]; font: inherit; }
@@ -320,7 +328,7 @@
   .modal-panel { @apply bg-panel border border-border rounded-[18px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: min(1800px, 96vw); height: min(1100px, 94vh); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
   .modal-body { @apply flex-1 flex flex-col min-h-0 overflow-auto; }
   .modal-body > * { @apply flex-1; }
-  .w-collapsed { @apply flex-1 grid place-items-center text-muted text-xs cursor-pointer min-h-[120px]; }
+  .w-collapsed { @apply w-full border-0 bg-transparent flex-1 grid place-items-center text-muted text-xs cursor-pointer min-h-[120px]; }
   .w-collapsed:hover { @apply text-accent; }
   .confirm-backdrop { @apply z-[60]; }
   .confirm-card { @apply bg-panel border border-border rounded-2xl p-6 text-center; box-shadow: 0 30px 80px #000a; width: min(420px, 92vw); animation: activityIn .18s cubic-bezier(.2,.7,.3,1); }
@@ -350,7 +358,7 @@
   .log-body > *:last-child { @apply mb-0; }
   .log-inv { @apply border border-border rounded-xl overflow-hidden bg-transparent; }
   .log-inv.open { @apply border-accent-border; }
-  .log-inv-head { @apply flex items-center gap-2.5 px-[13px] py-2.5 cursor-pointer transition-[background] duration-[.12s]; }
+  .log-inv-head { @apply w-full border-0 bg-transparent text-left text-inherit flex items-center gap-2.5 px-[13px] py-2.5 cursor-pointer transition-[background] duration-[.12s]; font: inherit; }
   .log-inv-head:hover { @apply bg-hover; }
   .log-inv-caret { @apply text-muted text-[10px] w-3 shrink-0; }
   .log-inv-num { @apply font-bold text-[12.5px] text-accent-fg whitespace-nowrap shrink-0; }
@@ -368,7 +376,8 @@
   .log-thinking { @apply text-fg2 text-[12.5px] whitespace-pre-wrap break-words bg-accent-soft rounded-r-lg px-3 py-[9px]; border-left: 2px solid var(--accent-border); line-height: 1.55; }
   .log-tool { @apply bg-chip border border-border rounded-[10px] overflow-hidden; }
   .log-tool.err { @apply border-err; }
-  .log-tool-head { @apply flex items-center gap-2 px-3 py-2 cursor-pointer text-[12.5px]; }
+  .log-tool-head { @apply w-full border-0 bg-transparent text-left text-inherit flex items-center gap-2 px-3 py-2 cursor-pointer text-[12.5px]; font: inherit; }
+  .log-tool-head:disabled { @apply cursor-default opacity-100; }
   .log-tool-head:hover { @apply bg-hover; }
   .log-tool-head .tool-ic { opacity: .8; }
   .log-tool-head b { @apply font-bold; }
@@ -403,7 +412,11 @@
   .team-filter:hover { @apply text-fg bg-hover; }
   .team-filter.active { @apply text-accent-fg bg-accent-soft border-accent-border; }
   .activity-agent-list { @apply min-h-0 overflow-auto pr-0.5; }
+  .agent-filter-row { @apply flex items-stretch gap-1; }
+  .agent-filter-row .agent-filter { @apply min-w-0 flex-1; }
   .agent-filter { @apply w-full flex items-center gap-2 p-2 border border-transparent rounded-[10px] bg-transparent text-fg2 text-left cursor-pointer; font: inherit; }
+  .agent-open { @apply shrink-0 border border-transparent rounded-[9px] bg-transparent text-muted px-2 cursor-pointer; }
+  .agent-open:hover, .agent-open:focus-visible { @apply text-fg bg-hover border-border; }
   .agent-filter:hover { @apply bg-hover text-fg; }
   .agent-filter.active { @apply bg-accent-soft text-accent-fg border-accent-border; }
   .agent-filter .cdot { @apply mr-0 shrink-0; }
@@ -433,6 +446,9 @@
   .live-cards .activity-summary { @apply whitespace-nowrap mt-1.5; line-height: 1.35; }
   .live-agent-chip { @apply inline-flex mt-1.5; width: fit-content; }
   .activity-event-head { @apply w-full flex items-baseline gap-2 border-0 bg-transparent p-0 text-left cursor-pointer relative; color: inherit; font: inherit; }
+  .toast-dismiss { @apply ml-auto border-0 bg-transparent text-muted cursor-pointer rounded px-1; }
+  .toast-dismiss:hover { @apply text-ink bg-well; }
+  .replay-speed.active { color: var(--brand-contrast); }
   .activity-event-head b { @apply text-fg text-[12.5px] overflow-hidden text-ellipsis whitespace-nowrap; }
   .agent-chip { @apply border border-border bg-chip text-fg2 rounded-full px-[7px] py-px text-[10.5px] font-bold whitespace-nowrap; }
   .outcome { @apply inline-grid place-items-center w-[15px] h-[15px] rounded-full text-[9px] font-bold flex-none; }

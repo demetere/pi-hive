@@ -34,6 +34,7 @@ export default function Settings() {
   const [pruning, setPruning] = useState(false);
   const [storage, setStorage] = useState<StorageBreakdown | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState(false);
 
   // Fetch storage usage + prune preview whenever the scope or the days input
   // settles. Debounced so typing in the days field doesn't spam the endpoint.
@@ -44,7 +45,7 @@ export default function Settings() {
     setStorageLoading(true);
     const t = setTimeout(async () => {
       const res = await fetchStorage(scopedProject, validDays);
-      if (!cancelled) { setStorage(res); setStorageLoading(false); }
+      if (!cancelled) { setStorage(res); setStorageError(!res); setStorageLoading(false); }
     }, 300);
     return () => { cancelled = true; clearTimeout(t); };
   }, [scopedProject, pruneDays]);
@@ -118,7 +119,11 @@ export default function Settings() {
   async function refreshStorage() {
     const days = Number(pruneDays.trim());
     const validDays = Number.isFinite(days) && days >= 0 ? days : undefined;
-    setStorage(await fetchStorage(scopedProject, validDays));
+    setStorageLoading(true);
+    const next = await fetchStorage(scopedProject, validDays);
+    setStorage(next);
+    setStorageError(!next);
+    setStorageLoading(false);
   }
 
   return (
@@ -149,18 +154,19 @@ export default function Settings() {
                     className="setting-input"
                     value={value}
                     placeholder={r.derived}
+                    aria-label={`Dashboard name for ${r.derived}`}
                     onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
                     onKeyDown={(e) => { if (e.key === "Enter" && dirty) save(r.projectId, r.key, value); }}
                   />
                   <div className="setting-actions">
-                    <button className="btn sm primary" disabled={!dirty || busy === r.key} onClick={() => save(r.projectId, r.key, value)}>
+                    <button type="button" className="btn sm primary" disabled={!dirty || busy === r.key} onClick={() => save(r.projectId, r.key, value)}>
                       {busy === r.key ? "Saving…" : "Save"}
                     </button>
                     {r.overridden && (
-                      <button className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.projectId, r.key, ""); }}>Reset</button>
+                      <button type="button" className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.projectId, r.key, ""); }}>Reset</button>
                     )}
-                    <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.projectId, r.label, r.sessions)}>Delete DB…</button>
-                    <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDeleteSourceLogs(r.projectId, r.label)}>Delete logs…</button>
+                    <button type="button" className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.projectId, r.label, r.sessions)}>Delete DB…</button>
+                    <button type="button" className="btn sm danger" disabled={busy === r.key} onClick={() => requestDeleteSourceLogs(r.projectId, r.label)}>Delete logs…</button>
                   </div>
                 </div>
               );
@@ -202,7 +208,7 @@ export default function Settings() {
               )}
             </div>
           ) : (
-            <div className="storage-muted">Unavailable — is the dashboard daemon running?</div>
+            <div className="storage-muted" role={storageError ? "alert" : undefined}>Unavailable — is the dashboard daemon running? <button type="button" className="btn pill" disabled={storageLoading} onClick={() => void refreshStorage()}>Retry</button></div>
           )}
         </div>
 
@@ -221,7 +227,7 @@ export default function Settings() {
               aria-label="Days of telemetry to retain"
             />
             <span className="prune-unit">day{pruneDays.trim() === "1" ? "" : "s"}</span>
-            <button className="btn sm danger" disabled={pruning || !(Number(pruneDays) >= 0)} onClick={requestPrune}>
+            <button type="button" className="btn sm danger" disabled={pruning || !(Number(pruneDays) >= 0)} onClick={requestPrune}>
               {pruning ? "Pruning…" : "Prune…"}
             </button>
           </div>

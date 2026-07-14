@@ -15,16 +15,15 @@ export default function Toast() {
         return (
           <div
             key={t.id}
-            role="status"
-            className="pointer-events-auto flex items-start gap-2 max-w-[360px] rounded-lg border border-line bg-panel px-3 py-2 text-[12px] text-ink shadow-lg cursor-pointer"
+            role={t.kind === "error" ? "alert" : "status"}
+            className="pointer-events-auto flex items-start gap-2 max-w-[360px] rounded-lg border border-line bg-panel px-3 py-2 text-[12px] text-ink shadow-lg"
             style={{ borderLeftWidth: 3, borderLeftColor: accent }}
-            onClick={() => dismissToast(t.id)}
-            title="Dismiss"
           >
-            <span className="mt-[1px] leading-none" style={{ color: accent }}>
+            <span className="mt-[1px] leading-none" style={{ color: accent }} aria-hidden="true">
               {t.kind === "error" ? "✕" : t.kind === "success" ? "✓" : "ℹ"}
             </span>
             <span className="min-w-0 break-words">{t.message}</span>
+            <button type="button" className="toast-dismiss" onClick={() => dismissToast(t.id)} aria-label="Dismiss notification">✕</button>
           </div>
         );
       })}

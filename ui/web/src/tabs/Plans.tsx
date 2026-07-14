@@ -5,6 +5,7 @@ import {
 } from "../api";
 import { useHive } from "../store";
 import RelTime from "../hooks/RelTime";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { REVIEW_IFRAME_SANDBOX, safeArtifactHref } from "../security";
 
 // The Plans tab is now a slim two-pane status view over OpenSpec changes. The
@@ -200,9 +201,11 @@ export default function Plans(props: { search: string }) {
   const [reviewSession, setReviewSession] = useState<{ rid: string; url: string } | null>(null);
   const [reviewSessionPending, setReviewSessionPending] = useState(false);
   const [reviewSessionFailed, setReviewSessionFailed] = useState(false);
+  const [reviewRetry, setReviewRetry] = useState(0);
   const [reviewFrameSrc, setReviewFrameSrc] = useState("");
   const [reviewFrameReady, setReviewFrameReady] = useState(false);
   const reviewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const fullscreenRef = useFocusTrap<HTMLDivElement>(fullscreen);
 
   // Esc exits the fullscreen review.
   useEffect(() => {
@@ -281,7 +284,7 @@ export default function Plans(props: { search: string }) {
       else setReviewSessionFailed(true);
     });
     return () => { cancelled = true; };
-  }, [cwd, reviewFinal, rid, selectedArtifact?.id]);
+  }, [cwd, reviewFinal, rid, selectedArtifact?.id, reviewRetry]);
 
   // Mount the review app once. Subsequent capabilities are delivered to the
   // sandboxed frame rather than assigned to iframe.src, preserving its runtime
@@ -351,7 +354,7 @@ export default function Plans(props: { search: string }) {
       <div className="plans-list tab-card">
         <div className="plans-list-head">
           <span>OpenSpec changes</span>
-          <button className="plans-refresh" title="Refresh" onClick={() => void loadPlans()}>⟳</button>
+          <button type="button" className="plans-refresh" aria-label="Refresh OpenSpec changes" title="Refresh" onClick={() => void loadPlans()}>⟳</button>
         </div>
         {listError ? (
           <div className="empty" role="alert">{listError} <button type="button" className="btn pill" onClick={() => void loadPlans()}>Retry</button></div>
@@ -421,7 +424,7 @@ export default function Plans(props: { search: string }) {
               )}
             </div>
 
-            <div className={`tab-card plan-review-frame ${fullscreen ? "fullscreen" : ""}`}>
+            <div ref={fullscreenRef} className={`tab-card plan-review-frame ${fullscreen ? "fullscreen" : ""}`} role={fullscreen ? "dialog" : undefined} aria-modal={fullscreen ? "true" : undefined} aria-label={fullscreen ? `Review ${artifactPath}` : undefined} tabIndex={fullscreen ? -1 : undefined}>
               {reviewFrameSrc || reviewSrc || reviewFinal ? (
                 <>
                   <div className="plan-review-bar">
@@ -461,7 +464,7 @@ export default function Plans(props: { search: string }) {
               ) : reviewSessionPending ? (
                 <div className="empty">Creating secure review session…</div>
               ) : reviewSessionFailed ? (
-                <div className="empty">Secure review session unavailable. Refresh and try again.</div>
+                <div className="empty" role="alert">Secure review session unavailable. <button type="button" className="btn pill" onClick={() => setReviewRetry((n) => n + 1)}>Retry</button></div>
               ) : <div className="empty">Select an authored artifact to review.</div>}
             </div>
           </>
