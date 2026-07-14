@@ -5,6 +5,7 @@ import { projectName } from "../../shared/project";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
 import type { AgentConfig, HiveTeam } from "../../core/types";
+import { withCrossProcessFileLock } from "../../core/file-lock";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
 import { BOOT_SESSION_ID, CONVERSATION_LOG, PROJECT_CWD, REGISTRY_PATH, SINGLE_LOG_PATH } from "./config";
 import {
@@ -640,15 +641,18 @@ export function sessionSummaries(): TelemetrySessionSummary[] {
 // Rewrite the global registry file, dropping any rows for the given session ids.
 function pruneRegistry(removed: Set<string>) {
   if (!fs.existsSync(REGISTRY_PATH)) return;
-  const kept: string[] = [];
-  for (const line of fs.readFileSync(REGISTRY_PATH, "utf8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line) as TelemetryRegistryRow;
-      if (!row.session_id || !removed.has(row.session_id)) kept.push(line);
-    } catch { kept.push(line); }
-  }
-  fs.writeFileSync(REGISTRY_PATH, kept.length ? kept.join("\n") + "\n" : "");
+  withCrossProcessFileLock(REGISTRY_PATH, () => {
+    if (!fs.existsSync(REGISTRY_PATH)) return;
+    const kept: string[] = [];
+    for (const line of fs.readFileSync(REGISTRY_PATH, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const row = JSON.parse(line) as TelemetryRegistryRow;
+        if (!row.session_id || !removed.has(row.session_id)) kept.push(line);
+      } catch { kept.push(line); }
+    }
+    fs.writeFileSync(REGISTRY_PATH, kept.length ? kept.join("\n") + "\n" : "");
+  });
 }
 
 // Delete sessions everywhere they live: SQLite (events/states/sessions),

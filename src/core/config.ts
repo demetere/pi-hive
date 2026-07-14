@@ -187,6 +187,7 @@ export function loadConfig(cwd: string): HiveConfig {
       subagentOutputLimit: Number(settings.subagentOutputLimit || 12_000),
       defaultTools: String(settings.defaultTools || "read, grep, find, ls"),
       maxParallel: Number(settings.maxParallel || 3),
+      secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
       distiller: {
         enabled: distillerEnabled,
         model: distillerModel,

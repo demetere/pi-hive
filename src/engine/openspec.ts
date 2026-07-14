@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ensureDir, readIfSmall } from "../core/fs";
 import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 import { resolveProjectIdentity, type ProjectIdentity } from "../shared/project-identity";
+import { withCrossProcessFileLock } from "../core/file-lock";
 
 // Thin, bounded wrapper around the OpenSpec CLI (@fission-ai/openspec).
 //
@@ -603,7 +604,7 @@ export function readAgentReviewLedger(cwd: string, name: string): AgentReviewLed
 // This function is called only from the trusted dashboard review hook. A green
 // human approval requires a current eligible automated record and current green
 // approvals for every direct upstream artifact.
-export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui", expectedArtifactHash?: string): boolean {
+function setArtifactApprovalUnlocked(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui", expectedArtifactHash?: string): boolean {
   const id = toArtifactId(artifact);
   if (!id || !isSafeChangeId(name)) throw new Error(`Invalid approval target: ${name}/${artifact}`);
   if (verdict === null) {
@@ -648,12 +649,21 @@ export function setArtifactApproval(cwd: string, name: string, artifact: string,
   return true;
 }
 
+export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui", expectedArtifactHash?: string): boolean {
+  const recordPath = approvalRecordPath(cwd, name, artifact, "human");
+  if (!recordPath) throw new Error(`Invalid approval target: ${name}/${artifact}`);
+  const changeDir = dirname(dirname(recordPath));
+  mkdirSync(changeDir, { recursive: true, mode: 0o700 });
+  return withCrossProcessFileLock(join(changeDir, ".approval-state"), () =>
+    setArtifactApprovalUnlocked(cwd, name, artifact, verdict, by, expectedArtifactHash));
+}
+
 export function artifactVerdict(cwd: string, name: string, artifact: string): ArtifactVerdict {
   const id = toArtifactId(artifact);
   return id ? (currentHumanRecord(cwd, name, id)?.verdict as ArtifactVerdict) ?? null : null;
 }
 
-export function setAgentReviewVerdict(cwd: string, name: string, artifact: string, verdict: AgentReviewVerdict, by = "agent-reviewer"): boolean {
+function setAgentReviewVerdictUnlocked(cwd: string, name: string, artifact: string, verdict: AgentReviewVerdict, by = "agent-reviewer"): boolean {
   const id = toArtifactId(artifact);
   if (!id || !isSafeChangeId(name)) throw new Error(`Invalid automated review target: ${name}/${artifact}`);
   if (verdict === null) {
@@ -679,6 +689,15 @@ export function setAgentReviewVerdict(cwd: string, name: string, artifact: strin
     artifactHash: hash,
   });
   return true;
+}
+
+export function setAgentReviewVerdict(cwd: string, name: string, artifact: string, verdict: AgentReviewVerdict, by = "agent-reviewer"): boolean {
+  const recordPath = approvalRecordPath(cwd, name, artifact, "automated-review");
+  if (!recordPath) throw new Error(`Invalid automated review target: ${name}/${artifact}`);
+  const changeDir = dirname(dirname(recordPath));
+  mkdirSync(changeDir, { recursive: true, mode: 0o700 });
+  return withCrossProcessFileLock(join(changeDir, ".approval-state"), () =>
+    setAgentReviewVerdictUnlocked(cwd, name, artifact, verdict, by));
 }
 
 export function agentReviewVerdict(cwd: string, name: string, artifact: string): AgentReviewVerdict {

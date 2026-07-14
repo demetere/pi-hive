@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import { defineTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { resolve } from "node:path";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
 import {
   extractFinalAnswer,
@@ -296,7 +297,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         } catch {
           answer = undefined;
         }
-        if (change) recordQuestion(ctx.cwd, change, question, answer || undefined);
+        if (change) await recordQuestion(ctx.cwd, change, question, answer || undefined);
         if (answer && answer.trim()) {
           return { content: [{ type: "text", text: `User answered: ${answer.trim()}` }], details: { ok: true, question, answer: answer.trim() } };
         }
@@ -306,9 +307,9 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       // Truly headless (no TUI anywhere — cron / RPC / print mode): fall back to
       // the dashboard-actions bridge so the question is at least surfaced and
       // file-recorded, and the planner records an assumption to proceed.
-      if (change) recordQuestion(ctx.cwd, change, question);
+      if (change) await recordQuestion(ctx.cwd, change, question);
       const mainDir = state.session?.sessionDir;
-      const promoted = mainDir ? enqueueQuestion(mainDir, { question, change: change || undefined, askedBy }) : false;
+      const promoted = mainDir ? await enqueueQuestion(mainDir, { question, change: change || undefined, askedBy }) : false;
       const text = promoted
         ? `No interactive prompt is available; your question was recorded and surfaced to the dashboard:\n"${question}"\nRecord a clearly-stated assumption and proceed; flag it for the human to confirm.`
         : `No interactive session is available to answer right now. Record a clearly-stated assumption for "${question}", proceed, and flag it for the human to confirm.`;
@@ -344,17 +345,25 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         const evidence = p.evidence || [];
         const concerns = p.concerns || [];
         const blockers = p.blockers || [];
-        // Emit as a telemetry event; the dashboard materializes it into
-        // plan_verdicts. The core cannot reach bun:sqlite, so this is the path.
+        // Persist content-bound automated review authority before publishing
+        // telemetry or in-memory state. The queue covers the complete
+        // validation/read/write window and shares a key with built-in writes.
+        if (changeId && p.artifact?.trim()) {
+          const artifact = p.artifact.trim();
+          const recordPath = openspec.approvalRecordPath(ctx.cwd, changeId, artifact, "automated-review");
+          if (!recordPath) throw new Error(`Invalid automated review target: ${changeId}/${artifact}`);
+          await withFileMutationQueue(recordPath, async () => {
+            openspec.setAgentReviewVerdict(ctx.cwd, changeId, artifact, p.verdict, callerName);
+          });
+        }
+        // Emit only after authoritative persistence succeeds. The dashboard
+        // materializes this event into plan_verdicts for display.
         emitHiveEvent(state, "review_verdict", { changeId, reviewer: callerName, verdict: p.verdict, summary: p.summary, evidence, concerns, blockers }, callerName);
-        // Also cache in-memory so team_status can surface the latest verdict
-        // without a SQLite read (the core has no access to plan_verdicts).
         if (changeId) {
           (state.latestVerdicts ||= new Map()).set(changeId, {
             changeId, reviewer: callerName, verdict: p.verdict, summary: p.summary,
             evidence, concerns, blockers, createdAt: new Date().toISOString(),
           });
-          if (p.artifact?.trim()) openspec.setAgentReviewVerdict(ctx.cwd, changeId, p.artifact.trim(), p.verdict, callerName);
         }
         const scope = changeId ? `change "${changeId}"` : "the current session (no active change-id)";
         const detail = p.verdict === "red" ? `${blockers.length} blocker(s)` : p.verdict === "yellow" ? `${concerns.length} concern(s)` : "clean";
@@ -384,7 +393,6 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         if (!openspec.isAvailable()) {
           return { content: [{ type: "text", text: "OpenSpec CLI is not installed, so no plan store is available. Install @fission-ai/openspec to author plans." }], details: { ok: false, reason: "openspec unavailable" } };
         }
-        openspec.ensureInit(ctx.cwd);
         const requestedChangeId = openspec.toChangeId(title);
         if (state.activeChangeId && openspec.changeExists(ctx.cwd, state.activeChangeId) && state.activeChangeId !== requestedChangeId) {
           return {
@@ -395,7 +403,10 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
             details: { ok: false, activeChangeId: state.activeChangeId, requestedChangeId },
           };
         }
-        const result = openspec.newChange(ctx.cwd, title);
+        const result = await withFileMutationQueue(resolve(ctx.cwd, "openspec", "changes", requestedChangeId), async () => {
+          openspec.ensureInit(ctx.cwd);
+          return openspec.newChange(ctx.cwd, title);
+        });
         if (!result) {
           return { content: [{ type: "text", text: `Could not create change from "${title}". Ensure the derived id is valid kebab-case and OpenSpec is initialized.` }], details: { ok: false } };
         }

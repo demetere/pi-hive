@@ -31,7 +31,7 @@ function existsLexically(value: string): boolean {
   }
 }
 
-function canonicalize(value: string, allowMissing: boolean): ContainedPath | null {
+export function resolveCanonicalPath(value: string, options: ContainedPathOptions = {}): ContainedPath | null {
   const lexicalPath = path.resolve(value);
   const exists = existsLexically(lexicalPath);
   if (exists) {
@@ -43,7 +43,7 @@ function canonicalize(value: string, allowMissing: boolean): ContainedPath | nul
       return null;
     }
   }
-  if (!allowMissing) return null;
+  if (options.allowMissing !== true) return null;
 
   let ancestor = lexicalPath;
   while (!existsLexically(ancestor)) {
@@ -82,8 +82,8 @@ export function resolveContainedPath(root: string, candidate: string, options: C
 
   // A configured root may itself be new (for example a not-yet-created tests/
   // domain), so canonicalize it through its nearest existing parent.
-  const canonicalRoot = canonicalize(lexicalRoot, true);
-  const canonicalCandidate = canonicalize(lexicalCandidate, options.allowMissing === true);
+  const canonicalRoot = resolveCanonicalPath(lexicalRoot, { allowMissing: true });
+  const canonicalCandidate = resolveCanonicalPath(lexicalCandidate, options);
   if (!canonicalRoot || !canonicalCandidate) return null;
   if (!isPathInside(canonicalRoot.canonicalPath, canonicalCandidate.canonicalPath)) return null;
   return canonicalCandidate;

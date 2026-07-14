@@ -123,6 +123,7 @@ export function validateHiveConfigShape(config: HiveConfig): void {
     assertObject(config.settings, "settings");
     assertNumber(config.settings.subagentOutputLimit, "settings.subagentOutputLimit");
     assertNumber(config.settings.maxParallel, "settings.maxParallel");
+    validateStringList(config.settings.secretPaths, "settings.secretPaths");
     if (config.settings.distiller) {
       assertObject(config.settings.distiller, "settings.distiller");
       assertBoolean(config.settings.distiller.enabled, "settings.distiller.enabled");

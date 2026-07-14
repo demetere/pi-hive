@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { classify } from "../src/engine/file-class.ts";
 import { checkPlannerStages, checkTypePolicy } from "../src/engine/policy.ts";
 import { bashMutationKind, enforceDomainForTool, isCommitCommand, readOnlyCommandDecision } from "../src/engine/domain.ts";
+import { checkReservedPath } from "../src/engine/reserved-paths.ts";
 import { runAsAgent } from "../src/engine/session.ts";
 import { buildOperatingContract } from "../src/engine/prompts.ts";
 import type { AgentRuntime, AgentType, HiveState, PlanStage } from "../src/core/types.ts";
@@ -218,6 +219,38 @@ test("enforce: planner blocked from code, allowed spec", () => {
   const state = stateWith([runtime("Plan", { agentType: "planner", domain: specDomain })]);
   assert.match(block(state, "Plan", { toolName: "write", input: { path: "src/x.ts" } }) ?? "", /may not upsert code files/);
   assert.equal(block(state, "Plan", { toolName: "write", input: { path: ".pi/hive/plans/a/proposal.md" } }), undefined);
+});
+
+test("reserved paths override broad read and mutation domains", () => {
+  const state = stateWith([runtime("Dev", { agentType: "coder", domain: codeDomain })]);
+  state.config = { settings: { secretPaths: ["config/secrets.json"] } } as any;
+  const reserved = [
+    ["read", ".git/config"],
+    ["write", ".env.local"],
+    ["read", "keys/id_ed25519"],
+    ["write", "certs/service.pem"],
+    ["read", ".pi/hive/sessions/s1/hive-events.jsonl"],
+    ["read", "config/secrets.json"],
+    ["write", ".pi-hive-approval.json"],
+    ["read", join(homedir(), ".pi", "agent", "hive", "approvals", "record.json")],
+  ];
+  for (const [toolName, path] of reserved) {
+    assert.match(block(state, "Dev", { toolName, input: { path } }) ?? "", /reserved path/, `${toolName} ${path}`);
+  }
+  assert.equal(block(state, "Dev", { toolName: "read", input: { path: "src/tmp" } }), undefined);
+});
+
+test("reserved path matching catches bare bash names and symlink destinations", () => {
+  const state = stateWith([runtime("Dev", { agentType: "coder", domain: codeDomain })]);
+  writeFileSync(join(policyRoot, ".env"), "SECRET=x\n");
+  try { symlinkSync(join(policyRoot, ".env"), join(policyRoot, "public-config")); } catch { /* already created by rerun */ }
+  assert.match(block(state, "Dev", { toolName: "bash", input: { command: "cat .env" } }) ?? "", /reserved path/);
+  assert.match(block(state, "Dev", { toolName: "read", input: { path: "public-config" } }) ?? "", /reserved path/);
+});
+
+test("reserved paths require an explicit trusted override", () => {
+  assert.equal(checkReservedPath(policyRoot, ".env", "read").ok, false);
+  assert.equal(checkReservedPath(policyRoot, ".env", "read", { trustedOverride: true }).ok, true);
 });
 
 test("enforce: planner cannot forge global approval records with file tools or classified bash", () => {

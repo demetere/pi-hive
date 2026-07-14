@@ -144,6 +144,10 @@ export interface HiveSettings {
   subagentOutputLimit: number;
   defaultTools: string;
   maxParallel: number;
+  // Project-relative paths that no worker may read or mutate, even when a broad
+  // domain would otherwise allow them. Absolute paths are supported for
+  // explicitly configured external secrets.
+  secretPaths?: string[];
   distiller: {
     enabled: boolean;
     model: string;

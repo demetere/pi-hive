@@ -28,7 +28,7 @@ import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extrac
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
-import { isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict, type ArtifactId } from "./openspec";
+import { approvalRecordPath, isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict, type ArtifactId } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
@@ -667,7 +667,14 @@ export async function dispatchAgent(
     const changeId = currentChangeId() || state.activeChangeId || inferChangeIdFromReviewTask(task) || "";
     const artifact = inferArtifactFromReviewTask(task);
     const verdict = inferReviewVerdict(output);
-    if (changeId && artifact && verdict) setAgentReviewVerdict(ctx.cwd, changeId, artifact, verdict, runtime.config.name);
+    if (changeId && artifact && verdict) {
+      const recordPath = approvalRecordPath(ctx.cwd, changeId, artifact, "automated-review");
+      if (recordPath) {
+        await withFileMutationQueue(recordPath, async () => {
+          setAgentReviewVerdict(ctx.cwd, changeId, artifact, verdict, runtime.config.name);
+        });
+      }
+    }
   }
 
   emitHiveEvent(state, "delegation_end", {
@@ -795,11 +802,20 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
     // even if the distiller's output drifts. The soft body is left byte-exact.
     const distilled = extracted ? normalizeMentalModelSpine(extracted, runtime.config.name).trim() : null;
     if (distilled && distilled !== currentModel.trim()) {
+      let changed = false;
       await withFileMutationQueue(targetPath, async () => {
+        // Re-read inside the queued mutation window. If another tool updated the
+        // model while distillation was running, do not overwrite fresher state
+        // with a result derived from the old snapshot.
+        const latestModel = safeRead(targetPath);
+        if (latestModel.trim() !== currentModel.trim()) return;
         writeFileSync(targetPath, `${distilled}\n`);
+        changed = true;
       });
-      logRecord(state, { from: "Distiller", to: runtime.config.name, type: "mental_model_distilled", message: `Updated ${target.path}`, path: target.path });
-      emitHiveEvent(state, "distill_end", { agent: runtime.config.name, target: target.path, changed: true }, "Distiller");
+      if (changed) {
+        logRecord(state, { from: "Distiller", to: runtime.config.name, type: "mental_model_distilled", message: `Updated ${target.path}`, path: target.path });
+        emitHiveEvent(state, "distill_end", { agent: runtime.config.name, target: target.path, changed: true }, "Distiller");
+      }
     }
   } catch { /* distillation is best-effort; never fail the delegation */ }
   finally { try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ } }

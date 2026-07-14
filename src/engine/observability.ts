@@ -7,6 +7,7 @@ import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, Jso
 import { tryResolveProjectIdentity } from "../shared/project-identity";
 import { agentSlug, ensureDir, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
+import { withCrossProcessFileLock } from "../core/file-lock";
 
 export type HiveObsEventType = HiveTelemetryEventType;
 export type HiveObsEvent<P = JsonRecord> = HiveTelemetryEvent<P>;
@@ -24,19 +25,21 @@ export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
   const registryPath = hiveTelemetryRegistryPath();
   const identity = tryResolveProjectIdentity(cwd);
   ensureDir(dirname(registryPath));
-  appendFileSync(registryPath, `${JSON.stringify({
-    registered_at: new Date().toISOString(),
-    session_id: state.session.sessionId,
-    project_id: identity?.projectId,
-    project_root: identity?.canonicalRoot,
-    project_label: identity?.displayLabel,
-    cwd,
-    session_dir: state.session.sessionDir,
-    conversation_log: state.session.conversationLog,
-    telemetry_log: state.session.observabilityLog,
-    state_file: join(state.session.sessionDir, "hive-state.json"),
-    pid: process.pid,
-  })}\n`);
+  withCrossProcessFileLock(registryPath, () => {
+    appendFileSync(registryPath, `${JSON.stringify({
+      registered_at: new Date().toISOString(),
+      session_id: state.session!.sessionId,
+      project_id: identity?.projectId,
+      project_root: identity?.canonicalRoot,
+      project_label: identity?.displayLabel,
+      cwd,
+      session_dir: state.session!.sessionDir,
+      conversation_log: state.session!.conversationLog,
+      telemetry_log: state.session!.observabilityLog,
+      state_file: join(state.session!.sessionDir, "hive-state.json"),
+      pid: process.pid,
+    })}\n`);
+  });
 }
 
 function agentSummary(agent: AgentConfig): TopologyNode {
