@@ -47,8 +47,8 @@ alias dd := dashboard-dev
 alias di := dashboard-install
 alias dt := dashboard-typecheck
 alias dv := dashboard-verify
-alias dn := dashboard-vendor
 alias ds := dashboard-serve
+alias rb := review-build
 
 # pi-*
 alias pd := pi-dev
@@ -207,17 +207,10 @@ dashboard-install:
 dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
 
-# plannotator.html is a self-contained single-file build (no build step); we host
-# it statically. Committed like ui/web/dist/; bumping the pinned @plannotator
-# version is a deliberate, tested step — the HTML must match the /api/* contract
-# in src/engine/review.ts.
-# Refresh the committed, vendored Plannotator review UI from the pinned dev dep.
+# Build the committed, review-only UI and deterministic gzip artifacts.
 [group('dashboard')]
-dashboard-vendor:
-  npm install
-  mkdir -p {{dashboard_dir}}/vendor
-  cp node_modules/@plannotator/pi-extension/plannotator.html {{dashboard_dir}}/vendor/plannotator.html
-  @printf "{{GREEN}}Vendored plannotator.html (%s).{{NC}}\n" "$(du -h {{dashboard_dir}}/vendor/plannotator.html | cut -f1)"
+review-build:
+  node scripts/build-review-bundle.mjs
 
 # Run the root extension TypeScript checker.
 [group('quality')]
@@ -255,33 +248,38 @@ test:
 test-db:
   bun test ./tests/*.spec.ts
 
-# Verify package manifest, required files, peer deps, and dashboard stamp.
+# Verify package manifest, required files, peer deps, and committed build stamps.
 [group('quality')]
 verify-package:
   node scripts/verify-package-files.mjs
 
+# Enforce packed/unpacked package and review-bundle byte budgets.
+[group('quality')]
+verify-budgets:
+  node scripts/check-package-budgets.mjs
+
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package
+verify: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package verify-budgets
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package pack-dry-run
+ci: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package verify-budgets pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================
 # PACKAGE & RELEASE
 # =============================================================================
 
-# Rebuild dashboard and run package verification, matching package prepack.
+# Rebuild committed UIs and run package verification, matching package prepack.
 [group('package')]
-prepack: dashboard-build verify-package
+prepack: dashboard-build review-build verify-package verify-budgets
   @printf "{{GREEN}}Prepack checks passed.{{NC}}\n"
 
 # Run publish-time checks.
 [group('package')]
-prepublish: test dashboard-verify verify-package
+prepublish: test dashboard-verify verify-package verify-budgets
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.

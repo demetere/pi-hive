@@ -5,7 +5,7 @@ import * as openspec from "../../engine/openspec";
 import { insertPlanVerdict } from "./db";
 import { enqueueDashboardAction, resolveProjectCwd } from "./plan-bridge";
 
-// Bun-side wiring for the self-hosted Plannotator plan-review surface. Builds the
+// Bun-side wiring for the self-hosted review-only surface. Builds the
 // ReviewHooks with SQLite verdict persistence + the dashboard-actions bridge, and
 // exposes a single dispatcher the server calls early in its fetch handler.
 //

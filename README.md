@@ -46,11 +46,12 @@ opposite: **it's config-first, and you own the whole tree.** Nothing runs until
   `.pi/hive/plans/` store. `/hive-execute` refuses to run until every exact
   artifact has automated review and human approval.
 
-- **Human-in-the-loop plan review, self-hosted.** `pi-hive` embeds a
-  [Plannotator](https://github.com/backnotprop/plannotator) review surface **directly in its own
-  dashboard** — no per-review server. You annotate, approve, or deny each plan
-  artifact in the browser; approval unblocks the planner, a denial routes your
-  feedback back and holds the gate. Verdicts persist to local SQLite.
+- **Human-in-the-loop plan review, self-hosted.** `pi-hive` embeds a compact,
+  [Plannotator](https://github.com/backnotprop/plannotator)-compatible review-only surface
+  **directly in its own dashboard** — no full Plannotator extension and no
+  per-review server. You annotate, approve, or deny each plan artifact in the
+  browser; approval unblocks the planner, a denial routes your feedback back and
+  holds the gate. Verdicts persist to local SQLite.
 
 - **Local, private telemetry.** Every session streams its own tailored event log to
   `.pi/hive/sessions/`, and `/hive-observe` opens a local Solid + Vite dashboard
@@ -193,7 +194,8 @@ which is committed so end users need no build step. If you change anything under
 
 ```sh
 just dashboard-install # first time only
-just dashboard-build   # rebuild dist/ — the server picks it up on next page load
+just dashboard-build   # rebuild dashboard dist/
+just review-build      # rebuild deterministic gzip review assets
 ```
 
 Before publishing or opening a release PR, run the same gates as CI:
@@ -201,6 +203,11 @@ Before publishing or opening a release PR, run the same gates as CI:
 ```sh
 just ci
 ```
+
+The npm package contains only the runtime dashboard `dist/` plus the tiny review
+bundle and its reproducible source; `ui/web/src/` and dashboard build tooling are
+not shipped. CI enforces 600 KiB packed / 1.5 MiB unpacked package budgets and a
+10 KiB compressed review-bundle budget.
 
 During UI development you can run `just dashboard-dev` (Vite HMR on port 43192) with a
 telemetry server running on `HIVE_TELEMETRY_PORT`; the dev server proxies the

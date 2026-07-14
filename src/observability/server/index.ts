@@ -140,7 +140,7 @@ const server = Bun.serve({
         const result = pruneTelemetry(cutoff);
         return json({ ok: true, ...result, cutoff });
       }
-      // Plan annotations/approvals now happen inside the self-hosted Plannotator
+      // Plan annotations/approvals happen inside the self-hosted review-only
       // review surface (/pl-review/ -> /api/approve|deny), not via these routes.
       // POST /project-overrides { projectId, label } — rename a display label
       // without allowing a caller-controlled cwd to become project authority.

@@ -5,12 +5,10 @@ import { fileURLToPath } from "node:url";
 import * as openspec from "./openspec";
 import { applyBrowserSecurityHeaders } from "../observability/security";
 
-// Generic embed layer for self-hosting a prebuilt single-file review UI
-// (Plannotator) on pi-hive's own dashboard server. It runs NO Plannotator
-// process: it static-serves the vendored HTML and answers the small set of
-// /api/* calls the review surface makes (proven by the endpoint spike:
-// GET /api/plan + POST /api/approve|deny are load-bearing; the rest degrade on
-// benign stubs).
+// Generic embed layer for the compact review-only UI on pi-hive's dashboard
+// server. It runs no per-review process: production streams deterministic gzip
+// assets and answers the narrow Plannotator-compatible API contract
+// (GET /api/plan + POST /api/approve|deny).
 //
 // Multiplexing N parallel reviews uses a short-lived capability minted by the
 // authenticated dashboard. The iframe URL carries rid, cwd, and a random nonce;
@@ -81,9 +79,18 @@ interface ReviewSession {
   used: boolean;
 }
 
+interface ReviewAsset {
+  path: string;
+  contentType: string;
+  etag: string;
+}
+
 export interface ReviewSurface {
   mountPath: string; // e.g. "/pl-review/"
-  htmlPath: string; // absolute path to the vendored single-file HTML
+  // htmlPath is retained for focused tests and downstream custom surfaces.
+  // Production uses the compressed review-only asset map.
+  htmlPath?: string;
+  assets?: Map<string, ReviewAsset>;
   hooks: ReviewHooks;
   sessions: Map<string, ReviewSession>;
 }
@@ -162,26 +169,35 @@ function reviewRequestParams(req: Request, url: URL, mountPath: string): { rid: 
 // Vendored HTML resolution
 // ---------------------------------------------------------------------------
 
-let cachedHtmlPath: string | null | undefined;
+let cachedReviewAssets: Map<string, ReviewAsset> | null | undefined;
 
-// Locate the committed, vendored Plannotator HTML (ui/web/vendor/plannotator.html)
-// by walking up from this module toward the extension root. Cached.
-export function resolveVendoredHtml(): string | null {
-  if (cachedHtmlPath !== undefined) return cachedHtmlPath;
+// Locate the committed, reproducible review-only bundle. Only gzip artifacts
+// ship at runtime; manifest hashes become strong ETags without reading the
+// bundle into memory on each request.
+export function resolveReviewAssets(): Map<string, ReviewAsset> | null {
+  if (cachedReviewAssets !== undefined) return cachedReviewAssets;
   let dir: string;
-  try {
-    dir = dirname(fileURLToPath(import.meta.url));
-  } catch {
-    dir = process.cwd();
-  }
+  try { dir = dirname(fileURLToPath(import.meta.url)); } catch { dir = process.cwd(); }
   for (let i = 0; i < 8; i++) {
-    const candidate = join(dir, "ui", "web", "vendor", "plannotator.html");
-    if (existsSync(candidate)) return (cachedHtmlPath = candidate);
+    const dist = join(dir, "ui", "review", "dist");
+    const manifestPath = join(dist, "manifest.json");
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { files?: Record<string, { path?: string; contentType?: string; sha256?: string }> };
+        const assets = new Map<string, ReviewAsset>();
+        for (const [name, entry] of Object.entries(manifest.files || {})) {
+          const assetPath = resolve(dist, String(entry.path || ""));
+          if (!entry.path || !entry.contentType || !entry.sha256 || !assetPath.startsWith(`${resolve(dist)}/`) || !safeFile(assetPath)) continue;
+          assets.set(name, { path: assetPath, contentType: entry.contentType, etag: `"sha256-${entry.sha256}"` });
+        }
+        if (assets.has("review.html") && assets.has("review.css") && assets.has("review.js")) return (cachedReviewAssets = assets);
+      } catch { /* malformed bundle falls through to unavailable */ }
+    }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return (cachedHtmlPath = null);
+  return (cachedReviewAssets = null);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,12 +287,30 @@ function emptySse(): Response {
   }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } }), "api");
 }
 
+function serveCompressedAsset(asset: ReviewAsset, req: Request, connectOrigin?: string): Response {
+  const headers: Record<string, string> = {
+    "content-type": asset.contentType,
+    "content-encoding": "gzip",
+    "cache-control": asset.contentType.startsWith("text/html") ? "private, no-cache" : "public, max-age=31536000, immutable",
+    etag: asset.etag,
+    vary: "Accept-Encoding",
+  };
+  if (req.headers.get("if-none-match") === asset.etag) {
+    return applyBrowserSecurityHeaders(new Response(null, { status: 304, headers }), "review", undefined, connectOrigin);
+  }
+  if (req.method === "HEAD") return applyBrowserSecurityHeaders(new Response(null, { headers }), "review", undefined, connectOrigin);
+  const bun = (globalThis as any).Bun;
+  const body = bun?.file ? bun.file(asset.path) : readFileSync(asset.path);
+  return applyBrowserSecurityHeaders(new Response(body, { headers }), "review", undefined, connectOrigin);
+}
+
+// Legacy raw single-file support for focused tests/downstream integrations.
 function serveHtml(htmlPath: string, connectOrigin: string): Response {
   let html: string;
   try {
     html = readFileSync(htmlPath, "utf8");
   } catch {
-    return applyBrowserSecurityHeaders(new Response("review UI not vendored — run `just dashboard-vendor`", { status: 503, headers: { "cache-control": "no-store" } }), "review");
+    return applyBrowserSecurityHeaders(new Response("custom review UI is unavailable", { status: 503, headers: { "cache-control": "no-store" } }), "review");
   }
   // A sandboxed frame has an opaque origin and intentionally sends no useful
   // Referer. Install this tiny bootstrap before the vendored module so its local
@@ -298,8 +332,8 @@ function serveHtml(htmlPath: string, connectOrigin: string): Response {
 }
 
 // The minimal GET /api/plan payload the plan surface needs to render. Only
-// `plan` (artifact markdown) is strictly required; the rest mirror the shape the
-// prebuilt bundle expects (from Plannotator serverPlan.ts) so it boots cleanly.
+// `plan` is the artifact markdown. The compatibility fields preserve the narrow
+// Plannotator plan API contract for downstream custom review surfaces.
 function planPayload(ctx: ReviewContext): Response {
   const markdown = openspec.readArtifact(ctx.cwd, ctx.change, ctx.artifact);
   return json({
@@ -389,7 +423,7 @@ function parseReviewBody(body: Record<string, unknown>): ParseResult<ReviewInput
 // only after the server's method gate accepts either the daemon bearer token
 // (`POST /review-sessions`) or a bound review capability (decision endpoints).
 export async function handleReviewSurface(surface: ReviewSurface, req: Request, url: URL): Promise<Response | null> {
-  const { mountPath, htmlPath, hooks } = surface;
+  const { mountPath, htmlPath, assets, hooks } = surface;
 
   // Authenticated dashboard endpoint: mint a bounded capability for exactly the
   // current project/change/artifact bytes. The generic server gate verifies the
@@ -415,9 +449,18 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
     return json({ nonce, expiresAt: new Date(expiresAt).toISOString(), reviewUrl: `${mountPath}?${query}` }, 201, true);
   }
 
-  // The vendored review HTML is itself capability-gated. A copied/stale URL
-  // cannot load artifact content, and the nonce never enters cached HTML.
-  if (url.pathname === mountPath || url.pathname.startsWith(mountPath)) {
+  // Static review assets contain no capability and are immutable/content-
+  // addressed. The HTML remains capability-gated below.
+  if (assets && url.pathname.startsWith(`${mountPath}assets/`)) {
+    if (req.method !== "GET" && req.method !== "HEAD") return json({ error: "method not allowed" }, 405, true);
+    const name = url.pathname.slice(`${mountPath}assets/`.length);
+    const asset = assets.get(name);
+    return asset ? serveCompressedAsset(asset, req) : json({ error: "not found" }, 404, true);
+  }
+
+  // The review HTML is itself capability-gated. A copied/stale URL cannot load
+  // artifact content, and the capability never enters the static response body.
+  if (url.pathname === mountPath || url.pathname === mountPath.slice(0, -1)) {
     if (req.method !== "GET" && req.method !== "HEAD") return json({ error: "method not allowed" }, 405, true);
     const rid = url.searchParams.get("rid");
     const ctx = rid ? hooks.resolveContext(rid, url.searchParams.get("cwd")) : null;
@@ -425,7 +468,10 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
     const session = activeSession(surface, url.searchParams.get("nonce"), ctx);
     if (!session) return json({ error: "invalid or expired review session" }, 401, true);
     if (!sessionIsCurrent(session)) return json({ error: "review artifact changed" }, 409, true);
-    return serveHtml(htmlPath, url.origin);
+    const bundleHtml = assets?.get("review.html");
+    if (bundleHtml) return serveCompressedAsset(bundleHtml, req, url.origin);
+    if (htmlPath) return serveHtml(htmlPath, url.origin);
+    return applyBrowserSecurityHeaders(new Response("review UI not built — run `just review-build`", { status: 503 }), "review");
   }
 
   // The vendored client hardcodes absolute /api/* paths. The sandbox bootstrap
@@ -523,9 +569,10 @@ export function registerReviewSurface(input: {
   htmlPath?: string;
   hooks: ReviewHooks;
 }): ReviewSurface | null {
-  const htmlPath = input.htmlPath ?? resolveVendoredHtml();
-  if (!htmlPath || !safeFile(htmlPath)) return null;
-  return { mountPath: input.mountPath, htmlPath: resolve(htmlPath), hooks: input.hooks, sessions: new Map() };
+  const htmlPath = input.htmlPath && safeFile(input.htmlPath) ? resolve(input.htmlPath) : undefined;
+  const assets = htmlPath ? undefined : resolveReviewAssets() || undefined;
+  if (!htmlPath && !assets) return null;
+  return { mountPath: input.mountPath, htmlPath, assets, hooks: input.hooks, sessions: new Map() };
 }
 
 function safeFile(p: string): boolean {

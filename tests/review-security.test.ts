@@ -27,18 +27,19 @@ function harness(options: {
   approve?: () => ReviewHookResult;
   deny?: () => ReviewHookResult;
   throwApprove?: boolean;
+  bundled?: boolean;
 } = {}): Harness {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-review-security-"));
   const changeDir = join(cwd, "openspec", "changes", "add-auth");
   mkdirSync(changeDir, { recursive: true });
   writeFileSync(join(changeDir, "proposal.md"), "# proposal\n");
   const htmlPath = join(cwd, "review.html");
-  writeFileSync(htmlPath, "<!doctype html><head><title>review</title></head><script type=\"module\" crossorigin>window.reviewBooted=true</script>");
+  if (!options.bundled) writeFileSync(htmlPath, "<!doctype html><head><title>review</title></head><script type=\"module\" crossorigin>window.reviewBooted=true</script>");
   const approvals: ReviewInput[] = [];
   const denials: ReviewInput[] = [];
   const surface = registerReviewSurface({
     mountPath: "/pl-review/",
-    htmlPath,
+    ...(options.bundled ? {} : { htmlPath }),
     hooks: {
       resolveContext(rid, cwdParam) {
         const parsed = parseRid(rid);
@@ -123,6 +124,27 @@ test("review sessions require exact mutation metadata and are not cacheable", as
   copiedWithoutNonce.searchParams.delete("nonce");
   const copied = new Request(copiedWithoutNonce, { headers: { host: "127.0.0.1:43191" } });
   assert.equal((await handle(h, copied))?.status, 401);
+});
+
+test("review-only bundle is gzip streamed with strong ETags", async () => {
+  const h = harness({ bundled: true });
+  const minted = await mint(h);
+  const page = new Request(`${ORIGIN}${minted.reviewUrl}`, { headers: { host: "127.0.0.1:43191" } });
+  const pageResponse = (await handle(h, page))!;
+  assert.equal(pageResponse.status, 200);
+  assert.equal(pageResponse.headers.get("content-encoding"), "gzip");
+  assert.equal(pageResponse.headers.get("cache-control"), "private, no-cache");
+  assert.match(pageResponse.headers.get("etag") || "", /^"sha256-[a-f0-9]{64}"$/);
+  assert.match(pageResponse.headers.get("content-security-policy") || "", /script-src http:\/\/127\.0\.0\.1:43191/);
+
+  const assetRequest = new Request(`${ORIGIN}/pl-review/assets/review.js`, { headers: { host: "127.0.0.1:43191" } });
+  const asset = (await handle(h, assetRequest))!;
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers.get("content-encoding"), "gzip");
+  assert.match(asset.headers.get("cache-control") || "", /immutable/);
+  const etag = asset.headers.get("etag")!;
+  const cached = new Request(assetRequest.url, { headers: { host: "127.0.0.1:43191", "if-none-match": etag } });
+  assert.equal((await handle(h, cached))?.status, 304);
 });
 
 test("missing nonce and forged Referer never invoke decision hooks", async () => {

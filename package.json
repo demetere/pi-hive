@@ -31,19 +31,18 @@
     "LICENSE",
     "index.ts",
     "src/",
-    "ui/web/src/",
     "ui/web/dist/",
-    "ui/web/vendor/",
-    "ui/web/index.html",
-    "ui/web/package.json",
-    "ui/web/tsconfig.json",
-    "ui/web/vite.config.ts",
+    "ui/review/src/",
+    "ui/review/dist/",
+    "scripts/build-review-bundle.mjs",
+    "scripts/check-package-budgets.mjs",
     "README.md",
     "SECURITY.md",
     "SETUP.md"
   ],
   "scripts": {
     "build:dashboard": "just dashboard-build",
+    "build:review": "just review-build",
     "typecheck:core": "just typecheck-core",
     "typecheck:dashboard": "just dashboard-typecheck",
     "test": "just test",
@@ -64,8 +63,7 @@
     "typebox": { "optional": false }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.3",
-    "@plannotator/pi-extension": "0.21.4"
+    "@earendil-works/pi-coding-agent": "0.80.3"
   },
   "dependencies": {
     "@fission-ai/openspec": "1.5.0"
