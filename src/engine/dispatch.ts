@@ -84,6 +84,57 @@ function archivePriorRun(sessionFile: string) {
 // live model. Kept as the last optional param so existing callers are unchanged.
 export type CreateAgentSession = typeof createAgentSession;
 
+class WorkerRunLifecycle {
+  private session: any;
+  private unsubscribe?: () => void;
+  private abortListener?: () => void;
+  private closed = false;
+  private readonly state: HiveState;
+  private readonly runtime: AgentRuntime;
+  private readonly abortSignal?: AbortSignal;
+
+  constructor(state: HiveState, runtime: AgentRuntime, abortSignal?: AbortSignal) {
+    this.state = state;
+    this.runtime = runtime;
+    this.abortSignal = abortSignal;
+    state.activeRuns++;
+  }
+
+  attachSession(session: any): void {
+    this.session = session;
+    this.runtime.session = session;
+  }
+
+  attachSubscription(unsubscribe: () => void): void {
+    this.unsubscribe = unsubscribe;
+  }
+
+  watchParentAbort(listener: () => void): void {
+    this.abortListener = listener;
+    if (this.abortSignal?.aborted) listener();
+    else this.abortSignal?.addEventListener("abort", listener, { once: true });
+  }
+
+  async close(failed: boolean): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.abortListener) this.abortSignal?.removeEventListener("abort", this.abortListener);
+    if (this.runtime.timer) {
+      clearInterval(this.runtime.timer);
+      this.runtime.timer = undefined;
+    }
+    try { this.unsubscribe?.(); } catch { /* cleanup must continue */ }
+    if (failed && this.session?.abort) {
+      // Do not let a hung provider abort strand the slot forever. Invoking abort
+      // starts cancellation; disposal and counter release remain unconditional.
+      try { void Promise.resolve(this.session.abort()).catch((): void => undefined); } catch { /* cleanup must continue */ }
+    }
+    try { this.session?.dispose?.(); } catch { /* cleanup must continue */ }
+    this.runtime.session = undefined;
+    this.state.activeRuns = Math.max(0, this.state.activeRuns - 1);
+  }
+}
+
 export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): string[] {
   return normalizeWorkerSkillPaths(refs).flatMap((skillPath) => {
     const safe = resolveProjectPath(cwd, skillPath);
@@ -250,7 +301,7 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
-  state.activeRuns++;
+  const lifecycle = new WorkerRunLifecycle(state, runtime, abortSignal);
   // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
   // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
   // tokens by per-run elapsed.
@@ -263,6 +314,24 @@ export async function dispatchAgent(
   runtime.runStartReasoningTokens = runtime.reasoningTokens;
   runtime.runStartCostUsd = runtime.costUsd;
 
+  const chunks: string[] = [];
+  let streamedSnapshot = "";
+  let session: any;
+  let abortedByParent = false;
+  let errorMessage: string | undefined;
+  const modelsSeen = new Set<string>();
+  const providersSeen = new Set<string>();
+  const apisSeen = new Set<string>();
+  let firstResponseId: string | undefined;
+  let lastResponseId: string | undefined;
+  const diagnostics: Array<{ type?: string; message?: string }> = [];
+  const MAX_DIAGNOSTICS = 20;
+  let lastStopReason: string | undefined;
+  const toolStartedAt = new Map<string, number>();
+  let lastRetryMaxAttempts: number | undefined;
+  let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
+
+  try {
   const toolNames = tools.split(",").map((t) => t.trim()).filter(Boolean);
   // Type-scoped tools (e.g. submit_review_verdict) are granted by agent type,
   // not the tools list, so keep them even when the agent does not enumerate
@@ -270,8 +339,6 @@ export async function dispatchAgent(
   const hiveTools = buildHiveTools(state, runtime.config.name).filter((t) => toolNames.includes(t.name) || TYPE_SCOPED_TOOL_NAMES.has(t.name));
   const skillPaths = resolveWorkerSkillPaths(ctx.cwd, runtime.config.skills as unknown[]);
 
-  const chunks: string[] = [];
-  let streamedSnapshot = "";
   const sessionManager = SessionManager.open(runtime.sessionFile);
 
   // createAgentSession only calls reload() when it creates its own resource
@@ -284,7 +351,7 @@ export async function dispatchAgent(
   const workerLoader = workerResourceLoader(state, ctx.cwd, runtime.config.name, skillPaths);
   await workerLoader.reload();
 
-  const { session } = await createSession({
+  const created = await createSession({
     cwd: ctx.cwd,
     model: resolvedModel,
     modelRegistry: (ctx as any).modelRegistry,
@@ -294,17 +361,16 @@ export async function dispatchAgent(
     sessionManager,
     resourceLoader: workerLoader,
   });
-  runtime.session = session;
+  session = created.session;
+  lifecycle.attachSession(session);
 
-  let abortedByParent = false;
   const abortWorker = (): void => {
     abortedByParent = true;
     runtime.lastWork = "cancelling";
     addHiveActivity(state, { kind: "delegation_end", parent: caller, agent: runtime.config.name, status: "error", text: "cancel requested" });
     void session.abort?.().catch((): undefined => undefined);
   };
-  if (abortSignal?.aborted) abortWorker();
-  else abortSignal?.addEventListener("abort", abortWorker, { once: true });
+  lifecycle.watchParentAbort(abortWorker);
 
   // Authoritative per-model thinking levels for this worker's effective model.
   // This is the SDK's own answer — no ModelRegistry plumbing needed (A10).
@@ -358,26 +424,13 @@ export async function dispatchAgent(
   runtime.timer.unref?.();
 
   // Distinct actual models seen across this run's assistant messages (A3).
-  const modelsSeen = new Set<string>();
   // Per-message identity the SDK exposes on AssistantMessage (Item 9 / R3-1.4):
   // `.provider`, `.api`, `.responseId?`, `.diagnostics?` all ride the same
   // message_end object. Capture the distinct providers/apis, the first+last
   // responseId (bookends of the run), and a bounded set of diagnostics.
-  const providersSeen = new Set<string>();
-  const apisSeen = new Set<string>();
-  let firstResponseId: string | undefined;
-  let lastResponseId: string | undefined;
-  const diagnostics: Array<{ type?: string; message?: string }> = [];
-  const MAX_DIAGNOSTICS = 20;
-  let lastStopReason: string | undefined;
   // toolCallId → startedAt, for per-call durationMs (A4). Bounded by in-flight
-  // calls: deleted on tool_execution_end.
-  const toolStartedAt = new Map<string, number>();
-  // The SDK's `auto_retry_end` event does NOT carry `maxAttempts`; only the
-  // matching `auto_retry_start` does. Remember the last seen value so the
-  // retry-end telemetry can report it instead of always emitting `undefined`.
-  let lastRetryMaxAttempts: number | undefined;
-
+  // calls: deleted on tool_execution_end. Retry metadata is retained only for
+  // this reserved run and cleared by the outer lifecycle cleanup.
   const unsubscribe = session.subscribe((event: any) => {
     if (event.type === "message_update") {
       const delta = event.assistantMessageEvent;
@@ -515,8 +568,8 @@ export async function dispatchAgent(
     publishRuntimeUpdate(state);
     writeHiveStateSnapshot(state);
   });
+  lifecycle.attachSubscription(unsubscribe);
 
-  let errorMessage: string | undefined;
   try {
     // Scoped so currentAgentName() resolves to this worker for everything
     // causally downstream of prompt() — subscribed event handlers, tool
@@ -565,7 +618,6 @@ export async function dispatchAgent(
   // stats throws, the incremental values already on the runtime are kept.
   // Item 9: SessionStats also carries authoritative message/tool counts —
   // preferred over the hand-tallied toolCount so the numbers match the SDK's own.
-  let sdkCounts: { toolCalls?: number; toolResults?: number; userMessages?: number; assistantMessages?: number } | undefined;
   try {
     const stats: any = session.getSessionStats?.();
     if (stats) {
@@ -610,15 +662,15 @@ export async function dispatchAgent(
     }
   } catch { /* keep incremental values if stats is unavailable */ }
 
-  abortSignal?.removeEventListener("abort", abortWorker);
-  unsubscribe();
-  if (runtime.timer) clearInterval(runtime.timer);
-  runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
-  runtime.status = errorMessage ? "error" : "done";
+  } catch (error: any) {
+    errorMessage = errorMessage || error?.message || String(error);
+  } finally {
+    toolStartedAt.clear();
+    await lifecycle.close(Boolean(errorMessage));
+    runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
+    runtime.status = errorMessage ? "error" : "done";
+  }
   const exitCode = errorMessage ? 1 : 0;
-  state.activeRuns = Math.max(0, state.activeRuns - 1);
-  session.dispose();
-  runtime.session = undefined;
 
   const output = chunks.join("").trim() || streamedSnapshot.trim() || errorMessage || "[no output]";
   runtime.lastWork = output.split("\n").filter((line) => line.trim()).pop() || runtime.status;
@@ -742,6 +794,7 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
 
   const chunks: string[] = [];
   let streamedSnapshot = "";
+  (state.backgroundDistillerSessions ||= new Set()).add(session);
   session.subscribe((event: any) => {
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       const delta = event.assistantMessageEvent;
@@ -760,6 +813,7 @@ export async function runDistillerProcess(state: HiveState, ctx: ExtensionContex
   } catch {
     return "";
   } finally {
+    state.backgroundDistillerSessions?.delete(session);
     session.dispose();
   }
   return chunks.join("").trim() || streamedSnapshot.trim();
@@ -791,32 +845,63 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
   } catch { /* no session yet */ }
   if (!conversation) { try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ } return; }
 
+  let changed = false;
+  let errorMessage: string | undefined;
+  emitHiveEvent(state, "distill_start", { agent: runtime.config.name, target: target.path, model: state.config.settings.distiller.model }, "Distiller");
   try {
     const currentModel = safeRead(targetPath);
     const today = new Date().toISOString().slice(0, 10);
     const prompt = buildDistillerPrompt(runtime.config.name, currentModel, conversation, today);
-    emitHiveEvent(state, "distill_start", { agent: runtime.config.name, target: target.path, model: state.config.settings.distiller.model }, "Distiller");
     const output = await runDistillerProcess(state, ctx, prompt, state.config.settings.distiller.model);
     const extracted = extractTagged(output, "mental_model");
     // Mechanical safety net: guarantee the hard spine (owner/updated/spine keys)
     // even if the distiller's output drifts. The soft body is left byte-exact.
     const distilled = extracted ? normalizeMentalModelSpine(extracted, runtime.config.name).trim() : null;
-    if (distilled && distilled !== currentModel.trim()) {
-      let changed = false;
+    if (distilled && distilled !== currentModel.trim() && !state.shuttingDown) {
       await withFileMutationQueue(targetPath, async () => {
         // Re-read inside the queued mutation window. If another tool updated the
         // model while distillation was running, do not overwrite fresher state
         // with a result derived from the old snapshot.
         const latestModel = safeRead(targetPath);
-        if (latestModel.trim() !== currentModel.trim()) return;
+        if (state.shuttingDown || latestModel.trim() !== currentModel.trim()) return;
         writeFileSync(targetPath, `${distilled}\n`);
         changed = true;
       });
       if (changed) {
         logRecord(state, { from: "Distiller", to: runtime.config.name, type: "mental_model_distilled", message: `Updated ${target.path}`, path: target.path });
-        emitHiveEvent(state, "distill_end", { agent: runtime.config.name, target: target.path, changed: true }, "Distiller");
       }
     }
-  } catch { /* distillation is best-effort; never fail the delegation */ }
-  finally { try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ } }
+  } catch (error: any) {
+    errorMessage = truncateMiddle(error?.message || String(error), 500);
+  } finally {
+    emitHiveEvent(state, "distill_end", { agent: runtime.config.name, target: target.path, changed, errorMessage }, "Distiller");
+    try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ }
+  }
+}
+
+export function scheduleMentalModelDistillation(
+  state: HiveState,
+  ctx: ExtensionContext,
+  runtime: AgentRuntime,
+  runDistiller: typeof distillMentalModel = distillMentalModel,
+): Promise<void> {
+  const target = agentMentalModelTarget(runtime);
+  if (!target || state.shuttingDown) return Promise.resolve();
+  const runCount = runtime.runCount;
+  const queues = state.distillQueues ||= new Map<string, Promise<void>>();
+  const background = state.backgroundTasks ||= new Set<Promise<void>>();
+  const previous = queues.get(target.path) || Promise.resolve();
+  const task = previous.catch((): void => undefined).then(async () => {
+    // A newer run for the same runtime supersedes this queued snapshot. Skipping
+    // it prevents an old conversation from overwriting a newer mental model.
+    if (state.shuttingDown || runtime.runCount !== runCount) return;
+    await runDistiller(state, ctx, runtime);
+  }).catch((): void => undefined);
+  queues.set(target.path, task);
+  background.add(task);
+  void task.finally(() => {
+    background.delete(task);
+    if (queues.get(target.path) === task) queues.delete(target.path);
+  });
+  return task;
 }

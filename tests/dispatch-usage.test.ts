@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchAgent, inferArtifactFromReviewTask, inferChangeIdFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, type CreateAgentSession } from "../src/engine/dispatch.ts";
+import { dispatchAgent, distillMentalModel, inferArtifactFromReviewTask, inferChangeIdFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, scheduleMentalModelDistillation, type CreateAgentSession } from "../src/engine/dispatch.ts";
 import { restoreRuntimeCounters } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
@@ -142,6 +142,101 @@ test("dispatchAgent treats message_update.text as snapshot, not appended delta",
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.output, "- Please approve");
+});
+
+test("mental-model distillers serialize per target and release background tracking", async () => {
+  const worker = runtimeFor("Builder", "/tmp/builder.jsonl");
+  worker.config.context = [{ path: ".pi/hive/agents/builder-model.yaml", updatable: true }];
+  worker.runCount = 1;
+  const state = {} as HiveState;
+  let active = 0;
+  let maxActive = 0;
+  let calls = 0;
+  let releaseFirst: (() => void) | undefined;
+  const runner = async (): Promise<void> => {
+    calls++;
+    active++;
+    maxActive = Math.max(maxActive, active);
+    if (calls === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    active--;
+  };
+
+  const first = scheduleMentalModelDistillation(state, {} as any, worker, runner as any);
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = scheduleMentalModelDistillation(state, {} as any, worker, runner as any);
+  assert.equal(calls, 1, "second distiller must wait behind the first target queue");
+  releaseFirst?.();
+  await Promise.all([first, second]);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 2);
+  assert.equal(maxActive, 1);
+  assert.equal(state.backgroundTasks?.size, 0);
+  assert.equal(state.distillQueues?.size, 0);
+});
+
+test("distiller always emits distill_end after a started no-output run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-distill-end-"));
+  const agentsDir = join(dir, ".pi", "hive", "agents");
+  mkdirSync(agentsDir, { recursive: true });
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  worker.config.context = [{ path: ".pi/hive/agents/builder-model.yaml", updatable: true }];
+  writeFileSync(worker.sessionFile, '{"type":"message","text":"learned fact"}\n');
+  writeFileSync(join(agentsDir, "builder-model.yaml"), "owner: Builder\nupdated: 2026-01-01\n");
+  const obsLog = join(dir, "e.jsonl");
+  const state = {
+    config: { settings: { distiller: { enabled: true, model: "missing/model", conversationLines: 10 } } },
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: (): undefined => undefined } } as any;
+
+  await distillMentalModel(state, ctx, worker);
+
+  const events = readEmittedEvents(obsLog).filter((event) => event.type.startsWith("distill_"));
+  assert.deepEqual(events.map((event) => event.type), ["distill_start", "distill_end"]);
+  assert.equal(events[1].payload.changed, false);
+});
+
+test("dispatchAgent setup failure releases the reserved slot and emits terminal telemetry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-setup-failure-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  const obsLog = join(dir, "e.jsonl");
+  const state: HiveState = {
+    pi: {} as any,
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md" },
+      agents: [worker.config], sharedContext: [],
+      settings: { subagentOutputLimit: 100, defaultTools: "read", maxParallel: 2, distiller: { enabled: false, model: "", conversationLines: 10 } },
+    } as any,
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: obsLog },
+    runtimes: new Map([["builder", worker]]), widgetCtx: null, activeRuns: 0,
+    mode: "hive", normalToolNames: [], sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", id: "model" }) } } as any;
+  let aborted = 0;
+  let disposed = 0;
+  const create: CreateAgentSession = (async () => ({ session: {
+    subscribe(): () => void { throw new Error("subscription setup failed"); },
+    async abort(): Promise<void> { aborted++; },
+    dispose(): void { disposed++; },
+    state: { errorMessage: undefined },
+  } } as any)) as any;
+
+  const result = await dispatchAgent(state, "Builder", "fail during setup", ctx, false, create);
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output, /subscription setup failed/);
+  assert.equal(state.activeRuns, 0);
+  assert.equal(worker.status, "error");
+  assert.equal(worker.session, undefined);
+  assert.equal(worker.timer, undefined);
+  assert.equal(aborted, 1, "a partially-created session must be aborted on setup failure");
+  assert.equal(disposed, 1, "a partially-created session must be disposed on setup failure");
+  const terminal = readEmittedEvents(obsLog).find((event) => event.type === "delegation_end");
+  assert.ok(terminal, "setup failure must still emit bounded terminal telemetry");
+  assert.equal(terminal.payload.exitCode, 1);
+  assert.match(terminal.payload.errorMessage, /subscription setup failed/);
 });
 
 test("dispatchAgent abort signal cancels the worker session", async () => {

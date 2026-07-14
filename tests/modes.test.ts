@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { canonicalMode } from "../src/core/types.ts";
 import { loadConfig, teamForMode, allConfiguredAgents } from "../src/core/config.ts";
 import { auditAgentTypes } from "../src/core/agent-type-audit.ts";
-import { nextMode, modeLabel } from "../src/ui/tui/widget.ts";
+import { applyMode, nextMode, modeLabel } from "../src/ui/tui/widget.ts";
 
 // ── canonicalMode + cycle ────────────────────────────────────────────────────
 
@@ -28,6 +28,16 @@ test("modeLabel renders uppercase labels", () => {
   assert.equal(modeLabel("normal"), "NORMAL");
   assert.equal(modeLabel("plan"), "PLAN");
   assert.equal(modeLabel("hive"), "HIVE");
+});
+
+test("applyMode blocks switching to normal while a worker run is reserved", () => {
+  const notifications: string[] = [];
+  const state = { mode: "hive", activeRuns: 1, config: {}, runtimes: new Map() } as any;
+  const ctx = { hasUI: true, ui: { notify: (message: string) => notifications.push(message) } } as any;
+
+  assert.equal(applyMode(state, ctx, "normal"), false);
+  assert.equal(state.mode, "hive");
+  assert.match(notifications[0], /Cannot switch mode while 1 agent is running/);
 });
 
 // ── config: planning + hive blocks ──────────────────────────────────────────
