@@ -23,7 +23,7 @@ import {
   extractUsage,
 } from "../core/utils";
 import { logRecord } from "./state";
-import { currentAgentName, currentChangeId, runAsAgent, runWithChange } from "./session";
+import { currentAgentName, currentChangeId, currentDelegationDepth, runAsAgent, runAtDelegationDepth, runWithChange } from "./session";
 import { canDelegateTo } from "./domain";
 import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extractTagged } from "./prompts";
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
@@ -34,6 +34,7 @@ import { ARTIFACT_ORDER, type ArtifactId } from "../shared/openspec-artifacts";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
+import { acquireWorkerSlot, budgetRemaining, checkDispatchBudgets, effectiveWorkerGovernance, releaseWorkerSlot } from "./governance";
 
 // Dashboard activity should show reviewer/worker conclusions without confusing
 // middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
@@ -99,7 +100,6 @@ class WorkerRunLifecycle {
     this.state = state;
     this.runtime = runtime;
     this.abortSignal = abortSignal;
-    state.activeRuns++;
   }
 
   attachSession(session: any): void {
@@ -133,7 +133,7 @@ class WorkerRunLifecycle {
     }
     try { this.session?.dispose?.(); } catch { /* cleanup must continue */ }
     this.runtime.session = undefined;
-    this.state.activeRuns = Math.max(0, this.state.activeRuns - 1);
+    releaseWorkerSlot(this.state);
   }
 }
 
@@ -248,11 +248,47 @@ export async function dispatchAgent(
   if (runtime.status === "running") {
     return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
   }
-  if (state.activeRuns >= state.config.settings.maxParallel) {
-    return { output: `Max parallel agent runs reached (${state.config.settings.maxParallel}). Wait for a worker to finish.`, exitCode: 1, elapsed: 0 };
+  const delegationDepth = currentDelegationDepth() + 1;
+  const blocked = checkDispatchBudgets(state, runtime, delegationDepth);
+  if (blocked) {
+    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, resource: blocked.resource, scope: blocked.scope, remaining: budgetRemaining(state, runtime) }, caller);
+    return { output: `Delegation blocked: ${blocked.message}`, exitCode: 1, elapsed: 0 };
+  }
+  const willQueue = state.config.settings.maxParallel !== undefined
+    && state.activeRuns >= state.config.settings.maxParallel
+    && state.config.settings.queueSize !== undefined;
+  const slotPromise = acquireWorkerSlot(state, abortSignal);
+  if (willQueue) emitHiveEvent(state, "queue_update", { workerQueue: state.workerQueue?.length || 0, agent: runtime.config.name, phase: "queued" }, caller);
+  const slot = await slotPromise;
+  if (willQueue) emitHiveEvent(state, "queue_update", { workerQueue: state.workerQueue?.length || 0, agent: runtime.config.name, phase: slot }, caller);
+  if (slot !== "acquired") {
+    const reason = slot === "parallel"
+      ? `Max parallel agent runs reached (${state.config.settings.maxParallel}); configure queue-size to enable fair waiting.`
+      : slot === "queue-full"
+        ? `Worker queue is full (${state.config.settings.queueSize}).`
+        : "Delegation cancelled while waiting for a worker slot.";
+    return { output: reason, exitCode: 1, elapsed: 0 };
+  }
+  // A queued request can become stale while waiting: another request may have
+  // started the same worker or consumed its remaining budget.
+  if ((runtime.status as AgentRuntime["status"]) === "running") {
+    releaseWorkerSlot(state);
+    return { output: `${runtime.config.name} is already running.`, exitCode: 1, elapsed: runtime.elapsedMs };
+  }
+  const queuedBlock = checkDispatchBudgets(state, runtime, delegationDepth);
+  if (queuedBlock) {
+    releaseWorkerSlot(state);
+    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, resource: queuedBlock.resource, scope: queuedBlock.scope, remaining: budgetRemaining(state, runtime) }, caller);
+    return { output: `Delegation blocked: ${queuedBlock.message}`, exitCode: 1, elapsed: 0 };
   }
 
-  const prompt = buildWorkerPrompt(state, ctx, runtime, task);
+  let prompt: string;
+  try {
+    prompt = buildWorkerPrompt(state, ctx, runtime, task);
+  } catch (error: any) {
+    releaseWorkerSlot(state);
+    return { output: `Cannot prepare ${runtime.config.name}: ${error?.message || String(error)}`, exitCode: 1, elapsed: 0 };
+  }
   const model = modelFrom(ctx, runtime.config.model);
   const tools = normalizeWorkerTools(runtime.config.tools, state.config.settings.defaultTools);
   const thinking = runtime.config.thinking!;
@@ -262,6 +298,10 @@ export async function dispatchAgent(
   // is used below to decide which input to pass to session.prompt(): the full
   // assembled worker context (new/fresh) or the lean task alone (resume).
   const sessionFileExisted = existsSync(runtime.sessionFile);
+  // Governance accounting is monotonic even when fresh=true archives the SDK
+  // transcript and resets its session-lifetime counters.
+  runtime.governanceTokens ??= runtime.inputTokens + runtime.outputTokens + runtime.cacheReadTokens + runtime.cacheWriteTokens + runtime.reasoningTokens;
+  runtime.governanceCostUsd ??= runtime.costUsd;
   // fresh=true starts this agent's conversation clean. Rather than DELETE the
   // prior session (which would lose the transcript of earlier runs while their
   // token/cost still count), ARCHIVE it to a numbered run file so the dashboard
@@ -292,9 +332,11 @@ export async function dispatchAgent(
   // it also means an unresolvable model aborts cleanly: no run-start field —
   // runCount, startedAt, elapsedMs, the token baselines — is touched for a run
   // that never happens (M-misc), so the previous run's stats stay intact.
-  const resolvedModel = resolveModel(ctx, model);
+  let resolvedModel: any;
+  try { resolvedModel = resolveModel(ctx, model); } catch { resolvedModel = undefined; }
   if (!resolvedModel) {
     runtime.status = "error";
+    releaseWorkerSlot(state);
     return { output: `Cannot resolve model "${model}" for ${runtime.config.name}.`, exitCode: 1, elapsed: 0 };
   }
 
@@ -307,7 +349,18 @@ export async function dispatchAgent(
   runtime.elapsedMs = 0;
   runtime.runCount++;
   runtime.startedAt = Date.now();
-  const lifecycle = new WorkerRunLifecycle(state, runtime, abortSignal);
+  const governance = effectiveWorkerGovernance(state, runtime);
+  const runController = new AbortController();
+  let timedOut = false;
+  const abortFromParent = () => runController.abort(abortSignal?.reason);
+  if (abortSignal?.aborted) abortFromParent();
+  else abortSignal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeout = governance.timeoutMs === undefined ? undefined : setTimeout(() => {
+    timedOut = true;
+    runController.abort(new Error(`Worker timeout after ${governance.timeoutMs}ms`));
+  }, governance.timeoutMs);
+  timeout?.unref?.();
+  const lifecycle = new WorkerRunLifecycle(state, runtime, runController.signal);
   // TOK/S baselines (J8/Decision 4): lifetime token counts at run start so the UI
   // divides the *per-run output* delta by *per-run* elapsedMs — not lifetime
   // tokens by per-run elapsed.
@@ -402,7 +455,7 @@ export async function dispatchAgent(
     // above (A10). Now populated on the FIRST run too (J4); the topology_nodes
     // sidecar fills in from this.
     thinkingLevels: runtime.thinkingLevels,
-    runtime: runtimeSummary(runtime),
+    runtime: runtimeSummary(state, runtime),
   }, caller);
   publishRuntimeUpdate(state);
   writeHiveStateSnapshot(state);
@@ -563,6 +616,30 @@ export async function dispatchAgent(
         runtime.cacheWriteTokens += u.cacheWrite;
         runtime.reasoningTokens += u.reasoning;
         runtime.costUsd += u.cost;
+
+        const remaining = budgetRemaining(state, runtime);
+        const teamLimits = state.config?.settings.teamBudgets || {};
+        const warn = (left: number | undefined, limit: number | undefined, scope: "worker" | "team", resource: "tokens" | "cost") => {
+          if (left === undefined || limit === undefined || left <= 0 || left / limit > 0.2) return;
+          const warningKey = `${scope}:${resource}:${scope === "worker" ? agentSlug(runtime.config) : "team"}`;
+          const warnings = state.budgetWarnings ||= new Set<string>();
+          if (warnings.has(warningKey)) return;
+          warnings.add(warningKey);
+          emitHiveEvent(state, "budget_warning", { agent: runtime.config.name, scope, resource, remaining: left, limit }, runtime.config.name);
+        };
+        warn(remaining.worker.tokens, governance.tokenBudget, "worker", "tokens");
+        warn(remaining.worker.costUsd, governance.costBudgetUsd, "worker", "cost");
+        warn(remaining.team.tokens, teamLimits.tokenBudget, "team", "tokens");
+        warn(remaining.team.costUsd, teamLimits.costBudgetUsd, "team", "cost");
+        const exhausted = remaining.worker.tokens === 0 ? { scope: "worker", resource: "tokens" }
+          : remaining.worker.costUsd === 0 ? { scope: "worker", resource: "cost" }
+          : remaining.team.tokens === 0 ? { scope: "team", resource: "tokens" }
+          : remaining.team.costUsd === 0 ? { scope: "team", resource: "cost" }
+          : undefined;
+        if (exhausted && !runController.signal.aborted) {
+          emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, ...exhausted, remaining }, runtime.config.name);
+          runController.abort(new Error(`${exhausted.scope} ${exhausted.resource} budget exhausted`));
+        }
       }
     } else if (event.type === "agent_end") {
       const messages = event.messages || [];
@@ -604,8 +681,8 @@ export async function dispatchAgent(
     // forward, so re-injecting would duplicate it on every resumed delegation.
     // Deliberate non-goal: distiller re-injection into resumed workers (P4).
     const isNewSession = fresh || !sessionFileExisted;
-    await runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task)));
-    errorMessage = abortedByParent ? "aborted" : session.state.errorMessage;
+    await runAtDelegationDepth(delegationDepth, () => runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task))));
+    errorMessage = abortedByParent ? (timedOut ? `Worker timed out after ${governance.timeoutMs}ms` : "aborted") : session.state.errorMessage;
     // The 1s timer polls this too, but relying on it alone can miss the final,
     // most accurate reading if the last tick landed moments before completion.
     // Refresh the raw tokens/window alongside the percent (Phase 4.7) so the
@@ -672,6 +749,8 @@ export async function dispatchAgent(
     errorMessage = errorMessage || error?.message || String(error);
   } finally {
     toolStartedAt.clear();
+    if (timeout) clearTimeout(timeout);
+    abortSignal?.removeEventListener("abort", abortFromParent);
     await lifecycle.close(Boolean(errorMessage));
     runtime.elapsedMs = runtime.startedAt ? Date.now() - runtime.startedAt : runtime.elapsedMs;
     runtime.status = errorMessage ? "error" : "done";
@@ -716,6 +795,9 @@ export async function dispatchAgent(
     reasoningTokens: nonneg(runtime.reasoningTokens - (runtime.runStartReasoningTokens ?? 0)),
     costUsd: nonneg(runtime.costUsd - (runtime.runStartCostUsd ?? 0)),
   };
+  runtime.governanceTokens = (runtime.governanceTokens || 0)
+    + delta.inputTokens + delta.outputTokens + delta.cacheReadTokens + delta.cacheWriteTokens + delta.reasoningTokens;
+  runtime.governanceCostUsd = (runtime.governanceCostUsd || 0) + delta.costUsd;
   if (runtime.config.agentType === "reviewer") {
     // Persist per-artifact reviewer clearance whenever a review prompt is
     // explicit enough to identify its target. Some dashboard-triggered review
@@ -758,7 +840,7 @@ export async function dispatchAgent(
     // never sums these rows with legacy cumulative ones (delegationsSchema=1).
     delegationsSchema: 1,
     delta,
-    runtime: runtimeSummary(runtime),
+    runtime: runtimeSummary(state, runtime),
   }, runtime.config.name);
   // Surface delegation failures as the now-live `error` telemetry event (A3).
   if (errorMessage) {
@@ -853,7 +935,7 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
 
   let changed = false;
   let errorMessage: string | undefined;
-  emitHiveEvent(state, "distill_start", { agent: runtime.config.name, target: target.path, model: state.config.settings.distiller.model }, "Distiller");
+  emitHiveEvent(state, "distill_start", { agent: runtime.config.name, target: target.path, model: state.config.settings.distiller.model, distillerRunCount: runtime.distillerRunCount || 0 }, "Distiller");
   try {
     const currentModel = safeRead(targetPath);
     const today = new Date().toISOString().slice(0, 10);
@@ -893,6 +975,11 @@ export function scheduleMentalModelDistillation(
 ): Promise<void> {
   const target = agentMentalModelTarget(runtime);
   if (!target || state.shuttingDown) return Promise.resolve();
+  const governance = effectiveWorkerGovernance(state, runtime);
+  if (governance.distillerRuns !== undefined && (runtime.distillerRunCount || 0) >= governance.distillerRuns) {
+    emitHiveEvent(state, "budget_exhausted", { agent: runtime.config.name, scope: "worker", resource: "distillerRuns", remaining: 0, limit: governance.distillerRuns }, "Distiller");
+    return Promise.resolve();
+  }
   const runCount = runtime.runCount;
   const queues = state.distillQueues ||= new Map<string, Promise<void>>();
   const background = state.backgroundTasks ||= new Set<Promise<void>>();
@@ -901,6 +988,9 @@ export function scheduleMentalModelDistillation(
     // A newer run for the same runtime supersedes this queued snapshot. Skipping
     // it prevents an old conversation from overwriting a newer mental model.
     if (state.shuttingDown || runtime.runCount !== runCount) return;
+    // Reserve at launch time so queued distillers cannot all pass the same cap.
+    if (governance.distillerRuns !== undefined && (runtime.distillerRunCount || 0) >= governance.distillerRuns) return;
+    runtime.distillerRunCount = (runtime.distillerRunCount || 0) + 1;
     await runDistiller(state, ctx, runtime);
   }).catch((): void => undefined);
   queues.set(target.path, task);

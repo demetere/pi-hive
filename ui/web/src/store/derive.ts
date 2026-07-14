@@ -382,7 +382,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       out.push({
         key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || (rt as any)?.agentType, model: node.model || rt?.model, color: node.color,
         status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
-        elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, contextTokens: rt?.contextTokens, contextWindow: rt?.contextWindow, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
+        elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, contextTokens: rt?.contextTokens, contextWindow: rt?.contextWindow, budgetRemaining: rt?.budgetRemaining, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
         // Enforcement contract carried from the topology node (Phase 6.1).
         domain: node.domain, commit: node.commit, stages: node.stages, consultWhen: node.consultWhen, responsibilities: node.responsibilities,
       });
@@ -403,7 +403,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       out.push({
         key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", agentType: (rt as any).agentType, model: rt.model, color: undefined,
         status: statusOf(sess.session_id, rt.name, rt.status), tokens, cost, runs: Math.max(rt.runCount || 0, h?.runs || 0), tools: Math.max(rt.toolCount || 0, h?.tools || 0),
-        elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, contextTokens: rt.contextTokens, contextWindow: rt.contextWindow, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
+        elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, contextTokens: rt.contextTokens, contextWindow: rt.contextWindow, budgetRemaining: rt.budgetRemaining, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
       });
     }
   }

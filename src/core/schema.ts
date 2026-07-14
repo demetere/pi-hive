@@ -22,6 +22,14 @@ function assertNumber(value: unknown, label: string) {
   if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`${label} must be a finite number when provided.`);
 }
 
+function validateGovernance(value: unknown, label: string) {
+  if (value === undefined) return;
+  assertObject(value, label);
+  for (const key of ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "costBudgetUsd", "distillerRuns"] as const) {
+    assertNumber(value[key], `${label}.${key}`);
+  }
+}
+
 function validateKnowledgeRefs(value: unknown, label: string) {
   if (value === undefined) return;
   if (!Array.isArray(value)) throw new Error(`${label} must be a list.`);
@@ -66,6 +74,7 @@ function validateAgent(agent: AgentConfig, label: string, seen: Map<string, stri
   validateKnowledgeRefs(agent.context, `${label}.context`);
   validateKnowledgeRefs(agent.skills, `${label}.skills`);
   validateDomains(agent.domain, `${label}.domain`);
+  validateGovernance(agent.governance, `${label}.governance`);
   if (agent.members !== undefined && !Array.isArray(agent.members)) throw new Error(`${label}.members must be a list.`);
   if (agent.children !== undefined && !Array.isArray(agent.children)) throw new Error(`${label}.children must be a list.`);
   [...(agent.members || []), ...(agent.children || [])].forEach((child, index) => validateAgent(child, `${label}.members[${index}]`, seen));
@@ -123,6 +132,14 @@ export function validateHiveConfigShape(config: HiveConfig): void {
     assertObject(config.settings, "settings");
     assertNumber(config.settings.subagentOutputLimit, "settings.subagentOutputLimit");
     assertNumber(config.settings.maxParallel, "settings.maxParallel");
+    assertNumber(config.settings.queueSize, "settings.queueSize");
+    validateGovernance(config.settings.worker, "settings.worker");
+    if (config.settings.teamBudgets) {
+      assertObject(config.settings.teamBudgets, "settings.teamBudgets");
+      assertNumber(config.settings.teamBudgets.maxRuns, "settings.teamBudgets.maxRuns");
+      assertNumber(config.settings.teamBudgets.tokenBudget, "settings.teamBudgets.tokenBudget");
+      assertNumber(config.settings.teamBudgets.costBudgetUsd, "settings.teamBudgets.costBudgetUsd");
+    }
     validateStringList(config.settings.secretPaths, "settings.secretPaths");
     if (config.settings.distiller) {
       assertObject(config.settings.distiller, "settings.distiller");

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchAgent, distillMentalModel, inferArtifactFromReviewTask, inferChangeIdFromReviewTask, isPendingArtifactRevisionTask, resolveWorkerSkillPaths, scheduleMentalModelDistillation, type CreateAgentSession } from "../src/engine/dispatch.ts";
-import { restoreRuntimeCounters } from "../src/engine/session.ts";
+import { restoreRuntimeCounters, runAtDelegationDepth } from "../src/engine/session.ts";
 import type { AgentRuntime, HiveState } from "../src/core/types.ts";
 
 // L1: a REAL double-count regression test. It drives dispatchAgent end-to-end
@@ -239,7 +239,7 @@ test("dispatchAgent setup failure releases the reserved slot and emits terminal 
   assert.match(terminal.payload.errorMessage, /subscription setup failed/);
 });
 
-test("dispatchAgent abort signal cancels the worker session", async () => {
+test("dispatchAgent propagates a parent/nested abort signal into the worker session", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-abort-"));
   const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
   const state: HiveState = {
@@ -279,6 +279,43 @@ test("dispatchAgent abort signal cancels the worker session", async () => {
   assert.equal(result.exitCode, 1);
   assert.match(result.output, /aborted/);
   assert.equal(state.activeRuns, 0);
+});
+
+test("dispatchAgent enforces optional timeout and nested delegation depth", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-governed-"));
+  const worker = runtimeFor("Builder", join(dir, "builder.jsonl"));
+  worker.config.governance = { timeoutMs: 10, maxDelegationDepth: 1 };
+  const state = {
+    pi: {},
+    config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [worker.config], sharedContext: [], settings: { subagentOutputLimit: 100, defaultTools: "read", worker: {}, distiller: { enabled: false, model: "", conversationLines: 10 } } },
+    session: { sessionId: "s1", sessionDir: dir, conversationLog: join(dir, "c.jsonl"), observabilityLog: join(dir, "e.jsonl") },
+    runtimes: new Map([["builder", worker]]), widgetCtx: null, activeRuns: 0, mode: "hive", normalToolNames: [], sddStatus: null, obsSeq: 0,
+  } as any;
+  const ctx = { cwd: dir, modelRegistry: { find: () => ({ provider: "test", modelId: "model" }) } } as any;
+  let release: (() => void) | undefined;
+  const create: CreateAgentSession = (async () => ({ session: {
+    subscribe(): () => void { return () => undefined; },
+    getAvailableThinkingLevels(): string[] { return ["off"]; },
+    getContextUsage(): { percent: number } { return { percent: 0 }; },
+    getSessionStats(): any { return { tokens: {}, cost: {} }; },
+    state: { errorMessage: undefined },
+    async prompt(): Promise<void> { await new Promise<void>((resolve) => { release = resolve; }); },
+    async abort(): Promise<void> { release?.(); },
+    dispose(): void { /* noop */ },
+  } } as any)) as any;
+
+  const timed = await dispatchAgent(state, "Builder", "slow task", ctx, false, create);
+  assert.equal(timed.exitCode, 1);
+  assert.match(timed.output, /timed out after 10ms/i);
+  assert.equal(state.activeRuns, 0);
+
+  worker.status = "idle";
+  const nested = await runAtDelegationDepth(1, () => dispatchAgent(state, "Builder", "too deep", ctx, false, create));
+  assert.equal(nested.exitCode, 1);
+  assert.match(nested.output, /maximum delegation depth exhausted/i);
+  assert.equal(worker.runCount, 1);
+  const exhausted = readEmittedEvents(state.session.observabilityLog).find((event) => event.type === "budget_exhausted");
+  assert.equal(exhausted?.payload.resource, "depth");
 });
 
 test("dispatchAgent totals equal getSessionStats exactly — no message_end/agent_end double-count (L1)", async () => {

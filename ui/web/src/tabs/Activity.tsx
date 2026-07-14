@@ -102,7 +102,9 @@ function itemTitle(item: ActivityItem): string {
     case "session_fork": return "Fork requested";
     case "session_tree": return "Session tree navigation";
     case "session_info_changed": return p.name ? `Session renamed → ${p.name}` : "Session name cleared";
-    case "queue_update": return `Queue: ${p.steering ?? 0} steering · ${p.followUp ?? 0} follow-up`;
+    case "queue_update": return p.workerQueue != null ? `Worker queue: ${p.workerQueue}` : `Queue: ${p.steering ?? 0} steering · ${p.followUp ?? 0} follow-up`;
+    case "budget_warning": return `${p.scope || "worker"} ${p.resource || "resource"} budget low`;
+    case "budget_exhausted": return `${p.scope || "worker"} ${p.resource || "resource"} budget exhausted`;
     default: return e.type;
   }
 }
@@ -124,6 +126,7 @@ function itemSummary(item: ActivityItem): string {
     case "delegation_end": return `${p.message || ""}${p.elapsedMs ? ` · ${Math.round((p.elapsedMs || 0) / 1000)}s` : ""}${p.costUsd != null ? ` · ${fmtCost(p.costUsd)}` : ""}`;
     case "user_message": case "assistant_message": return p.text || "";
     case "worker_retry": return p.errorMessage || "";
+    case "budget_warning": case "budget_exhausted": return p.remaining != null ? `remaining: ${typeof p.remaining === "object" ? JSON.stringify(p.remaining) : p.remaining}` : "";
     default: return typeof p.text === "string" ? p.text : "";
   }
 }

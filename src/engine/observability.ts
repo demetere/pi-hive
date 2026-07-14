@@ -9,6 +9,7 @@ import { agentSlug, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
 import { withCrossProcessFileLock } from "../core/file-lock";
 import { redactSensitive } from "../shared/privacy";
+import { budgetRemaining } from "./governance";
 
 export type HiveObsEventType = HiveTelemetryEventType;
 export type HiveObsEvent<P = JsonRecord> = HiveTelemetryEvent<P>;
@@ -121,7 +122,7 @@ export function hiveTeamTopologies(state: HiveState): HiveStateSnapshot["topolog
   };
 }
 
-export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnapshot["agents"]>[number] {
+export function runtimeSummary(state: HiveState, runtime: AgentRuntime): NonNullable<HiveStateSnapshot["agents"]>[number] {
   return {
     slug: agentSlug(runtime.config),
     name: runtime.config.name,
@@ -132,6 +133,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     task: runtime.task,
     lastWork: truncateMiddle(runtime.lastWork || "", 400),
     runCount: runtime.runCount,
+    distillerRunCount: runtime.distillerRunCount,
     toolCount: runtime.toolCount,
     elapsedMs: runtime.elapsedMs,
     inputTokens: runtime.inputTokens,
@@ -140,6 +142,8 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     cacheWriteTokens: runtime.cacheWriteTokens,
     reasoningTokens: runtime.reasoningTokens,
     costUsd: runtime.costUsd,
+    governanceTokens: runtime.governanceTokens,
+    governanceCostUsd: runtime.governanceCostUsd,
     contextPct: runtime.contextPct,
     // Raw context-window fill behind contextPct (Phase 4.7) — carried through so
     // the dashboard can show tokens/window, not just the percentage.
@@ -154,6 +158,7 @@ export function runtimeSummary(runtime: AgentRuntime): NonNullable<HiveStateSnap
     // not lifetime prompt volume.
     runStartInputTokens: runtime.runStartInputTokens,
     runStartOutputTokens: runtime.runStartOutputTokens,
+    budgetRemaining: budgetRemaining(state, runtime),
   };
 }
 
@@ -208,7 +213,7 @@ export function writeHiveStateSnapshot(state: HiveState) {
     topology: hiveTopology(state),
     topologies: hiveTeamTopologies(state),
     active_runs: state.activeRuns,
-    agents: Array.from(state.runtimes.values()).map((runtime) => withOrchestratorUsage(state, runtimeSummary(runtime))),
+    agents: Array.from(state.runtimes.values()).map((runtime) => withOrchestratorUsage(state, runtimeSummary(state, runtime))),
   };
   const tmp = `${path}.${process.pid}.tmp`;
   const persisted = redactSensitive(snapshot, state.config?.settings?.telemetry?.redactSensitiveData !== false);

@@ -126,6 +126,9 @@ export interface AgentConfig {
   // config, NOT agent-type. There is no "commit ⇒ lead" enforcement — a small
   // project may deliberately let a leaf agent commit. Do not add a type gate here.
   commit?: string;
+  // Optional worker-governance overrides. Omitted fields inherit settings.worker;
+  // if neither level provides a value, that resource is intentionally unlimited.
+  governance?: WorkerGovernance;
   // Derived grouping label: the name of the top-level agent (the orchestrator's
   // direct report) whose subtree this agent belongs to. Not configured.
   groupName?: string;
@@ -149,10 +152,30 @@ export interface TelemetrySettings {
   redactSensitiveData: boolean;
 }
 
+export interface WorkerGovernance {
+  timeoutMs?: number;
+  maxDelegationDepth?: number;
+  maxRuns?: number;
+  tokenBudget?: number;
+  costBudgetUsd?: number;
+  distillerRuns?: number;
+}
+
+export interface TeamBudgets {
+  maxRuns?: number;
+  tokenBudget?: number;
+  costBudgetUsd?: number;
+}
+
 export interface HiveSettings {
   subagentOutputLimit: number;
   defaultTools: string;
-  maxParallel: number;
+  // All resource governance is opt-in. Absent means unconstrained rather than a
+  // hidden default. queueSize only activates fair waiting when maxParallel is hit.
+  maxParallel?: number;
+  queueSize?: number;
+  worker?: WorkerGovernance;
+  teamBudgets?: TeamBudgets;
   telemetry?: TelemetrySettings;
   // Project-relative paths that no worker may read or mutate, even when a broad
   // domain would otherwise allow them. Absolute paths are supported for
@@ -199,11 +222,16 @@ export interface AgentRuntime {
   // authoritative overwrite must PRESERVE this accumulated value.
   reasoningTokens: number;
   costUsd: number;
+  // Monotonic governance accounting. Unlike session-lifetime SDK counters these
+  // never reset on fresh=true, so a fresh transcript cannot bypass budgets.
+  governanceTokens?: number;
+  governanceCostUsd?: number;
   contextPct: number;
   // Raw context-window fill (Phase 4.7): the tokens/window behind contextPct.
   contextTokens?: number;
   contextWindow?: number;
   runCount: number;
+  distillerRunCount?: number;
   sessionFile: string;
   // SDK-reported thinking levels for the runtime's effective model (A10).
   thinkingLevels?: string[];
@@ -282,6 +310,10 @@ export interface HiveState {
   // lifecycle point instead of the fragile mode-switch ctx that may lack it.
   modelRegistry?: unknown;
   activeRuns: number;
+  // FIFO waiters created only when maxParallel and queueSize are configured.
+  workerQueue?: Array<{ id: number; resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort?: () => void }>;
+  nextQueueId?: number;
+  budgetWarnings?: Set<string>;
   // The current session mode. Normal = plain Pi; plan = planning team; hive =
   // execution team. (Was `teamMode`; renamed for the three-mode model.)
   mode: HiveMode;

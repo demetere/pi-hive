@@ -129,13 +129,23 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 |---|---|---|
 | `subagent-output-limit` | Max chars of a worker's answer surfaced to its caller | `12000` |
 | `default-tools` | Fallback tool list **only** if an agent omits `tools` | `read, grep, find, ls` |
-| `max-parallel` | Max concurrent subprocess runs **per process** | `3` |
+| `max-parallel` | Optional maximum concurrent worker runs; omitted means unlimited | unlimited |
+| `queue-size` | Optional FIFO wait queue used when `max-parallel` is reached; omitted means fail immediately | disabled |
+| `worker.timeout-ms` | Optional timeout for each worker run | unlimited |
+| `worker.max-delegation-depth` | Optional nested delegation depth | unlimited |
+| `worker.max-runs` | Optional run budget per worker | unlimited |
+| `worker.token-budget` | Optional token budget per worker | unlimited |
+| `worker.cost-budget-usd` | Optional USD budget per worker | unlimited |
+| `worker.distiller-runs` | Optional distillation-run budget per worker | unlimited |
+| `team-budgets.max-runs` | Optional run pool shared by the team | unlimited |
+| `team-budgets.token-budget` | Optional token pool shared by the team | unlimited |
+| `team-budgets.cost-budget-usd` | Optional USD pool shared by the team | unlimited |
 | `secret-paths` | Additional project-relative or absolute paths reserved from every worker | `[]` |
 | `distiller.enabled` | Run the mental-model distiller after each worker | `true` |
 | `distiller.model` | `provider/id` for distillation (required if enabled) | — |
 | `distiller.conversation-lines` | Tail of the session fed to the distiller (`1..10000`) | `200` |
 
-Numeric limits are strict positive integers: `subagent-output-limit` is capped at `1000000` and `max-parallel` at `64`. Quoted numbers, fractions, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error.
+Configured numeric limits must be positive finite values (`cost-budget-usd` may be fractional; count/token/time limits are integers). Quoted numbers, fractions for integer fields, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error. Governance limits are all optional: omitting them does not install hidden defaults.
 
 ### Template (copy, then edit to the confirmed tree)
 
@@ -159,7 +169,21 @@ shared_context: []
 settings:
   subagent-output-limit: 12000
   default-tools: read, grep, find, ls
+  # Resource governance is opt-in. Omit this whole block for unconstrained runs.
   max-parallel: 10
+  queue-size: 20
+  worker:
+    timeout-ms: 1800000
+    max-delegation-depth: 4
+    max-runs: 20
+    token-budget: 1000000
+    cost-budget-usd: 25
+    distiller-runs: 10
+  team-budgets:
+    max-runs: 100
+    token-budget: 5000000
+    cost-budget-usd: 100
+  # Any agent node may override worker defaults with its own `governance:` map.
   # Reserved before normal domain rules. Add project-specific credentials here.
   secret-paths:
     - config/secrets.json

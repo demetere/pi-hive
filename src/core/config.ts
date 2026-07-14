@@ -198,7 +198,10 @@ export function loadConfig(cwd: string): HiveConfig {
     settings: {
       subagentOutputLimit: settings.subagentOutputLimit ?? 12_000,
       defaultTools: settings.defaultTools ?? "read, grep, find, ls",
-      maxParallel: settings.maxParallel ?? 3,
+      maxParallel: settings.maxParallel,
+      queueSize: settings.queueSize,
+      worker: settings.worker,
+      teamBudgets: settings.teamBudgets,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
       telemetry: {
         enabled: telemetry.enabled !== false,

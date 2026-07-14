@@ -25,6 +25,7 @@ export interface ScopeAgent {
   // Raw context-window fill behind contextPct (Phase 4.7), for the Agents-tab
   // hover detail (absolute tokens / window).
   contextTokens?: number; contextWindow?: number;
+  budgetRemaining?: { worker: { runs?: number; tokens?: number; costUsd?: number; distillerRuns?: number }; team: { runs?: number; tokens?: number; costUsd?: number } };
   task?: string; session_id: string; depth: number; order: number;
   // Enforcement contract from the topology node (Phase 6.1): what the agent may
   // touch / commit / which gates it owns. Undefined for runtime-only agents that
