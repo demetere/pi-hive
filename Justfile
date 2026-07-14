@@ -101,23 +101,26 @@ pi-dev:
 # ui/web/src/** and see changes live (Ctrl+C stops both). Vite binds to
 # localhost/::1, not 127.0.0.1. Usage: `just run`  or  `PROJECT=/path just run`.
 # Run EVERYTHING: Bun server (API + /pl-review) + Vite HMR frontend. Open http://localhost:43192.
+# The server always mints/reuses a bearer credential; manual development never
+# disables mutation authentication.
 [group('dashboard')]
 run:
   cd {{dashboard_dir}} && npm install
   @printf "{{BLUE}}pi-hive dashboard (dev){{NC}}\n"
   @printf "  project:  %s\n" "{{project}}"
   @printf "  frontend: http://localhost:43192  (HMR — open this)\n"
-  @printf "  api:      http://{{telemetry_host}}:{{telemetry_port}}\n"
+  @printf "  api:      http://{{telemetry_host}}:{{telemetry_port}} (authenticated writes)\n"
   npx concurrently --kill-others --names "api,web" --prefix-colors "blue,green" \
     "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} HIVE_TELEMETRY_DB={{project}}/.telemetry/telemetry.db bun src/observability/server/index.ts" \
     "cd {{dashboard_dir}} && HIVE_TELEMETRY_PORT={{telemetry_port}} npm run dev"
 
-# Serve the dashboard standalone: ONE Bun process (API + built dist/ + /pl-review), no Vite/HMR. For a quick check of the built UI.
+# Serve the dashboard standalone: ONE authenticated Bun process (API + built
+# dist/ + /pl-review), no Vite/HMR. For a quick check of the built UI.
 [group('dashboard')]
 dashboard-serve:
   @printf "{{BLUE}}pi-hive dashboard (serve){{NC}}\n"
   @printf "  project:   %s\n" "{{project}}"
-  @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (Plans tab)\n"
+  @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (authenticated writes)\n"},{
   HIVE_TELEMETRY_HOST="{{telemetry_host}}" HIVE_TELEMETRY_PORT="{{telemetry_port}}" \
     HIVE_PROJECT_CWD="{{project}}" HIVE_TELEMETRY_DB="{{project}}/.telemetry/telemetry.db" \
     bun src/observability/server/index.ts

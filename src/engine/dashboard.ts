@@ -98,10 +98,6 @@ export interface DashboardPidFile extends Partial<DaemonIdentity> {
   startedAt?: string;
 }
 
-function readDashboardPidFile(): DashboardPidFile | null {
-  try { return JSON.parse(readFileSync(dashboardMetadataPath(), "utf8")) as DashboardPidFile; } catch { return null; }
-}
-
 function publishDaemonMetadata(info: DashboardPidFile, token: string): void {
   // Publish credentials and process identity only after the new listener has
   // answered a matching health probe. Both files are atomic and private.
@@ -122,11 +118,6 @@ function removeDashboardPidFile(): void {
 function removePublishedDaemonMetadata(): void {
   removeDashboardPidFile();
   try { rmSync(daemonTokenPath(), { force: true }); } catch { /* noop */ }
-}
-
-function killPid(pid: number | undefined, killed: Set<number>): void {
-  if (!Number.isFinite(pid) || !pid || pid <= 0 || pid === process.pid) return;
-  try { process.kill(pid, "SIGTERM"); killed.add(pid); } catch { /* noop */ }
 }
 
 export interface DashboardProbe extends Partial<DaemonHealth> {
@@ -227,6 +218,42 @@ export interface EnsureDeps {
   open?: (url: string) => void;
 }
 
+export interface StopDeps {
+  probe?: (host: string, port: number) => Promise<DashboardProbe | null>;
+  requestShutdown?: (host: string, port: number, health: DaemonHealth, token: string) => Promise<boolean>;
+  killManaged?: typeof killProcess;
+  withLock?: <T>(path: string, fn: () => Promise<T>) => Promise<T>;
+}
+
+export async function requestDaemonShutdown(
+  host: string,
+  port: number,
+  health: DaemonHealth,
+  token: string,
+): Promise<boolean> {
+  if (!token) return false;
+  const url = dashboardUrl(host, port);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const response = await fetch(`${url}/shutdown`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        origin: url,
+      },
+      body: JSON.stringify({ startupNonce: health.startupNonce }),
+    });
+    return response.status === 202;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function waitForReady(host: string, port: number, expected: DaemonIdentity, probe = probeDashboard): Promise<DaemonHealth | null> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -259,7 +286,7 @@ export async function ensureDashboard(
   const probe = deps.probe ?? probeDashboard;
   const hasBun = deps.bunAvailable ?? bunAvailable;
   const doSpawn = deps.spawn ?? spawnDashboard;
-  const doStop = deps.stop ?? stopDashboard;
+  const doStop = deps.stop ?? stopDashboardUnlocked;
   const ready = deps.waitForReady ?? ((h, p, expected) => waitForReady(h, p, expected, probe));
   const lock = deps.withLock ?? ((path, fn) => withCrossProcessFileLockAsync(path, fn, { timeoutMs: 15_000, staleMs: 30_000 }));
   const doOpen = deps.open ?? ((target: string) => maybeOpen(target, true));
@@ -272,7 +299,10 @@ export async function ensureDashboard(
       let health = await probe(host, port);
       if (opts.forceRestart) {
         await doStop(state, host, port);
-        health = null;
+        health = await probe(host, port);
+        if (health) {
+          return { running: false, url, adopted: false, spawned: false, error: "Dashboard is still running and could not be stopped safely." };
+        }
       } else if (health) {
         const sameStorage = resolve(health.registryPath) === registryPath && resolve(health.dbPath) === dbPath;
         if (!sameStorage) {
@@ -286,7 +316,10 @@ export async function ensureDashboard(
         // Same storage but an old protocol/package/build: replace it so an
         // extension upgrade cannot silently adopt an incompatible daemon.
         await doStop(state, host, port);
-        health = null;
+        health = await probe(host, port);
+        if (health) {
+          return { running: false, url, adopted: false, spawned: false, error: "Incompatible dashboard is still running and could not be stopped safely." };
+        }
       }
 
       if (!hasBun()) {
@@ -334,27 +367,55 @@ function maybeOpen(url: string, open?: boolean): void {
   try { spawnManaged("open", [url], { detached: true, stdio: "ignore" }); } catch { /* noop */ }
 }
 
-// Explicit teardown remains centralized here. Process-identity strengthening and
-// authenticated shutdown are handled by the following lifecycle remediation.
-export async function stopDashboard(state: HiveState, host = dashboardHost(), port = dashboardPort()): Promise<number[]> {
-  const killed = new Set<number>();
-  if (state.obsServer?.proc && !state.obsServer.proc.killed) {
-    const pid = killProcess(state.obsServer.proc);
-    if (typeof pid === "number") killed.add(pid);
-  }
-  state.obsServer = undefined;
+async function stopDashboardUnlocked(
+  state: HiveState,
+  host: string,
+  port: number,
+  deps: StopDeps = {},
+): Promise<number[]> {
+  const probe = deps.probe ?? probeDashboard;
+  const shutdown = deps.requestShutdown ?? requestDaemonShutdown;
+  const killManaged = deps.killManaged ?? killProcess;
+  const stopped = new Set<number>();
+  const managed = state.obsServer?.proc;
+  const health = await probe(host, port);
 
-  const pidFile = readDashboardPidFile();
-  if (pidFile?.port === port) killPid(pidFile.pid, killed);
-  if (await isHiveDashboard(host, port)) {
-    try {
-      const out = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
-      for (const raw of out.split("\n")) killPid(Number(raw.trim()), killed);
-    } catch { /* no listener */ }
+  if (isCompleteHealth(health)) {
+    const sameStorage = resolve(health.registryPath) === dashboardRegistryPath()
+      && resolve(health.dbPath) === dashboardDbPath();
+    if (sameStorage && await shutdown(host, port, health, readDaemonToken() || "")) {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline && await probe(host, port)) await sleep(50);
+      if (!(await probe(host, port))) stopped.add(health.pid);
+    } else if (managed && managed.pid === health.pid && !managed.killed) {
+      // A ChildProcess handle created by this process is direct process identity;
+      // unlike a persisted PID, it cannot be stale metadata for an unrelated PID.
+      const pid = killManaged(managed);
+      if (typeof pid === "number") stopped.add(pid);
+    }
+  } else if (managed && !managed.killed) {
+    const pid = killManaged(managed);
+    if (typeof pid === "number") stopped.add(pid);
   }
-  if (killed.size) {
-    await sleep(300);
-    removeDashboardPidFile();
+
+  state.obsServer = undefined;
+  if (stopped.size) {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && await probe(host, port)) await sleep(50);
   }
-  return Array.from(killed);
+  if (!(await probe(host, port))) removePublishedDaemonMetadata();
+  return Array.from(stopped);
+}
+
+// The global daemon intentionally survives individual Pi sessions. Explicit
+// teardown is serialized with startup and uses authenticated, nonce-bound
+// shutdown. Persisted PID metadata is informational and is never kill authority.
+export async function stopDashboard(
+  state: HiveState,
+  host = dashboardHost(),
+  port = dashboardPort(),
+  deps: StopDeps = {},
+): Promise<number[]> {
+  const lock = deps.withLock ?? ((path, fn) => withCrossProcessFileLockAsync(path, fn, { timeoutMs: 15_000, staleMs: 30_000 }));
+  return lock(dashboardStartupLockPath(), () => stopDashboardUnlocked(state, host, port, deps));
 }

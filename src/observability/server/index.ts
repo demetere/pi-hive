@@ -2,7 +2,7 @@ import { hasExpectedHost, isSameOriginRequest, writeGateResponse } from "../secu
 import { dashboardFile, dashboardHtml } from "../static";
 import {
   BOOT_SESSION_ID, BUILD_HASH, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST,
-  PACKAGE_VERSION, PORT, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH,
+  IDLE_TIMEOUT_MS, PACKAGE_VERSION, PORT, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH,
   STARTUP_NONCE, expectedHostHeader,
 } from "./config";
 import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
@@ -47,9 +47,23 @@ startTelemetryRuntime();
 // browser/proxy, the client's EventSource fires `error`, and the dashboard
 // flickers to "reconnecting". A comment (": ping") keeps the socket alive and
 // is ignored by EventSource.
-setInterval(broadcastPing, 15_000);
+const heartbeatTimer = setInterval(broadcastPing, 15_000);
+let lastActivityAt = Date.now();
+let shuttingDown = false;
+let idleTimer: ReturnType<typeof setInterval>;
 
-Bun.serve({
+function scheduleServerStop(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  setTimeout(() => {
+    clearInterval(heartbeatTimer);
+    clearInterval(idleTimer);
+    server.stop(true);
+    process.exit(0);
+  }, 50);
+}
+
+const server = Bun.serve({
   hostname: HOST,
   port: PORT,
   // Disable the per-connection idle timeout. SSE (/stream) connections are
@@ -59,6 +73,7 @@ Bun.serve({
   // secondary guard for any proxy in front of us.
   idleTimeout: 0,
   async fetch(req: Request) {
+    lastActivityAt = Date.now();
     const url = new URL(req.url);
 
     // Reject DNS-rebinding and alternate-host requests before any route,
@@ -77,6 +92,16 @@ Bun.serve({
     // would land outside a per-route check.
     const gated = writeGateResponse(req, url, DAEMON_TOKEN, (error, status) => json({ error }, status), reviewCapability);
     if (gated) return gated;
+
+    if (req.method === "POST" && url.pathname === "/shutdown") {
+      let body: any;
+      try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
+      if (body?.startupNonce !== STARTUP_NONCE) return json({ error: "daemon identity mismatch" }, 409);
+      // Return the acknowledgement before closing the listener. The bearer token
+      // and startup nonce jointly prove authority over this exact daemon instance.
+      scheduleServerStop();
+      return json({ ok: true, pid: process.pid, startupNonce: STARTUP_NONCE }, 202);
+    }
 
     // Review HTML, session minting, and the vendored client's /api/* requests
     // are routed only after the method gate. Non-review /api requests fall through.
@@ -300,6 +325,13 @@ Bun.serve({
     return json({ error: "not found" }, 404);
   },
 });
+
+// The daemon is shared across Pi sessions, so a single session shutdown cannot
+// safely terminate it. Bound its lifetime instead: no active browser stream and
+// no HTTP activity for the configured interval triggers graceful self-shutdown.
+idleTimer = setInterval(() => {
+  if (subscribers.size === 0 && Date.now() - lastActivityAt >= IDLE_TIMEOUT_MS) scheduleServerStop();
+}, Math.min(60_000, Math.max(1_000, Math.floor(IDLE_TIMEOUT_MS / 4))));
 
 console.log(`pi-hive telemetry dashboard: http://${HOST}:${PORT}`);
 console.log(`registry: ${REGISTRY_PATH}`);
