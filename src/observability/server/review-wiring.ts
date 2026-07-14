@@ -45,7 +45,7 @@ const surface: ReviewSurface | null = registerReviewSurface({
       if (!cwd || !openspec.changeExists(cwd, parsed.change)) return null;
       return { cwd, change: parsed.change, artifact: parsed.artifact };
     },
-    onApprove(ctx, input, expectedArtifactHash) {
+    async onApprove(ctx, input, expectedArtifactHash, signal) {
       const feedback = renderReviewInput(input);
       const agentVerdict = latestAgentVerdict(ctx);
       if (agentVerdict !== "green" && agentVerdict !== "yellow") {
@@ -58,9 +58,16 @@ const surface: ReviewSurface | null = registerReviewSurface({
         // rejected the plan.
         return { ok: false as const, error: gateFeedback };
       }
-      // Persist authority first. If the atomic write fails, the exception
-      // reaches the request handler; no success verdict or unblock action is
-      // recorded. This both advances planning and, for tasks, may open execution.
+      // Validate asynchronously before persistence when this approval could open
+      // execution. The content-bound write below rechecks the artifact hash after
+      // the await, closing the external-writer race.
+      const approvingTasks = /(?:^|\/)tasks(?:\.md)?$/.test(ctx.artifact);
+      const tasksAlreadyApproved = openspec.isArtifactApproved(ctx.cwd, ctx.change, "tasks");
+      const validation = approvingTasks || tasksAlreadyApproved
+        ? await openspec.validateAsync(ctx.cwd, ctx.change, signal)
+        : null;
+      // Persist authority first. If the atomic write fails, the exception reaches
+      // the request handler; no success verdict or unblock action is recorded.
       openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "green", "dashboard-human", expectedArtifactHash);
       recordVerdict(ctx, "green", feedback);
       // Unblock the live session: the artifact's gate is satisfied; the planner
@@ -72,7 +79,7 @@ const surface: ReviewSurface | null = registerReviewSurface({
         changeId: ctx.change,
         artifact: ctx.artifact,
         nextArtifact: openspec.nextAuthorableArtifact(ctx.cwd, ctx.change),
-        readyToExecute: tasks && openspec.isReadyToExecute(ctx.cwd, ctx.change),
+        readyToExecute: tasks && !!validation && openspec.isReadyToExecuteWithValidation(ctx.cwd, ctx.change, validation),
         feedback: feedback || undefined,
       });
       return { ok: true as const };

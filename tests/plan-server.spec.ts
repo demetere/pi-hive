@@ -3,7 +3,7 @@
 // Run: bun test ./tests/plan-server.spec.ts
 import { expect, test, beforeAll } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,13 @@ process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-hive-plansrv-ag
 // CLI-dependent assertions when it is absent.
 const OSX_BIN = join(process.cwd(), "node_modules", ".bin", "openspec");
 const OSX = existsSync(OSX_BIN);
+const OSX_CALL_LOG = join(PROJECT, "openspec-calls.log");
+if (OSX) {
+  const wrapper = join(PROJECT, "openspec-test-wrapper.sh");
+  writeFileSync(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${OSX_CALL_LOG}"\ncase "$*" in *slow-command*) exec sleep 10 ;; esac\nexec "${OSX_BIN}" "$@"\n`);
+  chmodSync(wrapper, 0o755);
+  process.env.HIVE_OPENSPEC_BIN = wrapper;
+}
 function osx(args: string[]) {
   execFileSync(OSX_BIN, args, { cwd: PROJECT, stdio: "ignore", env: { ...process.env, OPENSPEC_TELEMETRY: "0", DO_NOT_TRACK: "1" } });
 }
@@ -44,10 +51,11 @@ beforeAll(async () => {
   review = await import("../src/observability/server/review-wiring");
   db = await import("../src/observability/server/db");
   openspec = await import("../src/engine/openspec");
+  if (OSX) writeFileSync(OSX_CALL_LOG, "");
 });
 
-test.if(OSX)("listPlans returns OpenSpec change summaries", () => {
-  const list = routes.listPlans(PROJECT);
+test.if(OSX)("listPlans returns OpenSpec change summaries", async () => {
+  const list = await routes.listPlans(PROJECT);
   expect(list.length).toBe(1);
   expect(list[0].changeId).toBe("add-auth");
   expect(list[0].totalTasks).toBe(2);
@@ -55,21 +63,66 @@ test.if(OSX)("listPlans returns OpenSpec change summaries", () => {
   expect(list[0].status).toBe("in-progress");
 });
 
-test.if(OSX)("planDetail includes artifact graph + validation + empty verdicts", () => {
-  const detail = routes.planDetail(PROJECT, "add-auth")!;
+test.if(OSX)("planDetail includes artifact graph + validation + empty verdicts", async () => {
+  const detail = (await routes.planDetail(PROJECT, "add-auth"))!;
   expect(detail).not.toBeNull();
   expect(detail.artifacts.find((a) => a.id === "proposal")?.status).toBe("done");
   expect(detail.files).toContain("proposal.md");
   expect(detail.verdicts).toEqual([]);
   expect(typeof detail.validation.passed).toBe("boolean");
-  expect(routes.planDetail(PROJECT, "nope")).toBeNull();
+  expect(await routes.planDetail(PROJECT, "nope")).toBeNull();
 });
 
-test("planFile reads an artifact and guards against traversal", () => {
+test.if(OSX)("plan detail caches by artifact metadata and coalesces concurrent CLI work", async () => {
+  const changeId = "cache-coalesce";
+  osx(["new", "change", changeId]);
+  const dir = join(PROJECT, "openspec", "changes", changeId);
+  writeFileSync(join(dir, "proposal.md"), "# Cache coalesce\n\nFirst version.\n");
+  routes.clearPlanRouteCaches();
+  writeFileSync(OSX_CALL_LOG, "");
+  const commandCounts = () => {
+    const lines = readFileSync(OSX_CALL_LOG, "utf8").trim().split("\n").filter(Boolean);
+    return {
+      status: lines.filter((line) => line.includes(`status --json --change ${changeId}`)).length,
+      validate: lines.filter((line) => line.includes(`validate ${changeId} --json`)).length,
+    };
+  };
+
+  await Promise.all([routes.planDetail(PROJECT, changeId), routes.planDetail(PROJECT, changeId)]);
+  expect(commandCounts()).toEqual({ status: 1, validate: 1 });
+  await routes.planDetail(PROJECT, changeId);
+  expect(commandCounts()).toEqual({ status: 1, validate: 1 });
+
+  writeFileSync(join(dir, "proposal.md"), "# Cache coalesce\n\nSecond version with a different size.\n");
+  await routes.planDetail(PROJECT, changeId);
+  expect(commandCounts()).toEqual({ status: 2, validate: 2 });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test.if(OSX)("plan detail enforces subprocess timeout and request cancellation", async () => {
+  const changeId = "slow-command";
+  osx(["new", "change", changeId]);
+  const dir = join(PROJECT, "openspec", "changes", changeId);
+  writeFileSync(join(dir, "proposal.md"), "# Slow command\n");
+  routes.clearPlanRouteCaches();
+  process.env.HIVE_OPENSPEC_TIMEOUT_MS = "60";
+  try {
+    await expect(routes.planDetail(PROJECT, changeId)).rejects.toMatchObject({ code: "timeout" });
+  } finally { delete process.env.HIVE_OPENSPEC_TIMEOUT_MS; }
+
+  routes.clearPlanRouteCaches();
+  const controller = new AbortController();
+  const pending = routes.planDetail(PROJECT, changeId, { signal: controller.signal });
+  setTimeout(() => controller.abort(), 30);
+  await expect(pending).rejects.toMatchObject({ code: "cancelled" });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("planFile reads an artifact and guards against traversal", async () => {
   expect(routes.planFile(PROJECT, "add-auth", "proposal.md")?.content).toContain("We need login.");
   expect(routes.planFile(PROJECT, "add-auth", "../../../../etc/passwd")).toBeNull();
   expect(routes.planFile(PROJECT, "../escape", "proposal.md")).toBeNull();
-  expect(routes.planDetail(PROJECT, "../escape")).toBeNull();
+  expect(await routes.planDetail(PROJECT, "../escape")).toBeNull();
 });
 
 test("resolveProjectCwd rejects an unknown cwd and echoes a known one", () => {
@@ -167,7 +220,7 @@ test("review approval does not borrow SQLite verdicts for another artifact", asy
   }
 });
 
-test.if(OSX)("planDetail does not show review-now for artifacts missing authoritative verdicts", () => {
+test.if(OSX)("planDetail does not show review-now for artifacts missing authoritative verdicts", async () => {
   const changeId = "sidecar-mismatch-detail";
   osx(["new", "change", changeId]);
   const dir = join(PROJECT, "openspec", "changes", changeId);
@@ -183,7 +236,7 @@ test.if(OSX)("planDetail does not show review-now for artifacts missing authorit
   });
 
   try {
-    const detail = routes.planDetail(PROJECT, changeId)!;
+    const detail = (await routes.planDetail(PROJECT, changeId))!;
     const proposal = detail.artifactReview.find((a) => a.id === "proposal")!;
     expect(proposal.authored).toBe(true);
     expect(proposal.agentCleared).toBe(false);

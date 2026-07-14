@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   bootCwd, createReviewSession, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
@@ -189,8 +189,11 @@ export default function Plans(props: { search: string }) {
 
   const [plans, setPlans] = useState<PlanSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<PlanDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const detailAbort = useRef<AbortController | null>(null);
   const [rid, setRid] = useState<string>("");
   const [fullscreen, setFullscreen] = useState(false);
   const [readOnlyMarkdown, setReadOnlyMarkdown] = useState<string | null>(null);
@@ -206,26 +209,47 @@ export default function Plans(props: { search: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [fullscreen]);
 
-  const loadPlans = useCallback(async () => {
+  const loadPlans = useCallback(async (signal?: AbortSignal) => {
     if (!cwd) return;
     setLoading(true);
-    const list = await fetchPlans(cwd);
-    setPlans(list);
-    setLoading(false);
+    setListError(null);
+    try {
+      const list = await fetchPlans(cwd, signal);
+      if (!signal?.aborted) setPlans(list);
+    } catch (error: any) {
+      if (!signal?.aborted) setListError(error?.message || "Unable to load OpenSpec changes.");
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
   }, [cwd]);
 
   const selectPlan = useCallback(async (changeId: string) => {
+    detailAbort.current?.abort();
+    const controller = new AbortController();
+    detailAbort.current = controller;
     setSelected(changeId);
     setDetail(null);
-    const d = await fetchPlanDetail(changeId, cwd);
-    setDetail(d);
-    // Default the review to the first authored artifact, else the proposal.
-    const files = d?.files || [];
-    const firstDone = d?.artifacts.find((a) => a.status === "done");
-    setRid(firstDone ? ridFor(changeId, firstDone, files) : `${changeId}#proposal.md`);
+    setDetailError(null);
+    try {
+      const d = await fetchPlanDetail(changeId, cwd, controller.signal);
+      if (controller.signal.aborted) return;
+      if (!d) { setDetailError("OpenSpec change not found."); return; }
+      setDetail(d);
+      // Default the review to the first authored artifact, else the proposal.
+      const files = d.files || [];
+      const firstDone = d.artifacts.find((a) => a.status === "done");
+      setRid(firstDone ? ridFor(changeId, firstDone, files) : `${changeId}#proposal.md`);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setDetailError(error?.message || "Unable to load OpenSpec change.");
+    }
   }, [cwd]);
 
-  useEffect(() => { void loadPlans(); }, [loadPlans]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadPlans(controller.signal);
+    return () => controller.abort();
+  }, [loadPlans]);
+  useEffect(() => () => detailAbort.current?.abort(), []);
 
   const filtered = useMemo(() => {
     const q = props.search.toLowerCase();
@@ -272,10 +296,16 @@ export default function Plans(props: { search: string }) {
   // A red verdict stays reviewable so the revision loop can reopen Plannotator.
   useEffect(() => {
     if (!detail || !selectedReview?.humanReviewReady || selectedReview.humanVerdict === "green" || !selected) return;
+    let controller: AbortController | undefined;
     const timer = window.setInterval(() => {
-      void fetchPlanDetail(selected, cwd).then((d) => { if (d) setDetail(d); });
+      controller?.abort();
+      const request = new AbortController();
+      controller = request;
+      void fetchPlanDetail(selected, cwd, request.signal)
+        .then((next) => { if (next) setDetail(next); })
+        .catch((error: any) => { if (!request.signal.aborted) setDetailError(error?.message || "Unable to refresh OpenSpec change."); });
     }, 3000);
-    return () => window.clearInterval(timer);
+    return () => { window.clearInterval(timer); controller?.abort(); };
   }, [cwd, detail, selected, selectedReview]);
 
   // Only AUTHORED artifacts (on disk) are reviewable; the single next unwritten
@@ -293,7 +323,9 @@ export default function Plans(props: { search: string }) {
           <span>OpenSpec changes</span>
           <button className="plans-refresh" title="Refresh" onClick={() => void loadPlans()}>⟳</button>
         </div>
-        {(!loading || plans.length) ? (
+        {listError ? (
+          <div className="empty" role="alert">{listError} <button type="button" className="btn pill" onClick={() => void loadPlans()}>Retry</button></div>
+        ) : (!loading || plans.length) ? (
           filtered.length ? filtered.map((p) => (
             <button
               type="button"
@@ -317,8 +349,10 @@ export default function Plans(props: { search: string }) {
       </div>
 
       <div className="plans-detail">
-        {!detail ? (
-          <div className="tab-card empty plans-empty">Select a change to review its artifacts.</div>
+        {detailError ? (
+          <div className="tab-card empty plans-empty" role="alert">{detailError} {selected && <button type="button" className="btn pill" onClick={() => void selectPlan(selected)}>Retry</button>}</div>
+        ) : !detail ? (
+          <div className="tab-card empty plans-empty">{selected ? "Loading OpenSpec change…" : "Select a change to review its artifacts."}</div>
         ) : (
           <>
             <div className="tab-card plan-head">

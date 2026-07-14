@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -38,7 +38,21 @@ type FsDirent = { name: string; isDirectory(): boolean; isFile(): boolean };
 const CHANGE_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const EXEC_TIMEOUT_MS = 20_000;
 const EXEC_MAX_BUFFER = 4_000_000; // 4 MB hard cap on CLI stdout
+function asyncExecTimeoutMs(): number {
+  const configured = Number(process.env.HIVE_OPENSPEC_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? Math.min(60_000, Math.max(50, Math.floor(configured))) : EXEC_TIMEOUT_MS;
+}
 const MAX_ARTIFACT_BYTES = 512_000;
+
+export type OpenSpecCommandErrorCode = "unavailable" | "timeout" | "cancelled" | "output-limit" | "failed";
+export class OpenSpecCommandError extends Error {
+  readonly code: OpenSpecCommandErrorCode;
+  constructor(code: OpenSpecCommandErrorCode, message: string) {
+    super(message);
+    this.name = "OpenSpecCommandError";
+    this.code = code;
+  }
+}
 
 export function isSafeChangeId(changeId: string): boolean {
   return CHANGE_ID_RE.test(changeId);
@@ -111,6 +125,65 @@ function runJson<T>(cwd: string, args: string[]): T | null {
   } catch {
     return null;
   }
+}
+
+async function runJsonAsync<T>(cwd: string, args: string[], signal?: AbortSignal, allowNonZero = false): Promise<T> {
+  const bin = resolveBinary();
+  if (!bin) throw new OpenSpecCommandError("unavailable", "OpenSpec CLI is unavailable");
+  if (signal?.aborted) throw new OpenSpecCommandError("cancelled", "OpenSpec request was cancelled");
+
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const detached = process.platform !== "win32";
+    const child = spawn(bin, args, {
+      cwd,
+      detached,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, OPENSPEC_TELEMETRY: "0", DO_NOT_TRACK: "1", NO_COLOR: "1" },
+    });
+    const chunks: string[] = [];
+    let bytes = 0;
+    let settled = false;
+    let failure: OpenSpecCommandError | undefined;
+    const finish = (error?: OpenSpecCommandError, value?: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) rejectPromise(error);
+      else resolvePromise(value as T);
+    };
+    const terminate = (error: OpenSpecCommandError) => {
+      if (failure) return;
+      failure = error;
+      try {
+        if (detached && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch { finish(error); }
+    };
+    const onAbort = () => terminate(new OpenSpecCommandError("cancelled", "OpenSpec request was cancelled"));
+    const timeoutMs = asyncExecTimeoutMs();
+    const timer = setTimeout(() => terminate(new OpenSpecCommandError("timeout", `OpenSpec command timed out after ${timeoutMs}ms`)), timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      bytes += Buffer.byteLength(chunk, "utf8");
+      if (bytes > EXEC_MAX_BUFFER) {
+        terminate(new OpenSpecCommandError("output-limit", "OpenSpec output exceeded 4 MB"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.once("error", (error: Error) => finish(new OpenSpecCommandError("failed", error.message || "OpenSpec command failed")));
+    child.once("close", (code: number | null) => {
+      if (failure) { finish(failure); return; }
+      const out = chunks.join("");
+      try {
+        const parsed = JSON.parse(out) as T;
+        if (code && !allowNonZero) finish(new OpenSpecCommandError("failed", `OpenSpec command exited with code ${code}`));
+        else finish(undefined, parsed);
+      } catch { finish(new OpenSpecCommandError("failed", "OpenSpec returned invalid JSON")); }
+    });
+  });
 }
 
 function run(cwd: string, args: string[]): boolean {
@@ -192,9 +265,7 @@ interface ListJson {
   }>;
 }
 
-// All changes under openspec/changes/, from `openspec list --json`.
-export function listChanges(cwd: string): ChangeSummary[] {
-  const data = runJson<ListJson>(cwd, ["list", "--json"]);
+function parseChanges(data: ListJson | null): ChangeSummary[] {
   if (!data?.changes) return [];
   return data.changes
     .filter((c): c is Required<Pick<typeof c, "name">> & typeof c => typeof c.name === "string" && isSafeChangeId(c.name))
@@ -206,6 +277,15 @@ export function listChanges(cwd: string): ChangeSummary[] {
       lastModified: c.lastModified,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// All changes under openspec/changes/, from `openspec list --json`.
+export function listChanges(cwd: string): ChangeSummary[] {
+  return parseChanges(runJson<ListJson>(cwd, ["list", "--json"]));
+}
+
+export async function listChangesAsync(cwd: string, signal?: AbortSignal): Promise<ChangeSummary[]> {
+  return parseChanges(await runJsonAsync<ListJson>(cwd, ["list", "--json"], signal));
 }
 
 export function changeExists(cwd: string, name: string): boolean {
@@ -245,9 +325,7 @@ interface StatusJson {
   }>;
 }
 
-export function changeDetail(cwd: string, name: string): ChangeDetail | null {
-  if (!isSafeChangeId(name)) return null;
-  const data = runJson<StatusJson>(cwd, ["status", "--json", "--change", name]);
+function parseChangeDetail(name: string, data: StatusJson | null): ChangeDetail | null {
   if (!data?.artifacts) return null;
   const reported = new Map(data.artifacts.map((artifact) => [String(artifact.id ?? ""), artifact]));
   const artifacts: ArtifactState[] = OPENSPEC_ARTIFACTS.map((definition) => {
@@ -267,6 +345,16 @@ export function changeDetail(cwd: string, name: string): ChangeDetail | null {
   });
   const nextReady = artifacts.find((a) => a.status === "ready")?.id ?? null;
   return { name, artifacts, nextReady };
+}
+
+export function changeDetail(cwd: string, name: string): ChangeDetail | null {
+  if (!isSafeChangeId(name)) return null;
+  return parseChangeDetail(name, runJson<StatusJson>(cwd, ["status", "--json", "--change", name]));
+}
+
+export async function changeDetailAsync(cwd: string, name: string, signal?: AbortSignal): Promise<ChangeDetail | null> {
+  if (!isSafeChangeId(name)) return null;
+  return parseChangeDetail(name, await runJsonAsync<StatusJson>(cwd, ["status", "--json", "--change", name], signal));
 }
 
 // ---------------------------------------------------------------------------
@@ -290,14 +378,8 @@ interface ValidateJson {
   summary?: { totals?: { passed?: number; failed?: number } };
 }
 
-// Validate one change (or all when name omitted). A change passes when the
-// summary reports zero failures.
-export function validate(cwd: string, name?: string): ValidateResult {
-  const args = name ? ["validate", name, "--json"] : ["validate", "--all", "--json"];
-  const data = runJson<ValidateJson>(cwd, args);
-  if (!data?.summary?.totals) {
-    return { passed: false, failed: -1, issues: [] };
-  }
+function parseValidation(data: ValidateJson | null): ValidateResult {
+  if (!data?.summary?.totals) return { passed: false, failed: -1, issues: [] };
   const failed = Number(data.summary.totals.failed ?? 0);
   const issues: ValidateIssue[] = [];
   for (const item of data.items ?? []) {
@@ -310,6 +392,18 @@ export function validate(cwd: string, name?: string): ValidateResult {
     }
   }
   return { passed: failed === 0, failed, issues };
+}
+
+// Validate one change (or all when name omitted). A change passes when the
+// summary reports zero failures.
+export function validate(cwd: string, name?: string): ValidateResult {
+  const args = name ? ["validate", name, "--json"] : ["validate", "--all", "--json"];
+  return parseValidation(runJson<ValidateJson>(cwd, args));
+}
+
+export async function validateAsync(cwd: string, name?: string, signal?: AbortSignal): Promise<ValidateResult> {
+  const args = name ? ["validate", name, "--json"] : ["validate", "--all", "--json"];
+  return parseValidation(await runJsonAsync<ValidateJson>(cwd, args, signal, true));
 }
 
 // ---------------------------------------------------------------------------
@@ -337,8 +431,12 @@ export function hasTasks(cwd: string, name: string): boolean {
 // authored) AND OpenSpec validation passes. This is what the dashboard and
 // /hive-plan surface show as "ready to approve". It does NOT include pi-hive's
 // human approval — see isExecutionGateOpen for the load-bearing dispatch gate.
+export function isReadyToExecuteWithValidation(cwd: string, name: string, validation: ValidateResult): boolean {
+  return hasTasks(cwd, name) && validation.passed;
+}
+
 export function isReadyToExecute(cwd: string, name: string): boolean {
-  return hasTasks(cwd, name) && validate(cwd, name).passed;
+  return isReadyToExecuteWithValidation(cwd, name, validate(cwd, name));
 }
 
 // The load-bearing gate consumed by dispatch.ts before it will delegate to a
