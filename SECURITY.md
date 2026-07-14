@@ -61,6 +61,8 @@ Regression coverage must include traversal, sibling-prefix collisions, absolute 
 
 Dashboard read and mutation APIs are local-only by default, but locality is not authorization. Production operation requires a non-empty random bearer credential. Sensitive review mutations additionally require a short-lived, single-purpose review nonce bound to project, change, artifact, and current artifact hash. Mutation requests fail closed on missing or invalid authentication and origin metadata.
 
+Dashboard documents and APIs send a restrictive Content Security Policy, same-origin framing policy, `nosniff`, Referrer-Policy, Cross-Origin-Opener-Policy, and explicit cache controls. The main dashboard can connect and frame only its own local origin. The vendored review UI runs in an iframe sandbox without `allow-same-origin`; a bootstrap attaches its content-bound capability only to local `/api/*` requests, which permits the opaque sandbox origin without weakening ordinary bearer-authenticated writes. Review CSP permits executable bundle/bootstrap scripts only with a per-response nonce and blocks nested frames, forms, objects, external connections, and inline event-handler attributes. Artifact Markdown is untrusted data: text is escaped, executable link schemes are discarded, and hostile embedded HTML receives no network or script authority.
+
 Credentials, review sessions, approval records, daemon metadata, `.git/**`, `.env*`, private keys, configured secrets, and telemetry/session state are reserved from agents unless a narrowly scoped trusted operation explicitly permits access.
 
 ## Platform support

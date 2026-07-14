@@ -5,6 +5,7 @@ import {
 } from "../api";
 import { useHive } from "../store";
 import RelTime from "../hooks/RelTime";
+import { REVIEW_IFRAME_SANDBOX, safeArtifactHref } from "../security";
 
 // The Plans tab is now a slim two-pane status view over OpenSpec changes. The
 // actual review/annotation happens in the self-hosted Plannotator UI, rendered
@@ -87,7 +88,12 @@ function inlineMarkdown(text: string): ReactNode[] {
       const close = token.indexOf("](");
       const label = token.slice(1, close);
       const href = token.slice(close + 2, -1);
-      parts.push(<a key={key} href={href} target="_blank" rel="noreferrer">{label}</a>);
+      // Artifact Markdown is untrusted. React escapes text/HTML; additionally
+      // refuse executable or local-action URL schemes in rendered links.
+      const safeHref = safeArtifactHref(href);
+      parts.push(safeHref
+        ? <a key={key} href={safeHref} target="_blank" rel="noopener noreferrer">{label}</a>
+        : <span key={key}>{label}</span>);
     }
     last = m.index + token.length;
   }
@@ -380,6 +386,8 @@ export default function Plans(props: { search: string }) {
                       title="Plan review"
                       src={reviewSrc}
                       className="plan-review-iframe"
+                      sandbox={REVIEW_IFRAME_SANDBOX}
+                      referrerPolicy="no-referrer"
                     />
                   )}
                 </>

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hasExpectedHost, isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite, writeGateResponse } from "../src/observability/security.ts";
+import { applyBrowserSecurityHeaders, hasExpectedHost, isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite, writeGateResponse } from "../src/observability/security.ts";
 
 function req(headers: Record<string, string> = {}): Request {
   return new Request("http://127.0.0.1:43191/events", { headers });
@@ -69,9 +69,33 @@ test("write gate rejects any non-GET/HEAD method without a token (M8c/J7)", () =
   // A separately validated narrow capability can authorize one route without
   // weakening empty-token behavior for ordinary writes.
   assert.equal(writeGateResponse(reqM("POST"), new URL(reqM("POST").url), "", reject, true), null);
+  const opaqueCapability = reqM("POST", { origin: "null" });
+  assert.equal(writeGateResponse(opaqueCapability, new URL(opaqueCapability.url), "", reject, true), null);
+  const opaquePreflight = reqM("OPTIONS", { origin: "null", "access-control-request-method": "POST" });
+  assert.equal(writeGateResponse(opaquePreflight, new URL(opaquePreflight.url), "", reject, true), null);
 
   // Cross-origin mutations are blocked at 403 before the token is even checked.
   const xorigin = gate(reqM("PUT", { origin: "https://evil.example" }));
   assert.ok(xorigin);
   assert.equal(xorigin!.status, 403);
+});
+
+test("browser security headers constrain framing, content, and local connections", () => {
+  const dashboard = applyBrowserSecurityHeaders(new Response("ok"), "dashboard");
+  const csp = dashboard.headers.get("content-security-policy") || "";
+  assert.match(csp, /frame-ancestors 'self'/);
+  assert.match(csp, /connect-src 'self'/);
+  assert.match(csp, /object-src 'none'/);
+  assert.equal(dashboard.headers.get("x-frame-options"), "SAMEORIGIN");
+  assert.equal(dashboard.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(dashboard.headers.get("referrer-policy"), "same-origin");
+  assert.equal(dashboard.headers.get("cross-origin-opener-policy"), "same-origin");
+
+  const review = applyBrowserSecurityHeaders(new Response("ok"), "review", "abc123", "http://127.0.0.1:43191");
+  const reviewCsp = review.headers.get("content-security-policy") || "";
+  assert.match(reviewCsp, /default-src 'none'/);
+  assert.match(reviewCsp, /script-src-attr 'none'/);
+  assert.match(reviewCsp, /connect-src http:\/\/127\.0\.0\.1:43191/);
+  assert.match(reviewCsp, /frame-src 'none'/);
+  assert.equal(review.headers.get("referrer-policy"), "no-referrer");
 });

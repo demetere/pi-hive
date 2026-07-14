@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as openspec from "./openspec";
+import { applyBrowserSecurityHeaders } from "../observability/security";
 
 // Generic embed layer for self-hosting a prebuilt single-file review UI
 // (Plannotator) on pi-hive's own dashboard server. It runs NO Plannotator
@@ -133,6 +134,30 @@ export function nonceFromReferer(referer: string | null, mountPath: string): str
   return reviewParamFromReferer(referer, mountPath, "nonce");
 }
 
+const CAPABILITY_QUERY = {
+  rid: "__hive_rid",
+  cwd: "__hive_cwd",
+  nonce: "__hive_nonce",
+} as const;
+
+function reviewRequestParams(req: Request, url: URL, mountPath: string): { rid: string | null; cwd: string | null; nonce: string | null; queryBound: boolean } {
+  const referer = req.headers.get("referer");
+  const queryValues = {
+    rid: url.searchParams.get(CAPABILITY_QUERY.rid),
+    cwd: url.searchParams.get(CAPABILITY_QUERY.cwd),
+    nonce: url.searchParams.get(CAPABILITY_QUERY.nonce),
+  };
+  const queryBound = Boolean(queryValues.rid && queryValues.cwd && queryValues.nonce);
+  return queryBound
+    ? { ...queryValues, queryBound }
+    : {
+        rid: ridFromReferer(referer, mountPath),
+        cwd: cwdFromReferer(referer, mountPath),
+        nonce: nonceFromReferer(referer, mountPath),
+        queryBound: false,
+      };
+}
+
 // ---------------------------------------------------------------------------
 // Vendored HTML resolution
 // ---------------------------------------------------------------------------
@@ -176,12 +201,17 @@ const REVIEW_MUTATION_PATHS = new Set(["/api/approve", "/api/deny", "/api/feedba
 function json(data: unknown, status = 200, noStore = false): Response {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (noStore) headers["cache-control"] = "no-store";
-  return new Response(JSON.stringify(data), { status, headers });
+  return applyBrowserSecurityHeaders(new Response(JSON.stringify(data), { status, headers }), "api");
 }
 
-function exactOriginMetadata(req: Request, url: URL, refererPath: string): boolean {
+function exactOriginMetadata(req: Request, url: URL, refererPath: string, queryBound = false): boolean {
   if (req.headers.get("host") !== url.host) return false;
-  if (req.headers.get("origin") !== url.origin) return false;
+  const origin = req.headers.get("origin");
+  // A sandbox without allow-same-origin intentionally sends Origin: null. It is
+  // accepted only when the request carries the complete content-bound review
+  // capability; ordinary dashboard mutations still require the exact origin.
+  if (origin !== url.origin && !(queryBound && origin === "null")) return false;
+  if (queryBound) return true;
   const rawReferer = req.headers.get("referer");
   if (!rawReferer) return false;
   try {
@@ -223,43 +253,48 @@ function pruneReviewSessions(surface: ReviewSurface): void {
 // correctly bound review capability. Artifact freshness is intentionally checked
 // later so an authenticated stale request reaches the handler and receives 409.
 export function isAuthorizedReviewMutation(surface: ReviewSurface, req: Request, url: URL): boolean {
-  if (req.method !== "POST" || !REVIEW_MUTATION_PATHS.has(url.pathname)) return false;
-  if (!exactOriginMetadata(req, url, surface.mountPath)) return false;
-  const referer = req.headers.get("referer");
-  const rid = ridFromReferer(referer, surface.mountPath);
-  const cwd = cwdFromReferer(referer, surface.mountPath);
-  const nonce = nonceFromReferer(referer, surface.mountPath);
-  if (!rid) return false;
-  const ctx = surface.hooks.resolveContext(rid, cwd);
-  return !!ctx && !!activeSession(surface, nonce, ctx);
+  const requestedMethod = req.method === "OPTIONS" ? req.headers.get("access-control-request-method") : req.method;
+  if (requestedMethod !== "POST" || !REVIEW_MUTATION_PATHS.has(url.pathname)) return false;
+  const params = reviewRequestParams(req, url, surface.mountPath);
+  if (!exactOriginMetadata(req, url, surface.mountPath, params.queryBound) || !params.rid) return false;
+  const ctx = surface.hooks.resolveContext(params.rid, params.cwd);
+  return !!ctx && !!activeSession(surface, params.nonce, ctx);
 }
 
 function emptySse(): Response {
   // Keep-alive stub for the client's SSE probes (/api/external-annotations/stream
   // etc). One comment line then held open; the client tolerates no events.
-  return new Response(new ReadableStream({
+  return applyBrowserSecurityHeaders(new Response(new ReadableStream({
     start(controller) {
       controller.enqueue(new TextEncoder().encode(": pi-hive-review-stub\n\n"));
     },
-  }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+  }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } }), "api");
 }
 
-function serveHtml(htmlPath: string): Response {
+function serveHtml(htmlPath: string, connectOrigin: string): Response {
   let html: string;
   try {
     html = readFileSync(htmlPath, "utf8");
   } catch {
-    return new Response("review UI not vendored — run `just dashboard-vendor`", { status: 503 });
+    return applyBrowserSecurityHeaders(new Response("review UI not vendored — run `just dashboard-vendor`", { status: 503, headers: { "cache-control": "no-store" } }), "review");
   }
-  return new Response(html, {
+  // A sandboxed frame has an opaque origin and intentionally sends no useful
+  // Referer. Install this tiny bootstrap before the vendored module so its local
+  // /api/* fetch/EventSource calls carry the already-minted capability in their
+  // query string. No capability is attached to external destinations.
+  const scriptNonce = randomUUID().replace(/-/g, "");
+  const bootstrap = `<script nonce="${scriptNonce}">(()=>{const p=new URLSearchParams(location.search),k={rid:"${CAPABILITY_QUERY.rid}",cwd:"${CAPABILITY_QUERY.cwd}",nonce:"${CAPABILITY_QUERY.nonce}"};function u(v){const x=new URL(v,location.href);if(x.protocol===location.protocol&&x.host===location.host&&x.pathname.startsWith("/api/")){x.searchParams.set(k.rid,p.get("rid")||"");x.searchParams.set(k.cwd,p.get("cwd")||"");x.searchParams.set(k.nonce,p.get("nonce")||"")}return x}const f=window.fetch.bind(window);window.fetch=(v,o)=>v instanceof Request?f(new Request(u(v.url),v),o):f(u(String(v)),o);const E=window.EventSource;window.EventSource=class extends E{constructor(v,o){super(u(String(v)),o)}}})();</script>`;
+  html = /<head(?:\s[^>]*)?>/i.test(html) ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${bootstrap}`) : `${bootstrap}${html}`;
+  // The pinned single-file vendor bundle has one executable module tag. Give it
+  // the same nonce; script-looking strings inside syntax-highlighter code must
+  // not be rewritten.
+  html = html.replace(/<script type="module" crossorigin>/i, `<script type="module" crossorigin nonce="${scriptNonce}">`);
+  return applyBrowserSecurityHeaders(new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      // Keep the rid query on the Referer for the iframe's /api/* calls, but only
-      // for our own origin.
-      "referrer-policy": "same-origin",
-      "cache-control": "no-cache",
+      "cache-control": "no-store",
     },
-  });
+  }), "review", scriptNonce, connectOrigin);
 }
 
 // The minimal GET /api/plan payload the plan surface needs to render. Only
@@ -390,38 +425,59 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
     const session = activeSession(surface, url.searchParams.get("nonce"), ctx);
     if (!session) return json({ error: "invalid or expired review session" }, 401, true);
     if (!sessionIsCurrent(session)) return json({ error: "review artifact changed" }, 409, true);
-    return serveHtml(htmlPath);
+    return serveHtml(htmlPath, url.origin);
   }
 
-  // The client hardcodes absolute /api/* paths. Claim only requests whose exact
-  // Referer points at this review mount and whose nonce is bound to that rid/cwd.
+  // The vendored client hardcodes absolute /api/* paths. The sandbox bootstrap
+  // adds the content-bound capability to those local URLs; legacy/new-tab loads
+  // may still provide it through an exact same-origin Referer.
   if (url.pathname.startsWith("/api/")) {
-    const dedicatedMutation = REVIEW_MUTATION_PATHS.has(url.pathname) && req.method === "POST";
-    const rejectOrFallThrough = () => dedicatedMutation ? json({ error: "invalid review request metadata" }, 403, true) : null;
-    const refererRaw = req.headers.get("referer");
-    let referer: URL;
-    try { referer = new URL(refererRaw || ""); } catch { return rejectOrFallThrough(); }
-    if (referer.origin !== url.origin || referer.pathname !== mountPath || req.headers.get("host") !== url.host) return rejectOrFallThrough();
-    const rid = ridFromReferer(refererRaw, mountPath);
-    if (!rid) return rejectOrFallThrough();
-    const ctx = hooks.resolveContext(rid, cwdFromReferer(refererRaw, mountPath));
-    if (!ctx) return json({ error: "unknown review" }, 404, true);
-    const session = activeSession(surface, nonceFromReferer(refererRaw, mountPath), ctx);
-    if (!session) return json({ error: "invalid or expired review session" }, 401, true);
-    if (!sessionIsCurrent(session)) return json({ error: "review artifact changed" }, 409, true);
+    const params = reviewRequestParams(req, url, mountPath);
+    const opaqueCors = params.queryBound && req.headers.get("origin") === "null";
+    const respond = (response: Response): Response => {
+      if (!opaqueCors) return response;
+      response.headers.set("access-control-allow-origin", "null");
+      response.headers.set("cross-origin-resource-policy", "cross-origin");
+      response.headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
+      response.headers.set("access-control-allow-headers", "content-type");
+      response.headers.append("vary", "Origin");
+      return response;
+    };
+    const requestedMethod = req.method === "OPTIONS" ? req.headers.get("access-control-request-method") : req.method;
+    const dedicatedMutation = REVIEW_MUTATION_PATHS.has(url.pathname) && requestedMethod === "POST";
+    const rejectOrFallThrough = () => dedicatedMutation ? respond(json({ error: "invalid review request metadata" }, 403, true)) : null;
+    if (req.headers.get("host") !== url.host || !params.rid) return rejectOrFallThrough();
+    if (!params.queryBound) {
+      const refererRaw = req.headers.get("referer");
+      let referer: URL;
+      try { referer = new URL(refererRaw || ""); } catch { return rejectOrFallThrough(); }
+      if (referer.origin !== url.origin || referer.pathname !== mountPath) return rejectOrFallThrough();
+    }
+    const ctx = hooks.resolveContext(params.rid, params.cwd);
+    if (!ctx) return respond(json({ error: "unknown review" }, 404, true));
+    const session = activeSession(surface, params.nonce, ctx);
+    if (!session) return respond(json({ error: "invalid or expired review session" }, 401, true));
+    if (!sessionIsCurrent(session)) return respond(json({ error: "review artifact changed" }, 409, true));
 
     const p = url.pathname;
-    if (p === "/api/plan" && req.method === "GET") return planPayload(ctx);
+    if (req.method === "OPTIONS") {
+      const requestedHeaders = (req.headers.get("access-control-request-headers") || "").toLowerCase().split(",").map((header) => header.trim()).filter(Boolean);
+      if (!opaqueCors || requestedMethod !== "POST" || requestedHeaders.some((header) => header !== "content-type")) {
+        return respond(json({ error: "invalid review preflight" }, 403, true));
+      }
+      return respond(new Response(null, { status: 204, headers: { "cache-control": "no-store" } }));
+    }
+    if (p === "/api/plan" && req.method === "GET") return respond(planPayload(ctx));
 
     if (REVIEW_MUTATION_PATHS.has(p) && req.method === "POST") {
-      if (!exactOriginMetadata(req, url, mountPath)) return json({ error: "invalid request origin" }, 403, true);
+      if (!exactOriginMetadata(req, url, mountPath, params.queryBound)) return respond(json({ error: "invalid request origin" }, 403, true));
       const body = await readBoundedJson(req);
-      if (body.ok === false) return json({ error: body.error }, 400, true);
+      if (body.ok === false) return respond(json({ error: body.error }, 400, true));
       const parsed = parseReviewBody(body.value);
-      if (parsed.ok === false) return json({ error: parsed.error }, 400, true);
+      if (parsed.ok === false) return respond(json({ error: parsed.error }, 400, true));
       let approve: boolean;
       if (p === "/api/feedback") {
-        if (typeof body.value.approved !== "boolean") return json({ error: "approved must be a boolean" }, 400, true);
+        if (typeof body.value.approved !== "boolean") return respond(json({ error: "approved must be a boolean" }, 400, true));
         approve = body.value.approved;
       } else {
         approve = p === "/api/approve";
@@ -430,25 +486,25 @@ export async function handleReviewSurface(surface: ReviewSurface, req: Request, 
         // Recheck after the asynchronous body read, then pass the expected hash
         // into persistence to close the external-writer race between validation
         // and the atomic approval write.
-        if (!sessionIsCurrent(session)) return json({ error: "review artifact changed" }, 409, true);
+        if (!sessionIsCurrent(session)) return respond(json({ error: "review artifact changed" }, 409, true));
         const result = approve
           ? hooks.onApprove(ctx, parsed.value, session.artifactHash)
           : hooks.onDeny(ctx, parsed.value, session.artifactHash);
-        if (result.ok === false) return json({ error: result.error }, 409, true);
+        if (result.ok === false) return respond(json({ error: result.error }, 409, true));
         session.used = true;
-        return json({ ok: true }, 200, true);
+        return respond(json({ ok: true }, 200, true));
       } catch (error) {
-        if (error instanceof openspec.StaleArtifactApprovalError) return json({ error: error.message }, 409, true);
-        return json({ error: "review persistence failed" }, 500, true);
+        if (error instanceof openspec.StaleArtifactApprovalError) return respond(json({ error: error.message }, 409, true));
+        return respond(json({ error: "review persistence failed" }, 500, true));
       }
     }
 
     // Read-only boot probes used by the vendored client.
-    if (req.method !== "GET") return json({ error: "not found" }, 404, true);
-    if (p.endsWith("/stream")) return emptySse();
-    if (p === "/api/draft") return json({ draft: null }, 200, true);
-    if (p === "/api/ai/capabilities") return json({ capabilities: {}, enabled: false }, 200, true);
-    return json({}, 200, true);
+    if (req.method !== "GET") return respond(json({ error: "not found" }, 404, true));
+    if (p.endsWith("/stream")) return respond(emptySse());
+    if (p === "/api/draft") return respond(json({ draft: null }, 200, true));
+    if (p === "/api/ai/capabilities") return respond(json({ capabilities: {}, enabled: false }, 200, true));
+    return respond(json({}, 200, true));
   }
 
   return null;
