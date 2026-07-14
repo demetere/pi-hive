@@ -84,8 +84,8 @@ test("submit_review_verdict caches the latest verdict per change and degrades wi
 
 // Note: gate approval is no longer a chat tool. Approving an artifact happens in
 // the dashboard's plan-review UI (POST /api/approve -> review-wiring), which
-// records a verdict and writes pi-hive's execution-approval sidecar. That path
-// is exercised through src/engine/review.ts + openspec.setExecutionApproval.
+// records a verdict and atomically writes pi-hive's global content-bound human
+// approval record. That path is exercised through review.ts + review-wiring.ts.
 
 test("team_status surfaces the latest verdict", async () => {
   const state = stateWith([runtime("Rev", { agentType: "reviewer" })]);

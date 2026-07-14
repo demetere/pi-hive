@@ -1,9 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, readIfSmall } from "../core/fs";
 import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
+import { resolveProjectIdentity, type ProjectIdentity } from "../shared/project-identity";
 
 // Thin, bounded wrapper around the OpenSpec CLI (@fission-ai/openspec).
 //
@@ -15,9 +18,9 @@ import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 // OpenSpec is the *store + validator*: it owns the artifact dependency graph
 // (proposal -> {design, specs} -> tasks) and validation, and reports readiness
 // per artifact via `openspec status --json`. It does NOT model human approval —
-// pi-hive owns the approval gate (verdicts in SQLite). `isReadyToExecute` here
-// answers only "are the artifacts materially complete + valid", which the
-// dispatch execution gate combines with pi-hive's own approval state.
+// pi-hive owns the approval gate (content-bound records in the global agent
+// directory). `isReadyToExecute` here answers only "are the artifacts materially
+// complete + valid", which dispatch combines with pi-hive's approval authority.
 
 // Node's Dirent, declared locally because the core tsconfig loads no @types/node
 // (matches the pattern in plan-store.ts / sdd.ts).
@@ -357,37 +360,332 @@ export function readArtifact(cwd: string, name: string, relPath: string): string
 }
 
 // ---------------------------------------------------------------------------
-// pi-hive approval gate (pi-hive owns approval; OpenSpec has no phase gates)
+// Content-bound approval authority
 // ---------------------------------------------------------------------------
 //
-// OpenSpec is the store + validator; it models artifact dependencies but not
-// human approval. pi-hive layers its own approval on top, persisted as a sidecar
-// under the change dir so the CORE (Node, inside the Pi session) can read it
-// without touching the dashboard's Bun SQLite. The self-hosted review surface
-// (Bun server, which has fs access to the project) writes it on approve.
+// Project files are agent-controlled and therefore cannot be an approval
+// authority. Automated and human records live in separate atomic files under
+// ~/.pi/agent/hive/approvals/<projectId>/<changeId>/<artifactId>/ (or the
+// configured PI_CODING_AGENT_DIR). Every standing verdict is revalidated
+// against the current artifact bytes before it can affect a gate.
 
-const APPROVAL_FILE = ".pi-hive-approval.json";
-
-// The four spec-driven artifacts, in dependency order, and each artifact's
-// direct upstream deps (mirrors what `openspec status --json` reports). A human
-// approval of an artifact is only meaningful while its upstream artifacts remain
-// approved, so DENYING an upstream artifact invalidates everything downstream.
+export const APPROVAL_SCHEMA_VERSION = 1 as const;
 export const ARTIFACT_ORDER = ["proposal", "design", "specs", "tasks"] as const;
 export type ArtifactId = (typeof ARTIFACT_ORDER)[number];
+export type ArtifactVerdict = "green" | "red" | null;
+export type AgentReviewVerdict = "green" | "yellow" | "red" | null;
+export type ApprovalAuthority = "automated-review" | "human";
+export type ApprovalLedger = Partial<Record<ArtifactId, ArtifactVerdict>>;
+export type AgentReviewLedger = Partial<Record<ArtifactId, AgentReviewVerdict>>;
+
+export interface ApprovalRecord {
+  schemaVersion: typeof APPROVAL_SCHEMA_VERSION;
+  authority: ApprovalAuthority;
+  projectId: string;
+  canonicalRoot: string;
+  changeId: string;
+  artifactId: ArtifactId;
+  verdict: Exclude<AgentReviewVerdict, null>;
+  actor: string;
+  timestamp: string;
+  artifactHash: string;
+  automatedReviewHash?: string;
+}
+
 const UPSTREAM: Record<ArtifactId, ArtifactId[]> = {
   proposal: [],
   design: ["proposal"],
   specs: ["proposal"],
   tasks: ["design", "specs"],
 };
+const APPROVAL_RECORD_MAX_BYTES = 16_000;
+const APPROVAL_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
+const APPROVAL_SPEC_MAX_FILES = 10_000;
+const HASH_RE = /^[a-f0-9]{64}$/;
 
-// The set of artifacts that (transitively) depend on `artifact` — the ones whose
-// approval must be revoked when `artifact` is denied.
+function toArtifactId(artifact: string): ArtifactId | null {
+  const id = artifact.replace(/\.md$/, "").replace(/^specs.*/, "specs");
+  return (ARTIFACT_ORDER as readonly string[]).includes(id) ? (id as ArtifactId) : null;
+}
+
+function approvalIdentity(cwd: string): ProjectIdentity {
+  return resolveProjectIdentity(cwd);
+}
+
+function approvalBaseDir(): string {
+  const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  return join(agentDir, "hive", "approvals");
+}
+
+export function approvalRecordPath(cwd: string, name: string, artifact: string, authority: ApprovalAuthority): string | null {
+  if (!isSafeChangeId(name)) return null;
+  const id = toArtifactId(artifact);
+  if (!id) return null;
+  const identity = approvalIdentity(cwd);
+  return join(approvalBaseDir(), identity.projectId, name, id, authority === "human" ? "human.json" : "automated.json");
+}
+
+function framed(hash: ReturnType<typeof createHash>, value: string | Uint8Array): void {
+  const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
+  const size = Buffer.allocUnsafe(8);
+  size.writeBigUInt64BE(BigInt(bytes.byteLength));
+  hash.update(size);
+  hash.update(bytes);
+}
+
+function approvalSpecFiles(cwd: string, name: string): string[] | null {
+  const root = resolveArtifact(cwd, name, "specs");
+  if (!root) return null;
+  const files: string[] = [];
+  let overflow = false;
+  const walk = (dir: string, rel: string, depth: number): void => {
+    if (overflow || depth > 32) { overflow = true; return; }
+    let entries: FsDirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }) as FsDirent[];
+    } catch {
+      overflow = true;
+      return;
+    }
+    for (const entry of entries) {
+      if (overflow) return;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(dir, entry.name), childRel, depth + 1);
+      else if (entry.isFile() && entry.name.endsWith(".md")) {
+        files.push(`specs/${childRel}`);
+        if (files.length > APPROVAL_SPEC_MAX_FILES) overflow = true;
+      }
+    }
+  };
+  walk(root, "", 0);
+  return overflow || files.length === 0 ? null : files.sort((a, b) => a.localeCompare(b));
+}
+
+// Hash one exact top-level artifact, or a stable path+bytes aggregate for specs.
+// Length framing avoids ambiguous concatenations; sorted relative paths make the
+// specs hash independent of filesystem enumeration order while still changing
+// on rename/add/remove.
+export function artifactHash(cwd: string, name: string, artifact: string): string | null {
+  const id = toArtifactId(artifact);
+  if (!id || !isSafeChangeId(name)) return null;
+  const files = id === "specs" ? approvalSpecFiles(cwd, name) : [`${id}.md`];
+  if (!files) return null;
+  const hash = createHash("sha256").update("pi-hive-artifact-v1\0");
+  framed(hash, id);
+  let total = 0;
+  try {
+    for (const relPath of files) {
+      const target = resolveArtifact(cwd, name, relPath);
+      if (!target) return null;
+      const bytes = readFileSync(target);
+      total += bytes.byteLength;
+      if (total > APPROVAL_ARTIFACT_MAX_BYTES) return null;
+      framed(hash, relPath);
+      framed(hash, bytes);
+    }
+    return hash.digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function recordDigest(record: ApprovalRecord): string {
+  return createHash("sha256")
+    .update("pi-hive-approval-record-v1\0")
+    .update(JSON.stringify(record))
+    .digest("hex");
+}
+
+function validRecordShape(value: unknown, authority: ApprovalAuthority, identity: ProjectIdentity, name: string, id: ArtifactId): value is ApprovalRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const r = value as Record<string, unknown>;
+  const verdictOk = authority === "human"
+    ? r.verdict === "green" || r.verdict === "red"
+    : r.verdict === "green" || r.verdict === "yellow" || r.verdict === "red";
+  return r.schemaVersion === APPROVAL_SCHEMA_VERSION
+    && r.authority === authority
+    && r.projectId === identity.projectId
+    && r.canonicalRoot === identity.canonicalRoot
+    && r.changeId === name
+    && r.artifactId === id
+    && verdictOk
+    && typeof r.actor === "string" && r.actor.trim().length > 0
+    && typeof r.timestamp === "string" && Number.isFinite(Date.parse(r.timestamp))
+    && typeof r.artifactHash === "string" && HASH_RE.test(r.artifactHash)
+    && (r.automatedReviewHash === undefined || (typeof r.automatedReviewHash === "string" && HASH_RE.test(r.automatedReviewHash)));
+}
+
+function readApprovalRecord(cwd: string, name: string, id: ArtifactId, authority: ApprovalAuthority): ApprovalRecord | null {
+  try {
+    const identity = approvalIdentity(cwd);
+    const path = approvalRecordPath(cwd, name, id, authority);
+    if (!path) return null;
+    const raw = readIfSmall(path, APPROVAL_RECORD_MAX_BYTES);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    return validRecordShape(parsed, authority, identity, name, id) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function currentAutomatedRecord(cwd: string, name: string, id: ArtifactId): ApprovalRecord | null {
+  const record = readApprovalRecord(cwd, name, id, "automated-review");
+  const currentHash = artifactHash(cwd, name, id);
+  return record && currentHash && record.artifactHash === currentHash ? record : null;
+}
+
+function currentHumanRecord(cwd: string, name: string, id: ArtifactId, seen = new Set<ArtifactId>()): ApprovalRecord | null {
+  if (seen.has(id)) return null;
+  seen.add(id);
+  const record = readApprovalRecord(cwd, name, id, "human");
+  const currentHash = artifactHash(cwd, name, id);
+  if (!record || !currentHash || record.artifactHash !== currentHash) return null;
+  if (record.verdict === "red") return record;
+  const automated = currentAutomatedRecord(cwd, name, id);
+  if (!automated || (automated.verdict !== "green" && automated.verdict !== "yellow")) return null;
+  if (record.automatedReviewHash !== recordDigest(automated)) return null;
+  for (const upstream of UPSTREAM[id]) {
+    if (currentHumanRecord(cwd, name, upstream, new Set(seen))?.verdict !== "green") return null;
+  }
+  return record;
+}
+
+function writeApprovalRecord(path: string, record: ApprovalRecord): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(tmp, path);
+  } catch (error) {
+    try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
+    throw error;
+  }
+}
+
+function removeApprovalRecord(cwd: string, name: string, id: ArtifactId, authority: ApprovalAuthority): void {
+  const path = approvalRecordPath(cwd, name, id, authority);
+  if (!path) throw new Error(`Invalid approval target: ${name}/${id}`);
+  try {
+    unlinkSync(path);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+export function readApprovalLedger(cwd: string, name: string): ApprovalLedger {
+  const ledger: ApprovalLedger = {};
+  for (const id of ARTIFACT_ORDER) {
+    const verdict = currentHumanRecord(cwd, name, id)?.verdict;
+    if (verdict === "green" || verdict === "red") ledger[id] = verdict;
+  }
+  return ledger;
+}
+
+export function readAgentReviewLedger(cwd: string, name: string): AgentReviewLedger {
+  const ledger: AgentReviewLedger = {};
+  for (const id of ARTIFACT_ORDER) {
+    const verdict = currentAutomatedRecord(cwd, name, id)?.verdict;
+    if (verdict === "green" || verdict === "yellow" || verdict === "red") ledger[id] = verdict;
+  }
+  return ledger;
+}
+
+// This function is called only from the trusted dashboard review hook. A green
+// human approval requires a current eligible automated record and current green
+// approvals for every direct upstream artifact.
+export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui"): boolean {
+  const id = toArtifactId(artifact);
+  if (!id || !isSafeChangeId(name)) throw new Error(`Invalid approval target: ${name}/${artifact}`);
+  if (verdict === null) {
+    removeApprovalRecord(cwd, name, id, "human");
+    for (const down of downstreamOf(id)) removeApprovalRecord(cwd, name, down, "human");
+    return true;
+  }
+  if (!by.trim()) throw new Error("Approval actor is required");
+  const identity = approvalIdentity(cwd);
+  const hash = artifactHash(cwd, name, id);
+  if (!hash) throw new Error(`Cannot approve missing, unsafe, or oversized artifact: ${id}`);
+  const automated = currentAutomatedRecord(cwd, name, id);
+  if (verdict === "green") {
+    if (!automated || (automated.verdict !== "green" && automated.verdict !== "yellow")) {
+      throw new Error(`Artifact ${id} has no current eligible automated review`);
+    }
+    for (const upstream of UPSTREAM[id]) {
+      if (currentHumanRecord(cwd, name, upstream)?.verdict !== "green") {
+        throw new Error(`Artifact ${id} requires current human approval of ${upstream}`);
+      }
+    }
+  }
+  const path = approvalRecordPath(cwd, name, id, "human");
+  if (!path) throw new Error(`Invalid approval target: ${name}/${id}`);
+  writeApprovalRecord(path, {
+    schemaVersion: APPROVAL_SCHEMA_VERSION,
+    authority: "human",
+    projectId: identity.projectId,
+    canonicalRoot: identity.canonicalRoot,
+    changeId: name,
+    artifactId: id,
+    verdict,
+    actor: by.trim(),
+    timestamp: new Date().toISOString(),
+    artifactHash: hash,
+    ...(automated ? { automatedReviewHash: recordDigest(automated) } : {}),
+  });
+  if (verdict === "red") {
+    for (const down of downstreamOf(id)) removeApprovalRecord(cwd, name, down, "human");
+  }
+  return true;
+}
+
+export function artifactVerdict(cwd: string, name: string, artifact: string): ArtifactVerdict {
+  const id = toArtifactId(artifact);
+  return id ? (currentHumanRecord(cwd, name, id)?.verdict as ArtifactVerdict) ?? null : null;
+}
+
+export function setAgentReviewVerdict(cwd: string, name: string, artifact: string, verdict: AgentReviewVerdict, by = "agent-reviewer"): boolean {
+  const id = toArtifactId(artifact);
+  if (!id || !isSafeChangeId(name)) throw new Error(`Invalid automated review target: ${name}/${artifact}`);
+  if (verdict === null) {
+    removeApprovalRecord(cwd, name, id, "automated-review");
+    return true;
+  }
+  if (!by.trim()) throw new Error("Automated reviewer actor is required");
+  const identity = approvalIdentity(cwd);
+  const hash = artifactHash(cwd, name, id);
+  if (!hash) throw new Error(`Cannot review missing, unsafe, or oversized artifact: ${id}`);
+  const path = approvalRecordPath(cwd, name, id, "automated-review");
+  if (!path) throw new Error(`Invalid automated review target: ${name}/${id}`);
+  writeApprovalRecord(path, {
+    schemaVersion: APPROVAL_SCHEMA_VERSION,
+    authority: "automated-review",
+    projectId: identity.projectId,
+    canonicalRoot: identity.canonicalRoot,
+    changeId: name,
+    artifactId: id,
+    verdict,
+    actor: by.trim(),
+    timestamp: new Date().toISOString(),
+    artifactHash: hash,
+  });
+  return true;
+}
+
+export function agentReviewVerdict(cwd: string, name: string, artifact: string): AgentReviewVerdict {
+  const id = toArtifactId(artifact);
+  return id ? (currentAutomatedRecord(cwd, name, id)?.verdict as AgentReviewVerdict) ?? null : null;
+}
+
+export function isArtifactApproved(cwd: string, name: string, artifact: string): boolean {
+  return artifactVerdict(cwd, name, artifact) === "green";
+}
+
 function downstreamOf(artifact: ArtifactId): ArtifactId[] {
   const out: ArtifactId[] = [];
   for (const id of ARTIFACT_ORDER) {
     if (id === artifact) continue;
-    // Walk id's upstream chain; if it reaches `artifact`, it's downstream.
     const seen = new Set<ArtifactId>();
     const stack = [...UPSTREAM[id]];
     while (stack.length) {
@@ -399,127 +697,11 @@ function downstreamOf(artifact: ArtifactId): ArtifactId[] {
   return out;
 }
 
-export type ArtifactVerdict = "green" | "red" | null;
-export type AgentReviewVerdict = "green" | "yellow" | "red" | null;
-// Per-artifact approval ledger — pi-hive's own gate state, independent of
-// OpenSpec, persisted as a sidecar the CORE can read without SQLite.
-export type ApprovalLedger = Partial<Record<ArtifactId, ArtifactVerdict>>;
-export type AgentReviewLedger = Partial<Record<ArtifactId, AgentReviewVerdict>>;
-
-type ApprovalSidecar = {
-  approved?: boolean;
-  artifacts?: ApprovalLedger;
-  agentReviews?: AgentReviewLedger;
-  by?: string;
-  at?: string;
-};
-
-function approvalPath(cwd: string, name: string): string | null {
-  return resolveArtifact(cwd, name, APPROVAL_FILE);
-}
-
-function toArtifactId(artifact: string): ArtifactId | null {
-  const id = artifact.replace(/\.md$/, "").replace(/^specs.*/, "specs");
-  return (ARTIFACT_ORDER as readonly string[]).includes(id) ? (id as ArtifactId) : null;
-}
-
-// Read the ledger. Back-compat: the old flat shape {approved:true} maps to
-// {tasks:"green"} so pre-existing sidecars keep gating execution.
-function readApprovalSidecar(cwd: string, name: string): ApprovalSidecar {
-  const p = approvalPath(cwd, name);
-  if (!p) return {};
-  const raw = readIfSmall(p, 16_000);
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as ApprovalSidecar;
-  } catch {
-    return {};
-  }
-}
-
-export function readApprovalLedger(cwd: string, name: string): ApprovalLedger {
-  const parsed = readApprovalSidecar(cwd, name);
-  if (parsed.artifacts) return parsed.artifacts;
-  if (parsed.approved === true) return { tasks: "green" }; // legacy flat shape
-  return {};
-}
-
-export function readAgentReviewLedger(cwd: string, name: string): AgentReviewLedger {
-  return readApprovalSidecar(cwd, name).agentReviews || {};
-}
-
-// Atomic write (temp + rename) so the core dispatch gate never reads a
-// half-written ledger. Single writer in practice, but preserve unrelated sidecar
-// sections so UI approvals and agent-review gates do not overwrite each other.
-function writeApprovalSidecar(cwd: string, name: string, sidecar: ApprovalSidecar, by: string): boolean {
-  const p = approvalPath(cwd, name);
-  if (!p) return false;
-  try {
-    ensureDir(dirname(p));
-    const tmp = `${p}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify({ ...sidecar, by, at: new Date().toISOString() }, null, 2)}\n`);
-    renameSync(tmp, p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function writeApprovalLedger(cwd: string, name: string, ledger: ApprovalLedger, by: string): boolean {
-  return writeApprovalSidecar(cwd, name, { ...readApprovalSidecar(cwd, name), artifacts: ledger }, by);
-}
-
-// Record a human verdict for one artifact. On a DENY (red), also revoke the
-// approval of every downstream artifact — work built on a rejected upstream
-// artifact can no longer be trusted, so the pipeline rewinds.
-export function setArtifactApproval(cwd: string, name: string, artifact: string, verdict: ArtifactVerdict, by = "ui"): boolean {
-  const id = toArtifactId(artifact);
-  if (!id) return false;
-  const ledger = readApprovalLedger(cwd, name);
-  ledger[id] = verdict;
-  if (verdict === "red") {
-    for (const down of downstreamOf(id)) ledger[down] = null;
-  }
-  return writeApprovalLedger(cwd, name, ledger, by);
-}
-
-export function artifactVerdict(cwd: string, name: string, artifact: string): ArtifactVerdict {
-  const id = toArtifactId(artifact);
-  if (!id) return null;
-  return readApprovalLedger(cwd, name)[id] ?? null;
-}
-
-export function setAgentReviewVerdict(cwd: string, name: string, artifact: string, verdict: AgentReviewVerdict, by = "agent-reviewer"): boolean {
-  const id = toArtifactId(artifact);
-  if (!id) return false;
-  const sidecar = readApprovalSidecar(cwd, name);
-  const agentReviews = { ...(sidecar.agentReviews || {}) };
-  agentReviews[id] = verdict;
-  return writeApprovalSidecar(cwd, name, { ...sidecar, agentReviews }, by);
-}
-
-export function agentReviewVerdict(cwd: string, name: string, artifact: string): AgentReviewVerdict {
-  const id = toArtifactId(artifact);
-  if (!id) return null;
-  return readAgentReviewLedger(cwd, name)[id] ?? null;
-}
-
-export function isArtifactApproved(cwd: string, name: string, artifact: string): boolean {
-  return artifactVerdict(cwd, name, artifact) === "green";
-}
-
-// An artifact may be AUTHORED (by a planner) only when every one of its upstream
-// dependencies has a standing green approval. This is the per-artifact planning
-// gate the dispatch guard consults (H2).
 export function canAuthorArtifact(cwd: string, name: string, artifact: string): boolean {
   const id = toArtifactId(artifact);
-  if (!id) return false;
-  const ledger = readApprovalLedger(cwd, name);
-  return UPSTREAM[id].every((dep) => ledger[dep] === "green");
+  return id ? UPSTREAM[id].every((dep) => isArtifactApproved(cwd, name, dep)) : false;
 }
 
-// The next artifact the planning team should author: the first in dependency
-// order that is not yet on disk and whose upstream deps are all approved.
 export function nextAuthorableArtifact(cwd: string, name: string): ArtifactId | null {
   const files = new Set(listArtifacts(cwd, name).map((f) => f.replace(/\.md$/, "")));
   const hasSpecs = existsSync(join(cwd, "openspec", "changes", name, "specs"));
@@ -530,37 +712,25 @@ export function nextAuthorableArtifact(cwd: string, name: string): ArtifactId | 
   return null;
 }
 
-// True once the tasks artifact is human-approved. Retained name for the
-// execution-gate callers; now backed by the per-artifact ledger.
 export function isApprovedForExecution(cwd: string, name: string): boolean {
-  return isArtifactApproved(cwd, name, "tasks");
+  return ARTIFACT_ORDER.every((id) => isArtifactApproved(cwd, name, id));
 }
 
-// The most-recently-authored artifact that the human has NOT YET decided on
-// (ledger entry is absent — not green, not red). A red entry means the human
-// asked for a revision, which is a permitted planner action, so it does not
-// count as "awaiting". Returns null when there is nothing waiting on the human.
 export function pendingReviewArtifact(cwd: string, name: string): ArtifactId | null {
   const files = new Set(listArtifacts(cwd, name).map((f) => f.replace(/\.md$/, "")));
   const hasSpecs = existsSync(join(cwd, "openspec", "changes", name, "specs"));
-  const ledger = readApprovalLedger(cwd, name);
-  let pending: ArtifactId | null = null;
+  // Return the earliest invalid artifact so an upstream edit rewinds review to
+  // the correct dependency instead of presenting a still-authored downstream
+  // artifact first. Automated red means that same artifact is awaiting planner
+  // revision, not human review, so the planning gate remains open for revision.
   for (const id of ARTIFACT_ORDER) {
     const present = id === "specs" ? hasSpecs : files.has(id);
-    // If the automated reviewer already rejected this artifact, it is not
-    // awaiting human review; it is awaiting same-artifact revision. Missing or
-    // green/yellow agent review still holds the pipeline before the next artifact.
-    if (present && ledger[id] == null && agentReviewVerdict(cwd, name, id) !== "red") pending = id;
+    if (!present || artifactVerdict(cwd, name, id) !== null) continue;
+    return agentReviewVerdict(cwd, name, id) === "red" ? null : id;
   }
-  return pending;
+  return null;
 }
 
-// The core hard-stop planning gate: once an artifact is authored and awaiting
-// the human's first decision, the planning team may NOT author the next one
-// until the human approves. Returns the artifact holding the pipeline, or null
-// when planning may proceed (nothing authored-and-undecided). A DENIED artifact
-// does not block — revising it is exactly what the planner should do next.
-// Ledger+files only (core-readable, no SQLite).
 export function isAwaitingHumanApproval(cwd: string, name: string): ArtifactId | null {
   return pendingReviewArtifact(cwd, name);
 }

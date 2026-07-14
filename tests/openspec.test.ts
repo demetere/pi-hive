@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,8 +9,21 @@ import { parseRid, renderReviewInput, ridFromReferer } from "../src/engine/revie
 import { resolveHiveSddStatus } from "../src/engine/sdd.ts";
 import type { HiveState } from "../src/core/types.ts";
 
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-hive-approval-agent-"));
+
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "pi-hive-osx-"));
+}
+
+function changeDir(cwd: string, name = "add-auth"): string {
+  const dir = join(cwd, "openspec", "changes", name);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function clearAndApprove(cwd: string, name: string, artifact: string, actor = "Human Reviewer"): void {
+  openspec.setAgentReviewVerdict(cwd, name, artifact, "green", "Plan Reviewer");
+  openspec.setArtifactApproval(cwd, name, artifact, "green", actor);
 }
 
 function emptyState(): HiveState {
@@ -82,64 +96,151 @@ test("specs glob expands to concrete spec markdown for review", () => {
   assert.match(openspec.readArtifact(cwd, "add-auth", "specs/auth"), /ADDED Requirements/);
 });
 
-test("per-artifact approval ledger round-trips and gates execution", () => {
+test("content-bound automated and human records are separate and versioned", () => {
   const cwd = scratch();
-  const dir = join(cwd, "openspec", "changes", "add-auth");
-  mkdirSync(dir, { recursive: true });
-  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
-  openspec.setArtifactApproval(cwd, "add-auth", "tasks.md", "green");
-  assert.equal(openspec.isArtifactApproved(cwd, "add-auth", "tasks"), true);
-  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
-  openspec.setArtifactApproval(cwd, "add-auth", "tasks", "red");
-  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+
+  assert.throws(() => openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green"), /no current eligible automated review/);
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "green", "Plan Reviewer");
+  writeFileSync(join(dir, "proposal.md"), "# changed after review\n");
+  assert.throws(() => openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green"), /no current eligible automated review/);
+  clearAndApprove(cwd, "add-auth", "proposal");
+
+  const automatedPath = openspec.approvalRecordPath(cwd, "add-auth", "proposal", "automated-review")!;
+  const humanPath = openspec.approvalRecordPath(cwd, "add-auth", "proposal", "human")!;
+  assert.notEqual(automatedPath, humanPath);
+  assert.ok(existsSync(automatedPath));
+  assert.ok(existsSync(humanPath));
+  const automated = JSON.parse(readFileSync(automatedPath, "utf8"));
+  const human = JSON.parse(readFileSync(humanPath, "utf8"));
+  assert.equal(automated.schemaVersion, openspec.APPROVAL_SCHEMA_VERSION);
+  assert.equal(automated.authority, "automated-review");
+  assert.equal(human.authority, "human");
+  assert.equal(human.projectId, automated.projectId);
+  assert.equal(human.canonicalRoot, cwd);
+  assert.equal(human.changeId, "add-auth");
+  assert.equal(human.artifactId, "proposal");
+  assert.equal(human.actor, "Human Reviewer");
+  assert.match(human.artifactHash, /^[a-f0-9]{64}$/);
+  assert.match(human.automatedReviewHash, /^[a-f0-9]{64}$/);
+  assert.ok(Number.isFinite(Date.parse(human.timestamp)));
 });
 
-test("legacy flat sidecar {approved:true} maps to tasks green", () => {
+test("legacy project sidecars never open execution", () => {
   const cwd = scratch();
-  const dir = join(cwd, "openspec", "changes", "add-auth");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, ".pi-hive-approval.json"), JSON.stringify({ approved: true }));
-  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
-});
-
-test("denying an upstream artifact invalidates everything downstream", () => {
-  const cwd = scratch();
-  const dir = join(cwd, "openspec", "changes", "add-auth");
-  mkdirSync(dir, { recursive: true });
-  // Approve the whole chain.
-  for (const a of ["proposal", "design", "specs", "tasks"]) openspec.setArtifactApproval(cwd, "add-auth", a, "green");
-  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
-  // Deny design — only tasks depends on design (specs is a sibling), so tasks is
-  // revoked but specs and proposal are untouched.
-  openspec.setArtifactApproval(cwd, "add-auth", "design", "red");
-  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "design"), "red");
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, ".pi-hive-approval.json"), JSON.stringify({ approved: true, artifacts: { tasks: "green" } }));
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
   assert.equal(openspec.artifactVerdict(cwd, "add-auth", "tasks"), null);
-  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "specs"), "green"); // sibling, untouched
-  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), "green"); // upstream, untouched
-  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+});
 
-  // Deny proposal — everything downstream (design, specs, tasks) is revoked.
-  for (const a of ["proposal", "design", "specs", "tasks"]) openspec.setArtifactApproval(cwd, "add-auth", a, "green");
-  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "red");
+test("editing approved bytes invalidates that artifact and downstream approvals", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  writeFileSync(join(dir, "design.md"), "# d\n");
+  mkdirSync(join(dir, "specs", "auth"), { recursive: true });
+  writeFileSync(join(dir, "specs", "auth", "spec.md"), "# s\n");
+  writeFileSync(join(dir, "tasks.md"), "# tasks\n- [ ] one\n");
+  for (const artifact of openspec.ARTIFACT_ORDER) clearAndApprove(cwd, "add-auth", artifact);
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+
+  writeFileSync(join(dir, "tasks.md"), "# tasks revised\n- [ ] one\n");
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+  clearAndApprove(cwd, "add-auth", "tasks");
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+
+  writeFileSync(join(dir, "proposal.md"), "# changed\n");
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), null);
   assert.equal(openspec.artifactVerdict(cwd, "add-auth", "design"), null);
   assert.equal(openspec.artifactVerdict(cwd, "add-auth", "specs"), null);
   assert.equal(openspec.artifactVerdict(cwd, "add-auth", "tasks"), null);
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+});
+
+test("denying an upstream artifact removes downstream human records", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  writeFileSync(join(dir, "design.md"), "# d\n");
+  mkdirSync(join(dir, "specs", "auth"), { recursive: true });
+  writeFileSync(join(dir, "specs", "auth", "spec.md"), "# s\n");
+  writeFileSync(join(dir, "tasks.md"), "# tasks\n- [ ] one\n");
+  for (const artifact of openspec.ARTIFACT_ORDER) clearAndApprove(cwd, "add-auth", artifact);
+  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "red", "Human Reviewer");
+  assert.equal(openspec.artifactVerdict(cwd, "add-auth", "proposal"), "red");
+  for (const artifact of ["design", "specs", "tasks"] as const) {
+    assert.equal(openspec.artifactVerdict(cwd, "add-auth", artifact), null);
+    assert.equal(existsSync(openspec.approvalRecordPath(cwd, "add-auth", artifact, "human")!), false);
+  }
+});
+
+test("spec aggregate hash is stable across creation order and changes on membership", () => {
+  const cwd = scratch();
+  const first = changeDir(cwd, "first");
+  const second = changeDir(cwd, "second");
+  for (const dir of [first, second]) mkdirSync(join(dir, "specs"), { recursive: true });
+  writeFileSync(join(first, "specs", "b.md"), "B\n");
+  writeFileSync(join(first, "specs", "a.md"), "A\n");
+  writeFileSync(join(second, "specs", "a.md"), "A\n");
+  writeFileSync(join(second, "specs", "b.md"), "B\n");
+  assert.equal(openspec.artifactHash(cwd, "first", "specs"), openspec.artifactHash(cwd, "second", "specs"));
+  const before = openspec.artifactHash(cwd, "first", "specs");
+  writeFileSync(join(first, "specs", "c.md"), "C\n");
+  assert.notEqual(openspec.artifactHash(cwd, "first", "specs"), before);
+});
+
+test("concurrent automated and human writers do not overwrite one another", async () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "green", "Initial Reviewer");
+  const modulePath = join(process.cwd(), "src", "engine", "openspec.ts");
+  const loaderPath = join(process.cwd(), "tests", "register-ts-loader.mjs");
+  const run = (expression: string) => new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", loaderPath, "--input-type=module", "-e", expression], {
+      env: process.env,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("exit", (code: number | null) => code === 0 ? resolve() : reject(new Error(stderr || `child exited ${code}`)));
+  });
+  const imported = JSON.stringify(modulePath);
+  const project = JSON.stringify(cwd);
+  await Promise.all([
+    run(`const o=await import(${imported});o.setAgentReviewVerdict(${project},"add-auth","proposal","green","Concurrent Reviewer")`),
+    run(`const o=await import(${imported});o.setArtifactApproval(${project},"add-auth","proposal","green","Concurrent Human")`),
+  ]);
+  assert.ok(existsSync(openspec.approvalRecordPath(cwd, "add-auth", "proposal", "automated-review")!));
+  assert.ok(existsSync(openspec.approvalRecordPath(cwd, "add-auth", "proposal", "human")!));
+});
+
+test("approval persistence failures propagate", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# p\n");
+  const prior = process.env.PI_CODING_AGENT_DIR;
+  const blocked = join(scratch(), "not-a-directory");
+  writeFileSync(blocked, "file");
+  process.env.PI_CODING_AGENT_DIR = blocked;
+  try {
+    assert.throws(() => openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal", "green"));
+  } finally {
+    process.env.PI_CODING_AGENT_DIR = prior;
+  }
 });
 
 test("isAwaitingHumanApproval halts the pipeline until the human decides", () => {
   const cwd = scratch();
-  const dir = join(cwd, "openspec", "changes", "add-auth");
-  mkdirSync(dir, { recursive: true });
-  // Nothing authored yet → nothing pending.
+  const dir = changeDir(cwd);
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
-  // Author proposal, no human verdict yet → pipeline awaits approval of proposal.
   writeFileSync(join(dir, "proposal.md"), "# p\n");
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), "proposal");
-  // Human approves proposal → no longer awaiting.
-  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green");
+  clearAndApprove(cwd, "add-auth", "proposal");
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
-  // Author design, then human DENIES it → a denied artifact does NOT block
-  // (revising it is the intended next planner action).
   writeFileSync(join(dir, "design.md"), "# d\n");
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), "design");
   openspec.setArtifactApproval(cwd, "add-auth", "design", "red");
@@ -148,8 +249,7 @@ test("isAwaitingHumanApproval halts the pipeline until the human decides", () =>
 
 test("agent reviewer red unlocks same-artifact revision without human denial", () => {
   const cwd = scratch();
-  const dir = join(cwd, "openspec", "changes", "add-auth");
-  mkdirSync(dir, { recursive: true });
+  const dir = changeDir(cwd);
   writeFileSync(join(dir, "proposal.md"), "# p\n");
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), "proposal");
   openspec.setAgentReviewVerdict(cwd, "add-auth", "proposal.md", "red", "Plan Reviewer");
@@ -157,19 +257,18 @@ test("agent reviewer red unlocks same-artifact revision without human denial", (
   assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
 });
 
-test("canAuthorArtifact enforces upstream approval; nextAuthorable walks the pipeline", () => {
+test("canAuthorArtifact enforces current upstream approval", () => {
   const cwd = scratch();
-  const dir = join(cwd, "openspec", "changes", "add-auth");
-  mkdirSync(dir, { recursive: true });
-  // Nothing approved: only proposal (no upstream deps) is authorable.
+  const dir = changeDir(cwd);
   assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "proposal"), true);
   assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "design"), false);
   assert.equal(openspec.nextAuthorableArtifact(cwd, "add-auth"), "proposal");
-  // Author + approve proposal → design and specs become authorable.
   writeFileSync(join(dir, "proposal.md"), "# p\n");
-  openspec.setArtifactApproval(cwd, "add-auth", "proposal", "green");
+  clearAndApprove(cwd, "add-auth", "proposal");
   assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "design"), true);
   assert.equal(openspec.nextAuthorableArtifact(cwd, "add-auth"), "design");
+  writeFileSync(join(dir, "proposal.md"), "# revised\n");
+  assert.equal(openspec.canAuthorArtifact(cwd, "add-auth", "design"), false);
 });
 
 // --- review rid parsing ---

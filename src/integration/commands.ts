@@ -76,7 +76,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         return;
       }
       if (!openspec.isApprovedForExecution(ctx.cwd, changeId)) {
-        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not approved for execution yet. Approve its tasks artifact in the dashboard's plan-review UI first.`, "error");
+        if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not approved for execution yet. Current human approvals are required for proposal, design, specs, and tasks.`, "error");
         return;
       }
       // Select the change so delegations are scoped to it, ensure HIVE (execution)
