@@ -1,6 +1,6 @@
 import { fetchDelegations, fetchEventsAfter, fetchInitialData, fetchModels, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, fetchTopologies, fetchTopologyDetail, openEventStream, pruneTelemetryRemote, saveProjectOverride } from "../api";
 import { store } from "./index";
-import { recomputeHeavy, recomputeLive, recomputeScoped } from "./derive";
+import { flushHeavyRecompute, recomputeLive, recomputeScoped, scheduleHeavyRecompute } from "./derive";
 import { ingestEvents, ingestSnapshot, purgeLocal, pushToast, setSelectedSession, tick } from "./raw";
 import { installRouter } from "./router";
 
@@ -158,17 +158,17 @@ let wired = false;
 let started = false;
 
 // Wire the recompute tiers to their raw inputs, mirroring the Solid memo graph:
-//   eventMap/snapshots change → heavy tier (which cascades to live + scoped)
+//   event ring revision/snapshots change → batched heavy tier (then live + scoped)
 //   scope/selectedSession change → scoped tier only
 //   now ticks → live tier only
 function wire() {
   if (wired) return;
   wired = true;
-  store.subscribe((s) => s.eventMap, recomputeHeavy);
-  store.subscribe((s) => s.snapshots, recomputeHeavy);
+  store.subscribe((s) => s.eventRevision, scheduleHeavyRecompute);
+  store.subscribe((s) => s.snapshots, scheduleHeavyRecompute);
   // Server session list unions into the sidebar/session view (Phase 3.4), so a
   // fresh summaries fetch must re-run the heavy tier to surface event-only rows.
-  store.subscribe((s) => s.sessionSummaries, recomputeHeavy);
+  store.subscribe((s) => s.sessionSummaries, scheduleHeavyRecompute);
   store.subscribe((s) => s.scope, recomputeScoped);
   store.subscribe((s) => s.selectedSession, recomputeScoped);
   // New typed delegation rows change the scoped cost/token series (Phase 3.1).
@@ -213,6 +213,9 @@ export function connect(): EventSource | undefined {
     // Seed the cursor high-water mark even if the recent-events page didn't
     // include the very latest rowid, so reconnect catch-up starts correctly.
     if (cursor > store.getState().lastCursor) store.setState({ lastCursor: cursor });
+    // Initial selection depends on the derived session list. Flush this one boot
+    // batch synchronously; subsequent SSE/snapshot bursts stay scheduled.
+    flushHeavyRecompute();
     // Only auto-select the newest session when the URL didn't already pin one
     // (i.e. we're not on a /session/... deep link).
     if (!store.getState().selectedSession && store.getState().scope.level !== "session") {

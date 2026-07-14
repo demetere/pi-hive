@@ -1038,14 +1038,21 @@ export interface SessionSummaryRow {
   topology_hash: string | null;
 }
 
-export function querySessionSummaries(): SessionSummaryRow[] {
-  return db.query(`
+export function querySessionSummaries(options: { offset?: number; limit?: number } = {}): SessionSummaryRow[] {
+  const paged = options.offset != null || options.limit != null;
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+  const limit = Math.min(1000, Math.max(1, Math.floor(Number(options.limit) || 250)));
+  const sql = `
     SELECT session_id, project_id, canonical_root, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count,
            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
            cost_usd, usage_status, topology_hash
     FROM sessions
-    ORDER BY last_ts DESC
-  `).all() as SessionSummaryRow[];
+    ORDER BY last_ts DESC, session_id ASC
+    ${paged ? "LIMIT $limit OFFSET $offset" : ""}
+  `;
+  return paged
+    ? db.query(sql).all({ $limit: limit, $offset: offset }) as SessionSummaryRow[]
+    : db.query(sql).all() as SessionSummaryRow[];
 }
 
 export function knownCwds(projectId?: string): string[] {

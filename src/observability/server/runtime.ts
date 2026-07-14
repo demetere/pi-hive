@@ -101,8 +101,14 @@ export function ingestionHealth() {
 // events array remains; callers pass a cursor to page forward.
 export { queryEvents, recentEvents, queryDelegations, queryToolCalls, maxEventCursor, listTopologies, listModels } from "./db";
 
-export function allSnapshots(): HiveStateSnapshot[] {
-  return Array.from(snapshots.values()).map(enrichSnapshotTopologies);
+export function allSnapshots(options: { offset?: number; limit?: number } = {}): HiveStateSnapshot[] {
+  const values = Array.from(snapshots.values()).sort((a, b) =>
+    String(b.updated_at || "").localeCompare(String(a.updated_at || "")) || String(a.session_id).localeCompare(String(b.session_id)));
+  const paged = options.offset != null || options.limit != null;
+  if (!paged) return values.map(enrichSnapshotTopologies);
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+  const limit = Math.min(1000, Math.max(1, Math.floor(Number(options.limit) || 250)));
+  return values.slice(offset, offset + limit).map(enrichSnapshotTopologies);
 }
 
 export function addSource(logPath: string, meta: TelemetryRegistryRow = {}) {
@@ -704,9 +710,9 @@ function backfillTopologies() {
   }
 }
 
-export function sessionSummaries(): TelemetrySessionSummary[] {
+export function sessionSummaries(options: { offset?: number; limit?: number } = {}): TelemetrySessionSummary[] {
   // SQL-backed (B2). Live running-agent counts come from the hot snapshot cache.
-  const rows = querySessionSummaries();
+  const rows = querySessionSummaries(options);
   return rows.map((row) => {
     const snap = snapshots.get(row.session_id);
     const agents = snap && Array.isArray(snap.agents) ? snap.agents : [];

@@ -3,24 +3,24 @@ import { deleteProjectRemote, deleteSessionRemote, fetchEventsBefore } from "../
 import { store, type AgentRef, type ConfirmState, type Scope } from "./index";
 
 // ── ingest ───────────────────────────────────────────────────────────────────
-export function ingestEvents(list: HiveEvent[]) {
-  const m = { ...store.getState().eventMap };
-  let changed = false;
-  let maxCursor = store.getState().lastCursor;
-  for (const e of list) {
-    if (!e || !e.event_id) continue;
-    if (e.type === "delegation_progress") continue;
-    // Track the global cursor for lossless reconnect catch-up (E1), even for
-    // events already seen (a duplicate still advances our high-water mark).
-    if (typeof e.cursor === "number" && e.cursor > maxCursor) maxCursor = e.cursor;
-    if (m[e.event_id]) continue;
-    m[e.event_id] = e;
-    changed = true;
+export function ingestEvents(list: HiveEvent[]): number {
+  const state = store.getState();
+  let maxCursor = state.lastCursor;
+  const accepted: HiveEvent[] = [];
+  for (const event of list) {
+    if (!event?.event_id) continue;
+    if (event.type === "delegation_progress") continue;
+    // Track the global cursor for reconnect catch-up even when the bounded ring
+    // drops an older row or deduplicates an overlap.
+    if (typeof event.cursor === "number" && event.cursor > maxCursor) maxCursor = event.cursor;
+    accepted.push(event);
   }
-  const patch: Partial<{ eventMap: typeof m; lastCursor: number }> = {};
-  if (changed) patch.eventMap = m;
-  if (maxCursor !== store.getState().lastCursor) patch.lastCursor = maxCursor;
+  const added = state.eventRing.addAll(accepted);
+  const patch: Partial<{ eventRevision: number; lastCursor: number }> = {};
+  if (added) patch.eventRevision = state.eventRevision + 1;
+  if (maxCursor !== state.lastCursor) patch.lastCursor = maxCursor;
   if (Object.keys(patch).length) store.setState(patch);
+  return added;
 }
 
 export function ingestSnapshot(s: Snapshot) {
@@ -80,9 +80,9 @@ export async function loadOlderEvents(): Promise<number> {
       const inScope = new Set(projectCwds);
       older = older.filter((e) => e.cwd != null && inScope.has(e.cwd));
     }
-    const before = Object.keys(store.getState().eventMap).length;
-    if (older.length) ingestEvents(older);
-    return Object.keys(store.getState().eventMap).length - before;
+    if (!older.length) return 0;
+    const added = ingestEvents(older);
+    return added || (store.getState().eventRing.full ? -1 : 0);
   } finally {
     loadingOlder = false;
   }
@@ -93,14 +93,17 @@ export async function loadOlderEvents(): Promise<number> {
 export function purgeLocal(ids: string[]) {
   const idSet = new Set(ids);
   const st = store.getState();
-  const eventMap: Record<string, HiveEvent> = {};
-  for (const [k, v] of Object.entries(st.eventMap)) if (!idSet.has(v.session_id)) eventMap[k] = v;
+  const removedEvents = st.eventRing.removeSessions(idSet);
   const snapshots = { ...st.snapshots };
   for (const id of idSet) delete snapshots[id];
   // Drop the deleted sessions' typed delegation rows too, so the cost/token
   // series (Phase 3.1) doesn't keep counting a session that no longer exists.
   const delegations = st.delegations.filter((d) => !idSet.has(d.sessionId));
-  store.setState({ eventMap, snapshots, delegations });
+  store.setState({
+    snapshots,
+    delegations,
+    ...(removedEvents ? { eventRevision: st.eventRevision + 1 } : {}),
+  });
 }
 
 // ── delete actions ───────────────────────────────────────────────────────────
