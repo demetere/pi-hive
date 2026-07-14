@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("shutdown requires the bearer token and exact startup nonce", async () => {
+test("daemon rejects hostile browser metadata and authenticates exact shutdown identity", async () => {
   const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
   const port = reservation.port;
   reservation.stop(true);
@@ -49,6 +49,22 @@ test("shutdown requires the bearer token and exact startup nonce", async () => {
       await sleep(50);
     }
     expect(ready).toBe(true);
+
+    const page = await fetch(`${origin}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    expect(page.headers.get("content-security-policy")).toContain("connect-src 'self'");
+    expect(page.headers.get("cache-control")).toBe("no-store");
+
+    const hostileHost = await fetch(`${origin}/health`, { headers: { host: `127.0.0.1.${port}.attacker.example` } });
+    expect(hostileHost.status).toBe(403);
+    const alternateHost = await fetch(`${origin}/health`, { headers: { host: `localhost:${port}` } });
+    expect(alternateHost.status).toBe(403);
+    const hostileOrigin = await fetch(`${origin}/health`, { headers: { origin: "https://evil.example" } });
+    expect(hostileOrigin.status).toBe(403);
+
     expect((await shutdown(undefined, startupNonce)).status).toBe(401);
     expect((await shutdown(token, "wrong-daemon")).status).toBe(409);
     expect((await shutdown(token, startupNonce)).status).toBe(202);
