@@ -469,7 +469,7 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
   // Only reviewer verdicts are materialized from telemetry events now. Plan
   // approvals and comments used to come from the retired chat approval flow and
   // the home-grown annotator; both are gone — approval/annotation now happens in
-  // the self-hosted Plannotator review surface, which writes plan_verdicts + the
+  // the self-hosted review surface, which writes plan_verdicts + the
   // content-bound global approval authority directly (see review-wiring.ts). The
   // plan_approvals / plan_comments tables are left in place (no DROP migration);
   // they simply stop receiving new rows.

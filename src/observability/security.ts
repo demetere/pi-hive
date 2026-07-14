@@ -16,11 +16,9 @@ const DASHBOARD_CSP = [
   "worker-src 'self' blob:",
 ].join("; ");
 
-// The vendored review bundle is a single HTML file with inline module/style
-// payloads. Each legitimate script element receives a per-response nonce;
-// event-handler attributes remain forbidden so hostile Markdown cannot execute
-// `onerror`-style script. Network, nested frames, forms, objects, and base-URL
-// changes stay local or disabled; external font/update/share probes fail closed.
+// The production review-only bundle uses external same-origin script/style
+// assets; legacy custom single-file surfaces may still supply a nonce. Handler
+// attributes, external network, nested frames, forms, and objects stay blocked.
 function reviewCsp(scriptNonce?: string, connectOrigin?: string): string {
   return [
     "default-src 'none'",
@@ -28,9 +26,9 @@ function reviewCsp(scriptNonce?: string, connectOrigin?: string): string {
     "object-src 'none'",
     "frame-ancestors 'self'",
     "form-action 'none'",
-    `script-src ${scriptNonce ? `'nonce-${scriptNonce}' 'strict-dynamic' 'wasm-unsafe-eval'` : "'none'"}`,
+    `script-src ${scriptNonce ? `'nonce-${scriptNonce}' 'strict-dynamic'` : connectOrigin || "'none'"}`,
     "script-src-attr 'none'",
-    "style-src 'unsafe-inline'",
+    `style-src ${scriptNonce ? "'unsafe-inline'" : connectOrigin || "'none'"}`,
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
     `connect-src ${connectOrigin || "'none'"}`,
@@ -44,7 +42,7 @@ export function applyBrowserSecurityHeaders(response: Response, profile: Browser
   response.headers.set("x-content-type-options", "nosniff");
   response.headers.set("referrer-policy", profile === "review" ? "no-referrer" : "same-origin");
   response.headers.set("cross-origin-opener-policy", "same-origin");
-  response.headers.set("cross-origin-resource-policy", "same-origin");
+  response.headers.set("cross-origin-resource-policy", profile === "review" ? "cross-origin" : "same-origin");
   response.headers.set("x-frame-options", "SAMEORIGIN");
   response.headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
   if (profile === "api" && !response.headers.has("cache-control")) response.headers.set("cache-control", "no-store");

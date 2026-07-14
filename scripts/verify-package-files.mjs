@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dashboardSourceHash, STAMP_PATH } from "./dashboard-hash.mjs";
@@ -21,8 +23,15 @@ const requiredPaths = [
   "src/ui/tui/widget.ts",
   "ui/web/dist/index.html",
   "ui/web/dist/.build-hash",
-  "ui/web/vendor/plannotator.html",
-  "ui/web/package.json",
+  "ui/review/src/review.html",
+  "ui/review/src/review.css",
+  "ui/review/src/review.js",
+  "ui/review/dist/review.html.gz",
+  "ui/review/dist/review.css.gz",
+  "ui/review/dist/review.js.gz",
+  "ui/review/dist/manifest.json",
+  "scripts/build-review-bundle.mjs",
+  "scripts/check-package-budgets.mjs",
   "README.md",
   "SETUP.md",
 ];
@@ -31,8 +40,10 @@ const requiredPackageFileEntries = [
   "index.ts",
   "src/",
   "ui/web/dist/",
-  "ui/web/vendor/",
-  "ui/web/package.json",
+  "ui/review/src/",
+  "ui/review/dist/",
+  "scripts/build-review-bundle.mjs",
+  "scripts/check-package-budgets.mjs",
   "README.md",
   "SETUP.md",
 ];
@@ -53,9 +64,26 @@ for (const relativePath of requiredPaths) {
 }
 
 for (const entry of requiredPackageFileEntries) {
-  if (!pkg.files?.includes(entry)) {
-    failures.push(`package.json files[] must include ${entry}`);
+  if (!pkg.files?.includes(entry)) failures.push(`package.json files[] must include ${entry}`);
+}
+for (const entry of ["ui/web/src/", "ui/web/vendor/", "ui/web/package.json", "ui/web/index.html", "ui/web/tsconfig.json", "ui/web/vite.config.ts"]) {
+  if (pkg.files?.includes(entry)) failures.push(`runtime package must not include dashboard build input: ${entry}`);
+}
+if (pkg.devDependencies?.["@plannotator/pi-extension"] || pkg.dependencies?.["@plannotator/pi-extension"]) {
+  failures.push("the runtime package must not depend on the full Plannotator extension");
+}
+
+try {
+  const manifest = JSON.parse(readFileSync(join(root, "ui/review/dist/manifest.json"), "utf8"));
+  for (const name of ["review.html", "review.css", "review.js"]) {
+    const source = readFileSync(join(root, "ui/review/src", name));
+    const compressed = gzipSync(source, { level: 9, mtime: 0 });
+    const entry = manifest.files?.[name];
+    const hash = createHash("sha256").update(compressed).digest("hex");
+    if (!entry || entry.sha256 !== hash || entry.compressedBytes !== compressed.byteLength) failures.push(`review dist is stale for ${name}; run just review-build`);
   }
+} catch (error) {
+  failures.push(`review bundle manifest is invalid: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 if (pkg.main !== "index.ts") failures.push("package.json main must be index.ts");

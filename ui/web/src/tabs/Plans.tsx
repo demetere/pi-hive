@@ -8,10 +8,10 @@ import RelTime from "../hooks/RelTime";
 import { REVIEW_IFRAME_SANDBOX, safeArtifactHref } from "../security";
 
 // The Plans tab is now a slim two-pane status view over OpenSpec changes. The
-// actual review/annotation happens in the self-hosted Plannotator UI, rendered
-// inline in an iframe on our own dashboard server. The dashboard first mints a
-// short-lived, content-bound review capability; the nonce-bearing URL is then
-// used by the vendored iframe without creating per-review processes.
+// actual review/annotation happens in a self-hosted review-only UI rendered in
+// one persistent iframe. The dashboard mints short-lived, content-bound review
+// capabilities and switches artifacts with postMessage, without reloading the
+// frame or starting per-review processes.
 
 const STATUS_LABEL: Record<string, string> = {
   "no-tasks": "no tasks",
@@ -200,6 +200,9 @@ export default function Plans(props: { search: string }) {
   const [reviewSession, setReviewSession] = useState<{ rid: string; url: string } | null>(null);
   const [reviewSessionPending, setReviewSessionPending] = useState(false);
   const [reviewSessionFailed, setReviewSessionFailed] = useState(false);
+  const [reviewFrameSrc, setReviewFrameSrc] = useState("");
+  const [reviewFrameReady, setReviewFrameReady] = useState(false);
+  const reviewFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   // Esc exits the fullscreen review.
   useEffect(() => {
@@ -280,6 +283,33 @@ export default function Plans(props: { search: string }) {
     return () => { cancelled = true; };
   }, [cwd, reviewFinal, rid, selectedArtifact?.id]);
 
+  // Mount the review app once. Subsequent capabilities are delivered to the
+  // sandboxed frame rather than assigned to iframe.src, preserving its runtime
+  // and avoiding a multi-megabyte reload for every artifact switch.
+  useEffect(() => {
+    if (!reviewSession) return;
+    if (!reviewFrameSrc) { setReviewFrameSrc(reviewSession.url); return; }
+    if (reviewFrameReady) reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-review-context", url: reviewSession.url }, "*");
+  }, [reviewFrameReady, reviewFrameSrc, reviewSession]);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      // The iframe intentionally has an opaque sandbox origin, so messages from
+      // it serialize as "null". The exact WindowProxy is the authority check.
+      if (event.origin !== "null" || event.source !== reviewFrameRef.current?.contentWindow) return;
+      if (event.data?.type === "pi-hive-review-ready") {
+        setReviewFrameReady(true);
+        if (reviewSession) reviewFrameRef.current?.contentWindow?.postMessage({ type: "pi-hive-review-context", url: reviewSession.url }, "*");
+        return;
+      }
+      if (event.data?.type !== "pi-hive-review-result" || !selected) return;
+      const controller = new AbortController();
+      void fetchPlanDetail(selected, cwd, controller.signal).then((next) => { if (next) setDetail(next); }).catch(() => undefined);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [cwd, reviewSession, selected]);
+
   useEffect(() => {
     let cancelled = false;
     setReadOnlyMarkdown(null);
@@ -293,7 +323,7 @@ export default function Plans(props: { search: string }) {
   // The embedded review UI cannot notify this React tree after approve/deny
   // because it is a vendored iframe. Poll while the selected artifact is awaiting
   // human approval, then swap to read-only markdown only once it is approved.
-  // A red verdict stays reviewable so the revision loop can reopen Plannotator.
+  // A red verdict stays reviewable so the revision loop can reopen the review UI.
   useEffect(() => {
     if (!detail || !selectedReview?.humanReviewReady || selectedReview.humanVerdict === "green" || !selected) return;
     let controller: AbortController | undefined;
@@ -392,7 +422,7 @@ export default function Plans(props: { search: string }) {
             </div>
 
             <div className={`tab-card plan-review-frame ${fullscreen ? "fullscreen" : ""}`}>
-              {reviewSrc || reviewFinal ? (
+              {reviewFrameSrc || reviewSrc || reviewFinal ? (
                 <>
                   <div className="plan-review-bar">
                     <div className="plan-review-title">
@@ -410,18 +440,21 @@ export default function Plans(props: { search: string }) {
                       </button>
                     </div>
                   </div>
-                  {reviewFinal ? (
+                  {reviewFinal && (
                     <div className="plan-review-readonly">
                       {readOnlyMarkdown === null ? <div className="empty">Loading reviewed artifact…</div> : <MarkdownView markdown={readOnlyMarkdown} />}
                     </div>
-                  ) : (
+                  )}
+                  {reviewFrameSrc && (
                     <iframe
-                      key={reviewSrc}
+                      ref={reviewFrameRef}
                       title="Plan review"
-                      src={reviewSrc}
+                      src={reviewFrameSrc}
                       className="plan-review-iframe"
+                      style={reviewFinal ? { display: "none" } : undefined}
                       sandbox={REVIEW_IFRAME_SANDBOX}
                       referrerPolicy="no-referrer"
+                      onLoad={() => setReviewFrameReady(true)}
                     />
                   )}
                 </>
