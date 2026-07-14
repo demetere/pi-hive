@@ -2,7 +2,7 @@
 // last one is generic (backend/frontend/...) or repeats the parent (iMed/iMed).
 export function projectName(cwd?: string): string {
   if (!cwd) return "unknown";
-  const parts = String(cwd).split("/").filter(Boolean);
+  const parts = String(cwd).split(/[\\/]+/).filter(Boolean);
   if (!parts.length) return cwd;
   const last = parts[parts.length - 1];
   const parent = parts[parts.length - 2];

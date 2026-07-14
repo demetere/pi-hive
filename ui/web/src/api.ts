@@ -132,6 +132,9 @@ export async function fetchSessionEvents(
 // is the correct baseline for detecting pruned/absent early history (I4/F3).
 export interface SessionSummary {
   session_id: string;
+  project_id?: string;
+  project_root?: string;
+  project_label?: string;
   cwd?: string;
   session_dir?: string;
   first_ts?: string;
@@ -190,8 +193,8 @@ export async function fetchDelegations(opts: { session?: string; cwd?: string; a
   return data.delegations || [];
 }
 
-// Storage usage + prune preview (GET /storage). `cwd` scopes to a project; add
-// `olderThanDays` for the remove/keep estimate at that cutoff. `bytes` is logical
+// Storage usage + prune preview (GET /storage). `projectId` scopes to an exact
+// canonical project; add `olderThanDays` for the remove/keep estimate. `bytes` is logical
 // telemetry content (payloads + projection text), not the physical .db size.
 export interface StorageBreakdown {
   bytes: number;
@@ -199,9 +202,9 @@ export interface StorageBreakdown {
   sessions: number;
   prune?: { removeBytes: number; removeEvents: number; removeSessions: number; keepBytes: number; keepEvents: number };
 }
-export async function fetchStorage(cwd?: string, olderThanDays?: number): Promise<StorageBreakdown | null> {
+export async function fetchStorage(projectId?: string, olderThanDays?: number): Promise<StorageBreakdown | null> {
   const q = new URLSearchParams();
-  if (cwd) q.set("cwd", cwd);
+  if (projectId) q.set("projectId", projectId);
   if (olderThanDays != null && Number.isFinite(olderThanDays)) q.set("olderThanDays", String(olderThanDays));
   const qs = q.toString();
   return jsonOr<StorageBreakdown | null>(fetch(`/storage${qs ? `?${qs}` : ""}`), null);
@@ -278,8 +281,8 @@ export function deleteSessionRemote(sessionId: string): Promise<WriteResult> {
   return writeResult("delete session", writeFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }));
 }
 
-export function deleteProjectRemote(project: string): Promise<WriteResult> {
-  return writeResult("delete project", writeFetch(`/projects/${encodeURIComponent(project)}`, { method: "DELETE" }));
+export function deleteProjectRemote(projectId: string): Promise<WriteResult> {
+  return writeResult("delete project", writeFetch(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }));
 }
 
 export function openEventStream(): EventSource {
@@ -296,14 +299,14 @@ export async function fetchThinking(sessionId: string): Promise<ThinkingEntry[]>
 }
 
 // ── project display-name overrides (settings) ────────────────────────────────
-export interface ProjectOverride { cwd: string; label: string; updatedAt?: string; }
+export interface ProjectOverride { projectId: string; canonicalRoot?: string; label: string; updatedAt?: string; }
 export async function fetchProjectOverrides(): Promise<ProjectOverride[]> {
   const data = await jsonOr<{ overrides: ProjectOverride[] }>(fetch("/project-overrides"), { overrides: [] });
   return data.overrides || [];
 }
-// Set (label non-empty) or clear (label empty) a project's override by cwd.
-export function saveProjectOverride(cwd: string, label: string): Promise<WriteResult> {
-  return writeResult("save project name", writeFetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd, label }) }));
+// Set (label non-empty) or clear (label empty) by canonical project identity.
+export function saveProjectOverride(projectId: string, label: string): Promise<WriteResult> {
+  return writeResult("save project name", writeFetch("/project-overrides", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId, label }) }));
 }
 
 // ── Plan store ───────────────────────────────────────────────────────────────

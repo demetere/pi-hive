@@ -97,16 +97,20 @@ Bun.serve({
       }
       // Plan annotations/approvals now happen inside the self-hosted Plannotator
       // review surface (/pl-review/ -> /api/approve|deny), not via these routes.
-      // POST /project-overrides  { cwd, label } — rename a project's display name.
+      // POST /project-overrides { projectId, label } — rename a display label
+      // without allowing a caller-controlled cwd to become project authority.
       if (url.pathname === "/project-overrides") {
         let body: any = {};
         try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
-        const cwd = String(body.cwd || "").trim();
+        const projectId = String(body.projectId || "").trim();
         const label = String(body.label || "").trim();
-        if (!cwd) return json({ error: "cwd required" }, 400);
-        if (!label) { clearProjectOverride(cwd); return json({ ok: true, cleared: true }); }
-        setProjectOverride(cwd, label.slice(0, 120), new Date().toISOString());
-        return json({ ok: true, cwd, label });
+        if (!projectId) return json({ error: "projectId required" }, 400);
+        const project = sessionSummaries().find((session) => session.project_id === projectId);
+        if (!project) return json({ error: "unknown project" }, 404);
+        if (!label) { clearProjectOverride(projectId); return json({ ok: true, projectId, cleared: true }); }
+        const savedLabel = label.slice(0, 120);
+        setProjectOverride(projectId, project.project_root, savedLabel, new Date().toISOString());
+        return json({ ok: true, projectId, label: savedLabel });
       }
       return json({ error: "not found" }, 404);
     }
@@ -119,12 +123,13 @@ Bun.serve({
         const deleted = deleteSessions([id]);
         return json({ ok: true, deleted, sessions: deleted });
       }
-      // DELETE /projects/:name — purge every session in a project.
+      // DELETE /projects/:projectId — purge only sessions carrying this exact
+      // canonical identity. Display labels and cwd basenames are never accepted.
       const projectMatch = url.pathname.match(/^\/projects\/(.+)$/);
       if (projectMatch) {
-        const name = decodeURIComponent(projectMatch[1]);
-        const deleted = deleteProject(name);
-        return json({ ok: true, project: name, sessions: deleted });
+        const projectId = decodeURIComponent(projectMatch[1]);
+        const deleted = deleteProject(projectId);
+        return json({ ok: true, projectId, sessions: deleted });
       }
       return json({ error: "not found" }, 404);
     }
@@ -208,14 +213,13 @@ Bun.serve({
     if (url.pathname === "/states") return json({ states: allSnapshots() });
     if (url.pathname === "/sessions") return json({ sessions: sessionSummaries() });
 
-    // Storage usage + prune preview for the Settings tab. `cwd` scopes to a
-    // project (resolved to its full cwd set server-side); `olderThanDays` adds the
-    // remove/keep estimate at that cutoff. Read-only.
+    // Storage usage + prune preview. Project scope is an exact canonical ID;
+    // omit it for fleet-wide storage.
     if (url.pathname === "/storage") {
-      const cwd = url.searchParams.get("cwd") || undefined;
+      const projectId = url.searchParams.get("projectId") || undefined;
       const daysRaw = url.searchParams.get("olderThanDays");
       const days = daysRaw != null ? Number(daysRaw) : undefined;
-      return json(telemetryStorage(cwd, days));
+      return json(telemetryStorage(projectId, days));
     }
 
     // Versioned topology (Phase C). List versions for a project, or fetch one

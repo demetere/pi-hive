@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { DB_PATH } from "./config";
 import type { HiveStateSnapshot, HiveTelemetryEvent } from "../../shared/telemetry";
+import { tryResolveProjectIdentity } from "../../shared/project-identity";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const isNewDb = !fs.existsSync(DB_PATH) || fs.statSync(DB_PATH).size === 0;
@@ -17,6 +18,8 @@ if (isNewDb) db.run("PRAGMA auto_vacuum = INCREMENTAL");
 db.run(`
 CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT PRIMARY KEY,
+  project_id TEXT,
+  canonical_root TEXT,
   cwd TEXT,
   session_dir TEXT,
   telemetry_log TEXT,
@@ -39,6 +42,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS events (
   event_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
+  project_id TEXT,
   seq INTEGER,
   ts TEXT NOT NULL,
   type TEXT NOT NULL,
@@ -60,6 +64,8 @@ CREATE INDEX IF NOT EXISTS idx_hive_events_cwd ON events(cwd);
 CREATE TABLE IF NOT EXISTS states (
   session_id TEXT PRIMARY KEY,
   updated_at TEXT NOT NULL,
+  project_id TEXT,
+  canonical_root TEXT,
   cwd TEXT,
   session_dir TEXT,
   telemetry_log TEXT,
@@ -75,6 +81,7 @@ CREATE TABLE IF NOT EXISTS plan_verdicts (
   concerns_json BLOB,
   blockers_json BLOB,
   session_id    TEXT,
+  project_id    TEXT,
   cwd           TEXT,
   created_at    TEXT NOT NULL
 );
@@ -87,6 +94,7 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
   actor        TEXT,
   summary      TEXT,
   session_id   TEXT,
+  project_id   TEXT,
   cwd          TEXT,
   created_at   TEXT NOT NULL
 );
@@ -101,6 +109,7 @@ CREATE TABLE IF NOT EXISTS plan_comments (
   annotation_type TEXT,
   original_text TEXT,
   session_id   TEXT,
+  project_id   TEXT,
   cwd          TEXT,
   created_at   TEXT NOT NULL
 );
@@ -224,12 +233,12 @@ CREATE TABLE IF NOT EXISTS model_versions (
 CREATE INDEX IF NOT EXISTS idx_model_versions_model ON model_versions(provider, model_id, last_seen_at);
 `);
 
-// Per-project display-name overrides, keyed by working directory. Lets the user
-// rename a project in the dashboard without touching the derived-from-cwd name
-// used internally for grouping/scope.
+// Per-project display-name overrides are keyed by canonical project identity;
+// cwd remains telemetry detail and is never an authority or grouping key.
 db.run(`
 CREATE TABLE IF NOT EXISTS project_overrides (
-  cwd TEXT PRIMARY KEY,
+  project_id TEXT PRIMARY KEY,
+  canonical_root TEXT,
   label TEXT NOT NULL,
   updated_at TEXT
 )
@@ -251,6 +260,19 @@ try { db.run(`ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER NOT NULL
 try { db.run(`ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 try { db.run(`ALTER TABLE sessions ADD COLUMN topology_hash TEXT`); } catch { /* column already exists */ }
+// Canonical project identity. Legacy rows are backfilled below from their cwd;
+// malformed or vanished roots remain NULL and therefore cannot be targeted by a
+// project-id mutation.
+try { db.run(`ALTER TABLE sessions ADD COLUMN project_id TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE sessions ADD COLUMN canonical_root TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE events ADD COLUMN project_id TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE states ADD COLUMN project_id TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE states ADD COLUMN canonical_root TEXT`); } catch { /* column already exists */ }
+for (const table of ["plan_verdicts", "plan_approvals", "plan_comments"] as const) {
+  try { db.run(`ALTER TABLE ${table} ADD COLUMN project_id TEXT`); } catch { /* column already exists */ }
+}
+try { db.run(`ALTER TABLE project_overrides ADD COLUMN project_id TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE project_overrides ADD COLUMN canonical_root TEXT`); } catch { /* column already exists */ }
 // Decision 1: delegations token/cost columns became PER-RUN DELTAS. Legacy rows
 // written before this migration hold session-lifetime CUMULATIVE values, so they
 // must never be summed alongside deltas. schema_version defaults to 0 (legacy);
@@ -271,7 +293,72 @@ db.run(`
 CREATE INDEX IF NOT EXISTS idx_plan_verdicts_cwd ON plan_verdicts(cwd, change_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_cwd ON plan_approvals(cwd, change_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_plan_comments_cwd ON plan_comments(cwd, change_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_events_project_id ON events(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_overrides_project_id ON project_overrides(project_id);
 `);
+
+function tableHasColumn(table: string, column: string): boolean {
+  const rows = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
+}
+
+export function backfillProjectIdentities(): void {
+  const sessions = db.query(`SELECT session_id, cwd FROM sessions WHERE project_id IS NULL AND cwd IS NOT NULL`).all() as Array<{ session_id: string; cwd: string }>;
+  for (const row of sessions) {
+    const identity = tryResolveProjectIdentity(row.cwd);
+    if (!identity) continue;
+    const params = { $session_id: row.session_id, $project_id: identity.projectId, $canonical_root: identity.canonicalRoot };
+    db.run(`UPDATE sessions SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id`, params as any);
+    db.run(`UPDATE events SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params as any);
+    db.run(`UPDATE states SET project_id = $project_id, canonical_root = $canonical_root WHERE session_id = $session_id AND project_id IS NULL`, params as any);
+    for (const table of ["plan_verdicts", "plan_approvals", "plan_comments"] as const) {
+      db.run(`UPDATE ${table} SET project_id = $project_id WHERE session_id = $session_id AND project_id IS NULL`, params as any);
+    }
+  }
+
+  // Backfill orphaned telemetry/approval rows that have cwd but no resolvable
+  // session link. This keeps legacy data scoped without treating basename labels
+  // as authority.
+  for (const table of ["events", "states", "plan_verdicts", "plan_approvals", "plan_comments"] as const) {
+    const roots = db.query(`SELECT DISTINCT cwd FROM ${table} WHERE project_id IS NULL AND cwd IS NOT NULL`).all() as Array<{ cwd: string }>;
+    for (const row of roots) {
+      const identity = tryResolveProjectIdentity(row.cwd);
+      if (!identity) continue;
+      db.run(`UPDATE ${table} SET project_id = $project_id WHERE cwd = $cwd AND project_id IS NULL`, {
+        $project_id: identity.projectId, $cwd: row.cwd,
+      } as any);
+      if (table === "states") {
+        db.run(`UPDATE states SET canonical_root = $canonical_root WHERE cwd = $cwd AND canonical_root IS NULL`, {
+          $canonical_root: identity.canonicalRoot, $cwd: row.cwd,
+        } as any);
+      }
+    }
+  }
+
+  // Old override tables were keyed by cwd. Preserve their labels under the new
+  // canonical identity key; when multiple cwd rows resolve to one Git root, the
+  // most recently updated label wins deterministically.
+  if (tableHasColumn("project_overrides", "cwd")) {
+    const overrides = db.query(`SELECT rowid, cwd, label, updated_at FROM project_overrides WHERE project_id IS NULL AND cwd IS NOT NULL ORDER BY COALESCE(updated_at, ''), rowid`).all() as Array<{ rowid: number; cwd: string; label: string; updated_at: string | null }>;
+    for (const row of overrides) {
+      const identity = tryResolveProjectIdentity(row.cwd);
+      if (!identity) continue;
+      const existing = db.query(`SELECT rowid FROM project_overrides WHERE project_id = $project_id`).get({ $project_id: identity.projectId }) as { rowid: number } | null;
+      if (existing && existing.rowid !== row.rowid) {
+        db.run(`UPDATE project_overrides SET label = $label, canonical_root = $canonical_root, updated_at = $updated_at WHERE rowid = $rowid`, {
+          $label: row.label, $canonical_root: identity.canonicalRoot, $updated_at: row.updated_at, $rowid: existing.rowid,
+        } as any);
+        db.run(`DELETE FROM project_overrides WHERE rowid = $rowid`, { $rowid: row.rowid } as any);
+      } else {
+        db.run(`UPDATE project_overrides SET project_id = $project_id, canonical_root = $canonical_root WHERE rowid = $rowid`, {
+          $project_id: identity.projectId, $canonical_root: identity.canonicalRoot, $rowid: row.rowid,
+        } as any);
+      }
+    }
+  }
+}
+backfillProjectIdentities();
 
 // J2: one-time backfill of plan-table cwd from the owning session. Legacy plan_*
 // rows (written before B1's cwd column) have NULL cwd and until now relied on the
@@ -295,9 +382,9 @@ backfillPlanCwd();
 
 export const insertEvent = db.query(`
   INSERT OR IGNORE INTO events
-    (event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json)
+    (event_id, session_id, project_id, seq, ts, type, actor, pid, cwd, telemetry_log, payload_json)
   VALUES
-    ($event_id, $session_id, $seq, $ts, $type, $actor, $pid, $cwd, $telemetry_log, jsonb($payload_json))
+    ($event_id, $session_id, $project_id, $seq, $ts, $type, $actor, $pid, $cwd, $telemetry_log, jsonb($payload_json))
 `);
 
 // Per-event session upsert. event_count uses arithmetic (+1) instead of the old
@@ -306,10 +393,12 @@ export const insertEvent = db.query(`
 // (behind the INSERT-OR-IGNORE dup check) so the increment stays accurate.
 export const upsertSession = db.query(`
   INSERT INTO sessions
-    (session_id, cwd, session_dir, telemetry_log, conversation_log, state_file, first_ts, last_ts, event_count)
+    (session_id, project_id, canonical_root, cwd, session_dir, telemetry_log, conversation_log, state_file, first_ts, last_ts, event_count)
   VALUES
-    ($session_id, $cwd, $session_dir, $telemetry_log, $conversation_log, $state_file, $ts, $ts, 1)
+    ($session_id, $project_id, $canonical_root, $cwd, $session_dir, $telemetry_log, $conversation_log, $state_file, $ts, $ts, 1)
   ON CONFLICT(session_id) DO UPDATE SET
+    project_id = COALESCE(excluded.project_id, sessions.project_id),
+    canonical_root = COALESCE(excluded.canonical_root, sessions.canonical_root),
     cwd = COALESCE(excluded.cwd, sessions.cwd),
     session_dir = COALESCE(excluded.session_dir, sessions.session_dir),
     telemetry_log = COALESCE(excluded.telemetry_log, sessions.telemetry_log),
@@ -334,6 +423,8 @@ export const updateSessionStats = db.query(`
     cost_usd = $cost_usd,
     topology_hash = COALESCE($topology_hash, topology_hash),
     last_ts = CASE WHEN last_ts IS NULL OR $updated_at > last_ts THEN $updated_at ELSE last_ts END,
+    project_id = COALESCE(project_id, $project_id),
+    canonical_root = COALESCE(canonical_root, $canonical_root),
     cwd = COALESCE(cwd, $cwd),
     session_dir = COALESCE(session_dir, $session_dir),
     telemetry_log = COALESCE(telemetry_log, $telemetry_log)
@@ -343,16 +434,18 @@ export const updateSessionStats = db.query(`
 // Ensure a session row exists (used before updateSessionStats when a snapshot
 // arrives before any event). Bumps timestamps but not event_count.
 export const ensureSession = db.query(`
-  INSERT INTO sessions (session_id, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count)
-  VALUES ($session_id, $cwd, $session_dir, $telemetry_log, $ts, $ts, 0)
+  INSERT INTO sessions (session_id, project_id, canonical_root, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count)
+  VALUES ($session_id, $project_id, $canonical_root, $cwd, $session_dir, $telemetry_log, $ts, $ts, 0)
   ON CONFLICT(session_id) DO NOTHING
 `);
 
 export const upsertState = db.query(`
-  INSERT INTO states (session_id, updated_at, cwd, session_dir, telemetry_log, state_json)
-  VALUES ($session_id, $updated_at, $cwd, $session_dir, $telemetry_log, jsonb($state_json))
+  INSERT INTO states (session_id, updated_at, project_id, canonical_root, cwd, session_dir, telemetry_log, state_json)
+  VALUES ($session_id, $updated_at, $project_id, $canonical_root, $cwd, $session_dir, $telemetry_log, jsonb($state_json))
   ON CONFLICT(session_id) DO UPDATE SET
     updated_at = excluded.updated_at,
+    project_id = COALESCE(excluded.project_id, states.project_id),
+    canonical_root = COALESCE(excluded.canonical_root, states.canonical_root),
     cwd = COALESCE(excluded.cwd, states.cwd),
     session_dir = COALESCE(excluded.session_dir, states.session_dir),
     telemetry_log = COALESCE(excluded.telemetry_log, states.telemetry_log),
@@ -367,9 +460,11 @@ const deleteToolCallsStmt = db.query(`DELETE FROM tool_calls WHERE session_id = 
 const deleteIngestSourcesStmt = db.query(`DELETE FROM ingest_sources WHERE session_id = $id`);
 
 export function dbEventRow(event: HiveTelemetryEvent) {
+  const identity = event.project_id ? undefined : tryResolveProjectIdentity(event.cwd);
   return {
     $event_id: event.event_id,
     $session_id: event.session_id || "unknown",
+    $project_id: event.project_id || identity?.projectId || null,
     $seq: Number(event.seq || 0),
     $ts: event.ts || new Date().toISOString(),
     $type: event.type || "unknown",
@@ -382,8 +477,11 @@ export function dbEventRow(event: HiveTelemetryEvent) {
 }
 
 export function dbSessionRowFromEvent(event: HiveTelemetryEvent) {
+  const identity = event.project_id && event.project_root ? undefined : tryResolveProjectIdentity(event.cwd);
   return {
     $session_id: event.session_id || "unknown",
+    $project_id: event.project_id || identity?.projectId || null,
+    $canonical_root: event.project_root || identity?.canonicalRoot || null,
     $cwd: event.cwd || null,
     $session_dir: event.session_dir || null,
     $telemetry_log: event.telemetry_log || null,
@@ -399,6 +497,7 @@ export function rowToEvent(row: any): HiveTelemetryEvent {
   return {
     event_id: row.event_id,
     session_id: row.session_id,
+    project_id: row.project_id || undefined,
     seq: row.seq,
     ts: row.ts,
     type: row.type,
@@ -419,7 +518,7 @@ function rowToEventWithCursor(row: any): HiveTelemetryEvent & { cursor: number }
 
 // json(payload_json) decodes BOTH new JSONB BLOBs and legacy TEXT-JSON rows to
 // canonical TEXT, so rowToEvent's JSON.parse works uniformly across the migration.
-const EVENT_COLS = `rowid, event_id, session_id, seq, ts, type, actor, pid, cwd, telemetry_log, json(payload_json) AS payload_json`;
+const EVENT_COLS = `rowid, event_id, session_id, project_id, seq, ts, type, actor, pid, cwd, telemetry_log, json(payload_json) AS payload_json`;
 
 // Paginated, cursor-ordered event reads (B5). Replaces the boot-time
 // load-everything-into-memory path. `after` is an events.rowid; results are
@@ -684,6 +783,8 @@ export function queryToolCalls(q: { session?: string; after?: number; limit?: nu
 // into the camelCase TelemetrySessionSummary and folds in live snapshot counts.
 export interface SessionSummaryRow {
   session_id: string;
+  project_id: string | null;
+  canonical_root: string | null;
   cwd: string | null;
   session_dir: string | null;
   telemetry_log: string | null;
@@ -700,15 +801,17 @@ export interface SessionSummaryRow {
 
 export function querySessionSummaries(): SessionSummaryRow[] {
   return db.query(`
-    SELECT session_id, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count,
+    SELECT session_id, project_id, canonical_root, cwd, session_dir, telemetry_log, first_ts, last_ts, event_count,
            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, topology_hash
     FROM sessions
     ORDER BY last_ts DESC
   `).all() as SessionSummaryRow[];
 }
 
-export function knownCwds(): string[] {
-  const rows = db.query(`SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL`).all() as any[];
+export function knownCwds(projectId?: string): string[] {
+  const rows = projectId
+    ? db.query(`SELECT DISTINCT cwd FROM sessions WHERE project_id = $project_id AND cwd IS NOT NULL`).all({ $project_id: projectId }) as any[]
+    : db.query(`SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL`).all() as any[];
   return rows.map((r) => r.cwd);
 }
 
@@ -1015,23 +1118,23 @@ export function listModels(allVersions = false): ModelVersionRow[] {
 
 const insertPlanVerdictStmt = db.query(`
   INSERT OR IGNORE INTO plan_verdicts
-    (id, change_id, reviewer, verdict, summary, evidence_json, concerns_json, blockers_json, session_id, cwd, created_at)
+    (id, change_id, reviewer, verdict, summary, evidence_json, concerns_json, blockers_json, session_id, project_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $reviewer, $verdict, $summary, jsonb($evidence_json), jsonb($concerns_json), jsonb($blockers_json), $session_id, $cwd, $created_at)
+    ($id, $change_id, $reviewer, $verdict, $summary, jsonb($evidence_json), jsonb($concerns_json), jsonb($blockers_json), $session_id, $project_id, $cwd, $created_at)
 `);
 
 const insertPlanApprovalStmt = db.query(`
   INSERT OR IGNORE INTO plan_approvals
-    (id, change_id, phase, approved_by, actor, summary, session_id, cwd, created_at)
+    (id, change_id, phase, approved_by, actor, summary, session_id, project_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $phase, $approved_by, $actor, $summary, $session_id, $cwd, $created_at)
+    ($id, $change_id, $phase, $approved_by, $actor, $summary, $session_id, $project_id, $cwd, $created_at)
 `);
 
 const insertPlanCommentStmt = db.query(`
   INSERT OR IGNORE INTO plan_comments
-    (id, change_id, file, anchor, author, body, annotation_type, original_text, session_id, cwd, created_at)
+    (id, change_id, file, anchor, author, body, annotation_type, original_text, session_id, project_id, cwd, created_at)
   VALUES
-    ($id, $change_id, $file, $anchor, $author, $body, $annotation_type, $original_text, $session_id, $cwd, $created_at)
+    ($id, $change_id, $file, $anchor, $author, $body, $annotation_type, $original_text, $session_id, $project_id, $cwd, $created_at)
 `);
 
 function jsonArray(value: unknown): string {
@@ -1048,6 +1151,7 @@ export interface PlanVerdictInput {
   concerns?: unknown;
   blockers?: unknown;
   sessionId?: string;
+  projectId?: string;
   cwd?: string;
   createdAt: string;
 }
@@ -1063,6 +1167,7 @@ export function insertPlanVerdict(input: PlanVerdictInput): void {
     $concerns_json: jsonArray(input.concerns),
     $blockers_json: jsonArray(input.blockers),
     $session_id: input.sessionId ?? null,
+    $project_id: input.projectId ?? tryResolveProjectIdentity(input.cwd)?.projectId ?? null,
     $cwd: input.cwd ?? null,
     $created_at: input.createdAt,
   });
@@ -1076,6 +1181,7 @@ export interface PlanApprovalInput {
   actor?: string;
   summary?: string;
   sessionId?: string;
+  projectId?: string;
   cwd?: string;
   createdAt: string;
 }
@@ -1089,6 +1195,7 @@ export function insertPlanApproval(input: PlanApprovalInput): void {
     $actor: input.actor ?? null,
     $summary: input.summary ?? null,
     $session_id: input.sessionId ?? null,
+    $project_id: input.projectId ?? tryResolveProjectIdentity(input.cwd)?.projectId ?? null,
     $cwd: input.cwd ?? null,
     $created_at: input.createdAt,
   });
@@ -1104,6 +1211,7 @@ export interface PlanCommentInput {
   annotationType?: string;
   originalText?: string;
   sessionId?: string;
+  projectId?: string;
   cwd?: string;
   createdAt: string;
 }
@@ -1119,6 +1227,7 @@ export function insertPlanComment(input: PlanCommentInput): void {
     $annotation_type: input.annotationType ?? null,
     $original_text: input.originalText ?? null,
     $session_id: input.sessionId ?? null,
+    $project_id: input.projectId ?? tryResolveProjectIdentity(input.cwd)?.projectId ?? null,
     $cwd: input.cwd ?? null,
     $created_at: input.createdAt,
   });
@@ -1246,21 +1355,31 @@ export function listComments(changeId: string, cwd?: string): PlanCommentRow[] {
 // ── project display-name overrides ───────────────────────────────────────────
 
 const upsertProjectOverrideStmt = db.query(`
-  INSERT INTO project_overrides (cwd, label, updated_at)
-  VALUES ($cwd, $label, $updated_at)
-  ON CONFLICT(cwd) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
+  INSERT INTO project_overrides (project_id, canonical_root, label, updated_at)
+  VALUES ($project_id, $canonical_root, $label, $updated_at)
+  ON CONFLICT(project_id) DO UPDATE SET
+    canonical_root = excluded.canonical_root,
+    label = excluded.label,
+    updated_at = excluded.updated_at
 `);
-const deleteProjectOverrideStmt = db.query(`DELETE FROM project_overrides WHERE cwd = $cwd`);
+const deleteProjectOverrideStmt = db.query(`DELETE FROM project_overrides WHERE project_id = $project_id`);
 
-export function listProjectOverrides(): Array<{ cwd: string; label: string; updatedAt?: string }> {
-  const rows = db.query(`SELECT cwd, label, updated_at FROM project_overrides`).all() as any[];
-  return rows.map((r) => ({ cwd: r.cwd, label: r.label, updatedAt: r.updated_at || undefined }));
+export interface ProjectOverrideRow {
+  projectId: string;
+  canonicalRoot?: string;
+  label: string;
+  updatedAt?: string;
 }
 
-export function setProjectOverride(cwd: string, label: string, updatedAt: string) {
-  upsertProjectOverrideStmt.run({ $cwd: cwd, $label: label, $updated_at: updatedAt });
+export function listProjectOverrides(): ProjectOverrideRow[] {
+  const rows = db.query(`SELECT project_id, canonical_root, label, updated_at FROM project_overrides WHERE project_id IS NOT NULL`).all() as any[];
+  return rows.map((r) => ({ projectId: r.project_id, canonicalRoot: r.canonical_root || undefined, label: r.label, updatedAt: r.updated_at || undefined }));
 }
 
-export function clearProjectOverride(cwd: string) {
-  deleteProjectOverrideStmt.run({ $cwd: cwd });
+export function setProjectOverride(projectId: string, canonicalRoot: string | undefined, label: string, updatedAt: string) {
+  upsertProjectOverrideStmt.run({ $project_id: projectId, $canonical_root: canonicalRoot ?? null, $label: label, $updated_at: updatedAt });
+}
+
+export function clearProjectOverride(projectId: string) {
+  deleteProjectOverrideStmt.run({ $project_id: projectId });
 }

@@ -50,6 +50,9 @@ export interface HiveTelemetryEvent<P = JsonRecord> {
   ts: string;
   type: HiveTelemetryEventType | string;
   session_id: string;
+  project_id?: string;
+  project_root?: string;
+  project_label?: string;
   cwd?: string;
   session_dir?: string;
   telemetry_log?: string;
@@ -64,6 +67,9 @@ export interface HiveTelemetryEvent<P = JsonRecord> {
 export interface TelemetryRegistryRow {
   registered_at?: string;
   session_id?: string;
+  project_id?: string;
+  project_root?: string;
+  project_label?: string;
   cwd?: string;
   session_dir?: string;
   conversation_log?: string;
@@ -145,6 +151,9 @@ export interface TelemetryAgentRuntime {
 export interface HiveStateSnapshot {
   updated_at: string;
   session_id: string;
+  project_id?: string;
+  project_root?: string;
+  project_label?: string;
   cwd?: string;
   session_dir?: string;
   telemetry_log?: string;
@@ -159,6 +168,9 @@ export interface HiveStateSnapshot {
 
 export interface TelemetrySessionSummary {
   session_id: string;
+  project_id?: string;
+  project_root?: string;
+  project_label?: string;
   cwd?: string;
   session_dir?: string;
   telemetry_log?: string;

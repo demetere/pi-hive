@@ -39,14 +39,43 @@ function computeAllEvents(eventMap: Record<string, HiveEvent>): HiveEvent[] {
   return arr;
 }
 
-function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, { cwd?: string; first_ts?: string; last_ts?: string; event_count?: number; tokens?: number; cost?: number }>): SessionView[] {
+type ProjectFields = { project_id?: string; project_root?: string; project_label?: string; cwd?: string };
+
+function projectFields(source: ProjectFields, sessionId: string) {
+  const key = source.project_id || `legacy:${source.cwd || sessionId}`;
+  const label = source.project_label || projectName(source.project_root || source.cwd);
+  return { key, label };
+}
+
+function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, ProjectFields & { first_ts?: string; last_ts?: string; event_count?: number; tokens?: number; cost?: number }>): SessionView[] {
   const present = new Set<string>();
 
-  const ensure = (id: string, cwd?: string, ts?: string): SessionView => {
+  const ensure = (id: string, source: ProjectFields = {}, ts?: string): SessionView => {
     let v = sessionStore.get(id);
+    const identity = projectFields(source, id);
     if (!v) {
-      v = { session_id: id, cwd, project: projectName(cwd), first_ts: ts || "", last_ts: ts || "", event_count: 0, running: 0, tokens: 0, cost: 0, live: false, agents: new Map() };
+      v = {
+        session_id: id,
+        project_id: identity.key,
+        project_root: source.project_root,
+        project_label: identity.label,
+        cwd: source.cwd,
+        project: identity.key,
+        first_ts: ts || "",
+        last_ts: ts || "",
+        event_count: 0,
+        running: 0,
+        tokens: 0,
+        cost: 0,
+        live: false,
+        agents: new Map(),
+      };
       sessionStore.set(id, v);
+    } else if (source.project_id && v.project_id !== source.project_id) {
+      v.project_id = source.project_id;
+      v.project = source.project_id;
+      v.project_root = source.project_root || v.project_root;
+      v.project_label = source.project_label || v.project_label;
     }
     present.add(id);
     return v;
@@ -57,8 +86,8 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
 
   for (const e of allEvents) {
     const id = e.session_id || "unknown";
-    const v = ensure(id, e.cwd, e.ts);
-    if (!v.cwd && e.cwd) { v.cwd = e.cwd; v.project = projectName(e.cwd); }
+    const v = ensure(id, e, e.ts);
+    if (!v.cwd && e.cwd) v.cwd = e.cwd;
     if (!v.first_ts || e.ts < v.first_ts) v.first_ts = e.ts;
     if (e.ts > v.last_ts) v.last_ts = e.ts;
     v.event_count++;
@@ -66,8 +95,8 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
 
   for (const snap of Object.values(snapshots) as any[]) {
     const id = snap.session_id;
-    const v = ensure(id, snap.cwd, snap.updated_at);
-    if (!v.cwd && snap.cwd) { v.cwd = snap.cwd; v.project = projectName(snap.cwd); }
+    const v = ensure(id, snap, snap.updated_at);
+    if (!v.cwd && snap.cwd) v.cwd = snap.cwd;
     if (snap.updated_at > v.last_ts) v.last_ts = snap.updated_at;
     sessionUpdatedAt.set(id, new Date(snap.updated_at).getTime());
     v.topology = snap.topology;
@@ -92,9 +121,14 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
   // tokens/cost/event_count come straight from the DB. Skipped once real
   // events/snapshots arrive for it (ensure() already created the richer row).
   for (const [id, sum] of summaries) {
-    if (sessionStore.has(id) && present.has(id)) continue;
-    const v = ensure(id, sum.cwd, sum.last_ts || sum.first_ts);
-    if (!v.cwd && sum.cwd) { v.cwd = sum.cwd; v.project = projectName(sum.cwd); }
+    if (sessionStore.has(id) && present.has(id)) {
+      const current = ensure(id, sum, sum.last_ts || sum.first_ts);
+      if (sum.project_root) current.project_root = sum.project_root;
+      if (sum.project_label) current.project_label = sum.project_label;
+      continue;
+    }
+    const v = ensure(id, sum, sum.last_ts || sum.first_ts);
+    if (!v.cwd && sum.cwd) v.cwd = sum.cwd;
     if (sum.first_ts && (!v.first_ts || sum.first_ts < v.first_ts)) v.first_ts = sum.first_ts;
     if (sum.last_ts && sum.last_ts > v.last_ts) v.last_ts = sum.last_ts;
     if (!v.event_count && sum.event_count) v.event_count = sum.event_count;
@@ -221,16 +255,17 @@ export function recomputeLive() {
   const groups = new Map<string, ProjectGroup>();
   for (const sess of s.sessions) {
     let g = groups.get(sess.project);
-    if (!g) { g = { name: sess.project, label: sess.project, sessions: [], live: false, totalCost: 0, cwds: [] }; groups.set(sess.project, g); }
+    if (!g) {
+      g = { name: sess.project, derivedLabel: sess.project_label, label: sess.project_label, sessions: [], live: false, totalCost: 0, cwds: [] };
+      groups.set(sess.project, g);
+    }
     g.sessions.push(sess);
     g.live = g.live || live.has(sess.session_id);
     g.totalCost += sess.cost;
     if (sess.cwd && !g.cwds.includes(sess.cwd)) g.cwds.push(sess.cwd);
   }
-  // Apply display-name overrides: first matching cwd in the group wins.
-  for (const g of groups.values()) {
-    for (const cwd of g.cwds) { const l = overrides.get(cwd); if (l) { g.label = l; break; } }
-  }
+  // Display names are presentation only; grouping remains keyed by project ID.
+  for (const g of groups.values()) g.label = overrides.get(g.name) || g.derivedLabel;
   const projectGroups = Array.from(groups.values()).sort((a, b) => Number(b.live) - Number(a.live) || a.label.localeCompare(b.label));
   store.setState({ liveSet: live, projectGroups, fleetStats: computeFleetStats(s.sessions) });
 }
@@ -285,10 +320,8 @@ export function recomputeScoped() {
 
   // Display label for the scoped project (override its derived name if set).
   const labelFor = (project: string) => {
-    for (const sess of s.sessions) {
-      if (sess.project === project && sess.cwd) { const l = s.projectOverrides.get(sess.cwd); if (l) return l; }
-    }
-    return project;
+    const session = s.sessions.find((candidate) => candidate.project === project);
+    return s.projectOverrides.get(project) || session?.project_label || project;
   };
 
   // scope title + breadcrumb

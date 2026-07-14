@@ -17,7 +17,7 @@ function StorageTile(props: { label: string; value: string; valueClass?: string;
   );
 }
 
-// Settings: rename projects (persisted in the telemetry DB, keyed by cwd).
+// Settings: rename projects (persisted by canonical project ID).
 // Future settings can be added as additional sections below.
 export default function Settings() {
   const projectGroups = useHive((s) => s.projectGroups);
@@ -35,13 +35,6 @@ export default function Settings() {
   const [storage, setStorage] = useState<StorageBreakdown | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
 
-  // The cwd of the scoped project (first cwd of its group), or undefined at fleet
-  // scope → whole-DB storage. The server resolves it to the project's full cwd set.
-  const scopedCwd = useMemo(() => {
-    if (!scopedProject) return undefined;
-    return projectGroups.find((g) => g.name === scopedProject)?.cwds[0];
-  }, [projectGroups, scopedProject]);
-
   // Fetch storage usage + prune preview whenever the scope or the days input
   // settles. Debounced so typing in the days field doesn't spam the endpoint.
   useEffect(() => {
@@ -50,11 +43,11 @@ export default function Settings() {
     let cancelled = false;
     setStorageLoading(true);
     const t = setTimeout(async () => {
-      const res = await fetchStorage(scopedCwd, validDays);
+      const res = await fetchStorage(scopedProject, validDays);
       if (!cancelled) { setStorage(res); setStorageLoading(false); }
     }, 300);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [scopedCwd, pruneDays]);
+  }, [scopedProject, pruneDays]);
 
   // Seed the draft from current labels when the group set changes.
   useEffect(() => {
@@ -70,20 +63,20 @@ export default function Settings() {
       .filter((g) => !scopedProject || g.name === scopedProject)
       .map((g) => ({
         key: g.name,
-        derived: g.name,
+        derived: g.derivedLabel,
         label: g.label,
-        cwd: g.cwds[0] || "",
+        projectId: g.name,
         cwds: g.cwds,
         sessions: g.sessions.length,
-        overridden: g.cwds.some((c) => overrides.has(c)),
+        overridden: overrides.has(g.name),
       })),
     [projectGroups, overrides, scopedProject],
   );
 
-  async function save(cwd: string, key: string, label: string) {
-    if (!cwd) return;
+  async function save(projectId: string, key: string, label: string) {
+    if (!projectId) return;
     setBusy(key);
-    await saveOverride(cwd, label);
+    await saveOverride(projectId, label);
     setBusy("");
   }
 
@@ -115,7 +108,7 @@ export default function Settings() {
   async function refreshStorage() {
     const days = Number(pruneDays.trim());
     const validDays = Number.isFinite(days) && days >= 0 ? days : undefined;
-    setStorage(await fetchStorage(scopedCwd, validDays));
+    setStorage(await fetchStorage(scopedProject, validDays));
   }
 
   return (
@@ -140,21 +133,21 @@ export default function Settings() {
                       {r.derived}
                       {r.overridden && <span className="setting-badge">renamed</span>}
                     </div>
-                    <div className="setting-path" title={r.cwd}>{r.cwd || "—"}{r.cwds.length > 1 ? ` (+${r.cwds.length - 1} more)` : ""} · {r.sessions} session{r.sessions === 1 ? "" : "s"}</div>
+                    <div className="setting-path" title={r.cwds[0]}>{r.cwds[0] || "—"}{r.cwds.length > 1 ? ` (+${r.cwds.length - 1} more)` : ""} · {r.sessions} session{r.sessions === 1 ? "" : "s"}</div>
                   </div>
                   <input
                     className="setting-input"
                     value={value}
                     placeholder={r.derived}
                     onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
-                    onKeyDown={(e) => { if (e.key === "Enter" && dirty) save(r.cwd, r.key, value); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && dirty) save(r.projectId, r.key, value); }}
                   />
                   <div className="setting-actions">
-                    <button className="btn sm primary" disabled={!dirty || busy === r.key} onClick={() => save(r.cwd, r.key, value)}>
+                    <button className="btn sm primary" disabled={!dirty || busy === r.key} onClick={() => save(r.projectId, r.key, value)}>
                       {busy === r.key ? "Saving…" : "Save"}
                     </button>
                     {r.overridden && (
-                      <button className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.cwd, r.key, ""); }}>Reset</button>
+                      <button className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.projectId, r.key, ""); }}>Reset</button>
                     )}
                     <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.derived, r.label, r.sessions)}>Delete…</button>
                   </div>
