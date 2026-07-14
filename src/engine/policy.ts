@@ -1,6 +1,7 @@
 import type { AgentType, PlanStage } from "../core/types";
 import type { FileClass } from "./file-class";
 import { toPosixPath } from "./glob";
+import { artifactIdFromReference } from "../shared/openspec-artifacts";
 
 // Actions the type-policy layer reasons about. `read`/`upsert`/`delete` carry a
 // file class; `command` (non-mutating bash), `verdict`, and `commit` do not
@@ -73,32 +74,25 @@ export function checkTypePolicy(agentType: AgentType, fileClass: FileClass | nul
   }
 }
 
-// Map a gate artifact filename to its PlanStage. Only the four gate files are
-// stage-scoped; any other spec file (e.g. under specs/) returns null and is
-// allowed for any planner.
-const GATE_FILES: Record<string, PlanStage> = {
-  "proposal.md": "proposal",
-  "requirements.md": "requirements",
-  "design.md": "design",
-  "tasks.md": "tasks",
-};
-
+// Resolve only canonical OpenSpec change artifacts. Generic design.md/tasks.md
+// files elsewhere are docs/tasks, not planning gates. Every markdown file below
+// specs/ belongs to the single aggregate `specs` stage.
 function gateOf(pathRelativeToCwd: string): PlanStage | null {
-  const base = toPosixPath(pathRelativeToCwd).split("/").pop() || "";
-  return GATE_FILES[base] ?? null;
+  const rel = toPosixPath(pathRelativeToCwd).replace(/^\.\//, "");
+  const match = rel.match(/(?:^|\/)openspec\/changes\/[a-z0-9]+(?:-[a-z0-9]+)*\/(.+)$/);
+  return match ? artifactIdFromReference(match[1]) : null;
 }
 
-// Narrow which gate artifacts a planner may write. `stages` omitted = all four
-// gates allowed. A gate file whose stage is not in `stages` is blocked; non-gate
-// spec files are allowed for any planner. Only meaningful for planners writing
-// spec/tasks-class files — call after checkTypePolicy has allowed the write.
+// Narrow which canonical artifact paths a planner may write. `stages` omitted
+// means all four artifacts. Files outside openspec/changes are unaffected by
+// stage ownership (the normal type + domain policies still apply).
 export function checkPlannerStages(stages: PlanStage[] | undefined, pathRelativeToCwd: string): PolicyDecision {
-  if (!stages) return OK; // omitted ⇒ all gates
+  if (!stages) return OK;
   const gate = gateOf(pathRelativeToCwd);
-  if (gate === null) return OK; // non-gate spec artifact ⇒ any planner may write
+  if (gate === null) return OK;
   if (stages.includes(gate)) return OK;
   return {
     ok: false,
-    reason: `Blocked: this planner owns gates [${stages.join(", ")}] and may not write the "${gate}" gate (${toPosixPath(pathRelativeToCwd).split("/").pop()}).`,
+    reason: `Blocked: this planner owns stages [${stages.join(", ")}] and may not write the "${gate}" artifact (${toPosixPath(pathRelativeToCwd)}).`,
   };
 }

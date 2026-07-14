@@ -38,12 +38,13 @@ opposite: **it's config-first, and you own the whole tree.** Nothing runs until
   spec. They're distinct trees in your config so a project can never silently run
   planning against its coding tree.
 
-- **Spec-driven, backed by OpenSpec.** Non-trivial work flows through fixed gates —
-  `proposal → requirements → design → tasks` — stored under
-  `.pi/hive/plans/<change-id>/`. [OpenSpec](https://github.com/Fission-AI/OpenSpec)
-  (a CLI dependency) is the store and validator: it owns the artifact dependency
-  graph and reports per-artifact readiness. Execution is hard-gated — `/hive-execute`
-  refuses to run until `tasks.md` exists and its gate is approved.
+- **Spec-driven, backed by OpenSpec.** Non-trivial work follows one artifact graph:
+  `proposal → { design, specs } → tasks`, stored under
+  `openspec/changes/<change-id>/`. [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+  (a CLI dependency) is the store and validator. Specification deltas live at
+  `specs/<capability>/spec.md`; there is no `requirements.md` or legacy
+  `.pi/hive/plans/` store. `/hive-execute` refuses to run until every exact
+  artifact has automated review and human approval.
 
 - **Human-in-the-loop plan review, self-hosted.** `pi-hive` embeds a
   [Plannotator](https://github.com/backnotprop/plannotator) review surface **directly in its own
@@ -146,8 +147,8 @@ Point an agent at the build guide and let it interview you:
 `pi-hive` has three hardcoded session modes: `normal` → `plan` → `hive` → `normal`. The cycle order is not configurable.
 
 - `normal` — plain Pi chat. No hive tools or hive enforcement.
-- `plan` — the `planning:` team is active. The visible main session should be `agent-type: planner`; plan gates run in order `proposal → requirements → design → tasks` under `.pi/hive/plans/<change-id>/`.
-- `hive` — the `hive:` team is active. The visible main session should be `agent-type: lead`; execution agents build an approved `tasks.md`.
+- `plan` — the `planning:` team is active. The visible main session should be `agent-type: planner`; artifacts follow `proposal → { design, specs } → tasks` under `openspec/changes/<change-id>/`.
+- `hive` — the `hive:` team is active. The visible main session should be `agent-type: lead`; execution agents implement the approved `tasks.md` and the lead records evidence with `plan_task_complete`.
 
 Commands:
 
@@ -160,7 +161,7 @@ Commands:
 - `/hive-observe` — restart/open the local browser dashboard for global hive telemetry (`http://127.0.0.1:43191` by default).
 - `/hive-observe-stop` — stop the telemetry dashboard on the configured port.
 
-The hive tool set is mode/type scoped in code, not configurable by users: plan mode exposes planning/store/review tools to eligible planners/reviewers, hive mode exposes delegation/status/review tools to eligible execution agents, and normal mode exposes none. The dashboard host/port default to `127.0.0.1:43191` and can only be changed with `HIVE_TELEMETRY_HOST` / `HIVE_TELEMETRY_PORT`.
+The hive tool set is mode/type scoped in code, not configurable by users: plan mode exposes planning/store/review tools to eligible planners/reviewers, hive mode exposes delegation/status/review tools to eligible execution agents, and normal mode exposes none. Planners use `ask_user` for ambiguous scope; approval is only a human dashboard action, never an agent tool. The dashboard host/port default to `127.0.0.1:43191` and can only be changed with `HIVE_TELEMETRY_HOST` / `HIVE_TELEMETRY_PORT`.
 
 SDD/OpenSpec is the default operating mode for non-trivial hive work. Agent `skills:` paths are passed to worker Pi processes explicitly with `--no-skills` plus repeated `--skill <path>`, so Hive reuses Pi's native skill system without automatic discovery bleed-through.
 

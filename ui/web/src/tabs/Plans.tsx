@@ -66,7 +66,7 @@ function ArtifactChip({
       title="Open in the review UI"
       onClick={() => onSelect(rid)}
     >
-      <span className="plan-artifact-id mono">{a.id}</span>
+      <span className="plan-artifact-id" title={a.outputPath}>{a.displayLabel}</span>
       {st.label && <span className="plan-artifact-review">{st.label}</span>}
     </button>
   );
@@ -329,12 +329,17 @@ export default function Plans(props: { search: string }) {
                   <span className="plan-validation progress">in progress</span>
                 )}
                 {detail.readyToExecute && <span className="plan-ready">ready to execute</span>}
+                {detail.taskProgress.length > 0 && (
+                  <span className="plan-tasks">
+                    {detail.taskProgress.filter((task) => task.completed).length}/{detail.taskProgress.length} execution tasks recorded
+                  </span>
+                )}
               </div>
               <div className="plan-artifacts">
                 {authored.length ? authored.map((a) => (
                   <ArtifactChip key={a.id} a={a} review={detail.artifactReview.find((r) => r.id === a.id)} changeId={detail.changeId} files={detail.files} selectedRid={rid} onSelect={setRid} />
                 )) : <span className="plan-artifact-none">No artifacts authored yet.</span>}
-                {upNext && <span className="plan-artifact-next">up next: {upNext.id}</span>}
+                {upNext && <span className="plan-artifact-next">up next: {upNext.displayLabel}</span>}
               </div>
               {/* Surface real validation issues only once specs are authored. */}
               {specsAuthored && !detail.validation.passed && detail.validation.issues.length > 0 && (

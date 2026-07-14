@@ -8,6 +8,14 @@ import { ensureDir, readIfSmall } from "../core/fs";
 import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 import { resolveProjectIdentity, type ProjectIdentity } from "../shared/project-identity";
 import { withCrossProcessFileLock } from "../core/file-lock";
+import {
+  ARTIFACT_ORDER,
+  OPENSPEC_ARTIFACTS,
+  artifactDependencies,
+  artifactIdFromReference,
+  type ArtifactId,
+} from "../shared/openspec-artifacts";
+export { ARTIFACT_ORDER, OPENSPEC_ARTIFACTS, type ArtifactId } from "../shared/openspec-artifacts";
 
 // Thin, bounded wrapper around the OpenSpec CLI (@fission-ai/openspec).
 //
@@ -211,10 +219,12 @@ export function changeExists(cwd: string, name: string): boolean {
 export type ArtifactStatus = "done" | "ready" | "blocked";
 
 export interface ArtifactState {
-  id: string; // proposal | design | specs | tasks
+  id: ArtifactId;
+  displayLabel: string;
   outputPath: string;
   status: ArtifactStatus;
-  missingDeps: string[];
+  missingDeps: ArtifactId[];
+  reviewOrder: number;
 }
 
 export interface ChangeDetail {
@@ -239,12 +249,22 @@ export function changeDetail(cwd: string, name: string): ChangeDetail | null {
   if (!isSafeChangeId(name)) return null;
   const data = runJson<StatusJson>(cwd, ["status", "--json", "--change", name]);
   if (!data?.artifacts) return null;
-  const artifacts: ArtifactState[] = data.artifacts.map((a) => ({
-    id: String(a.id ?? ""),
-    outputPath: String(a.outputPath ?? ""),
-    status: (a.status === "done" || a.status === "ready" ? a.status : "blocked") as ArtifactStatus,
-    missingDeps: Array.isArray(a.missingDeps) ? a.missingDeps.map(String) : [],
-  }));
+  const reported = new Map(data.artifacts.map((artifact) => [String(artifact.id ?? ""), artifact]));
+  const artifacts: ArtifactState[] = OPENSPEC_ARTIFACTS.map((definition) => {
+    const state = reported.get(definition.id);
+    const status = state?.status === "done" || state?.status === "ready" ? state.status : "blocked";
+    const missingDeps = Array.isArray(state?.missingDeps)
+      ? state.missingDeps.map(String).filter((id): id is ArtifactId => (ARTIFACT_ORDER as readonly string[]).includes(id))
+      : [...artifactDependencies(definition.id)];
+    return {
+      id: definition.id,
+      displayLabel: definition.displayLabel,
+      outputPath: definition.outputPath,
+      status,
+      missingDeps,
+      reviewOrder: definition.reviewOrder,
+    };
+  });
   const nextReady = artifacts.find((a) => a.status === "ready")?.id ?? null;
   return { name, artifacts, nextReady };
 }
@@ -328,6 +348,104 @@ export function isExecutionGateOpen(cwd: string, name: string): boolean {
   return isReadyToExecute(cwd, name) && isApprovedForExecution(cwd, name);
 }
 
+// Execution progress is stored outside the approved tasks artifact. Checking a
+// box in tasks.md would change its exact content hash and correctly close the
+// execution gate after the first task. Trusted progress records stay bound to
+// the approved tasks hash without mutating the reviewed plan.
+export interface ExecutionTaskProgress {
+  taskId: string;
+  text: string;
+  completed: boolean;
+  actor?: string;
+  evidence?: string;
+  completedAt?: string;
+}
+
+const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const TASK_PROGRESS_MAX_BYTES = 16_000;
+
+function plannedTasks(cwd: string, name: string): Array<{ taskId: string; text: string }> {
+  const raw = readArtifact(cwd, name, "tasks.md");
+  const tasks: Array<{ taskId: string; text: string }> = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^\s*[-*]\s*\[[ xX]\]\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:[.:)]\s+|\s+-\s+|\s+)(.+?)\s*$/);
+    if (match && TASK_ID_RE.test(match[1])) tasks.push({ taskId: match[1], text: match[2] });
+  }
+  return tasks;
+}
+
+export function executionTaskRecordPath(cwd: string, name: string, taskId: string): string | null {
+  if (!isSafeChangeId(name) || !TASK_ID_RE.test(taskId)) return null;
+  const identity = approvalIdentity(cwd);
+  const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  return join(agentDir, "hive", "execution", identity.projectId, name, "tasks", `${taskId}.json`);
+}
+
+export function markExecutionTaskComplete(cwd: string, name: string, taskId: string, actor: string, evidence: string): ExecutionTaskProgress {
+  const path = executionTaskRecordPath(cwd, name, taskId);
+  if (!path) throw new Error(`Invalid execution task target: ${name}/${taskId}`);
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  return withCrossProcessFileLock(path, () => {
+    if (!isExecutionGateOpen(cwd, name)) throw new Error(`Execution gate is not open for change ${name}`);
+    if (!actor.trim() || !evidence.trim()) throw new Error("Task completion requires an actor and implementation evidence");
+    const task = plannedTasks(cwd, name).find((item) => item.taskId === taskId);
+    if (!task) throw new Error(`Unknown task id ${taskId} in ${name}/tasks.md`);
+    const tasksHash = artifactHash(cwd, name, "tasks");
+    if (!tasksHash) throw new Error(`Invalid execution task target: ${name}/${taskId}`);
+    const record = {
+      schemaVersion: 1,
+      projectId: approvalIdentity(cwd).projectId,
+      changeId: name,
+      taskId,
+      taskText: task.text,
+      tasksHash,
+      actor: actor.trim(),
+      evidence: evidence.trim().slice(0, 8_000),
+      completedAt: new Date().toISOString(),
+    };
+    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      renameSync(tmp, path);
+    } catch (error) {
+      try { unlinkSync(tmp); } catch { /* best effort */ }
+      throw error;
+    }
+    return { taskId, text: task.text, completed: true, actor: record.actor, evidence: record.evidence, completedAt: record.completedAt };
+  });
+}
+
+export function executionTaskProgress(cwd: string, name: string): ExecutionTaskProgress[] {
+  const currentHash = artifactHash(cwd, name, "tasks");
+  const projectId = approvalIdentity(cwd).projectId;
+  return plannedTasks(cwd, name).map((task) => {
+    const path = executionTaskRecordPath(cwd, name, task.taskId);
+    if (!path || !currentHash) return { ...task, completed: false };
+    try {
+      const raw = readIfSmall(path, TASK_PROGRESS_MAX_BYTES);
+      const record = raw ? JSON.parse(raw) as Record<string, unknown> : null;
+      if (!record || record.schemaVersion !== 1 || record.projectId !== projectId || record.changeId !== name
+        || record.tasksHash !== currentHash || record.taskId !== task.taskId || record.taskText !== task.text
+        || typeof record.actor !== "string" || !record.actor.trim()
+        || typeof record.evidence !== "string" || !record.evidence.trim() || record.evidence.length > 8_000
+        || typeof record.completedAt !== "string" || !Number.isFinite(Date.parse(record.completedAt))) {
+        return { ...task, completed: false };
+      }
+      return {
+        ...task,
+        completed: true,
+        actor: String(record.actor || ""),
+        evidence: String(record.evidence || ""),
+        completedAt: String(record.completedAt || ""),
+      };
+    } catch {
+      return { ...task, completed: false };
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Artifact reads (path-guarded)
 // ---------------------------------------------------------------------------
@@ -371,8 +489,6 @@ export function readArtifact(cwd: string, name: string, relPath: string): string
 // against the current artifact bytes before it can affect a gate.
 
 export const APPROVAL_SCHEMA_VERSION = 1 as const;
-export const ARTIFACT_ORDER = ["proposal", "design", "specs", "tasks"] as const;
-export type ArtifactId = (typeof ARTIFACT_ORDER)[number];
 export type ArtifactVerdict = "green" | "red" | null;
 export type AgentReviewVerdict = "green" | "yellow" | "red" | null;
 export type ApprovalAuthority = "automated-review" | "human";
@@ -400,20 +516,16 @@ export interface ApprovalRecord {
   automatedReviewHash?: string;
 }
 
-const UPSTREAM: Record<ArtifactId, ArtifactId[]> = {
-  proposal: [],
-  design: ["proposal"],
-  specs: ["proposal"],
-  tasks: ["design", "specs"],
-};
+const UPSTREAM = Object.fromEntries(
+  ARTIFACT_ORDER.map((id) => [id, [...artifactDependencies(id)]]),
+) as Record<ArtifactId, ArtifactId[]>;
 const APPROVAL_RECORD_MAX_BYTES = 16_000;
 const APPROVAL_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
 const APPROVAL_SPEC_MAX_FILES = 10_000;
 const HASH_RE = /^[a-f0-9]{64}$/;
 
 function toArtifactId(artifact: string): ArtifactId | null {
-  const id = artifact.replace(/\.md$/, "").replace(/^specs.*/, "specs");
-  return (ARTIFACT_ORDER as readonly string[]).includes(id) ? (id as ArtifactId) : null;
+  return artifactIdFromReference(artifact);
 }
 
 function approvalIdentity(cwd: string): ProjectIdentity {

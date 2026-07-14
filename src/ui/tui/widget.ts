@@ -38,7 +38,7 @@ async function handlePromotedQuestion(state: HiveState, ctx: ExtensionContext, a
 // human before writing artifacts.
 const COMMON_HIVE_TOOLS = ["route_agent", "delegate_agent", "team_status", "team_conversation", "hive_sdd_status"];
 const PLAN_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_new", "plan_select", "ask_user"];
-const HIVE_MODE_TOOLS = COMMON_HIVE_TOOLS;
+const HIVE_MODE_TOOLS = [...COMMON_HIVE_TOOLS, "plan_task_complete"];
 
 // The bridge cursor is persisted BESIDE the action queue so it survives an
 // accidental close/reopen of the same session: on re-entry we resume from the

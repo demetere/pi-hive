@@ -104,6 +104,7 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
       if (agent.commit === undefined) agent.commit = normalizeCommit(attrs.commit);
     }
   }
+  if (agent.stages !== undefined) agent.stages = normalizePlanStages(agent.stages) as AgentConfig["stages"];
   agent.slug = slug(agent.slug || agent.name || agent.path || "agent");
   for (const child of agent.members || agent.children || []) enrichFromFrontmatter(cwd, child);
 }

@@ -466,7 +466,7 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
   const changeId = typeof payload.changeId === "string" ? payload.changeId.trim() : "";
   if (!changeId) return; // no active change ⇒ nothing plan-scoped to record
   // Only reviewer verdicts are materialized from telemetry events now. Plan
-  // approvals and comments used to come from the in-house approve_plan tool and
+  // approvals and comments used to come from the retired chat approval flow and
   // the home-grown annotator; both are gone — approval/annotation now happens in
   // the self-hosted Plannotator review surface, which writes plan_verdicts + the
   // content-bound global approval authority directly (see review-wiring.ts). The

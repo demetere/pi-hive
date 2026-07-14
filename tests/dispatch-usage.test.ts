@@ -37,7 +37,7 @@ test("review artifact inference ignores negative scope clauses", () => {
   assert.equal(inferArtifactFromReviewTask("Review ONLY the proposal gate. Do not consider design/specs/tasks."), "proposal");
   assert.equal(inferArtifactFromReviewTask("Review ONLY the specs gate for OpenSpec change `integrate-front-window-registration-workspace-frontend`."), "specs");
   assert.equal(inferArtifactFromReviewTask("Review ONLY the spec gate for OpenSpec change `integrate-front-window-registration-workspace-frontend`."), "specs");
-  assert.equal(inferArtifactFromReviewTask("Review ONLY the requirements gate before design. Do not modify files."), null);
+  assert.equal(inferArtifactFromReviewTask("Review ONLY the requirements gate before design. Do not modify files."), "specs");
   assert.equal(inferArtifactFromReviewTask("Audit `openspec/changes/add-auth/proposal.md` for readiness. Do not consider design/specs/tasks."), "proposal");
 });
 

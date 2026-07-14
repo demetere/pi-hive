@@ -422,6 +422,30 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     }));
 
     typeScopedTools.push(defineTool({
+      name: "plan_task_complete",
+      label: "Complete Plan Task",
+      description: "Record one executed tasks.md checkbox as complete without mutating the human-approved OpenSpec artifact. The record is bound to the exact approved tasks hash and requires implementation evidence.",
+      parameters: Type.Object({
+        taskId: Type.String({ description: "Task identifier from a tasks.md checkbox, for example 1.1 or api-tests." }),
+        evidence: Type.String({ description: "Concrete implementation/test evidence supporting completion." }),
+        changeId: Type.Optional(Type.String({ description: "OpenSpec change-id. Defaults to the active change." })),
+      }),
+      async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: ToolUpdate | undefined, ctx: ExtensionContext) {
+        const p = params as { taskId: string; evidence: string; changeId?: string };
+        const changeId = String(p.changeId || state.activeChangeId || currentChangeId() || "").trim();
+        const taskId = String(p.taskId || "").trim();
+        const recordPath = openspec.executionTaskRecordPath(ctx.cwd, changeId, taskId);
+        if (!recordPath) throw new Error(`Invalid execution task target: ${changeId}/${taskId}`);
+        const progress = await withFileMutationQueue(recordPath, async () =>
+          openspec.markExecutionTaskComplete(ctx.cwd, changeId, taskId, callerName, String(p.evidence || "")));
+        return {
+          content: [{ type: "text", text: `Recorded task ${progress.taskId} complete for change "${changeId}". The approved tasks.md was not modified.` }],
+          details: { ok: true, changeId, progress },
+        };
+      },
+    }));
+
+    typeScopedTools.push(defineTool({
       name: "plan_select",
       label: "Select Plan",
       description: "Set the active OpenSpec change by change-id (must exist under openspec/changes/). With no argument, lists available changes.",

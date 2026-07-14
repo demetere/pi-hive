@@ -30,13 +30,11 @@ function stateWith(runtimes: AgentRuntime[]): HiveState {
 
 // ── File classifier ────────────────────────────────────────────────────────
 
-test("classify resolves language-agnostic classes with spec before tasks/docs", () => {
-  // Decision 6 / G3: everything under the plan store is spec-class, incl. tasks.md,
-  // so an approved plan's task list is not coder-mutable by type policy.
-  assert.equal(classify(".pi/hive/plans/add-auth/tasks.md"), "spec"); // spec beats tasks in the plan store
-  assert.equal(classify("docs/tasks.md"), "tasks");                    // generic tasks.md OUTSIDE plans stays tasks
-  assert.equal(classify(".pi/hive/plans/add-auth/proposal.md"), "spec");
-  assert.equal(classify(".pi/hive/plans/add-auth/design.md"), "spec");
+test("classify resolves language-agnostic classes with OpenSpec before tasks/docs", () => {
+  assert.equal(classify("openspec/changes/add-auth/tasks.md"), "spec");
+  assert.equal(classify("docs/tasks.md"), "tasks");
+  assert.equal(classify(".pi/hive/plans/add-auth/proposal.md"), "docs");
+  assert.equal(classify(".pi/hive/plans/add-auth/design.md"), "docs");
   assert.equal(classify("openspec/changes/x/proposal.md"), "spec");
   assert.equal(classify("docs/architecture.md"), "docs");
   assert.equal(classify("README.md"), "docs");
@@ -97,18 +95,18 @@ test("checkTypePolicy: command (non-mutating bash) allowed for all types", () =>
 
 // ── Planner stage scoping ──────────────────────────────────────────────────
 
-test("checkPlannerStages: omitted stages allow all gates", () => {
-  assert.equal(checkPlannerStages(undefined, ".pi/hive/plans/x/proposal.md").ok, true);
-  assert.equal(checkPlannerStages(undefined, ".pi/hive/plans/x/tasks.md").ok, true);
+test("checkPlannerStages: omitted stages allow all artifacts", () => {
+  assert.equal(checkPlannerStages(undefined, "openspec/changes/x/proposal.md").ok, true);
+  assert.equal(checkPlannerStages(undefined, "openspec/changes/x/tasks.md").ok, true);
 });
 
-test("checkPlannerStages: a scoped planner writes only its gates", () => {
+test("checkPlannerStages: a scoped planner writes only its canonical artifacts", () => {
   const stages: PlanStage[] = ["design"];
-  assert.equal(checkPlannerStages(stages, ".pi/hive/plans/x/design.md").ok, true);
-  assert.equal(checkPlannerStages(stages, ".pi/hive/plans/x/proposal.md").ok, false);
-  assert.equal(checkPlannerStages(stages, ".pi/hive/plans/x/tasks.md").ok, false);
-  // Non-gate spec files are allowed for any planner.
-  assert.equal(checkPlannerStages(stages, ".pi/hive/plans/x/specs/api.md").ok, true);
+  assert.equal(checkPlannerStages(stages, "openspec/changes/x/design.md").ok, true);
+  assert.equal(checkPlannerStages(stages, "openspec/changes/x/proposal.md").ok, false);
+  assert.equal(checkPlannerStages(stages, "openspec/changes/x/tasks.md").ok, false);
+  assert.equal(checkPlannerStages(stages, "openspec/changes/x/specs/api/spec.md").ok, false);
+  assert.equal(checkPlannerStages(["specs"], "openspec/changes/x/specs/api/spec.md").ok, true);
 });
 
 // ── Commit detection ───────────────────────────────────────────────────────
@@ -181,18 +179,17 @@ test("bashMutationKind classifies the previously-missed mutators (G1)", () => {
   assert.equal(bashMutationKind("cat file.txt"), "read");
 });
 
-test("file-class: plans/**/tasks.md is spec, not coder-writable tasks (G3)", () => {
-  // Decision 6: everything under the plan store is spec-class.
-  assert.equal(classify(".pi/hive/plans/add-auth/tasks.md"), "spec");
-  assert.equal(classify(".pi/hive/plans/add-auth/design.md"), "spec");
-  // A generic tasks.md OUTSIDE the plan store is still coder-writable tasks.
+test("file-class: OpenSpec tasks are spec and legacy plan paths have no special class", () => {
+  assert.equal(classify("openspec/changes/add-auth/tasks.md"), "spec");
+  assert.equal(classify("openspec/changes/add-auth/design.md"), "spec");
+  assert.equal(classify(".pi/hive/plans/add-auth/design.md"), "docs");
   assert.equal(classify("docs/tasks.md"), "tasks");
   assert.equal(classify("todo.md"), "tasks");
 });
 
-test("enforce: coder upsert on plans/**/tasks.md is denied by type policy (G3)", () => {
+test("enforce: coder upsert on OpenSpec tasks is denied by type policy", () => {
   const state = stateWith([runtime("Coder", { agentType: "coder", domain: codeDomain })]);
-  const reason = block(state, "Coder", { toolName: "write", input: { path: ".pi/hive/plans/x/tasks.md" } });
+  const reason = block(state, "Coder", { toolName: "write", input: { path: "openspec/changes/x/tasks.md" } });
   assert.match(reason || "", /class=spec/);
 });
 
@@ -218,7 +215,7 @@ test("enforce: planner blocked from code, allowed spec", () => {
   const specDomain = [{ path: ".", read: true, upsert: true, delete: false }];
   const state = stateWith([runtime("Plan", { agentType: "planner", domain: specDomain })]);
   assert.match(block(state, "Plan", { toolName: "write", input: { path: "src/x.ts" } }) ?? "", /may not upsert code files/);
-  assert.equal(block(state, "Plan", { toolName: "write", input: { path: ".pi/hive/plans/a/proposal.md" } }), undefined);
+  assert.equal(block(state, "Plan", { toolName: "write", input: { path: "openspec/changes/a/proposal.md" } }), undefined);
 });
 
 test("reserved paths override broad read and mutation domains", () => {
@@ -265,14 +262,15 @@ test("enforce: planner cannot forge global approval records with file tools or c
 test("enforce: planner stages narrow which gate files", () => {
   const specDomain = [{ path: ".", read: true, upsert: true, delete: false }];
   const state = stateWith([runtime("Plan", { agentType: "planner", stages: ["design"], domain: specDomain })]);
-  assert.equal(block(state, "Plan", { toolName: "write", input: { path: ".pi/hive/plans/a/design.md" } }), undefined);
-  assert.match(block(state, "Plan", { toolName: "write", input: { path: ".pi/hive/plans/a/proposal.md" } }) ?? "", /may not write the "proposal" gate/);
+  assert.equal(block(state, "Plan", { toolName: "write", input: { path: "openspec/changes/a/design.md" } }), undefined);
+  assert.match(block(state, "Plan", { toolName: "write", input: { path: "openspec/changes/a/proposal.md" } }) ?? "", /may not write the "proposal" artifact/);
+  assert.match(block(state, "Plan", { toolName: "write", input: { path: "openspec/changes/a/specs/api/spec.md" } }) ?? "", /may not write the "specs" artifact/);
 });
 
 test("enforce: coder code allowed, spec blocked", () => {
   const state = stateWith([runtime("Dev", { agentType: "coder", domain: codeDomain })]);
   assert.equal(block(state, "Dev", { toolName: "edit", input: { path: "src/x.ts" } }), undefined);
-  assert.match(block(state, "Dev", { toolName: "write", input: { path: ".pi/hive/plans/a/design.md" } }) ?? "", /may not upsert spec files/);
+  assert.match(block(state, "Dev", { toolName: "write", input: { path: "openspec/changes/a/design.md" } }) ?? "", /may not upsert spec files/);
 });
 
 test("enforce: lead upsert blocked", () => {

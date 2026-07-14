@@ -52,6 +52,14 @@ hive:
   return cwd;
 }
 
+test("loadConfig normalizes deprecated requirements stage to specs", () => {
+  const cwd = fixtureProject();
+  const prompt = join(cwd, ".pi", "hive", "agents", "plan-main.md");
+  writeFileSync(prompt, "---\nmodel: openai/gpt-5\nthinking: medium\nagent-type: planner\nstages:\n  - requirements\n---\nPlan.");
+  const config = loadConfig(cwd);
+  assert.deepEqual(config.planning?.main.stages, ["specs"]);
+});
+
 test("loadConfig normalizes settings and enriches model frontmatter", () => {
   const config = loadConfig(fixtureProject());
 
@@ -366,7 +374,7 @@ hive:
   assert.equal(config.orchestrator.network, true);
   assert.equal(config.orchestrator.commit, "Only commit after review is green.");
   assert.equal(config.agents[0].agentType, "planner");
-  assert.deepEqual(config.agents[0].stages, ["proposal", "requirements"]);
+  assert.deepEqual(config.agents[0].stages, ["proposal", "specs"]);
 });
 
 function typedFixture(orchestratorFrontmatter: string, agentFrontmatter: string, agentConfigExtra = "") {

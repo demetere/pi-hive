@@ -8,6 +8,7 @@ import * as openspec from "../src/engine/openspec.ts";
 import { parseRid, renderReviewInput, ridFromReferer } from "../src/engine/review.ts";
 import { resolveHiveSddStatus } from "../src/engine/sdd.ts";
 import type { HiveState } from "../src/core/types.ts";
+import { resolveProjectIdentity } from "../src/shared/project-identity.ts";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-hive-approval-agent-"));
 
@@ -35,6 +36,16 @@ function emptyState(): HiveState {
 }
 
 // --- pure helpers (no CLI needed) ---
+
+test("canonical artifact table defines paths, dependencies, review order, and hashes", () => {
+  assert.deepEqual(openspec.ARTIFACT_ORDER, ["proposal", "design", "specs", "tasks"]);
+  assert.deepEqual(openspec.OPENSPEC_ARTIFACTS.map((artifact) => artifact.outputPath), [
+    "proposal.md", "design.md", "specs/**/*.md", "tasks.md",
+  ]);
+  assert.deepEqual(openspec.OPENSPEC_ARTIFACTS.find((artifact) => artifact.id === "tasks")?.dependencies, ["design", "specs"]);
+  assert.deepEqual(openspec.OPENSPEC_ARTIFACTS.map((artifact) => artifact.reviewOrder), [0, 1, 2, 3]);
+  assert.equal(openspec.OPENSPEC_ARTIFACTS.find((artifact) => artifact.id === "specs")?.hashStrategy, "sorted-path-and-content-sha256");
+});
 
 test("isSafeChangeId enforces kebab-case", () => {
   assert.ok(openspec.isSafeChangeId("add-auth"));
@@ -230,6 +241,46 @@ test("concurrent automated and human writers do not overwrite one another", asyn
   ]);
   assert.ok(existsSync(openspec.approvalRecordPath(cwd, "add-auth", "proposal", "automated-review")!));
   assert.ok(existsSync(openspec.approvalRecordPath(cwd, "add-auth", "proposal", "human")!));
+});
+
+test("execution task progress is external, hash-bound, and invalidated by plan edits", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [ ] 1.1 Implement API\n- [ ] ui-tests Add browser coverage\n");
+  const taskHash = openspec.artifactHash(cwd, "add-auth", "tasks")!;
+  const recordPath = openspec.executionTaskRecordPath(cwd, "add-auth", "1.1")!;
+  mkdirSync(join(recordPath, ".."), { recursive: true });
+  writeFileSync(recordPath, JSON.stringify({
+    schemaVersion: 1,
+    projectId: resolveProjectIdentity(cwd).projectId,
+    changeId: "add-auth",
+    taskId: "1.1",
+    taskText: "Implement API",
+    tasksHash: taskHash,
+    actor: "Execution Lead",
+    evidence: "tests/api.test.ts passes",
+    completedAt: new Date().toISOString(),
+  }));
+
+  let progress = openspec.executionTaskProgress(cwd, "add-auth");
+  assert.equal(progress.length, 2);
+  assert.equal(progress[0].completed, true);
+  assert.equal(progress[1].completed, false);
+  assert.match(readFileSync(join(dir, "tasks.md"), "utf8"), /- \[ \] 1\.1/);
+
+  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [ ] 1.1 Implement API safely\n");
+  progress = openspec.executionTaskProgress(cwd, "add-auth");
+  assert.equal(progress[0].completed, false);
+});
+
+test("markExecutionTaskComplete fails closed before the approved execution gate", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [ ] 1.1 Implement API\n");
+  assert.throws(
+    () => openspec.markExecutionTaskComplete(cwd, "add-auth", "1.1", "Lead", "implemented and tested"),
+    /Execution gate is not open/,
+  );
 });
 
 test("approval persistence failures propagate", () => {

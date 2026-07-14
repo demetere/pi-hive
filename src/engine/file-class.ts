@@ -8,12 +8,11 @@ export type FileClass = "spec" | "docs" | "tasks" | "code";
 
 // Ordered, most-specific-first. The first class whose any-glob matches wins;
 // anything unmatched falls back to "code". `spec` is checked BEFORE `tasks`
-// (Decision 6): everything under `.pi/hive/plans/**` is spec-class, full stop —
-// so an APPROVED plan's tasks.md is not coder-mutable by type policy. A generic
-// `tasks.md` OUTSIDE the plan store still classifies as `tasks` (coder-writable).
-// `spec` before `docs` so plan/openspec markdown is `spec`, not generic `docs`.
+// OpenSpec is the only planning artifact store. A generic tasks.md outside
+// openspec/ remains coder-writable tasks; openspec/tasks.md is spec-class.
+// `spec` comes before `docs` so OpenSpec markdown is never generic documentation.
 const RULES: Array<{ cls: FileClass; globs: string[] }> = [
-  { cls: "spec",  globs: [".pi/hive/plans/**", ".pi/hive/specs/**", "openspec/**"] },
+  { cls: "spec",  globs: ["openspec/**"] },
   { cls: "tasks", globs: ["**/tasks.md", "**/todo.md", ".pi/hive/tasks/**"] },
   { cls: "docs",  globs: ["**/*.md", "docs/**", "**/*.mdx"] },
 ];
