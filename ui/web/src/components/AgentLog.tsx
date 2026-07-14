@@ -9,6 +9,7 @@ interface Part { type: "text" | "thinking" | "toolCall" | "toolResult"; text?: s
 interface Entry { kind: "message" | "meta"; role?: string; parts?: Part[]; text?: string; ts?: string; }
 interface Invoc { task: string; entries: Entry[] }
 interface RunRef { id: string; label: string; }
+const MAX_TRANSCRIPT_ENTRIES = 2000;
 
 function splitInvocations(entries: Entry[]): Invoc[] {
   const invs: Invoc[] = [];
@@ -38,17 +39,20 @@ export default function AgentLog() {
   const [exists, setExists] = useState(true);
   const [runs, setRuns] = useState<RunRef[]>([]);
   const [selectedRun, setSelectedRun] = useState("current");
+  const [hasOlder, setHasOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [bulk, setBulk] = useState<{ open: boolean; n: number }>({ open: false, n: 0 });
 
   const invocations = useMemo(() => splitInvocations(entries), [entries]);
   const trapRef = useFocusTrap<HTMLDivElement>(!!openAgent);
   const offset = useRef(0);
+  const startOffset = useRef(0);
   const timer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const scroller = useRef<HTMLDivElement | null>(null);
   const selectedRunRef = useRef(selectedRun);
   selectedRunRef.current = selectedRun;
 
-  const poll = useCallback(async (initial: boolean) => {
+  const poll = useCallback(async (initial: boolean, before?: number) => {
     const a = openAgent;
     if (!a) return;
     // Don't hit the network for a background tab's live tail; the visibility
@@ -56,18 +60,29 @@ export default function AgentLog() {
     if (!initial && typeof document !== "undefined" && document.visibilityState === "hidden") return;
     try {
       const run = selectedRunRef.current;
-      const url = `/agent-log?session=${encodeURIComponent(a.sessionId)}&agent=${encodeURIComponent(a.name)}&offset=${offset.current}&run=${encodeURIComponent(run)}`;
+      const paging = before != null ? `&before=${before}` : `&offset=${offset.current}`;
+      const url = `/agent-log?session=${encodeURIComponent(a.sessionId)}&agent=${encodeURIComponent(a.name)}&run=${encodeURIComponent(run)}${paging}`;
       const res = await fetch(url);
       const data = await res.json();
       setStatus(data.status || "");
       setExists(!!data.exists);
       if (Array.isArray(data.runs)) setRuns(data.runs);
-      if (data.offset != null) offset.current = data.offset;
+      if (before == null && data.offset != null) offset.current = data.offset;
+      if ((initial || before != null) && data.startOffset != null) startOffset.current = data.startOffset;
+      if (initial || before != null) setHasOlder(!!data.hasMoreBefore);
       if (data.entries?.length) {
         const el = scroller.current;
         const atBottom = el ? el.scrollTop + el.clientHeight >= el.scrollHeight - 60 : true;
-        setEntries((prev) => initial ? data.entries : [...prev, ...data.entries]);
-        if (atBottom) queueMicrotask(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight }));
+        setEntries((prev) => {
+          if (initial) return data.entries.slice(-MAX_TRANSCRIPT_ENTRIES);
+          if (before != null) {
+            const combined = [...data.entries, ...prev];
+            if (combined.length >= MAX_TRANSCRIPT_ENTRIES) setHasOlder(false);
+            return combined.slice(0, MAX_TRANSCRIPT_ENTRIES);
+          }
+          return [...prev, ...data.entries].slice(-MAX_TRANSCRIPT_ENTRIES);
+        });
+        if (before == null && atBottom) queueMicrotask(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight }));
       }
       const shouldTail = data.running && selectedRunRef.current === "current";
       if (shouldTail && !timer.current) timer.current = setInterval(() => poll(false), 1500);
@@ -76,18 +91,25 @@ export default function AgentLog() {
     setLoading(false);
   }, [openAgent]);
 
+  async function loadOlder() {
+    if (loadingOlder || !hasOlder || startOffset.current <= 0) return;
+    setLoadingOlder(true);
+    await poll(false, startOffset.current);
+    setLoadingOlder(false);
+  }
+
   function loadRun(runId: string) {
     if (timer.current) { clearInterval(timer.current); timer.current = undefined; }
     setSelectedRun(runId);
     selectedRunRef.current = runId;
-    offset.current = 0; setEntries([]); setLoading(true);
+    offset.current = 0; startOffset.current = 0; setEntries([]); setHasOlder(false); setLoading(true);
     poll(true);
   }
 
   // (re)load when the target agent changes
   useEffect(() => {
     if (timer.current) { clearInterval(timer.current); timer.current = undefined; }
-    offset.current = 0; setEntries([]); setLoading(true); setExists(true); setRuns([]); setSelectedRun("current");
+    offset.current = 0; startOffset.current = 0; setEntries([]); setHasOlder(false); setLoading(true); setExists(true); setRuns([]); setSelectedRun("current");
     selectedRunRef.current = "current";
     if (openAgent) poll(true);
     return () => { if (timer.current) { clearInterval(timer.current); timer.current = undefined; } };
@@ -139,6 +161,11 @@ export default function AgentLog() {
           </div>
         )}
         <div className="log-body" ref={scroller}>
+          {!loading && hasOlder && (
+            <button className="log-bulk block mx-auto my-2" onClick={() => void loadOlder()} disabled={loadingOlder}>
+              {loadingOlder ? "Loading…" : "Load older transcript"}
+            </button>
+          )}
           {loading ? <div className="empty">Loading transcript…</div>
             : !exists ? <div className="empty">No transcript for this agent yet{status === "idle" ? " — it hasn't run." : "."}</div>
             : (<>

@@ -11,6 +11,7 @@ import {
   ensureDir,
   modelFrom,
   normalizeWorkerTools,
+  readJsonlPage,
   safeJson,
   safeRead,
   slug,
@@ -844,7 +845,8 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
   try {
     if (existsSync(runtime.sessionFile)) {
       copyFileSync(runtime.sessionFile, snapshotPath);
-      conversation = tailLines(safeRead(snapshotPath), state.config.settings.distiller.conversationLines);
+      const tail = readJsonlPage(snapshotPath, { before: Number.MAX_SAFE_INTEGER, maxBytes: 1024 * 1024 });
+      conversation = tailLines(tail.text, state.config.settings.distiller.conversationLines);
     }
   } catch { /* no session yet */ }
   if (!conversation) { try { rmSync(snapshotPath, { force: true }); } catch { /* noop */ } return; }
