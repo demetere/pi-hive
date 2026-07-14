@@ -10,6 +10,7 @@ import type { Subscriber } from "./types";
 import {
   allSnapshots,
   deleteProject,
+  deleteProjectSourceLogs,
   deleteSessions,
   ingestionHealth,
   listModels,
@@ -23,6 +24,7 @@ import {
   recentEvents,
   recentThinking,
   sessionSummaries,
+  sourceLogForSession,
   sourcePaths,
   startTelemetryRuntime,
   telemetryStorage,
@@ -159,6 +161,16 @@ const server = Bun.serve({
     }
 
     if (req.method === "DELETE") {
+      // Source logs are separate project files. Require an exact canonical
+      // project ID plus an explicit confirmation phrase; DB deletion never
+      // reaches this path.
+      const sourceProjectMatch = url.pathname.match(/^\/source-logs\/projects\/(.+)$/);
+      if (sourceProjectMatch) {
+        if (url.searchParams.get("confirm") !== "delete-source-logs") return json({ error: "explicit source-log confirmation required" }, 400);
+        const projectId = decodeURIComponent(sourceProjectMatch[1]);
+        if (!sessionSummaries().some((session) => session.project_id === projectId)) return json({ error: "unknown project" }, 404);
+        return json({ ok: true, projectId, ...deleteProjectSourceLogs(projectId) });
+      }
       // DELETE /sessions/:id  — purge one session's telemetry.
       const sessionMatch = url.pathname.match(/^\/sessions\/(.+)$/);
       if (sessionMatch) {
@@ -178,6 +190,19 @@ const server = Bun.serve({
     }
 
     if (url.pathname === "/") return dashboardHtml();
+
+    const sourceExportMatch = url.pathname.match(/^\/source-logs\/sessions\/(.+)$/);
+    if (req.method === "GET" && sourceExportMatch) {
+      const sessionId = decodeURIComponent(sourceExportMatch[1]);
+      const file = sourceLogForSession(sessionId);
+      if (!file) return json({ error: "source log not found" }, 404);
+      const response = new Response(Bun.file(file), { headers: {
+        "content-type": "application/x-ndjson",
+        "content-disposition": `attachment; filename="pi-hive-${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.jsonl"`,
+        "cache-control": "no-store",
+      } });
+      return applyBrowserSecurityHeaders(response, "api");
+    }
     if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/fonts/") || url.pathname === "/favicon.ico") {
       const asset = dashboardFile(url.pathname);
       if (asset) return asset;

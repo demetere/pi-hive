@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { HIVE_SESSIONS_DIR } from "../core/constants";
@@ -154,8 +154,10 @@ export function activateTeamRuntimes(state: HiveState, ctx: ExtensionContext, mo
 export function reloadTeam(state: HiveState, ctx: ExtensionContext) {
   state.config = loadConfig(ctx.cwd);
   state.session = restoreOrCreateSession(state, ctx, state.config);
-  ensureDir(state.session.sessionDir);
-  ensureDir(join(state.session.sessionDir, "agents"));
+  for (const dir of [state.session.sessionDir, join(state.session.sessionDir, "agents")]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+  }
 
   // Build runtimes for the team active in the current mode (plan → planning
   // team, otherwise the hive team). activateTeamRuntimes also reseeds usage

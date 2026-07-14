@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useHive } from "../store";
 import { pruneTelemetry, saveOverride } from "../store/wiring";
 import { confirmAction, deleteProject } from "../store/raw";
-import { fetchStorage, type StorageBreakdown } from "../api";
+import { deleteProjectSourceLogsRemote, fetchStorage, type StorageBreakdown } from "../api";
 import { fmtBytes, fmtNum } from "../lib/format";
 
 // One labelled metric tile in the storage summary. `accent` gives the prune-
@@ -90,6 +90,16 @@ export default function Settings() {
     });
   }
 
+  function requestDeleteSourceLogs(projectId: string, label: string) {
+    confirmAction({
+      title: "Delete project source logs?",
+      message: <>This permanently deletes the on-disk JSONL telemetry logs and rotated archives for <b>{label}</b>. This is separate from dashboard database cleanup and cannot be undone. Export any session log first from its download URL if you need a backup.</>,
+      confirmLabel: "Delete source logs",
+      danger: true,
+      onConfirm: async () => { await deleteProjectSourceLogsRemote(projectId); await refreshStorage(); },
+    });
+  }
+
   function requestPrune() {
     const days = Number(pruneDays.trim());
     if (!Number.isFinite(days) || days < 0) return;
@@ -149,7 +159,8 @@ export default function Settings() {
                     {r.overridden && (
                       <button className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.projectId, r.key, ""); }}>Reset</button>
                     )}
-                    <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.derived, r.label, r.sessions)}>Delete…</button>
+                    <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.projectId, r.label, r.sessions)}>Delete DB…</button>
+                    <button className="btn sm danger" disabled={busy === r.key} onClick={() => requestDeleteSourceLogs(r.projectId, r.label)}>Delete logs…</button>
                   </div>
                 </div>
               );
@@ -162,7 +173,7 @@ export default function Settings() {
         <div className="settings-head">
           <div>
             <h2 className="settings-title">Storage &amp; prune</h2>
-            <p className="settings-sub">Telemetry content size {scopedProject ? "for this project" : "across all projects"} (payloads + tool/message text; the physical database file is larger and shrinks after a prune). Pruning removes telemetry older than a chosen age and cannot be undone.</p>
+            <p className="settings-sub">Dashboard database and project source logs are reported separately. Pruning removes old database rows only; it never deletes the JSONL logs under each project. Source-log deletion is a separate guarded action above.</p>
           </div>
         </div>
 
@@ -172,7 +183,8 @@ export default function Settings() {
             <div className="storage-muted">Measuring…</div>
           ) : storage ? (
             <div className="storage-tiles">
-              <StorageTile label="Content size" value={fmtBytes(storage.bytes)} hint="payloads + text" />
+              <StorageTile label="DB content" value={fmtBytes(storage.database?.logicalBytes ?? storage.bytes)} hint={`${fmtBytes(storage.database?.fileBytes ?? 0)} on disk`} />
+              <StorageTile label="Source logs" value={fmtBytes(storage.sourceLogs?.bytes ?? 0)} hint={`${storage.sourceLogs?.files ?? 0} file${storage.sourceLogs?.files === 1 ? "" : "s"}`} />
               <StorageTile label="Events" value={fmtNum(storage.events)} />
               <StorageTile label="Sessions" value={String(storage.sessions)} />
               {storage.prune && (

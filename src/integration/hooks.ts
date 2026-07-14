@@ -374,7 +374,11 @@ ${catalog}`,
       // Bun-gated: the first hive session with Bun starts the daemon, later
       // sessions adopt the running one. No browser tab opens automatically — the
       // header shows the URL. It is NOT torn down on session shutdown (shared).
-      void ensureDashboard(state, ctx, EXTENSION_ROOT, { open: false }).then((result) => {
+      const telemetry = state.config?.settings?.telemetry;
+      const dashboardStartup = telemetry?.enabled !== false && telemetry?.dashboardAutoStart !== false
+        ? ensureDashboard(state, ctx, EXTENSION_ROOT, { open: false })
+        : Promise.resolve({ running: false, url: "", adopted: false, spawned: false });
+      void dashboardStartup.then((result) => {
         // The async health-check/spawn may finish after session_shutdown. Ignore
         // that stale completion instead of reinstalling UI on a dead session.
         if (state.shuttingDown || state.lifecycleGeneration !== lifecycleGeneration) {

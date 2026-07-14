@@ -164,6 +164,13 @@ settings:
   secret-paths:
     - config/secrets.json
     - .credentials/
+  telemetry:
+    enabled: true
+    dashboard-auto-start: true
+    retention-days: 30
+    max-log-bytes: 52428800       # 50 MiB; old files are timestamp-archived
+    capture-thinking: false       # raw reasoning stays out of dashboard APIs
+    redact-sensitive-data: true
   distiller:
     enabled: true
     model: openai-codex/gpt-5.4-mini   # see: pi --list-models

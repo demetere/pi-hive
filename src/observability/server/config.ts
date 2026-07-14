@@ -32,6 +32,16 @@ export const DB_PATH = path.resolve(process.env.HIVE_TELEMETRY_DB || path.join(H
 export const CONVERSATION_LOG = process.env.HIVE_CONVERSATION_LOG || "";
 export const BOOT_SESSION_ID = process.env.HIVE_SESSION_ID || "global";
 export const PROJECT_CWD = process.env.HIVE_PROJECT_CWD || process.cwd();
+function positiveEnv(name: string, fallback: number, max: number): number {
+  const raw = process.env[name] || String(fallback);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error(`Invalid ${name}: ${raw}`);
+  return value;
+}
+
+export const RETENTION_DAYS = positiveEnv("HIVE_TELEMETRY_RETENTION_DAYS", 30, 3650);
+export const MAX_LOG_BYTES = positiveEnv("HIVE_TELEMETRY_MAX_LOG_BYTES", 50 * 1024 * 1024, 1024 * 1024 * 1024);
+export const CAPTURE_THINKING = process.env.HIVE_TELEMETRY_CAPTURE_THINKING === "1";
 export const IDLE_TIMEOUT_MS: number = (() => {
   const raw = process.env.HIVE_DAEMON_IDLE_TIMEOUT_MS || "900000";
   const value = Number(raw);

@@ -1,16 +1,43 @@
-import { appendFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, AgentRuntime, HiveState, HiveTeam } from "../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TopologyNode } from "../shared/telemetry";
 import { tryResolveProjectIdentity } from "../shared/project-identity";
-import { agentSlug, ensureDir, truncateMiddle } from "../core/utils";
+import { agentSlug, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
 import { withCrossProcessFileLock } from "../core/file-lock";
+import { redactSensitive } from "../shared/privacy";
 
 export type HiveObsEventType = HiveTelemetryEventType;
 export type HiveObsEvent<P = JsonRecord> = HiveTelemetryEvent<P>;
+
+function telemetryEnabled(state: HiveState): boolean {
+  return state.config?.settings?.telemetry?.enabled !== false;
+}
+
+function privateDir(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  chmodSync(path, 0o700);
+}
+
+function appendPrivateJsonl(path: string, line: string, maxBytes?: number): void {
+  privateDir(dirname(path));
+  withCrossProcessFileLock(path, () => {
+    if (maxBytes && existsSync(path)) {
+      const size = statSync(path).size;
+      if (size > 0 && size + Buffer.byteLength(line) > maxBytes) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const archive = `${path}.${stamp}`;
+        renameSync(path, archive);
+        chmodSync(archive, 0o600);
+      }
+    }
+    appendFileSync(path, line, { mode: 0o600 });
+    chmodSync(path, 0o600);
+  });
+}
 export function hiveTelemetryRegistryPath(): string {
   const base = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
   return join(base, "hive", "telemetry-sessions.jsonl");
@@ -21,10 +48,10 @@ export function hiveTelemetryServerPidPath(): string {
 }
 
 export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
-  if (!state.session) return;
+  if (!state.session || !telemetryEnabled(state)) return;
   const registryPath = hiveTelemetryRegistryPath();
   const identity = tryResolveProjectIdentity(cwd);
-  ensureDir(dirname(registryPath));
+  privateDir(dirname(registryPath));
   withCrossProcessFileLock(registryPath, () => {
     appendFileSync(registryPath, `${JSON.stringify({
       registered_at: new Date().toISOString(),
@@ -38,7 +65,9 @@ export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
       telemetry_log: state.session!.observabilityLog,
       state_file: join(state.session!.sessionDir, "hive-state.json"),
       pid: process.pid,
-    })}\n`);
+      telemetry_settings: state.config?.settings?.telemetry,
+    })}\n`, { mode: 0o600 });
+    chmodSync(registryPath, 0o600);
   });
 }
 
@@ -162,9 +191,9 @@ function withOrchestratorUsage(
 }
 
 export function writeHiveStateSnapshot(state: HiveState) {
-  if (!state.session || state.mode === "normal") return;
+  if (!state.session || state.mode === "normal" || !telemetryEnabled(state)) return;
   const path = join(state.session.sessionDir, "hive-state.json");
-  ensureDir(dirname(path));
+  privateDir(dirname(path));
   const identity = tryResolveProjectIdentity(state.widgetCtx?.cwd);
   const snapshot: HiveStateSnapshot = {
     updated_at: new Date().toISOString(),
@@ -182,8 +211,10 @@ export function writeHiveStateSnapshot(state: HiveState) {
     agents: Array.from(state.runtimes.values()).map((runtime) => withOrchestratorUsage(state, runtimeSummary(runtime))),
   };
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(snapshot));
+  const persisted = redactSensitive(snapshot, state.config?.settings?.telemetry?.redactSensitiveData !== false);
+  writeFileSync(tmp, JSON.stringify(persisted), { mode: 0o600 });
   renameSync(tmp, path);
+  chmodSync(path, 0o600);
 }
 
 // Distinct config-declared models across both teams (excluding "inherit"). Used
@@ -283,7 +314,7 @@ export function emitModelCatalog(state: HiveState, registry: any, effectiveModel
 }
 
 export function startHiveTelemetrySession(state: HiveState, cwd: string) {
-  if (!state.session || state.mode === "normal" || state.telemetryRegistered) return;
+  if (!state.session || state.mode === "normal" || state.telemetryRegistered || !telemetryEnabled(state)) return;
   state.telemetryRegistered = true;
   registerHiveTelemetrySession(state, cwd);
   // Phase 2.3: do NOT embed the full topology tree here. It was redundant with
@@ -306,10 +337,9 @@ export function startHiveTelemetrySession(state: HiveState, cwd: string) {
 }
 
 export function emitHiveEvent(state: HiveState, type: HiveObsEventType, payload: JsonRecord = {}, actor = currentAgentName()) {
-  if (!state.session || state.mode === "normal") return;
+  if (!state.session || state.mode === "normal" || !telemetryEnabled(state)) return;
   const logPath = state.session.observabilityLog;
   if (!logPath) return;
-  ensureDir(dirname(logPath));
   const identity = tryResolveProjectIdentity(state.widgetCtx?.cwd);
   const event: HiveObsEvent = {
     event_id: randomUUID(),
@@ -325,8 +355,9 @@ export function emitHiveEvent(state: HiveState, type: HiveObsEventType, payload:
     actor,
     pid: process.pid,
     seq: state.obsSeq++,
-    payload,
+    payload: redactSensitive(payload, state.config?.settings?.telemetry?.redactSensitiveData !== false),
   };
-  appendFileSync(logPath, `${JSON.stringify(event)}\n`);
+  const line = `${JSON.stringify(event)}\n`;
+  appendPrivateJsonl(logPath, line, state.config?.settings?.telemetry?.maxLogBytes);
 }
 

@@ -12,6 +12,8 @@ export const CONFIG_LIMITS = {
   subagentOutputLimit: 1_000_000,
   maxParallel: 64,
   conversationLines: 10_000,
+  telemetryRetentionDays: 3650,
+  telemetryLogBytes: 1024 * 1024 * 1024,
 } as const;
 
 function object(value: unknown, label: string): asserts value is Record<string, any> {
@@ -168,7 +170,7 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
   const settings = parsed.settings;
   if (settings !== undefined) {
     object(settings, "settings");
-    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "secretPaths", "distiller"], "settings");
+    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "secretPaths", "distiller", "telemetry"], "settings");
     positiveInteger(settings.subagentOutputLimit, "settings.subagentOutputLimit", CONFIG_LIMITS.subagentOutputLimit);
     positiveInteger(settings.maxParallel, "settings.maxParallel", CONFIG_LIMITS.maxParallel);
     if (settings.defaultTools !== undefined) string(settings.defaultTools, "settings.defaultTools");
@@ -179,6 +181,16 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
       optionalBoolean(settings.distiller.enabled, "settings.distiller.enabled");
       if (settings.distiller.model !== undefined) string(settings.distiller.model, "settings.distiller.model");
       positiveInteger(settings.distiller.conversationLines, "settings.distiller.conversationLines", CONFIG_LIMITS.conversationLines);
+    }
+    if (settings.telemetry !== undefined) {
+      object(settings.telemetry, "settings.telemetry");
+      keys(settings.telemetry, ["enabled", "dashboardAutoStart", "retentionDays", "maxLogBytes", "captureThinking", "redactSensitiveData"], "settings.telemetry");
+      optionalBoolean(settings.telemetry.enabled, "settings.telemetry.enabled");
+      optionalBoolean(settings.telemetry.dashboardAutoStart, "settings.telemetry.dashboardAutoStart");
+      optionalBoolean(settings.telemetry.captureThinking, "settings.telemetry.captureThinking");
+      optionalBoolean(settings.telemetry.redactSensitiveData, "settings.telemetry.redactSensitiveData");
+      positiveInteger(settings.telemetry.retentionDays, "settings.telemetry.retentionDays", CONFIG_LIMITS.telemetryRetentionDays);
+      positiveInteger(settings.telemetry.maxLogBytes, "settings.telemetry.maxLogBytes", CONFIG_LIMITS.telemetryLogBytes);
     }
   }
 

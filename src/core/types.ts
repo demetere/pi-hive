@@ -140,10 +140,20 @@ export interface HiveTeam {
   agents: AgentConfig[];
 }
 
+export interface TelemetrySettings {
+  enabled: boolean;
+  dashboardAutoStart: boolean;
+  retentionDays: number;
+  maxLogBytes: number;
+  captureThinking: boolean;
+  redactSensitiveData: boolean;
+}
+
 export interface HiveSettings {
   subagentOutputLimit: number;
   defaultTools: string;
   maxParallel: number;
+  telemetry?: TelemetrySettings;
   // Project-relative paths that no worker may read or mutate, even when a broad
   // domain would otherwise allow them. Absolute paths are supported for
   // explicitly configured external secrets.

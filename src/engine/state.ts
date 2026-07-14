@@ -1,9 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { slug } from "../core/utils";
 import type { JsonRecord, HiveState } from "../core/types";
-import { ensureDir } from "../core/utils";
+import { redactSensitive } from "../shared/privacy";
+
+function ensurePrivateDir(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  chmodSync(path, 0o700);
+}
 
 export function createState(pi: ExtensionAPI): HiveState {
   return {
@@ -29,13 +34,17 @@ export function createState(pi: ExtensionAPI): HiveState {
 
 export function logRecord(state: HiveState, record: JsonRecord) {
   if (!state.session) return;
-  ensureDir(dirname(state.session.conversationLog));
+  ensurePrivateDir(dirname(state.session.conversationLog));
   // Stamp the writing process. The top-level orchestrator tails this shared log
   // to surface child-dispatched (nested) agents in its status view; the `pid`
   // lets it skip records it wrote itself (already reflected in its runtimes) and
   // apply only those from child worker processes.
-  const row = { timestamp: new Date().toISOString(), pid: process.pid, ...record };
-  appendFileSync(state.session.conversationLog, `${JSON.stringify(row)}\n`);
+  const row = redactSensitive(
+    { timestamp: new Date().toISOString(), pid: process.pid, ...record },
+    state.config?.settings?.telemetry?.redactSensitiveData !== false,
+  );
+  appendFileSync(state.session.conversationLog, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  chmodSync(state.session.conversationLog, 0o600);
 
   // Also keep a focused transcript for the visible main session agent
   // (Planning Lead / Orchestrator / custom root). conversation.jsonl remains the
@@ -51,6 +60,7 @@ export function logRecord(state: HiveState, record: JsonRecord) {
   if (!include) return;
   const runtimeFile = Array.from(state.runtimes.values()).find((runtime) => runtime.config.name === mainName || runtime.config.slug === mainName)?.sessionFile;
   const mainFile = runtimeFile || `${state.session.sessionDir}/agents/${slug(mainName)}.jsonl`;
-  ensureDir(dirname(mainFile));
-  appendFileSync(mainFile, `${JSON.stringify(row)}\n`);
+  ensurePrivateDir(dirname(mainFile));
+  appendFileSync(mainFile, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  chmodSync(mainFile, 0o600);
 }
