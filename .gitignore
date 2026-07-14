@@ -20,6 +20,10 @@ ui/web/node_modules/
 # Package tarball output
 *.tgz
 
+# Local audit remediation working files
+/docs/AUDIT_REMEDIATION_TASKS.md
+/docs/.AUDIT_REMEDIATION_TASKS.md.swp
+
 # NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
 # extension needs no build step at install time. Rebuild it after editing
 # ui/web/src/ with: just build-dashboard
