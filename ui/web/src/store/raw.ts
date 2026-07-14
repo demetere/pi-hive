@@ -113,13 +113,15 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
   return true;
 }
 
-export async function deleteProject(project: string): Promise<boolean> {
-  const ids = store.getState().sessions.filter((s) => s.project === project).map((s) => s.session_id);
-  const res = await deleteProjectRemote(project);
+export async function deleteProject(projectId: string): Promise<boolean> {
+  const state = store.getState();
+  const ids = state.sessions.filter((session) => session.project === projectId).map((session) => session.session_id);
+  const label = state.projectGroups.find((group) => group.name === projectId)?.label || "project";
+  const res = await deleteProjectRemote(projectId);
   if (!res.ok) { pushToast("error", res.error || "Failed to delete project — is the dashboard still running?"); return false; }
   purgeLocal(ids);
   reconcileScopeAfterDelete(ids);
-  pushToast("success", `Deleted ${ids.length} session${ids.length === 1 ? "" : "s"} from ${project}.`);
+  pushToast("success", `Deleted ${ids.length} session${ids.length === 1 ? "" : "s"} from ${label}.`);
   return true;
 }
 

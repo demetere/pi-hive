@@ -92,7 +92,7 @@ export interface HiveState {
   eventStatus: Map<string, Map<string, string>>;
   // Agent thinking/reasoning by session (fetched from transcripts, not events).
   thinkingBySession: Map<string, ThinkingEntry[]>;
-  // Per-project display-name overrides, keyed by cwd (from settings, DB-backed).
+  // Per-project display-name overrides, keyed by canonical project ID.
   projectOverrides: Map<string, string>;
   // SDK-reported thinking levels per model (GET /models), keyed by a normalized
   // model string — the dial's fallback when a node lacks its own sidecar (K3).

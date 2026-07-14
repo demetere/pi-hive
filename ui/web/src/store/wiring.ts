@@ -140,15 +140,15 @@ export async function pruneTelemetry(olderThanDays: number): Promise<boolean> {
 export async function refreshOverrides() {
   const overrides = await fetchProjectOverrides();
   const map = new Map<string, string>();
-  for (const o of overrides) map.set(o.cwd, o.label);
+  for (const o of overrides) map.set(o.projectId, o.label);
   store.setState({ projectOverrides: map });
   recomputeLive();
   recomputeScoped();
 }
 
-// Rename (label set) or reset (label empty) a project by cwd, then refresh.
-export async function saveOverride(cwd: string, label: string): Promise<boolean> {
-  const res = await saveProjectOverride(cwd, label.trim());
+// Rename (label set) or reset (label empty) by canonical project identity.
+export async function saveOverride(projectId: string, label: string): Promise<boolean> {
+  const res = await saveProjectOverride(projectId, label.trim());
   if (res.ok) { await refreshOverrides(); pushToast("success", label.trim() ? "Project renamed." : "Project name reset."); }
   else pushToast("error", res.error || "Failed to save project name — is the dashboard still running?");
   return res.ok;

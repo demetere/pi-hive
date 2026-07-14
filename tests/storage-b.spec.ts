@@ -116,7 +116,7 @@ test("session stats update sums (never Math.max) and is SQL-readable (B2)", () =
   db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "x", session_id: "s2", ts: "2026-07-01T02:00:00.000Z", cwd: "/proj2", type: "session_start", actor: "System", pid: 1, payload: {} }));
   db.updateSessionStats.run({
     $session_id: "s2", $input_tokens: 300, $output_tokens: 80, $cache_read_tokens: 400, $cache_write_tokens: 10,
-    $cost_usd: 0.08, $topology_hash: "hash123", $updated_at: "2026-07-01T02:10:00.000Z", $cwd: "/proj2", $session_dir: null, $telemetry_log: null,
+    $cost_usd: 0.08, $topology_hash: "hash123", $updated_at: "2026-07-01T02:10:00.000Z", $project_id: null, $canonical_root: null, $cwd: "/proj2", $session_dir: null, $telemetry_log: null,
   });
   const summary = db.querySessionSummaries().find((s) => s.session_id === "s2")!;
   expect(summary.input_tokens).toBe(300);

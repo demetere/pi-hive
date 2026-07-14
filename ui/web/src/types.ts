@@ -27,8 +27,11 @@ export type Snapshot = HiveStateSnapshot;
 // Derived per-session view model the UI consumes.
 export interface SessionView {
   session_id: string;
+  project_id: string;
+  project_root?: string;
+  project_label: string;
   cwd?: string;
-  project: string;
+  project: string; // canonical project ID (scope/group key)
   first_ts: string;
   last_ts: string;
   event_count: number;
@@ -43,8 +46,9 @@ export interface SessionView {
 }
 
 export interface ProjectGroup {
-  name: string;   // internal key (derived from cwd)
-  label: string;  // display label (override, or === name)
+  name: string;   // canonical project ID (internal scope/group key)
+  derivedLabel: string;
+  label: string;  // display override, or derivedLabel
   sessions: SessionView[];
   live: boolean;
   totalCost: number;

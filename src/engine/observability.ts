@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentConfig, AgentRuntime, HiveState, HiveTeam } from "../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, HiveTelemetryEventType, JsonRecord, TopologyNode } from "../shared/telemetry";
+import { tryResolveProjectIdentity } from "../shared/project-identity";
 import { agentSlug, ensureDir, truncateMiddle } from "../core/utils";
 import { currentAgentName } from "./session";
 
@@ -21,10 +22,14 @@ export function hiveTelemetryServerPidPath(): string {
 export function registerHiveTelemetrySession(state: HiveState, cwd: string) {
   if (!state.session) return;
   const registryPath = hiveTelemetryRegistryPath();
+  const identity = tryResolveProjectIdentity(cwd);
   ensureDir(dirname(registryPath));
   appendFileSync(registryPath, `${JSON.stringify({
     registered_at: new Date().toISOString(),
     session_id: state.session.sessionId,
+    project_id: identity?.projectId,
+    project_root: identity?.canonicalRoot,
+    project_label: identity?.displayLabel,
     cwd,
     session_dir: state.session.sessionDir,
     conversation_log: state.session.conversationLog,
@@ -157,9 +162,13 @@ export function writeHiveStateSnapshot(state: HiveState) {
   if (!state.session || state.mode === "normal") return;
   const path = join(state.session.sessionDir, "hive-state.json");
   ensureDir(dirname(path));
+  const identity = tryResolveProjectIdentity(state.widgetCtx?.cwd);
   const snapshot: HiveStateSnapshot = {
     updated_at: new Date().toISOString(),
     session_id: state.session.sessionId,
+    project_id: identity?.projectId,
+    project_root: identity?.canonicalRoot,
+    project_label: identity?.displayLabel,
     cwd: state.widgetCtx?.cwd,
     session_dir: state.session.sessionDir,
     telemetry_log: state.session.observabilityLog,
@@ -298,11 +307,15 @@ export function emitHiveEvent(state: HiveState, type: HiveObsEventType, payload:
   const logPath = state.session.observabilityLog;
   if (!logPath) return;
   ensureDir(dirname(logPath));
+  const identity = tryResolveProjectIdentity(state.widgetCtx?.cwd);
   const event: HiveObsEvent = {
     event_id: randomUUID(),
     ts: new Date().toISOString(),
     type,
     session_id: state.session.sessionId,
+    project_id: identity?.projectId,
+    project_root: identity?.canonicalRoot,
+    project_label: identity?.displayLabel,
     cwd: state.widgetCtx?.cwd,
     session_dir: state.session.sessionDir,
     telemetry_log: state.session.observabilityLog,

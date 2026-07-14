@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { agentRuns, parseAgentLog } from "../agent-log";
 import { projectName } from "../../shared/project";
+import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
 import type { AgentConfig, HiveTeam } from "../../core/types";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
@@ -155,6 +156,9 @@ export function readState(logPath: string) {
     const snapshot = JSON.parse(fs.readFileSync(source.statePath, "utf8")) as HiveStateSnapshot;
     snapshot.telemetry_log ||= source.logPath;
     snapshot.cwd ||= source.meta.cwd;
+    snapshot.project_id ||= source.meta.project_id;
+    snapshot.project_root ||= source.meta.project_root;
+    snapshot.project_label ||= source.meta.project_label;
     addSnapshot(snapshot);
   } catch { /* ignore partial snapshot writes */ }
 }
@@ -274,6 +278,10 @@ function versionTopology(snapshot: HiveStateSnapshot): string | undefined {
 function addSnapshot(snapshot: HiveStateSnapshot) {
   if (!snapshot || !snapshot.session_id) return;
   snapshot.updated_at ||= new Date().toISOString();
+  const identity = snapshot.project_id ? undefined : tryResolveProjectIdentity(snapshot.cwd);
+  snapshot.project_id ||= identity?.projectId;
+  snapshot.project_root ||= identity?.canonicalRoot;
+  snapshot.project_label ||= identity?.displayLabel;
   snapshot = enrichSnapshotTopologies(snapshot);
   snapshots.set(snapshot.session_id, snapshot);
   const topologyHashValue = versionTopology(snapshot);
@@ -305,6 +313,8 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
     upsertState.run({
       $session_id: snapshot.session_id,
       $updated_at: snapshot.updated_at,
+      $project_id: snapshot.project_id || null,
+      $canonical_root: snapshot.project_root || null,
       $cwd: snapshot.cwd || null,
       $session_dir: snapshot.session_dir || null,
       $telemetry_log: snapshot.telemetry_log || null,
@@ -312,6 +322,8 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
     });
     ensureSession.run({
       $session_id: snapshot.session_id,
+      $project_id: snapshot.project_id || null,
+      $canonical_root: snapshot.project_root || null,
       $cwd: snapshot.cwd || null,
       $session_dir: snapshot.session_dir || null,
       $telemetry_log: snapshot.telemetry_log || null,
@@ -326,6 +338,8 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
       $cost_usd: sum((a) => Number(a.costUsd)),
       $topology_hash: topologyHashValue || null,
       $updated_at: snapshot.updated_at,
+      $project_id: snapshot.project_id || null,
+      $canonical_root: snapshot.project_root || null,
       $cwd: snapshot.cwd || null,
       $session_dir: snapshot.session_dir || null,
       $telemetry_log: snapshot.telemetry_log || null,
@@ -337,6 +351,10 @@ function addSnapshot(snapshot: HiveStateSnapshot) {
 
 function enrichEvent(event: HiveTelemetryEvent, source: Source): HiveTelemetryEvent {
   event.cwd ||= source.meta.cwd;
+  const identity = event.project_id ? undefined : tryResolveProjectIdentity(event.cwd);
+  event.project_id ||= source.meta.project_id || identity?.projectId;
+  event.project_root ||= source.meta.project_root || identity?.canonicalRoot;
+  event.project_label ||= source.meta.project_label || identity?.displayLabel;
   event.session_dir ||= source.meta.session_dir;
   event.telemetry_log ||= source.logPath;
   event.conversation_log ||= source.meta.conversation_log;
@@ -597,8 +615,12 @@ export function sessionSummaries(): TelemetrySessionSummary[] {
     const snap = snapshots.get(row.session_id);
     const agents = snap && Array.isArray(snap.agents) ? snap.agents : [];
     const running = agents.filter((agent) => agent.status === "running").length;
+    const identity = row.project_id ? undefined : tryResolveProjectIdentity(row.cwd || undefined);
     return {
       session_id: row.session_id,
+      project_id: row.project_id || identity?.projectId,
+      project_root: row.canonical_root || identity?.canonicalRoot,
+      project_label: identity?.displayLabel || projectName(row.canonical_root || row.cwd || undefined),
       cwd: row.cwd || undefined,
       session_dir: row.session_dir || undefined,
       telemetry_log: row.telemetry_log || undefined,
@@ -677,24 +699,16 @@ export function pruneTelemetry(cutoffIso: string): { events: number; sessions: n
   return { events, sessions: idSet.size };
 }
 
-export function deleteProject(name: string): number {
-  const ids = sessionSummaries().filter((s) => projectName(s.cwd)).filter((s) => projectName(s.cwd) === name).map((s) => s.session_id);
+export function deleteProject(projectId: string): number {
+  const ids = sessionSummaries().filter((session) => session.project_id === projectId).map((session) => session.session_id);
   return deleteSessions(ids);
 }
 
-// Storage usage + prune preview for the Settings tab. `cwd` scopes to a single
-// project — resolved to that project's FULL cwd set (a project can span several
-// working dirs sharing a basename), so the number matches what a project-scoped
-// prune/delete would touch. Omit `cwd` for the whole DB. `olderThanDays`, when
-// given, adds the remove/keep preview at that cutoff.
-export function telemetryStorage(cwd?: string, olderThanDays?: number): StorageBreakdown {
-  let cwds: string[] | undefined;
-  if (cwd) {
-    const name = projectName(cwd);
-    // All known cwds that resolve to the same project as the requested one.
-    cwds = knownCwds().filter((c) => projectName(c) === name);
-    if (!cwds.length) cwds = [cwd];
-  }
+// Storage usage + prune preview for Settings. Project scope is selected only by
+// canonical project ID; cwd remains a detail used by the existing SQL byte
+// aggregation after the authoritative ID lookup.
+export function telemetryStorage(projectId?: string, olderThanDays?: number): StorageBreakdown {
+  const cwds = projectId ? knownCwds(projectId) : undefined;
   const cutoff = Number.isFinite(olderThanDays) && (olderThanDays as number) >= 0
     ? new Date(Date.now() - (olderThanDays as number) * 86400_000).toISOString()
     : undefined;
