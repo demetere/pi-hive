@@ -173,6 +173,7 @@ function spawnDashboard(state: HiveState, ctx: ExtensionContext, extensionRoot: 
   if (!state.session) return { ok: false, error: "session not initialized" };
   const path = serverPath(extensionRoot);
   if (!existsSync(path)) return { ok: false, error: `missing observability server: ${path}` };
+  const telemetry = state.config?.settings?.telemetry;
   const { proc } = spawnManaged("bun", [path], {
     cwd: ctx.cwd,
     detached: true,
@@ -192,6 +193,9 @@ function spawnDashboard(state: HiveState, ctx: ExtensionContext, extensionRoot: 
       HIVE_CONVERSATION_LOG: state.session.conversationLog,
       HIVE_SESSION_ID: state.session.sessionId,
       HIVE_PROJECT_CWD: ctx.cwd,
+      HIVE_TELEMETRY_RETENTION_DAYS: String(telemetry?.retentionDays ?? 30),
+      HIVE_TELEMETRY_MAX_LOG_BYTES: String(telemetry?.maxLogBytes ?? 50 * 1024 * 1024),
+      HIVE_TELEMETRY_CAPTURE_THINKING: telemetry?.captureThinking === true ? "1" : "0",
     },
   });
   proc.on("error", () => { /* readiness timeout surfaces startup failure */ });

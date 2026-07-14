@@ -182,7 +182,9 @@ See SETUP.md §4 for the full directory contract.
 
 `pi-hive` writes its own tailored telemetry stream to `.pi/hive/sessions/<session>/hive-events.jsonl` for each hive session and a live mutable state snapshot to `.pi/hive/sessions/<session>/hive-state.json`. Top-level sessions are also registered in a global index at `~/.pi/agent/hive/telemetry-sessions.jsonl`, so one `/hive-observe` dashboard can show hives from multiple projects and many simultaneously running sessions.
 
-`/hive-observe` starts a local Bun/SSE dashboard with hive-specific views for project/session cards, topology, delegation lifecycle, worker state, tool activity, tokens, and cost. The dashboard also indexes events/state into local SQLite at `~/.pi/agent/hive/telemetry.db` for fast reloads and historical browsing. Telemetry persists even when the dashboard is not running; serve it only when you want to watch or inspect.
+`/hive-observe` starts a local Bun/SSE dashboard with hive-specific views for project/session cards, topology, delegation lifecycle, worker state, tool activity, tokens, and cost. The dashboard also indexes events/state into local SQLite at `~/.pi/agent/hive/telemetry.db` for fast reloads and historical browsing. By default, sensitive credential-shaped values are redacted before persistence, telemetry files use mode `0600`, directories use `0700`, the database is pruned after 30 days, source logs rotate at 50 MiB, and raw reasoning text is not exposed. Configure these controls under `settings.telemetry` in `hive-config.yaml`.
+
+Database pruning and project logs are deliberately separate: pruning SQLite does **not** delete `.pi/hive/sessions/**`. The Settings tab reports both stores independently, offers an authenticated, explicitly confirmed source-log deletion action, and provides per-session JSONL downloads for backup.
 
 The dashboard UI is a prebuilt Solid + Vite single-page app under `ui/web/`. The
 server (`src/observability/server/index.ts`) serves the built bundle from `ui/web/dist/`,
@@ -215,6 +217,12 @@ Runtime knobs are hive-specific:
 - `HIVE_TELEMETRY_REGISTRY` — override the global session registry path
 - `HIVE_TELEMETRY_DB` — override the local SQLite database path
 - `HIVE_DAEMON_IDLE_TIMEOUT_MS` — stop an unused daemon after this interval, default `900000` (15 minutes; allowed `1000..86400000`)
+- `settings.telemetry.enabled` — disable pi-hive event/state telemetry for this project
+- `settings.telemetry.dashboard-auto-start` — keep telemetry but require `/hive-observe` to start the dashboard
+- `settings.telemetry.retention-days` — automatic SQLite retention, default `30`
+- `settings.telemetry.max-log-bytes` — rotate each source JSONL before the next event would exceed this size, default `52428800`
+- `settings.telemetry.capture-thinking` — expose raw worker reasoning in dashboard transcript/activity APIs, default `false`
+- `settings.telemetry.redact-sensitive-data` — redact credential-shaped keys and text before pi-hive persistence, default `true`
 
 Dashboard startup is serialized across Pi processes. A session adopts a daemon only when `/health` reports the same protocol, package/build, registry, and database identity; compatible upgrades restart stale same-storage daemons, while a daemon using different storage is never adopted. Host headers must exactly match the configured listener origin.
 

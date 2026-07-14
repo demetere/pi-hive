@@ -79,7 +79,7 @@ The following are deliberate limits of policy enforcement and are not approval o
 2. **Bare bash read paths may evade static domain extraction.** A bare filename such as `cat secrets.env` may not be distinguishable from an ordinary argument. Mutations remain fail-closed by command classification. Reserved secret paths and tool-level read controls reduce, but do not eliminate, this limitation.
 3. **Same-UID compromise is out of scope.** Authentication protects against accidental, browser-origin, cross-project, and unauthenticated API use; it cannot protect credentials or files from a malicious process already running as the same OS user.
 4. **Agent controls are not OS sandboxing.** Domain and command policy constrain registered Pi tools. They do not contain a hostile runtime, dependency, Pi extension, kernel exploit, or trusted human shell.
-5. **Telemetry is local but sensitive.** Prompts, outputs, paths, and usage metadata can contain confidential information. Filesystem permissions and future retention/redaction controls are required; users must protect the host account and backups.
+5. **Telemetry is local but sensitive.** Prompts, outputs, paths, and usage metadata can contain confidential information. Pi-hive applies restrictive permissions, bounded retention/rotation, opt-in reasoning capture, and best-effort credential redaction, but pattern-based redaction cannot recognize every secret. Users must still protect the host account, source logs, exports, and backups.
 
 ## Audit baseline
 

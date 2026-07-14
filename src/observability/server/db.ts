@@ -6,11 +6,16 @@ import { DB_PATH } from "./config";
 import type { HiveStateSnapshot, HiveTelemetryEvent } from "../../shared/telemetry";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true, mode: 0o700 });
+fs.chmodSync(path.dirname(DB_PATH), 0o700);
 const isNewDb = !fs.existsSync(DB_PATH) || fs.statSync(DB_PATH).size === 0;
 export const db = new Database(DB_PATH);
+try { fs.chmodSync(DB_PATH, 0o600); } catch { /* created lazily on first write */ }
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 5000");
+for (const file of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+  try { fs.chmodSync(file, 0o600); } catch { /* SQLite may create sidecars lazily */ }
+}
 // Enable incremental auto-vacuum on fresh DBs so the prune action (B6) can
 // reclaim space via PRAGMA incremental_vacuum. Legacy DBs keep their existing
 // vacuum mode (switching would require a full rewrite) and skip vacuuming.

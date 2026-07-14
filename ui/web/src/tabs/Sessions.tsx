@@ -7,6 +7,7 @@ import { useFrozenOrder } from "../hooks/useFrozenOrder";
 import RelTime from "../hooks/RelTime";
 import { absTime, fmtCost, fmtNum, sessionSlug } from "../lib/format";
 import type { SessionView } from "../types";
+import { sourceLogExportUrl } from "../api";
 
 // Lazy like Overview does, so the d3-hierarchy chunk only loads when the
 // topology-version modal is actually opened (keeps the code-split intact).
@@ -170,6 +171,7 @@ export default function Sessions(props: { search: string }) {
               </td>
               <td className="num muted-cell"><RelTime ts={s.last_ts} /></td>
               <td className="del-col" onClick={(e) => e.stopPropagation()}>
+                <a className="row-del" title="Export source JSONL" href={sourceLogExportUrl(s.session_id)} download>⇩</a>
                 <button className="row-del" title="Delete session telemetry" onClick={(e) => askDelete(s, e)}>🗑</button>
               </td>
             </tr>

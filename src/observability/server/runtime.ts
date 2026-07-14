@@ -9,7 +9,7 @@ import type { AgentConfig, HiveTeam } from "../../core/types";
 import { withCrossProcessFileLock } from "../../core/file-lock";
 import { readJsonlPage } from "../../core/fs";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
-import { BOOT_SESSION_ID, CONVERSATION_LOG, PROJECT_CWD, REGISTRY_PATH, SINGLE_LOG_PATH } from "./config";
+import { BOOT_SESSION_ID, CAPTURE_THINKING, CONVERSATION_LOG, DB_PATH, PROJECT_CWD, REGISTRY_PATH, RETENTION_DAYS, SINGLE_LOG_PATH } from "./config";
 import {
   db,
   dbEventRow,
@@ -138,8 +138,10 @@ export function addSource(logPath: string, meta: TelemetryRegistryRow = {}) {
     lastSuccessfulIngest: cursor.updatedAt,
   });
   try {
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.closeSync(fs.openSync(abs, "a"));
+    fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(abs), 0o700);
+    fs.closeSync(fs.openSync(abs, "a", 0o600));
+    fs.chmodSync(abs, 0o600);
     fs.watchFile(abs, { interval: 500 }, () => readSource(abs));
     fs.watchFile(statePath, { interval: 500 }, () => readState(abs));
   } catch {
@@ -814,12 +816,70 @@ export function deleteProject(projectId: string): number {
 // Storage usage + prune preview for Settings. Project scope is selected only by
 // canonical project ID; cwd remains a detail used by the existing SQL byte
 // aggregation after the authoritative ID lookup.
-export function telemetryStorage(projectId?: string, olderThanDays?: number): StorageBreakdown {
+export interface TelemetryStorage extends StorageBreakdown {
+  database: { logicalBytes: number; fileBytes: number };
+  sourceLogs: { bytes: number; files: number };
+}
+
+function trackedSourcePaths(projectId?: string): string[] {
+  const allowedSessions = projectId
+    ? new Set(sessionSummaries().filter((session) => session.project_id === projectId).map((session) => session.session_id))
+    : undefined;
+  return Array.from(sources.values())
+    .filter((source) => !allowedSessions || (source.meta?.session_id && allowedSessions.has(source.meta.session_id)))
+    .map((source) => source.logPath);
+}
+
+function sourceArtifacts(basePath: string): string[] {
+  const dir = path.dirname(basePath);
+  const base = path.basename(basePath);
+  try {
+    return (fs.readdirSync(dir) as string[])
+      .filter((name: string) => name === base || (name.startsWith(`${base}.`) && name !== `${base}.lock`))
+      .map((name: string) => path.join(dir, name));
+  } catch { return []; }
+}
+
+export function telemetryStorage(projectId?: string, olderThanDays?: number): TelemetryStorage {
   const cwds = projectId ? knownCwds(projectId) : undefined;
   const cutoff = Number.isFinite(olderThanDays) && (olderThanDays as number) >= 0
     ? new Date(Date.now() - (olderThanDays as number) * 86400_000).toISOString()
     : undefined;
-  return storageBreakdown(cwds, cutoff);
+  const logical = storageBreakdown(cwds, cutoff);
+  const paths = trackedSourcePaths(projectId).flatMap(sourceArtifacts);
+  const sourceBytes = paths.reduce((sum, file) => {
+    try { return sum + fs.statSync(file).size; } catch { return sum; }
+  }, 0);
+  let dbFileBytes = 0;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try { dbFileBytes += fs.statSync(`${DB_PATH}${suffix}`).size; } catch { /* absent */ }
+  }
+  return { ...logical, database: { logicalBytes: logical.bytes, fileBytes: dbFileBytes }, sourceLogs: { bytes: sourceBytes, files: paths.length } };
+}
+
+export function sourceLogForSession(sessionId: string): string | undefined {
+  const summary = sessionSummaries().find((session) => session.session_id === sessionId);
+  if (!summary) return undefined;
+  const source = Array.from(sources.values()).find((candidate) => candidate.meta?.session_id === sessionId);
+  return source?.logPath;
+}
+
+export function deleteProjectSourceLogs(projectId: string): { files: number; bytes: number } {
+  if (!projectId) return { files: 0, bytes: 0 };
+  const paths = trackedSourcePaths(projectId);
+  let files = 0;
+  let bytes = 0;
+  for (const abs of paths) {
+    const source = sources.get(abs);
+    if (source) {
+      try { fs.unwatchFile(abs); fs.unwatchFile(source.statePath); } catch { /* noop */ }
+      sources.delete(abs);
+    }
+    for (const file of sourceArtifacts(abs)) {
+      try { bytes += fs.statSync(file).size; fs.unlinkSync(file); files++; } catch { /* already gone */ }
+    }
+  }
+  return { files, bytes };
 }
 
 // Resolve an agent's own conversation-log file from the latest snapshot. The
@@ -879,6 +939,7 @@ function thinkingFromEntries(agent: string, entries: any[]): ThinkingEntry[] {
 }
 
 export function recentThinking(sessionId: string, perAgent = 12, overall = 200): ThinkingEntry[] {
+  if (!CAPTURE_THINKING) return [];
   const snap = snapshots.get(sessionId);
   if (!snap || !Array.isArray(snap.agents)) return [];
   const out: ThinkingEntry[] = [];
@@ -927,6 +988,11 @@ export function readAgentLog(sessionId: string, agent: string, offset: number, r
   if (!runs.length) return { entries: [], offset: 0, size: 0, status, exists: false, runs: [] };
   const chosen = runs.find((r) => r.id === runId) || runs[0];
   const parsed = parseAgentLog(chosen.file, pageOptions);
+  if (!CAPTURE_THINKING) {
+    parsed.entries = parsed.entries.map((entry: any) => entry.kind === "message" && Array.isArray(entry.parts)
+      ? { ...entry, parts: entry.parts.filter((part: any) => part.type !== "thinking") }
+      : entry);
+  }
   return {
     ...parsed,
     status,
@@ -943,8 +1009,13 @@ export function startTelemetryRuntime() {
   resumeIngestSources();
   readRegistry();
   if (SINGLE_LOG_PATH) addSource(SINGLE_LOG_PATH, { cwd: PROJECT_CWD, conversation_log: CONVERSATION_LOG, session_id: BOOT_SESSION_ID });
-  fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true });
-  fs.closeSync(fs.openSync(REGISTRY_PATH, "a"));
+  fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.dirname(REGISTRY_PATH), 0o700);
+  fs.closeSync(fs.openSync(REGISTRY_PATH, "a", 0o600));
+  fs.chmodSync(REGISTRY_PATH, 0o600);
+  const automaticPrune = () => pruneTelemetry(new Date(Date.now() - RETENTION_DAYS * 86400_000).toISOString());
+  automaticPrune();
+  setInterval(automaticPrune, 60 * 60 * 1000).unref?.();
   fs.watchFile(REGISTRY_PATH, { interval: 1000 }, readRegistry);
   setInterval(() => {
     readRegistry();

@@ -159,6 +159,7 @@ export function loadConfig(cwd: string): HiveConfig {
 
   const settings = parsed.settings || ({} as HiveConfig["settings"]);
   const distiller = (settings as any).distiller || {};
+  const telemetry = (settings as any).telemetry || {};
   const distillerEnabled = distiller.enabled !== false;
   const distillerModel = String(distiller.model || "").trim();
   if (distillerEnabled && !distillerModel) {
@@ -199,6 +200,14 @@ export function loadConfig(cwd: string): HiveConfig {
       defaultTools: settings.defaultTools ?? "read, grep, find, ls",
       maxParallel: settings.maxParallel ?? 3,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
+      telemetry: {
+        enabled: telemetry.enabled !== false,
+        dashboardAutoStart: telemetry.dashboardAutoStart !== false,
+        retentionDays: telemetry.retentionDays ?? 30,
+        maxLogBytes: telemetry.maxLogBytes ?? 50 * 1024 * 1024,
+        captureThinking: telemetry.captureThinking === true,
+        redactSensitiveData: telemetry.redactSensitiveData !== false,
+      },
       distiller: {
         enabled: distillerEnabled,
         model: distillerModel,

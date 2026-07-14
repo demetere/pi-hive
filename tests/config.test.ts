@@ -22,6 +22,13 @@ settings:
   secret-paths:
     - config/secrets.json
     - .credentials/
+  telemetry:
+    enabled: true
+    dashboard-auto-start: false
+    retention-days: 45
+    max-log-bytes: 1048576
+    capture-thinking: true
+    redact-sensitive-data: true
   distiller:
     enabled: false
 shared-context:
@@ -66,10 +73,28 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.settings.maxParallel, 2);
   assert.equal(config.settings.defaultTools, "read, grep");
   assert.deepEqual(config.settings.secretPaths, ["config/secrets.json", ".credentials/"]);
+  assert.deepEqual(config.settings.telemetry, {
+    enabled: true,
+    dashboardAutoStart: false,
+    retentionDays: 45,
+    maxLogBytes: 1048576,
+    captureThinking: true,
+    redactSensitiveData: true,
+  });
   assert.equal(config.settings.distiller.enabled, false);
   assert.equal(config.orchestrator.model, "openai/gpt-5");
   assert.equal(config.orchestrator.thinking, "medium");
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
+});
+
+test("loadConfig rejects unsafe telemetry limits and unknown telemetry keys", () => {
+  for (const replacement of ["max-log-bytes: 0", "retention-days: 999999", "send-to-cloud: true"]) {
+    const cwd = fixtureProject();
+    const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+    const yaml = readFileSync(cfgPath, "utf8").replace("max-log-bytes: 1048576", replacement);
+    writeFileSync(cfgPath, yaml);
+    assert.throws(() => loadConfig(cwd), /settings\.telemetry/);
+  }
 });
 
 test("loadConfig reads shared_context from YAML (both snake_case and camelCase)", () => {

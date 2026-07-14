@@ -286,6 +286,8 @@ export interface StorageBreakdown {
   bytes: number;
   events: number;
   sessions: number;
+  database: { logicalBytes: number; fileBytes: number };
+  sourceLogs: { bytes: number; files: number };
   prune?: { removeBytes: number; removeEvents: number; removeSessions: number; keepBytes: number; keepEvents: number };
 }
 export async function fetchStorage(projectId?: string, olderThanDays?: number): Promise<StorageBreakdown | null> {
@@ -369,6 +371,14 @@ export function deleteSessionRemote(sessionId: string): Promise<WriteResult> {
 
 export function deleteProjectRemote(projectId: string): Promise<WriteResult> {
   return writeResult("delete project", writeFetch(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }));
+}
+
+export function deleteProjectSourceLogsRemote(projectId: string): Promise<WriteResult> {
+  return writeResult("delete project source logs", writeFetch(`/source-logs/projects/${encodeURIComponent(projectId)}?confirm=delete-source-logs`, { method: "DELETE" }));
+}
+
+export function sourceLogExportUrl(sessionId: string): string {
+  return `/source-logs/sessions/${encodeURIComponent(sessionId)}`;
 }
 
 export function openEventStream(): EventSource {
