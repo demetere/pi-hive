@@ -20,7 +20,7 @@ import {
 import { allConfiguredAgents, loadConfig, teamForMode } from "../core/config";
 import { canonicalMode } from "../core/types";
 import { runtimeKey } from "./agent-lookup";
-import { resolveProjectPath } from "../core/safe-path";
+import { resolveConfiguredPath } from "../core/safe-path";
 
 export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, _cfg: HiveConfig): SessionState {
   const existing = ctx.sessionManager
@@ -49,7 +49,7 @@ export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, 
 }
 
 export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: HiveConfig, agent: AgentConfig): AgentRuntime {
-  const safePromptPath = resolveProjectPath(ctx.cwd, agent.path);
+  const safePromptPath = resolveConfiguredPath(ctx.cwd, agent.path, agent.allowOutsideProject === true);
   if (!safePromptPath) throw new Error(`Agent prompt is missing or escapes the project root: ${agent.path}`);
   const fullPath = safePromptPath.canonicalPath;
   const parsed = parseFrontmatter(safeRead(fullPath));
@@ -73,12 +73,12 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
   // targets it). No need to declare it in frontmatter.
   const explicitContext = normalizeKnowledgeRefs(attrs.context || (agent as any).context);
   const mentalModelPath = agent.path.replace(/\.md$/, "-mental-model.yaml");
-  const safeMentalModel = resolveProjectPath(ctx.cwd, mentalModelPath);
+  const safeMentalModel = resolveConfiguredPath(ctx.cwd, mentalModelPath, agent.allowOutsideProject === true);
   const alreadyListed = safeMentalModel
-    ? explicitContext.some((ref) => resolveProjectPath(ctx.cwd, ref.path)?.canonicalPath === safeMentalModel.canonicalPath)
+    ? explicitContext.some((ref) => resolveConfiguredPath(ctx.cwd, ref.path, ref.allowOutsideProject === true)?.canonicalPath === safeMentalModel.canonicalPath)
     : false;
   const context = safeMentalModel && !alreadyListed
-    ? [{ path: mentalModelPath, useWhen: "Your durable mental model for this role.", updatable: true }, ...explicitContext]
+    ? [{ path: mentalModelPath, useWhen: "Your durable mental model for this role.", updatable: true, allowOutsideProject: agent.allowOutsideProject === true }, ...explicitContext]
     : explicitContext;
   const mergedConfig: AgentConfig = {
     ...agent,

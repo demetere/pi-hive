@@ -424,6 +424,128 @@ test("loadConfig rejects a non-boolean network capability", () => {
   assert.throws(() => loadConfig(cwd), /network must be true or false/);
 });
 
+test("loadConfig rejects unknown settings and nested keys with path-aware errors", () => {
+  const cwd = fixtureProject();
+  const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(file, readFileSync(file, "utf8").replace("  max-parallel: 2", "  max-parallel: 2\n  max-paralell: 3"));
+  assert.throws(() => loadConfig(cwd), /settings\.maxParalell is not a recognized configuration key/);
+
+  const cwd2 = fixtureProject();
+  const file2 = join(cwd2, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(file2, readFileSync(file2, "utf8").replace("    enabled: false", "    enabled: false\n    conversation-linez: 12"));
+  assert.throws(() => loadConfig(cwd2), /settings\.distiller\.conversationLinez is not a recognized configuration key/);
+
+  const cwd3 = fixtureProject();
+  const file3 = join(cwd3, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(file3, readFileSync(file3, "utf8").replace("      routing-tags: [frontend, react]", "      routing-tags: [frontend, react]\n      mystery-capability: true"));
+  assert.throws(() => loadConfig(cwd3), /hive\.agents\[0\]\.mysteryCapability is not a recognized configuration key/);
+});
+
+test("loadConfig validates raw bounded positive integers before defaults", () => {
+  for (const value of ["0", "-1", "1.5", "\"2\"", "NaN", "65"]) {
+    const cwd = fixtureProject();
+    const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+    writeFileSync(file, readFileSync(file, "utf8").replace("max-parallel: 2", `max-parallel: ${value}`));
+    assert.throws(() => loadConfig(cwd), /settings\.maxParallel must be a positive integer between 1 and 64/, `value ${value}`);
+  }
+
+  const cwd = fixtureProject();
+  const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(file, readFileSync(file, "utf8").replace("  default-tools:", "  subagent-output-limit: -5\n  default-tools:"));
+  assert.throws(() => loadConfig(cwd), /settings\.subagentOutputLimit must be a positive integer/);
+});
+
+test("loadConfig requires regular Markdown prompt files", () => {
+  const missing = fixtureProject();
+  const missingFile = join(missing, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(missingFile, readFileSync(missingFile, "utf8").replace(".pi/hive/agents/frontend.md", ".pi/hive/agents/missing.md"));
+  assert.throws(() => loadConfig(missing), /hive\.agents\[0\]\.path.*missing|hive\.agents\[0\]\.path must exist/);
+
+  const directory = fixtureProject();
+  const directoryFile = join(directory, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(directoryFile, readFileSync(directoryFile, "utf8").replace(".pi/hive/agents/frontend.md", ".pi/hive/agents"));
+  assert.throws(() => loadConfig(directory), /hive\.agents\[0\]\.path must reference a Markdown/);
+});
+
+test("configured paths are project-relative unless explicitly opted outside", () => {
+  const cwd = fixtureProject();
+  const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+  const absoluteInside = join(cwd, ".pi", "hive", "agents", "frontend.md");
+  writeFileSync(file, readFileSync(file, "utf8").replace(".pi/hive/agents/frontend.md", absoluteInside));
+  assert.throws(() => loadConfig(cwd), /hive\.agents\[0\]\.path must be project-relative/);
+
+  const outsideDir = mkdtempSync(join(tmpdir(), "pi-hive-outside-agent-"));
+  const outsidePrompt = join(outsideDir, "external.md");
+  writeFileSync(outsidePrompt, "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: coder\n---\nExternal.");
+  const opted = fixtureProject();
+  const optedFile = join(opted, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(optedFile, readFileSync(optedFile, "utf8").replace(
+    "      path: .pi/hive/agents/frontend.md",
+    `      path: ${outsidePrompt}\n      allow-outside-project: true`,
+  ));
+  assert.equal(loadConfig(opted).agents[0].path, outsidePrompt);
+});
+
+test("context, skill, and domain paths require explicit outside-project opt-in", () => {
+  for (const block of [
+    "      context:\n        - path: ../outside-context.md",
+    "      skills:\n        - path: ../outside-skill.md",
+  ]) {
+    const cwd = fixtureProject();
+    const file = join(cwd, ".pi", "hive", "hive-config.yaml");
+    writeFileSync(file, readFileSync(file, "utf8").replace("      routing-tags: [frontend, react]", `      routing-tags: [frontend, react]\n${block}`));
+    assert.throws(() => loadConfig(cwd), /must stay inside the project; outside paths require allow-outside-project: true/, block);
+  }
+  const domain = fixtureProject();
+  const domainFile = join(domain, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(domainFile, readFileSync(domainFile, "utf8").replace("        - path: ui", "        - path: ../outside-domain"));
+  assert.throws(() => loadConfig(domain), /hive\.agents\[0\]\.domain\[0\]\.path must stay inside the project/);
+});
+
+test("loadConfig enforces global duplicate slugs, tree depth, config size, refs, and injected bytes", () => {
+  const duplicate = fixtureProject();
+  const duplicateFile = join(duplicate, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(duplicateFile, readFileSync(duplicateFile, "utf8").replace(
+    "  agents: []",
+    "  agents:\n    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md",
+  ));
+  assert.throws(() => loadConfig(duplicate), /Duplicate agent slug "frontend-dev".*hive\.agents\[0\].*planning\.agents\[0\]/);
+
+  const deep = fixtureProject();
+  const deepFile = join(deep, ".pi", "hive", "hive-config.yaml");
+  const deepMember = (level: number, indent: number): string => {
+    const pad = " ".repeat(indent);
+    const fields = `${pad}- name: Deep ${level}\n${pad}  path: .pi/hive/agents/frontend.md`;
+    return level >= 8 ? fields : `${fields}\n${pad}  members:\n${deepMember(level + 1, indent + 4)}`;
+  };
+  writeFileSync(deepFile, readFileSync(deepFile, "utf8").replace("      members:\n        - name: QA Engineer\n          path: .pi/hive/agents/qa.md\n          routing-tags: [test]", `      members:\n${deepMember(0, 8)}`));
+  assert.throws(() => loadConfig(deep), /maximum agent tree depth/);
+
+  const huge = fixtureProject();
+  const hugeFile = join(huge, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(hugeFile, `${readFileSync(hugeFile, "utf8")}\n# ${"x".repeat(512 * 1024)}\n`);
+  assert.throws(() => loadConfig(huge), /exceeds the 524288-byte size limit/);
+
+  const tooManyRefs = fixtureProject();
+  const refsFile = join(tooManyRefs, ".pi", "hive", "hive-config.yaml");
+  const refs = Array.from({ length: 257 }, (_, index) => `        - path: missing-${index}.md`).join("\n");
+  writeFileSync(refsFile, readFileSync(refsFile, "utf8").replace("      routing-tags: [frontend, react]", `      routing-tags: [frontend, react]\n      context:\n${refs}`));
+  assert.throws(() => loadConfig(tooManyRefs), /context\/skill refs exceed the limit of 256/);
+
+  const tooManyAgents = fixtureProject();
+  const agentsFile = join(tooManyAgents, ".pi", "hive", "hive-config.yaml");
+  const agents = Array.from({ length: 129 }, (_, index) => `    - name: Agent ${index}\n      path: .pi/hive/agents/frontend.md`).join("\n");
+  writeFileSync(agentsFile, readFileSync(agentsFile, "utf8").replace("  agents: []", `  agents:\n${agents}`));
+  assert.throws(() => loadConfig(tooManyAgents), /Configured agents exceed the limit of 128/);
+
+  const context = fixtureProject();
+  const largeContext = join(context, "large-context.md");
+  writeFileSync(largeContext, "x".repeat(2 * 1024 * 1024 + 1));
+  const contextFile = join(context, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(contextFile, readFileSync(contextFile, "utf8").replace("      routing-tags: [frontend, react]", "      routing-tags: [frontend, react]\n      context:\n        - path: large-context.md"));
+  assert.throws(() => loadConfig(context), /Configured prompt\/context content .* limit is 2097152 bytes/);
+});
+
 test("inferAgentType applies name/report heuristics", () => {
   assert.equal(inferAgentType("Security Reviewer", false, false), "reviewer");
   assert.equal(inferAgentType("QA Tester", false, false), "tester");

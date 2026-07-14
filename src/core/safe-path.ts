@@ -89,6 +89,13 @@ export function resolveContainedPath(root: string, candidate: string, options: C
   return canonicalCandidate;
 }
 
+export function resolveConfiguredPath(projectRoot: string, requestedPath: string, allowOutsideProject = false, options: ContainedPathOptions = {}): ContainedPath | null {
+  if (!requestedPath || hasForeignAbsoluteSyntax(requestedPath)) return null;
+  if (!allowOutsideProject) return resolveProjectPath(projectRoot, requestedPath, options);
+  const candidate = path.isAbsolute(requestedPath) ? requestedPath : path.resolve(projectRoot, requestedPath);
+  return resolveCanonicalPath(candidate, options);
+}
+
 export function resolveProjectPath(projectRoot: string, requestedPath: string, options: ContainedPathOptions = {}): ContainedPath | null {
   if (!requestedPath || hasForeignAbsoluteSyntax(requestedPath)) return null;
   const candidate = path.isAbsolute(requestedPath) ? requestedPath : path.resolve(projectRoot, requestedPath);

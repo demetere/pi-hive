@@ -133,7 +133,9 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 | `secret-paths` | Additional project-relative or absolute paths reserved from every worker | `[]` |
 | `distiller.enabled` | Run the mental-model distiller after each worker | `true` |
 | `distiller.model` | `provider/id` for distillation (required if enabled) | — |
-| `distiller.conversation-lines` | Tail of the session fed to the distiller | `200` |
+| `distiller.conversation-lines` | Tail of the session fed to the distiller (`1..10000`) | `200` |
+
+Numeric limits are strict positive integers: `subagent-output-limit` is capped at `1000000` and `max-parallel` at `64`. Quoted numbers, fractions, zero, negatives, `NaN`, infinity, and unknown keys are rejected during config load with a path-aware error.
 
 ### Template (copy, then edit to the confirmed tree)
 
@@ -219,8 +221,10 @@ hive:
 > **Both blocks are required.** `hive-config.yaml` must define *both* a `hive:` team block and a `planning:` team block — the loader hard-throws otherwise. There is no top-level `orchestrator:` / `agents:` shape: keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree.
 
 Rules:
-- Every `name` must be **unique** across the whole tree (case-insensitive). Duplicates are dropped. Names are shared across both blocks' namespace — do not reuse a name between `planning:` and `hive:` unless it is deliberately the same agent.
-- `path` is repo-relative and must point at an existing `.md` you create in §6–§7.
+- Every name/slug must be **unique across both team trees** (case-insensitive). Duplicates hard-fail; planning and hive do not have separate namespaces.
+- `path` is project-relative and must point at an existing regular `.md` file you create in §6–§7. Context, skill, and domain paths are project-relative by default too. An intentional external path must set `allow-outside-project: true` on that agent/ref/scope; use this sparingly because it expands the worker trust boundary.
+- The config is capped at 512 KiB, 128 configured agents, tree depth 8, 256 context/skill refs, and 2 MiB of configured prompt/context source bytes.
+- Unknown top-level, settings, team, agent, ref, domain, and nested distiller keys hard-fail with their full path.
 - `color` is `#rrggbb` (used in the tree widget and inline labels). Give each agent a distinct color.
 
 YAML subset supported by pi-hive:

@@ -2,8 +2,8 @@ import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { spawnManaged } from "./process";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
-import { HIVE_AGENTS_DIR, TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
+import { basename, dirname, join } from "node:path";
+import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";
 import { normalizeMentalModelSpine } from "../core/mental-model";
 import type { AgentRuntime, HiveState } from "../core/types";
 import {
@@ -31,7 +31,7 @@ import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extens
 import { approvalRecordPath, isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict, type ArtifactId } from "./openspec";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
-import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
+import { resolveConfiguredPath } from "../core/safe-path";
 
 // Dashboard activity should show reviewer/worker conclusions without confusing
 // middle elision in normal cases. Keep a high hard cap to avoid unbounded shared
@@ -136,8 +136,10 @@ class WorkerRunLifecycle {
 }
 
 export function resolveWorkerSkillPaths(cwd: string, refs: unknown[] = []): string[] {
-  return normalizeWorkerSkillPaths(refs).flatMap((skillPath) => {
-    const safe = resolveProjectPath(cwd, skillPath);
+  return normalizeWorkerSkillPaths(refs).flatMap((skillPath, index) => {
+    const raw = refs[index] as any;
+    const allowOutside = raw?.allowOutsideProject === true || raw?.path?.allowOutsideProject === true;
+    const safe = resolveConfiguredPath(cwd, skillPath, allowOutside);
     return safe ? [safe.canonicalPath] : [];
   });
 }
@@ -824,10 +826,9 @@ export async function distillMentalModel(state: HiveState, ctx: ExtensionContext
   const target = agentMentalModelTarget(runtime);
   if (!target) return;
 
-  // Write guard: the mental-model file must live under the agents/ root.
-  const agentsRoot = resolve(ctx.cwd, HIVE_AGENTS_DIR);
-  if (!resolveProjectPath(ctx.cwd, HIVE_AGENTS_DIR, { allowMissing: true })) return;
-  const safeTarget = resolveContainedPath(agentsRoot, resolve(ctx.cwd, target.path), { allowMissing: true });
+  // Config validation already requires an explicit opt-in for targets outside
+  // the project. Re-apply that rule at the write site before queueing mutation.
+  const safeTarget = resolveConfiguredPath(ctx.cwd, target.path, target.allowOutsideProject === true, { allowMissing: true });
   if (!safeTarget) return;
   const targetPath = safeTarget.canonicalPath;
 

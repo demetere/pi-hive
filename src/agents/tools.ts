@@ -45,6 +45,11 @@ function boundedToolRender(lines: string[] | (() => string[]), ellipsis: string)
   };
 }
 
+function boundedPositiveInteger(value: unknown, fallback: number, max: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.min(max, Math.floor(number)) : fallback;
+}
+
 function formatTokens(count: number): string {
   if (!Number.isFinite(count) || count < 0) return "?";
   if (count < 1000) return Math.round(count).toString();
@@ -109,7 +114,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     }),
     async execute(_toolCallId: string, params: unknown) {
       const { task, limit } = params as { task: string; limit?: number };
-      const recommendations = routeAgents(state, task, Math.max(1, Math.min(10, Number(limit || 5))));
+      const recommendations = routeAgents(state, task, boundedPositiveInteger(limit, 5, 10));
       const text = recommendations.length
         ? recommendations.map((entry, index) => `${index + 1}. ${entry.slug} — ${entry.name}${entry.group ? ` (${entry.group})` : ""} — score ${entry.score}${entry.reasons.length ? ` — ${entry.reasons.join(", ")}` : ""}`).join("\n")
         : "No strong route found. Delegate to the team lead whose consultWhen best matches, or ask the user to clarify scope.";
@@ -229,7 +234,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
     }),
     async execute(_toolCallId: string, params: unknown) {
       if (!state.session) return { content: [{ type: "text", text: "hive session not initialized" }], details: { ok: false } };
-      const lines = Math.max(1, Math.min(1000, Number((params as any).lines || 80)));
+      const lines = boundedPositiveInteger((params as any).lines, 80, 1000);
       const agentName = String((params as any).agent || "").trim();
       // Scoped-only: an empty agent (including a lines-only call) is rejected.
       // Reading the shared log dumped its entire interleaved tail — individual
