@@ -38,6 +38,7 @@ The extension must stay safe to install globally: it should do nothing unless th
 
 - Do not commit `node_modules/`, `.tgz` package artifacts, runtime sessions, logs, or local telemetry databases.
 - Use Conventional Commits for commit messages, for example `feat: add hive policy checks`, `fix(dashboard): preserve runtime counters`, or `docs: update setup guide`.
+- For audit remediation backlog tasks (`Txx`), completion includes committing, pushing, and opening a PR after required checks pass. Do not begin the next task until that PR exists.
 - Do not add AI attribution trailers or generated-by notices to commits, docs, package text, or release notes.
 - Prefer complete, production-ready changes: no TODO placeholders, no debug logs, and no unexplained temporary behavior.
 
