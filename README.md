@@ -214,5 +214,8 @@ Runtime knobs are hive-specific:
 - `HIVE_TELEMETRY_NO_OPEN=1` — start the server without opening a browser
 - `HIVE_TELEMETRY_REGISTRY` — override the global session registry path
 - `HIVE_TELEMETRY_DB` — override the local SQLite database path
+- `HIVE_DAEMON_IDLE_TIMEOUT_MS` — stop an unused daemon after this interval, default `900000` (15 minutes; allowed `1000..86400000`)
 
 Dashboard startup is serialized across Pi processes. A session adopts a daemon only when `/health` reports the same protocol, package/build, registry, and database identity; compatible upgrades restart stale same-storage daemons, while a daemon using different storage is never adopted. Host headers must exactly match the configured listener origin.
+
+The dashboard uses an explicit shared-daemon lifecycle: it survives individual Pi session shutdowns because other sessions may still use it. It stops through `/hive-observe-stop`, an authenticated restart, normal OS/process supervision, or automatically after 15 minutes with no HTTP activity and no active browser event stream. Shutdown requests must carry both the daemon bearer token and its current startup nonce. PID metadata is informational only—pi-hive never signals a process merely because its PID appears in a file, and it does not discover termination targets with `lsof`. Managed child-process handles may be terminated directly when startup fails because the live handle, rather than persisted metadata, supplies process identity. Manual `just run` and `just dashboard-serve` starts also keep write authentication enabled by minting an ephemeral credential when no private stored token exists.

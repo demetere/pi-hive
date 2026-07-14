@@ -12,6 +12,7 @@ import {
   dashboardUrl,
   daemonTokenPath,
   ensureDashboard,
+  stopDashboard,
   type EnsureDeps,
 } from "../src/engine/dashboard.ts";
 import { daemonIdentity, type DaemonHealth, type DaemonIdentity } from "../src/shared/daemon-protocol.ts";
@@ -185,6 +186,62 @@ test("is Bun-gated and browser opening remains explicit", async () => {
   const explicit = deps();
   await ensureDashboard(state(), ctx, ROOT, { open: true }, explicit.deps);
   assert.equal(explicit.calls.opened, 1);
+});
+
+test("stale PID metadata is never used as process-kill authority", async () => {
+  const isolated = mkdtempSync(join(tmpdir(), "pi-hive-dashboard-stale-pid-"));
+  process.env.HIVE_TELEMETRY_REGISTRY = join(isolated, "registry.jsonl");
+  try {
+    mkdirSync(isolated, { recursive: true });
+    writeFileSync(dashboardMetadataPath(), JSON.stringify({ pid: 999_999, port: dashboardPort(), startupNonce: "stale" }));
+    let shutdownCalls = 0;
+    let managedKills = 0;
+    const stopped = await stopDashboard(state(), dashboardHost(), dashboardPort(), {
+      probe: async () => null,
+      requestShutdown: async () => { shutdownCalls++; return true; },
+      killManaged: () => { managedKills++; return 999_999; },
+      withLock: async (_path, fn) => fn(),
+    });
+    assert.deepEqual(stopped, []);
+    assert.equal(shutdownCalls, 0);
+    assert.equal(managedKills, 0);
+    assert.equal(existsSync(dashboardMetadataPath()), false);
+  } finally {
+    delete process.env.HIVE_TELEMETRY_REGISTRY;
+  }
+});
+
+test("stops an adopted daemon only through token and startup-nonce authentication", async () => {
+  installAdoptionToken();
+  const current = healthy(expectedIdentity("exact-daemon"), { pid: 54321 });
+  let running = true;
+  let requestedNonce = "";
+  const stopped = await stopDashboard(state(), dashboardHost(), dashboardPort(), {
+    probe: async () => running ? current : null,
+    requestShutdown: async (_host, _port, health, token) => {
+      requestedNonce = health.startupNonce;
+      assert.equal(token, "adoption-token");
+      running = false;
+      return true;
+    },
+    killManaged: () => { throw new Error("must not signal an adopted process"); },
+    withLock: async (_path, fn) => fn(),
+  });
+  assert.deepEqual(stopped, [54321]);
+  assert.equal(requestedNonce, "exact-daemon");
+});
+
+test("refuses to stop a daemon belonging to different storage", async () => {
+  const other = healthy({ ...expectedIdentity(), registryPath: "/other/registry.jsonl" }, { pid: 65432 });
+  let shutdownCalls = 0;
+  const stopped = await stopDashboard(state(), dashboardHost(), dashboardPort(), {
+    probe: async () => other,
+    requestShutdown: async () => { shutdownCalls++; return true; },
+    killManaged: () => { throw new Error("must not signal an unowned process"); },
+    withLock: async (_path, fn) => fn(),
+  });
+  assert.deepEqual(stopped, []);
+  assert.equal(shutdownCalls, 0);
 });
 
 test("host and port validation fail closed; non-loopback requires dangerous opt-in", () => {

@@ -438,7 +438,8 @@ ${catalog}`,
     state.distillQueues?.clear();
     // The telemetry dashboard is a SHARED global daemon — other sessions may be
     // using it — so we do NOT kill it here. Just drop this session's reference.
-    // Explicit teardown is /hive-observe-stop.
+    // Explicit teardown is /hive-observe-stop; the server also self-terminates
+    // after its bounded idle timeout when no browser event stream remains.
     state.obsServer = undefined;
     if (state.dashboardActionTimer) clearInterval(state.dashboardActionTimer);
     state.dashboardActionTimer = undefined;

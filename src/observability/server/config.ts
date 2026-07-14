@@ -32,6 +32,14 @@ export const DB_PATH = path.resolve(process.env.HIVE_TELEMETRY_DB || path.join(H
 export const CONVERSATION_LOG = process.env.HIVE_CONVERSATION_LOG || "";
 export const BOOT_SESSION_ID = process.env.HIVE_SESSION_ID || "global";
 export const PROJECT_CWD = process.env.HIVE_PROJECT_CWD || process.cwd();
+export const IDLE_TIMEOUT_MS: number = (() => {
+  const raw = process.env.HIVE_DAEMON_IDLE_TIMEOUT_MS || "900000";
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1_000 || value > 86_400_000) {
+    throw new Error(`Invalid HIVE_DAEMON_IDLE_TIMEOUT_MS: ${raw}`);
+  }
+  return value;
+})();
 
 const EXTENSION_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 export const PROTOCOL_VERSION = Number(process.env.HIVE_DAEMON_PROTOCOL_VERSION || DAEMON_PROTOCOL_VERSION);
@@ -39,14 +47,18 @@ export const PACKAGE_VERSION = process.env.HIVE_DAEMON_PACKAGE_VERSION || packag
 export const BUILD_HASH = process.env.HIVE_DAEMON_BUILD_HASH || dashboardBuildHash(EXTENSION_ROOT);
 export const STARTUP_NONCE = process.env.HIVE_DAEMON_STARTUP_NONCE || randomUUID();
 
-// Empty credentials always fail closed. The extension passes a fresh token to a
-// managed spawn and publishes it only after identity-checked health readiness.
-// An out-of-band start may reuse an existing private token but never mints one
-// before the listener is known healthy.
+// Authentication is mandatory for every startup path. Managed extension starts
+// pass a fresh token and publish it only after identity-checked readiness. Manual
+// and development starts reuse a private published token when available, or keep
+// a newly minted token in memory (the same-origin bootstrap exposes it to the UI).
 export const DAEMON_TOKEN: string = (() => {
   const configured = process.env.HIVE_TELEMETRY_TOKEN?.trim();
   if (configured) return configured;
-  try { return fs.readFileSync(path.join(path.dirname(REGISTRY_PATH), "daemon-token"), "utf8").trim(); } catch { return ""; }
+  try {
+    const stored = fs.readFileSync(path.join(path.dirname(REGISTRY_PATH), "daemon-token"), "utf8").trim();
+    if (stored) return stored;
+  } catch { /* mint an ephemeral credential below */ }
+  return (randomUUID() + randomUUID()).replace(/-/g, "");
 })();
 
 export function expectedHostHeader(): string {

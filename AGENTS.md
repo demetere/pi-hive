@@ -17,7 +17,7 @@ The extension must stay safe to install globally: it should do nothing unless th
 ## Extension behavior
 
 - Do not register commands, tools, hooks, background servers, file watchers, or UI widgets unless `.pi/hive/hive-config.yaml` exists in the active project.
-- Do not start long-lived processes from the extension factory. Start them from commands/session hooks and clean them up on session shutdown.
+- Do not start long-lived processes from the extension factory. Start them from commands/session hooks. Clean up session-owned processes on session shutdown; deliberately shared daemons must provide authenticated explicit teardown and a bounded idle timeout.
 - Guard TUI-specific behavior with `ctx.mode === "tui"`; guard user prompts/notifications with `ctx.hasUI`.
 - Custom tools that mutate files must use Pi's file mutation queue.
 - Tool output must be bounded/truncated so it cannot flood model context.
