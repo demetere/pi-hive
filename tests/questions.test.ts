@@ -32,22 +32,29 @@ test("ask_user is a base tool available to planners/leads", () => {
   assert.ok(buildHiveTools(state, "Planner").some((t) => t.name === "ask_user"));
 });
 
-test("recordQuestion writes a file-backed trail under the change", () => {
+test("recordQuestion writes a file-backed trail under the change", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-q-cwd-"));
-  recordQuestion(cwd, "add-auth", "Which auth provider?", "OIDC via Auth0");
+  await recordQuestion(cwd, "add-auth", "Which auth provider?", "OIDC via Auth0");
   const file = join(cwd, "openspec", "changes", "add-auth", "questions.md");
   assert.ok(existsSync(file));
   const body = readFileSync(file, "utf8");
   assert.match(body, /Which auth provider\?/);
   assert.match(body, /OIDC via Auth0/);
   // Unsafe change ids are ignored (no traversal).
-  recordQuestion(cwd, "../evil", "x");
+  await recordQuestion(cwd, "../evil", "x");
   assert.ok(!existsSync(join(cwd, "..", "evil", "questions.md")));
 });
 
-test("enqueueQuestion appends a question action to dashboard-actions.jsonl", () => {
+test("question writes share Pi's per-file mutation queue", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-q-concurrent-"));
+  await Promise.all(Array.from({ length: 20 }, (_, index) => recordQuestion(cwd, "queued", `Question ${index}?`)));
+  const body = readFileSync(join(cwd, "openspec", "changes", "queued", "questions.md"), "utf8");
+  for (let index = 0; index < 20; index++) assert.match(body, new RegExp(`Question ${index}\\?`));
+});
+
+test("enqueueQuestion appends a question action to dashboard-actions.jsonl", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-q-enq-"));
-  assert.ok(enqueueQuestion(dir, { question: "Scope?", change: "add-auth", askedBy: "Planner" }));
+  assert.ok(await enqueueQuestion(dir, { question: "Scope?", change: "add-auth", askedBy: "Planner" }));
   const body = readFileSync(join(dir, "dashboard-actions.jsonl"), "utf8");
   const action = JSON.parse(body.trim().split("\n")[0]);
   assert.equal(action.type, "question");

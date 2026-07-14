@@ -8,6 +8,7 @@ import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
 import { checkPlannerStages, checkTypePolicy, type PolicyAction, type PolicyDecision } from "./policy";
 import { hasForeignAbsoluteSyntax, isPathInside, resolveContainedPath, resolveProjectPath } from "../core/safe-path";
+import { checkReservedPath, type ReservedPathAccess } from "./reserved-paths";
 
 function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | undefined {
   return resolveRuntime(state, callerName);
@@ -379,6 +380,14 @@ function statementIsCommit(statement: string): boolean {
 // message) and independently of the domain-glob layer; both must pass. When the
 // agent has no agent-type (e.g. tests, normal mode) type-policy is skipped and
 // only the domain layer applies. Returns a block reason or undefined.
+function enforceReservedPath(state: HiveState, runtime: AgentRuntime, ctx: ExtensionContext, rawPath: string, access: ReservedPathAccess): string | undefined {
+  const decision = checkReservedPath(ctx.cwd, rawPath, access, {
+    secretPaths: state.config?.settings.secretPaths,
+    allowMissing: access === "upsert",
+  });
+  return decision.ok ? undefined : `${runtime.config.name} cannot ${access} reserved path "${rawPath}": ${decision.reason}. Reserved-path policy takes precedence over domains.`;
+}
+
 function enforceTypePolicyForPath(runtime: AgentRuntime, ctx: ExtensionContext, rawPath: string, action: PolicyAction): string | undefined {
   const agentType = runtime.config.agentType;
   if (!agentType) return undefined;
@@ -410,6 +419,8 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
 
   if (readTools.has(toolName)) {
     for (const path of extractToolPaths(toolName, event.input)) {
+      const reservedBlock = enforceReservedPath(state, runtime, ctx, path, "read");
+      if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, "read");
       if (typeBlock) return { block: true, reason: typeBlock };
       if (!domainAllows(ctx, runtime, path, "read")) {
@@ -420,6 +431,8 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
 
   if (upsertTools.has(toolName)) {
     for (const path of extractToolPaths(toolName, event.input)) {
+      const reservedBlock = enforceReservedPath(state, runtime, ctx, path, "upsert");
+      if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, "upsert");
       if (typeBlock) return { block: true, reason: typeBlock };
       if (!domainAllows(ctx, runtime, path, "upsert")) {
@@ -456,6 +469,13 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
     const kind = bashMutationKind(command);
     const capability = kind === "read" ? "read" : kind;
     const paths = extractBashPathTokens(command);
+    // Reserved-path matching also inspects bare shell words. Normal domain
+    // extraction intentionally ignores bare words because they are ambiguous,
+    // but known secret/authority names must never inherit that fail-open rule.
+    for (const token of parsedCommands.flatMap(({ words }) => words)) {
+      const reservedBlock = enforceReservedPath(state, runtime, ctx, token, capability);
+      if (reservedBlock) return { block: true, reason: reservedBlock };
+    }
     // Git mutates its worktree/repository even when the command names no file.
     // Treat the effective working directory as an explicit policy target so a
     // write-capable agent can use granted Git operations without making generic
@@ -478,6 +498,8 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
     }
 
     for (const path of paths) {
+      const reservedBlock = enforceReservedPath(state, runtime, ctx, path, capability);
+      if (reservedBlock) return { block: true, reason: reservedBlock };
       const typeBlock = enforceTypePolicyForPath(runtime, ctx, path, policyAction);
       if (typeBlock) return { block: true, reason: typeBlock };
       if (!domainAllows(ctx, runtime, path, capability)) {

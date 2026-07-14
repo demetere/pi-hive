@@ -19,6 +19,9 @@ function fixtureProject() {
 settings:
   default-tools: read, grep
   max-parallel: 2
+  secret-paths:
+    - config/secrets.json
+    - .credentials/
   distiller:
     enabled: false
 shared-context:
@@ -54,6 +57,7 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
 
   assert.equal(config.settings.maxParallel, 2);
   assert.equal(config.settings.defaultTools, "read, grep");
+  assert.deepEqual(config.settings.secretPaths, ["config/secrets.json", ".credentials/"]);
   assert.equal(config.settings.distiller.enabled, false);
   assert.equal(config.orchestrator.model, "openai/gpt-5");
   assert.equal(config.orchestrator.thinking, "medium");

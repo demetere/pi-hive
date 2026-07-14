@@ -130,6 +130,7 @@ This file declares **only**: the orchestrator, the agent tree (`name` / `color` 
 | `subagent-output-limit` | Max chars of a worker's answer surfaced to its caller | `12000` |
 | `default-tools` | Fallback tool list **only** if an agent omits `tools` | `read, grep, find, ls` |
 | `max-parallel` | Max concurrent subprocess runs **per process** | `3` |
+| `secret-paths` | Additional project-relative or absolute paths reserved from every worker | `[]` |
 | `distiller.enabled` | Run the mental-model distiller after each worker | `true` |
 | `distiller.model` | `provider/id` for distillation (required if enabled) | — |
 | `distiller.conversation-lines` | Tail of the session fed to the distiller | `200` |
@@ -157,6 +158,10 @@ settings:
   subagent-output-limit: 12000
   default-tools: read, grep, find, ls
   max-parallel: 10
+  # Reserved before normal domain rules. Add project-specific credentials here.
+  secret-paths:
+    - config/secrets.json
+    - .credentials/
   distiller:
     enabled: true
     model: openai-codex/gpt-5.4-mini   # see: pi --list-models
@@ -333,10 +338,17 @@ Capabilities are resolved by **most-specific-wins**: deeper `path` entries beat 
 
 ```yaml
 domain:
-  - path: .                                   # read the whole repo
+  - path: .                                   # read the repo except sensitive state
     read: true
     upsert: false
     delete: false
+    exclude:
+      - ".git/**"
+      - ".env*"
+      - "**/.env*"
+      - ".pi/hive/sessions/**"
+      - "**/*.key"
+      - "**/*.pem"
   - path: backend/internal/                   # write broadly across the backend
     read: true
     upsert: true
@@ -369,9 +381,11 @@ domain:
 
 At the same `path`, the `include` rule is more specific than the catch-all deny, so `*_test.go` writes are allowed while production `.go` writes remain blocked.
 
+Reserved-path policy runs **before** domains and cannot be reopened by a broader or deeper scope. It blocks approval authority, telemetry/session files, daemon metadata, `.git/**`, `.env*`, private-key filenames, and every configured `settings.secret-paths` entry. Only trusted extension internals can pass an explicit override; no agent frontmatter or domain option grants one. Keep the exclusions above as defense in depth and as an auditable declaration of broad-read intent.
+
 Patterns:
 - **Coder** → `read: true, upsert: true, delete: false` over its code area (e.g. `backend/`), plus explicit deny carve-outs for any sub-area another agent owns.
-- **Lead** → `read: true, upsert: false, delete: false` broadly over the repo, plus `upsert: true` over `docs/` or `tasks/` where it writes specs.
+- **Lead** → `read: true, upsert: false, delete: false` over only the areas it must inspect; all writes remain delegated.
 - **Reviewer / QA** → `read: true, upsert: false, delete: false` over what it reviews.
 - **Test-only implementer** → broad read scope plus an `include` write scope for test globs such as `**/*_test.go`, `**/*.test.ts`, or `**/*.spec.ts`.
 - Reserve `delete: true` for the rare agent that must remove files; default it off explicitly.
@@ -410,6 +424,8 @@ domain:
     read: true
     upsert: false
     delete: false
+    exclude:
+      - "sessions/**"
 routing-tags:
   - coordination
   - synthesis
@@ -468,12 +484,17 @@ skills:
 domain:
   - path: docs/
     read: true
-    upsert: true
+    upsert: false
     delete: false
   - path: <area this lead reads to scope work>
     read: true
     upsert: false
     delete: false
+    exclude:
+      - ".env*"
+      - "**/.env*"
+      - "**/*.key"
+      - "**/*.pem"
 routing-tags:
   - <tag>
   - <tag>
@@ -528,6 +549,11 @@ domain:
     read: true
     upsert: true        # false for pure reviewers
     delete: false
+    exclude:
+      - ".env*"
+      - "**/.env*"
+      - "**/*.key"
+      - "**/*.pem"
 routing-tags:
   - <tag>
 consult-when: <one-line: this member's specialty>

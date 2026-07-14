@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import { PROJECT_CWD } from "./config";
 import { sessionSummaries } from "./runtime";
 import { ensureDir } from "../../core/fs";
+import { withCrossProcessFileLock } from "../../core/file-lock";
 
 // Shared plan/review infrastructure for the (Bun) dashboard server: project-cwd
 // scoping and the dashboard-actions.jsonl bridge producer. Extracted so it
@@ -45,6 +46,8 @@ export function enqueueDashboardAction(
   if (!target?.session_dir) return false;
   const file = path.join(target.session_dir, "dashboard-actions.jsonl");
   ensureDir(path.dirname(file));
-  appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...action })}\n`);
+  withCrossProcessFileLock(file, () => {
+    appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...action })}\n`);
+  });
   return true;
 }
