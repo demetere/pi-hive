@@ -55,10 +55,15 @@ export function textOfResult(result: any): string {
   return safeJson(result);
 }
 
+function safeLimit(value: number, fallback: number, ceiling = 1_000_000): number {
+  return Number.isFinite(value) && value > 0 ? Math.min(ceiling, Math.floor(value)) : fallback;
+}
+
 export function truncateMiddle(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const head = Math.floor(max * 0.65);
-  const tail = Math.max(0, max - head - 32);
+  const limit = safeLimit(max, 12_000);
+  if (text.length <= limit) return text;
+  const head = Math.floor(limit * 0.65);
+  const tail = Math.max(0, limit - head - 32);
   return `${text.slice(0, head)}\n\n... [truncated] ...\n\n${text.slice(text.length - tail)}`;
 }
 
@@ -72,8 +77,9 @@ export function boundedDiagnostics(
 ): Array<{ type?: string; message?: string }> | undefined {
   if (!Array.isArray(diagnostics) || !diagnostics.length) return undefined;
   const out: Array<{ type?: string; message?: string }> = [];
+  const limit = safeLimit(max, 20, 100);
   for (const d of diagnostics) {
-    if (out.length >= max) break;
+    if (out.length >= limit) break;
     const type = (d as any)?.type ? String((d as any).type) : undefined;
     const message = (d as any)?.error?.message ? truncateMiddle(String((d as any).error.message), 300) : undefined;
     if (!type && !message) continue;
@@ -89,13 +95,15 @@ export function boundedDiagnostics(
 // stamp a machine-readable `truncated` flag on the telemetry payload (J6) rather
 // than having downstream code re-infer truncation from a length threshold.
 export function clip(text: string, max: number): { text: string; truncated: boolean } {
-  if (text.length <= max) return { text, truncated: false };
-  return { text: text.slice(0, max), truncated: true };
+  const limit = safeLimit(max, 8_000);
+  if (text.length <= limit) return { text, truncated: false };
+  return { text: text.slice(0, limit), truncated: true };
 }
 
 export function tailLines(text: string, limit: number): string {
   const lines = text.split("\n").filter(Boolean);
-  return lines.slice(Math.max(0, lines.length - limit)).join("\n");
+  const count = safeLimit(limit, 80, 10_000);
+  return lines.slice(Math.max(0, lines.length - count)).join("\n");
 }
 
 export function extractFinalAnswer(text: string): string | null {

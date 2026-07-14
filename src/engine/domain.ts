@@ -7,7 +7,7 @@ import { agentMatches } from "../core/utils";
 import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
 import { checkPlannerStages, checkTypePolicy, type PolicyAction, type PolicyDecision } from "./policy";
-import { hasForeignAbsoluteSyntax, isPathInside, resolveContainedPath, resolveProjectPath } from "../core/safe-path";
+import { hasForeignAbsoluteSyntax, isPathInside, resolveConfiguredPath, resolveContainedPath } from "../core/safe-path";
 import { checkReservedPath, type ReservedPathAccess } from "./reserved-paths";
 
 function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | undefined {
@@ -51,8 +51,9 @@ function excludedBy(scope: DomainScope, relativePath: string): boolean {
 }
 
 function domainScopeMatch(ctx: ExtensionContext, scope: DomainScope, target: string, allowMissing: boolean): { matches: boolean; specificity: number } {
-  const scopePath = resolve(ctx.cwd, scope.path);
-  if (!resolveProjectPath(ctx.cwd, scope.path, { allowMissing: true })) return { matches: false, specificity: 0 };
+  const resolvedScope = resolveConfiguredPath(ctx.cwd, scope.path, scope.allowOutsideProject === true, { allowMissing: true });
+  if (!resolvedScope) return { matches: false, specificity: 0 };
+  const scopePath = resolvedScope.canonicalPath;
   const contained = resolveContainedPath(scopePath, target, { allowMissing });
   if (!contained) return { matches: false, specificity: 0 };
   const relativePath = toPosixPath(relative(scopePath, contained.lexicalPath) || ".");

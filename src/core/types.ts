@@ -36,6 +36,7 @@ export interface KnowledgeRef {
   path: string;
   useWhen?: string;
   updatable?: boolean;
+  allowOutsideProject?: boolean;
 }
 
 // A reviewer's structured verdict on a change. green = clean approval; yellow =
@@ -84,6 +85,7 @@ export interface DomainScope {
   include?: string[];
   exclude?: string[];
   description?: string;
+  allowOutsideProject?: boolean;
 }
 
 export interface AgentConfig {
@@ -93,6 +95,7 @@ export interface AgentConfig {
   slug?: string;
   name: string;
   path: string;
+  allowOutsideProject?: boolean;
   color?: string;
   model?: string;
   tools?: string;

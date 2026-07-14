@@ -63,6 +63,7 @@ export function normalizeKnowledgeRefs(value: any): KnowledgeRef[] {
       path: String(entry.path),
       useWhen: entry.useWhen ? String(entry.useWhen) : undefined,
       updatable: Boolean(entry.updatable),
+      allowOutsideProject: entry.allowOutsideProject === true,
     }));
 }
 
@@ -96,6 +97,7 @@ export function normalizeDomainScopes(value: any, label = "domain"): DomainScope
         include: optionalPatternList(entry.include, `${entryLabel}.include`),
         exclude: optionalPatternList(entry.exclude, `${entryLabel}.exclude`),
         description: entry.description ? String(entry.description) : undefined,
+        allowOutsideProject: entry.allowOutsideProject === true,
       };
     });
 }

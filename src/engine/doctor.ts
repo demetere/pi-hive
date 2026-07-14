@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { HiveState } from "../core/types";
 import { HIVE_ROOT } from "../core/constants";
 import { auditAgentTypes } from "../core/agent-type-audit";
+import { loadConfig } from "../core/config";
 import { hiveTelemetryRegistryPath } from "./observability";
 
 export type DoctorSeverity = "info" | "warning";
@@ -33,11 +34,15 @@ export function renderHiveDoctor(state: HiveState, cwd: string, extensionDir: st
   const observabilityServer = join(extensionDir, "src", "observability", "server", "index.ts");
   const registryPath = hiveTelemetryRegistryPath();
   const bunVersion = commandVersion("bun", ["--version"]);
+  let configError: string | undefined;
+  if (existsSync(configPath) && !state.config) {
+    try { loadConfig(cwd); } catch (error: any) { configError = error?.message || String(error); }
+  }
 
   const lines = [
     "pi-hive doctor",
     checkLine(existsSync(configPath), `Opt-in config ${existsSync(configPath) ? "present" : "missing"}: ${configPath}`),
-    checkLine(Boolean(state.config), `Hive config ${state.config ? "loaded" : "not loaded"}`),
+    checkLine(Boolean(state.config) || !configError, configError ? `Hive config invalid: ${configError}` : `Hive config ${state.config ? "loaded and valid" : "valid but not initialized"}`),
     checkLine(state.runtimes.size > 0, `Agent runtimes ${state.runtimes.size ? `${state.runtimes.size} loaded` : "not initialized"}`),
     checkLine(Boolean(state.session), `Session ${state.session ? state.session.sessionId : "not initialized"}`, true),
     checkLine(existsSync(observabilityServer), `Telemetry server ${existsSync(observabilityServer) ? "present" : "missing"}: ${observabilityServer}`),
@@ -62,6 +67,7 @@ export function renderHiveDoctor(state: HiveState, cwd: string, extensionDir: st
   }
 
   if (!existsSync(configPath)) lines.push(`remedy: create ${HIVE_ROOT}/hive-config.yaml to activate pi-hive in this project`);
+  if (configError) lines.push("remedy: fix the path-aware hive-config.yaml validation error, then restart pi");
   if (audit.offenders.length) lines.push("remedy: add the suggested 'agent-type:' to each agent's frontmatter, then restart pi (validation hard-fails without it)");
   if (!bunVersion) lines.push("remedy: install Bun or avoid /hive-observe dashboard commands");
   if (!existsSync(dashboardIndex) || !existsSync(dashboardStamp)) lines.push("remedy: run just dashboard-build before packaging");

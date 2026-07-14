@@ -1,9 +1,11 @@
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentConfig, HiveConfig, HiveMode, HiveTeam } from "./types";
 import { parseYamlLite, parseFrontmatter } from "./yaml";
 import { agentSlug, configuredChildAgents, flatAgentConfig, normalizeAgentType, normalizeCommit, normalizePlanStages, safeRead, slug } from "./utils";
 import { validateAgentTypes, validateHiveConfigShape } from "./schema";
-import { resolveProjectPath } from "./safe-path";
+import { CONFIG_LIMITS, validateConfigSize, validateRawConfig } from "./config-validation";
+import { resolveConfiguredPath, resolveProjectPath } from "./safe-path";
 
 // Read an agent's .md frontmatter and copy model/thinking onto the config node
 // when the config itself does not set them. The config tree (from hive-config.
@@ -89,7 +91,7 @@ function enrichFromFrontmatter(cwd: string, agent: AgentConfig | undefined): voi
   // onto the config node whenever the node itself does not already set them.
   const needsEnrich = !agent.slug || !agent.model || !agent.thinking || agent.agentType === undefined || agent.stages === undefined || agent.network === undefined || agent.commit === undefined;
   if (agent.path && needsEnrich) {
-    const promptPath = resolveProjectPath(cwd, agent.path);
+    const promptPath = resolveConfiguredPath(cwd, agent.path, agent.allowOutsideProject === true);
     const raw = promptPath ? safeRead(promptPath.canonicalPath) : "";
     if (raw) {
       const { attrs } = parseFrontmatter(raw);
@@ -135,9 +137,17 @@ function enrichTeam(cwd: string, team: HiveTeam | undefined): void {
 export function loadConfig(cwd: string): HiveConfig {
   const configPath = join(cwd, ".pi", "hive", "hive-config.yaml");
   const safeConfigPath = resolveProjectPath(cwd, configPath);
+  if (safeConfigPath) {
+    const size = statSync(safeConfigPath.canonicalPath).size;
+    if (size > CONFIG_LIMITS.configBytes) throw new Error(`hive-config.yaml exceeds the ${CONFIG_LIMITS.configBytes}-byte size limit.`);
+  }
   const raw = safeConfigPath ? safeRead(safeConfigPath.canonicalPath) : "";
   if (!raw) throw new Error(`Missing config: ${configPath}`);
+  validateConfigSize(raw);
   const parsed = parseYamlLite(raw) as any;
+  // Validate the complete user-authored shape before defaults or frontmatter
+  // enrichment can erase invalid values or make malformed input look valid.
+  validateRawConfig(cwd, raw, parsed);
 
   // H1 (Decision 7): allowedAgents is no longer a user config field — the
   // delegation hierarchy is derived from members/children. A user-set value was
@@ -184,14 +194,14 @@ export function loadConfig(cwd: string): HiveConfig {
     // camelizing snake_case parser-wide (plan-store reads `session_id` raw).
     sharedContext: normalizeSharedContext(parsed.shared_context ?? parsed.sharedContext),
     settings: {
-      subagentOutputLimit: Number(settings.subagentOutputLimit || 12_000),
-      defaultTools: String(settings.defaultTools || "read, grep, find, ls"),
-      maxParallel: Number(settings.maxParallel || 3),
+      subagentOutputLimit: settings.subagentOutputLimit ?? 12_000,
+      defaultTools: settings.defaultTools ?? "read, grep, find, ls",
+      maxParallel: settings.maxParallel ?? 3,
       secretPaths: Array.isArray(settings.secretPaths) ? settings.secretPaths.map((entry: unknown) => String(entry).trim()).filter(Boolean) : [],
       distiller: {
         enabled: distillerEnabled,
         model: distillerModel,
-        conversationLines: Number(distiller.conversationLines || 200),
+        conversationLines: distiller.conversationLines ?? 200,
       },
     },
   };

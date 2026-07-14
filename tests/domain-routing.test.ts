@@ -145,6 +145,12 @@ test("routeAgents scores specialists and respects delegation hierarchy", () => {
   const matches = runAsAgent("Orchestrator", () => routeAgents(state, "fix the React CSS component", 3));
   assert.equal(matches[0].name, "Frontend Dev");
   assert.equal(matches.some((match) => match.name === "Security Reviewer"), false);
+
+  for (const unsafe of [Number.NaN, Number.POSITIVE_INFINITY, -5]) {
+    const bounded = runAsAgent("Orchestrator", () => routeAgents(state, "fix the React CSS component", unsafe));
+    assert.equal(bounded[0].name, "Frontend Dev");
+    assert.ok(bounded.length <= 5, `unsafe limit ${unsafe} must fall back to a bounded result`);
+  }
 });
 
 test("buildOrchestratorPrompt routes to the ACTUAL configured leads, nothing hardcoded (H3/L4)", () => {

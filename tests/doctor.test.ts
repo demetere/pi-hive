@@ -59,6 +59,19 @@ test("renderHiveDoctor flags agents missing agent-type with a suggestion", () =>
   assert.match(result.text, /remedy: add the suggested 'agent-type:'/);
 });
 
+test("renderHiveDoctor reports path-aware malformed configuration diagnostics", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-doctor-invalid-"));
+  const extensionDir = mkdtempSync(join(tmpdir(), "pi-hive-doctor-ext-"));
+  mkdirSync(join(cwd, ".pi", "hive"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), "settings:\n  max-paralell: nope\n");
+
+  const result = renderHiveDoctor(state({ config: null, runtimes: new Map() }), cwd, extensionDir);
+
+  assert.equal(result.severity, "warning");
+  assert.match(result.text, /fail: Hive config invalid: settings\.maxParalell is not a recognized configuration key/);
+  assert.match(result.text, /remedy: fix the path-aware hive-config\.yaml validation error/);
+});
+
 test("renderHiveDoctor includes remedies for missing required assets", () => {
   const result = renderHiveDoctor(state({ config: null, runtimes: new Map(), session: null, sddStatus: null }), "/missing-cwd", "/missing-extension");
 

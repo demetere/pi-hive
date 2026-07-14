@@ -4,6 +4,7 @@ import { currentAgentName } from "./session";
 import { canDelegateTo } from "./domain";
 
 export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ slug: string; name: string; group: string; score: number; reasons: string[] }> {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(100, Math.floor(limit)) : 5;
   const terms = task.toLowerCase().split(/[^a-z0-9_-]+/).filter((term) => term.length > 2);
   const caller = currentAgentName();
   const scored = Array.from(state.runtimes.values())
@@ -72,5 +73,5 @@ export function routeAgents(state: HiveState, task: string, limit = 5): Array<{ 
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
-  return scored.slice(0, limit);
+  return scored.slice(0, safeLimit);
 }
