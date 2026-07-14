@@ -7,6 +7,7 @@ import {
   allSnapshots,
   deleteProject,
   deleteSessions,
+  ingestionHealth,
   listModels,
   listTopologies,
   maxEventCursor,
@@ -160,6 +161,7 @@ Bun.serve({
       registry: REGISTRY_PATH,
       db: DB_PATH,
       sources: sourcePaths(),
+      ingestion: ingestionHealth(),
     });
     // Paginated, cursor-ordered event feed (B5). `?after=<cursor>` returns only
     // newer events (lossless SSE catch-up); no more single 20k-event body.

@@ -168,7 +168,11 @@ CREATE TABLE IF NOT EXISTS ingest_sources (
   path TEXT PRIMARY KEY,
   session_id TEXT,
   offset INTEGER NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  device INTEGER,
+  inode INTEGER,
+  checkpoint TEXT,
+  last_successful_ingest TEXT
 );
 
 -- Versioned topology (Phase C). One immutable row per unique team configuration,
@@ -281,6 +285,12 @@ try { db.run(`ALTER TABLE project_overrides ADD COLUMN canonical_root TEXT`); } 
 try { db.run(`ALTER TABLE delegations ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
 // Phase 4.8: reasoning ("thinking") tokens per delegation run.
 try { db.run(`ALTER TABLE delegations ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0`); } catch { /* column already exists */ }
+// T08: persist the file identity beside its committed newline offset so a
+// rotated path is replayed from byte zero even across daemon restarts.
+try { db.run(`ALTER TABLE ingest_sources ADD COLUMN device INTEGER`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE ingest_sources ADD COLUMN inode INTEGER`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE ingest_sources ADD COLUMN checkpoint TEXT`); } catch { /* column already exists */ }
+try { db.run(`ALTER TABLE ingest_sources ADD COLUMN last_successful_ingest TEXT`); } catch { /* column already exists */ }
 // Phase 2.5: drop the unused (session_id, ts, seq) events index — no query
 // orders by (session_id, ts); session-filtered reads order by rowid and are
 // served by idx_hive_events_session_seq. Dropping frees write/space overhead.
@@ -593,21 +603,77 @@ export function deleteSessionRows(ids: string[]): void {
 // ── Incremental-ingest offsets (B4) ──────────────────────────────────────────
 
 const upsertIngestSourceStmt = db.query(`
-  INSERT INTO ingest_sources (path, session_id, offset, updated_at)
-  VALUES ($path, $session_id, $offset, $updated_at)
+  INSERT INTO ingest_sources (path, session_id, offset, updated_at, device, inode, checkpoint, last_successful_ingest)
+  VALUES ($path, $session_id, $offset, $updated_at, $device, $inode, $checkpoint, $last_successful_ingest)
   ON CONFLICT(path) DO UPDATE SET
     session_id = COALESCE(excluded.session_id, ingest_sources.session_id),
     offset = excluded.offset,
-    updated_at = excluded.updated_at
+    updated_at = excluded.updated_at,
+    device = COALESCE(excluded.device, ingest_sources.device),
+    inode = COALESCE(excluded.inode, ingest_sources.inode),
+    checkpoint = COALESCE(excluded.checkpoint, ingest_sources.checkpoint),
+    last_successful_ingest = COALESCE(excluded.last_successful_ingest, ingest_sources.last_successful_ingest)
 `);
 
-export function getIngestOffset(sourcePath: string): number {
-  const row = db.query(`SELECT offset FROM ingest_sources WHERE path = $path`).get({ $path: sourcePath }) as any;
-  return Number(row?.offset || 0);
+export interface IngestSourceCursor {
+  offset: number;
+  updatedAt?: string;
+  device?: number;
+  inode?: number;
+  checkpoint?: string;
 }
 
-export function setIngestOffset(sourcePath: string, offset: number, sessionId: string | undefined, updatedAt: string): void {
-  upsertIngestSourceStmt.run({ $path: sourcePath, $session_id: sessionId ?? null, $offset: offset, $updated_at: updatedAt });
+export function getIngestSource(sourcePath: string): IngestSourceCursor {
+  const row = db.query(`SELECT offset, last_successful_ingest, device, inode, checkpoint FROM ingest_sources WHERE path = $path`).get({ $path: sourcePath }) as any;
+  return {
+    offset: Number(row?.offset || 0),
+    updatedAt: row?.last_successful_ingest || undefined,
+    device: row?.device == null ? undefined : Number(row.device),
+    inode: row?.inode == null ? undefined : Number(row.inode),
+    checkpoint: row?.checkpoint || undefined,
+  };
+}
+
+export function getIngestOffset(sourcePath: string): number {
+  return getIngestSource(sourcePath).offset;
+}
+
+export function setIngestOffset(
+  sourcePath: string,
+  offset: number,
+  sessionId: string | undefined,
+  updatedAt: string,
+  identity: { device?: number; inode?: number; checkpoint?: string } = {},
+): void {
+  upsertIngestSourceStmt.run({
+    $path: sourcePath,
+    $session_id: sessionId ?? null,
+    $offset: offset,
+    $updated_at: updatedAt,
+    $device: identity.device ?? null,
+    $inode: identity.inode ?? null,
+    $checkpoint: identity.checkpoint ?? null,
+    $last_successful_ingest: updatedAt,
+  });
+}
+
+export function setIngestIdentity(
+  sourcePath: string,
+  offset: number,
+  sessionId: string | undefined,
+  updatedAt: string,
+  identity: { device?: number; inode?: number; checkpoint?: string },
+): void {
+  upsertIngestSourceStmt.run({
+    $path: sourcePath,
+    $session_id: sessionId ?? null,
+    $offset: offset,
+    $updated_at: updatedAt,
+    $device: identity.device ?? null,
+    $inode: identity.inode ?? null,
+    $checkpoint: identity.checkpoint ?? null,
+    $last_successful_ingest: null,
+  });
 }
 
 // ── Typed projections: delegations / tool_calls (B3) ──────────────────────────

@@ -144,8 +144,15 @@ test("ingest offsets persist and resume (B4)", () => {
   expect(db.getIngestOffset("/tmp/does-not-exist.jsonl")).toBe(0);
   db.setIngestOffset("/tmp/log.jsonl", 4096, "s1", "2026-07-01T04:00:00.000Z");
   expect(db.getIngestOffset("/tmp/log.jsonl")).toBe(4096);
-  db.setIngestOffset("/tmp/log.jsonl", 8192, "s1", "2026-07-01T04:01:00.000Z");
+  db.setIngestOffset("/tmp/log.jsonl", 8192, "s1", "2026-07-01T04:01:00.000Z", { device: 12, inode: 34, checkpoint: "4:abcd" });
   expect(db.getIngestOffset("/tmp/log.jsonl")).toBe(8192);
+  expect(db.getIngestSource("/tmp/log.jsonl")).toEqual({
+    offset: 8192,
+    updatedAt: "2026-07-01T04:01:00.000Z",
+    device: 12,
+    inode: 34,
+    checkpoint: "4:abcd",
+  });
 });
 
 test("plan-table cwd is backfilled from the owning session (J2)", () => {
