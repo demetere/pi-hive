@@ -1,4 +1,5 @@
 import type { HiveEvent, Snapshot } from "./types";
+import type { ArtifactId } from "../../../src/shared/openspec-artifacts";
 
 export interface InitialData {
   events: HiveEvent[];
@@ -321,7 +322,14 @@ export interface PlanSummary {
   lastModified?: string; latestVerdict: PlanVerdict | null;
 }
 export type ArtifactStatus = "done" | "ready" | "blocked";
-export interface ArtifactState { id: string; outputPath: string; status: ArtifactStatus; missingDeps: string[]; }
+export interface ArtifactState {
+  id: ArtifactId;
+  displayLabel: string;
+  outputPath: string;
+  status: ArtifactStatus;
+  missingDeps: ArtifactId[];
+  reviewOrder: number;
+}
 export interface ArtifactReview {
   id: string;
   authored: boolean;
@@ -337,6 +345,7 @@ export interface PlanDetail {
   files: string[];
   validation: { passed: boolean; failed: number; issues: Array<{ level: string; path: string; message: string }> };
   readyToExecute: boolean;
+  taskProgress: Array<{ taskId: string; text: string; completed: boolean; actor?: string; evidence?: string; completedAt?: string }>;
   verdicts: PlanVerdict[];
 }
 

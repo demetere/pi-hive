@@ -44,6 +44,7 @@ export interface PlanDetail {
   files: string[];
   validation: { passed: boolean; failed: number; issues: openspec.ValidateIssue[] };
   readyToExecute: boolean;
+  taskProgress: openspec.ExecutionTaskProgress[];
   verdicts: ReturnType<typeof listVerdicts>;
 }
 
@@ -80,6 +81,7 @@ export function planDetail(cwd: string, changeId: string): PlanDetail | null {
     files: openspec.listArtifacts(cwd, changeId),
     validation,
     readyToExecute: openspec.isReadyToExecute(cwd, changeId),
+    taskProgress: openspec.executionTaskProgress(cwd, changeId),
     verdicts: listVerdicts(changeId, cwd),
   };
 }

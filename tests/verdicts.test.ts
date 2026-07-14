@@ -51,6 +51,7 @@ test("plan lifecycle tools are present only for leads", () => {
   // happens in the dashboard's plan-review UI — so approve_plan must NOT exist.
   assert.ok(toolNames(state, "Lead").includes("plan_new"));
   assert.ok(toolNames(state, "Lead").includes("plan_select"));
+  assert.ok(toolNames(state, "Lead").includes("plan_task_complete"));
   assert.ok(!toolNames(state, "Lead").includes("approve_plan"));
   assert.ok(!toolNames(state, "Rev").includes("plan_new"));
 });

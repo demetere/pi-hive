@@ -33,12 +33,12 @@ Runtime behavior:
 ### Session modes (normal / plan / hive)
 The session runs in one of three modes; the main Pi session changes identity with the mode:
 - **normal** — plain Pi chat. No hive tools, **no enforcement**. The hive is dormant.
-- **plan** — the **planning team** is active. The main session is a `planner`; it drives planners to produce a complete spec under `.pi/hive/plans/<change-id>/` (proposal → requirements → design → tasks). No code execution. Enforcement is on (planners cannot touch code).
+- **plan** — the **planning team** is active. The main session is a `planner`; it drives planners through `proposal → { design, specs } → tasks` under `openspec/changes/<change-id>/`. No code execution. Enforcement is on (planners cannot touch code).
 - **hive** — the **execution team** is active. The main session is a `lead`; it delegates to coders/testers/reviewers to build the approved spec. Enforcement is on.
 
 Switch modes with `/hive-normal`, `/hive-plan-mode`, `/hive`, or cycle normal → plan → hive → normal with **`/hive-toggle`** / **Ctrl+Alt+T**. `/hive-execute <change-id>` switches to hive mode and drives execution only after validating that the change exists, `tasks.md` exists, and the tasks gate is approved.
 
-Non-configurable mode behavior: the cycle order is fixed (`normal → plan → hive → normal`); plan gates are fixed (`proposal → requirements → design → tasks`); plan execution is gated by approved `tasks.md`; the mode/type-scoped hive tools are selected by runtime policy, not user config; and the local dashboard defaults to `127.0.0.1:43191` (overridable only with `HIVE_TELEMETRY_HOST` / `HIVE_TELEMETRY_PORT`, not hive-config YAML).
+Non-configurable mode behavior: the cycle order is fixed (`normal → plan → hive → normal`); the artifact graph is fixed (`proposal → { design, specs } → tasks`); execution is gated by exact-content approval of all four artifacts; the mode/type-scoped hive tools are selected by runtime policy, not user config; and the local dashboard defaults to `127.0.0.1:43191` (overridable only with `HIVE_TELEMETRY_HOST` / `HIVE_TELEMETRY_PORT`, not hive-config YAML).
 
 The two teams are configured as **two required blocks** in `hive-config.yaml` — a `planning:` block **and** a `hive:` block — each with its own `main:` (the main session's identity for that mode) and `agents:` (its reports). The loader **hard-throws** if either block is missing: there is no top-level `orchestrator:`/`agents:` shape and no fallback of plan mode onto the hive team. Keeping the two hierarchies explicit is deliberate so a project cannot silently run plan mode against its coding tree (see §1's shape reference below). The supported mode contract is `planning.main` with `agent-type: planner` and `hive.main` with `agent-type: lead`; mismatches currently warn so older projects still load, but should be fixed.
 
@@ -177,9 +177,9 @@ planning:
     color: "#f9e2af"
     path: .pi/hive/agents/plan-lead.md       # frontmatter: agent-type: planner
   agents:
-    - name: Requirements Planner
+    - name: Specs Planner
       color: "#fab387"
-      path: .pi/hive/agents/planning/requirements/requirements.md   # agent-type: planner
+      path: .pi/hive/agents/planning/specs/specs.md                 # agent-type: planner; stages: [specs]
     - name: Design Planner
       color: "#f9e2af"
       path: .pi/hive/agents/planning/design/design.md               # agent-type: planner
@@ -250,7 +250,7 @@ Every agent (orchestrator, leads, members) is a Markdown file: **YAML frontmatte
 | `model` | **yes** | string | `provider/id` (e.g. `openai-codex/gpt-5.5`) or `inherit` (use the live session model). No global default — every agent declares it. |
 | `thinking` | **yes** | string | One of `off, minimal, low, medium, high, xhigh`. |
 | `agent-type` | **yes** | string | One of `planner, coder, tester, reviewer, lead`. Enforced capability type (see §7.1). Config **hard-fails** if missing/invalid. The orchestrator and every lead/routing node is `lead`. |
-| `stages` | no | list | **Planner-only.** Which planning gates this planner may write: any of `proposal, requirements, design, tasks`. Omitted = all four. Error if set on a non-planner. |
+| `stages` | no | list | **Planner-only.** Which OpenSpec artifacts this planner may write: any of `proposal, design, specs, tasks`. Omitted = all four. The old `requirements` value is accepted only as a deprecated alias for `specs`. Error if set on a non-planner. |
 | `network` | no | boolean | Enables network commands for this worker. Defaults to `false`; the local pi-hive dashboard API remains blocked. |
 | `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for a write-capable agent. It never overrides the read-only `reviewer`/`lead` type policy. |
 | `tools` | no | list | Allow-list of tool names for this agent. Falls back to `default-tools` if omitted. See §7. |
@@ -279,9 +279,10 @@ These extension tools can be granted via an agent's `tools` list:
 | `route_agent` | leads / orchestrator | Score which agent should handle a task before delegating. |
 | `team_status` | any | Inspect live session, active runs, per-agent tokens/cost. |
 | `team_conversation` | any | Read **one named agent's** transcript (scoped; requires an `agent` arg). Used to inspect e.g. what a reviewer found. |
-| `hive_sdd_status` | orchestrator / leads | Inspect the plan store (`.pi/hive/plans/`) active changes and recommended phase routing. |
+| `hive_sdd_status` | orchestrator / leads | Inspect OpenSpec changes under `openspec/changes/` and recommended phase routing. |
+| `ask_user` | planners / leads | Ask the human before authoring when scope, requirements, or acceptance criteria are ambiguous. |
 
-Type-scoped hive tools (granted automatically by `agent-type`, not listed in `tools`): `submit_review_verdict` (reviewers), `plan_new` / `plan_select` / `approve_plan` (leads). You do not add these to a `tools` list.
+Type-scoped hive tools (granted automatically by `agent-type`, not listed in `tools`): `submit_review_verdict` (reviewers), and `plan_new` / `plan_select` / `plan_task_complete` (leads). Human approval happens only in the authenticated dashboard review UI; there is no approval tool for agents.
 
 Built-in `pi` tools you allow per role: `read`, `grep`, `find`, `ls` (read/search — safe default for everyone), `edit`, `write` (mutate files — only implementers), `bash` (shell — grant sparingly; mutating bash is gated by domains, see §8).
 
@@ -301,15 +302,15 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 
 | `agent-type` | May mutate | Verdicts | Commits | Typical use |
 |---|---|---|---|---|
-| `planner` | `spec` / `docs` / `tasks` artifacts only — **never `code`** | no | no | Writes `proposal.md` / `requirements.md` / `design.md` / `tasks.md` under `.pi/hive/plans/`. Scope further with `stages`. |
+| `planner` | `spec` / `docs` / `tasks` artifacts only — **never `code`** | no | no | Writes `proposal.md`, `design.md`, `specs/<capability>/spec.md`, and `tasks.md` under `openspec/changes/<change-id>/`. Scope further with `stages`. |
 | `coder` | `code` / `docs` / `tasks` — **never `spec`** | no | only if it has a `commit:` field | Implements production code and tests **within its domain**. |
 | `tester` | tests (drawn by its domain `include`/`exclude` globs) | no | only with `commit:` | Writes tests, not production code. |
 | `reviewer` | **nothing (read-only)** — explicit inspection-command allowlist only | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; delegates tests to a tester; submits a structured red/yellow/green verdict. |
 | `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. |
 
-**Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file*?" So a `coder` whose domain allows `src/**` still cannot write a `.pi/hive/plans/**` spec file (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
+**Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file?" So a `coder` whose domain allows the project root still cannot write an `openspec/changes/**` artifact (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
 
-**File classes** are language-agnostic: `spec` (`.pi/hive/plans/**`, `.pi/hive/specs/**`, `openspec/**`), `tasks` (`**/tasks.md`, `**/todo.md`), `docs` (`**/*.md`, `docs/**`), and `code` (everything else). The test-vs-production split is **not** a class — express it per-agent with domain `include`/`exclude` globs (§8): give a `tester` an `include: ["**/*.test.ts"]` write scope and a `coder` an `exclude: ["**/*.test.ts"]` write scope.
+**File classes** are language-agnostic: `spec` (`openspec/**`), `tasks` (`**/tasks.md`, `**/todo.md` outside OpenSpec), `docs` (`**/*.md`, `docs/**`), and `code` (everything else). The legacy `.pi/hive/plans/**` and `.pi/hive/specs/**` paths have no planning semantics. The test-vs-production split is **not** a class — express it per-agent with domain `include`/`exclude` globs (§8): give a `tester` an `include: ["**/*.test.ts"]` write scope and a `coder` an `exclude: ["**/*.test.ts"]` write scope.
 
 **Leads (including the orchestrator) cannot mutate files.** All mutation flows through typed `coder`/`tester` agents. Invariant: *if a file changed, a typed mutator did it.*
 
@@ -319,7 +320,16 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 
 **Network commands are disabled by default.** Set `network: true` only on workers that require external access. This capability does not permit worker requests to the local pi-hive dashboard API.
 
-**`stages` (planner scoping).** A `planner` may optionally list which gate artifacts it may write: `stages: [proposal, requirements]`. Omitted = all four gates. One planner can own all gates, or you can run N specialist planners one gate each — same type, config decides granularity.
+**`stages` (planner scoping).** A `planner` may optionally list which artifacts it may write: `stages: [proposal, specs]`. Omitted = all four. The `specs` owner controls every `openspec/changes/<change-id>/specs/**/*.md` file. The canonical graph is:
+
+| ID | Display label | Output path | Depends on | Review order | Hash strategy |
+|---|---|---|---|---:|---|
+| `proposal` | Proposal | `proposal.md` | — | 1 | exact file bytes |
+| `design` | Design | `design.md` | `proposal` | 2 | exact file bytes |
+| `specs` | Specification deltas | `specs/**/*.md` | `proposal` | 3 | sorted relative path + exact file bytes |
+| `tasks` | Tasks | `tasks.md` | `design`, `specs` | 4 | exact file bytes |
+
+The old `requirements` stage is normalized to `specs` only for config compatibility; do not create `requirements.md`. Human review follows the table order. Execution progress is written to trusted, hash-bound records by `plan_task_complete`, not by editing the approved `tasks.md` checkboxes.
 
 Denials return an explanatory tool error (naming the type, class, and reason); the agent reads it and adapts — it is not killed. This matches the domain-denial UX.
 
@@ -633,7 +643,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] Agents that edit files have `edit`/`write` in `tools` **and** an `upsert: true` domain over their area. (Tools without a matching domain = blocked at runtime.)
 - [ ] The orchestrator has **no** `edit`/`write`/`bash`.
 - [ ] `settings.distiller.model` is set (or `distiller.enabled: false`).
-- [ ] Spec-driven planning is treated as the default for non-trivial work: plans live under `.pi/hive/plans/<change-id>/` with `proposal → requirements → design → tasks` gates. A lead creates a change with `plan_new`; planners write the gate artifacts; `/hive-execute <change-id>` drives execution from an approved `tasks.md`. Teams map naturally: Planning → proposal/requirements/design/tasks, Engineering (coders/testers) → apply-progress, Validation (reviewers) → verify-report + verdict.
+- [ ] Spec-driven planning is the default for non-trivial work: changes live under `openspec/changes/<change-id>/` with the `proposal → { design, specs } → tasks` graph. A lead creates a change with `plan_new`; planners use `ask_user` when needed and write canonical artifacts; `/hive-execute <change-id>` drives execution only after exact-content review and approval. Leads record completed execution tasks with evidence through `plan_task_complete` without editing approved `tasks.md`.
 - [ ] Every agent `skills:` entry points to a Pi-loadable skill file or directory; only these explicit skills are exposed to that worker.
 - [ ] The global local telemetry dashboard auto-starts on session start (Bun required) and the header shows its URL; `/hive-observe` force-restarts + opens it, `/hive-observe-stop` stops it. It is a shared daemon across all hive sessions and survives an individual session shutdown.
 - [ ] All YAML keys are kebab-case; no tabs; consistent 2-space indentation.

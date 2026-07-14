@@ -244,7 +244,7 @@ export function runAsAgent<T>(agentName: string, fn: () => T): T {
   return currentAgentStorage.run(agentName, fn);
 }
 
-// The active change-id (a planning/execution change under .pi/hive/plans/<id>/)
+// The active change-id (a planning/execution change under openspec/changes/<id>/)
 // flows the same way as the current agent name — through AsyncLocalStorage, not
 // an env var — so it is correctly scoped per concurrent async call chain. Absent
 // ⇒ "no active change"; verdict/approval/comment writes degrade gracefully

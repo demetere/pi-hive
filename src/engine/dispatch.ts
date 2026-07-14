@@ -28,7 +28,8 @@ import { agentMentalModelTarget, buildDistillerPrompt, buildWorkerPrompt, extrac
 import { emitHiveEvent, runtimeSummary, writeHiveStateSnapshot } from "./observability";
 import { buildHiveTools } from "../agents/tools";
 import { normalizeWorkerSkillPaths, workerResourceLoader } from "./worker-extension";
-import { approvalRecordPath, isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict, type ArtifactId } from "./openspec";
+import { approvalRecordPath, isExecutionGateOpen, isAwaitingHumanApproval, setAgentReviewVerdict, type AgentReviewVerdict } from "./openspec";
+import { ARTIFACT_ORDER, type ArtifactId } from "../shared/openspec-artifacts";
 import { agentRoster, resolveRuntime } from "./agent-lookup";
 import { addHiveActivity } from "../ui/tui/activity";
 import { resolveConfiguredPath } from "../core/safe-path";
@@ -170,9 +171,11 @@ export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
   // Prefer the explicit review target. Review prompts often contain negative
   // scope clauses like "Do not consider design/specs/tasks"; a plain keyword
   // scan would otherwise tag a proposal review as tasks/specs/design.
-  if (/\breview\s+only\s+the\s+requirements\s+gate\b/i.test(task)) return null;
-  const explicit = task.match(/\breview\s+only\s+the\s+(proposal|design|specs?|tasks)\s+gate\b/i);
-  if (explicit) return explicit[1].toLowerCase().startsWith("spec") ? "specs" : (explicit[1].toLowerCase() as ArtifactId);
+  const explicit = task.match(/\breview\s+only\s+the\s+(proposal|design|specs?|requirements|tasks)\s+(?:artifact|gate)\b/i);
+  if (explicit) {
+    const target = explicit[1].toLowerCase();
+    return target.startsWith("spec") || target === "requirements" ? "specs" : (target as ArtifactId);
+  }
 
   const pathMatch = task.match(/openspec\/changes\/[^\s`'"]+\/((?:proposal|design|tasks)\.md|specs\/[^\s`'"]+|specs\/\*\*\/\*\.md)/i);
   if (pathMatch) return pathMatch[1].startsWith("specs/") ? "specs" : (pathMatch[1].replace(/\.md$/i, "") as ArtifactId);
@@ -182,7 +185,7 @@ export function inferArtifactFromReviewTask(task: string): ArtifactId | null {
     .filter((sentence) => !/\bdo not\b|\bdon't\b|\bno\s+(?:design|specs|tasks|proposal)\b/i.test(sentence))
     .join("\n");
   let best: { id: ArtifactId; index: number } | null = null;
-  for (const id of ["proposal", "design", "specs", "tasks"] as const) {
+  for (const id of ARTIFACT_ORDER) {
     const match = positiveText.match(ARTIFACT_TARGET_MARKERS[id]);
     if (match?.index != null && (!best || match.index < best.index)) best = { id, index: match.index };
   }
@@ -585,7 +588,7 @@ export async function dispatchAgent(
     // API key); a failure mid-run instead surfaces via session.state.errorMessage.
     //
     // The active change-id is scoped alongside the agent name so the worker's
-    // tools (e.g. submit_review_verdict / approve_plan) resolve currentChangeId()
+    // plan/review tools resolve currentChangeId()
     // to the selected change. A nested delegation inherits the caller's change-id
     // unless a more specific one is set. state.activeChangeId is the persistent
     // selection; currentChangeId() carries an already-scoped value into nesting.

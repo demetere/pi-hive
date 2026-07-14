@@ -1,6 +1,8 @@
 // ── Types ────────────────────────────────────────────────────────────────────
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { PlanStage } from "../shared/openspec-artifacts";
+export type { PlanStage } from "../shared/openspec-artifacts";
 
 export type AgentStatus = "idle" | "running" | "done" | "error";
 export type JsonRecord = Record<string, any>;
@@ -8,7 +10,7 @@ export type JsonRecord = Record<string, any>;
 //   normal — plain Pi chat: no hive tools, no domain/type enforcement.
 //   plan   — hive active but scoped to the PLANNING team (planners + the leads
 //            that route to them). The orchestrator drives planners to produce
-//            full specs (proposal→requirements→design→tasks); no code execution.
+//            OpenSpec artifacts (proposal→design/specs→tasks); no code execution.
 //   hive   — full hive: delegates to coders/testers/reviewers, executes tasks.
 export type HiveMode = "normal" | "plan" | "hive";
 
@@ -26,11 +28,6 @@ export function canonicalMode(mode: string | undefined): HiveMode {
 // perform on which KIND of file. Distinct from the derived tree role
 // (orchestrator/lead/member) which only governs delegation.
 export type AgentType = "planner" | "coder" | "tester" | "reviewer" | "lead";
-
-// The four planning gates a planner may own. Derived (never enforced) as a
-// workflow phase from which files exist on disk; used here only to scope which
-// gate artifacts a given planner may write (see AgentConfig.stages).
-export type PlanStage = "proposal" | "requirements" | "design" | "tasks";
 
 export interface KnowledgeRef {
   path: string;

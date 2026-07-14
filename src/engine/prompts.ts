@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BODY_CATEGORIES } from "../core/mental-model";
 import type { AgentRuntime, HiveState, KnowledgeRef } from "../core/types";
 import { buildSharedContext, renderDomainScopes, renderKnowledgeRefs } from "../core/prompting";
+import { plannerOperatingTemplate, REVIEWER_OPERATING_TEMPLATE } from "../agents/role-templates";
 
 // The type-specific operating contract injected into a worker's prompt. States
 // the capability boundary the enforcer also mechanically applies, so the model
@@ -14,8 +15,7 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
   const lines: string[] = ["## Operating contract (agent type)"];
   switch (type) {
     case "planner": {
-      lines.push("You are a **planner**. You write only OpenSpec proposal/design/specs/tasks artifacts (under `openspec/changes/<change-id>/`, plus docs). Spec deltas belong at `specs/<capability>/spec.md` using a capability slug, not the change-id repeated; do not create bare `spec.md` or `specs/spec.md`. For `tasks.md`, include concrete Markdown task-list checkboxes (`- [ ] ...`) even when organizing work into sprints, so execution readiness and human review have explicit actionable units. You must not modify production or test code — those edits are blocked at the tool layer.");
-      if (runtime.config.stages?.length) lines.push(`You own these planning gates: ${runtime.config.stages.join(", ")}. You may write only those gate artifacts.`);
+      lines.push(plannerOperatingTemplate(runtime.config.stages));
       break;
     }
     case "coder":
@@ -25,7 +25,7 @@ export function buildOperatingContract(runtime: AgentRuntime): string {
       lines.push("You are a **tester**. You write tests, not production code. You do not write spec files or issue verdicts.");
       break;
     case "reviewer":
-      lines.push("You are a **reviewer**. You are read-only: bash is limited to explicit file and Git inspection commands. Project tests, builds, package managers, interpreters, patches, archive extraction, and all mutating Git commands are blocked; delegate tests to a tester because workers do not receive disposable checkouts. Before your final answer, you MUST call `submit_review_verdict` with your red/yellow/green verdict and include the reviewed OpenSpec artifact when known (for example `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`). Do not rely on chat text like PASS/FAIL as the gate signal. A red verdict unlocks same-artifact revision; green/yellow marks it ready for human UI review.");
+      lines.push(REVIEWER_OPERATING_TEMPLATE);
       break;
     case "lead": {
       lines.push("You are a **lead**. You delegate and coordinate; you do not modify files (all edits go through your coder/tester reports).");

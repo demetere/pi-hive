@@ -96,7 +96,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
       }
       const tasks = truncateMiddle(openspec.readArtifact(ctx.cwd, changeId, "tasks.md"), 12_000);
       pi.sendUserMessage(
-        `Execute the approved plan for change "${changeId}" (openspec/changes/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead and record implementation evidence. Do not edit files yourself.\n\n## tasks.md\n${tasks}`,
+        `Execute the approved plan for change "${changeId}" (openspec/changes/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead. After verifying a task's implementation evidence, call plan_task_complete with its checkbox ID and evidence. Do not edit tasks.md or any project files yourself.\n\n## tasks.md\n${tasks}`,
       );
       if (ctx.hasUI) ctx.ui.notify(`Executing plan "${changeId}" — driving the hive from tasks.md.`, "info");
     },

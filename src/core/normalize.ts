@@ -1,7 +1,8 @@
 import type { AgentType, DomainScope, KnowledgeRef, PlanStage } from "./types";
+import { ARTIFACT_ORDER } from "../shared/openspec-artifacts";
 
 export const AGENT_TYPES: readonly AgentType[] = ["planner", "coder", "tester", "reviewer", "lead"];
-export const PLAN_STAGES: readonly PlanStage[] = ["proposal", "requirements", "design", "tasks"];
+export const PLAN_STAGES: readonly PlanStage[] = ARTIFACT_ORDER;
 
 // Parse an agent-type value from frontmatter/config. Returns the lowercased
 // enum member when valid, otherwise the raw string (so schema validation can
@@ -18,7 +19,13 @@ export function normalizeAgentType(value: any): AgentType | string | undefined {
 // (= all gates) stays distinguishable from an explicit empty list.
 export function normalizePlanStages(value: any): string[] | undefined {
   if (value === undefined || value === null) return undefined;
-  return normalizeStringList(value).map((item) => item.toLowerCase());
+  // `requirements` was the pre-OpenSpec stage name. Keep it as a temporary
+  // input alias so existing configs fail safe while runtime policy uses the
+  // canonical `specs` stage everywhere.
+  return normalizeStringList(value).map((item) => {
+    const stage = item.toLowerCase();
+    return stage === "requirements" ? "specs" : stage;
+  });
 }
 
 // Trim commit guidance to a string; empty/whitespace collapses to undefined so
