@@ -313,4 +313,11 @@ export interface HiveState {
   activityLog?: HiveActivityEntry[];
   activityRender?: () => void;
   activityWidgetInstalled?: boolean;
+  // Session lifecycle guards for fire-and-forget work. Dashboard startup results
+  // and mental-model distillers must not mutate a state that has shut down.
+  shuttingDown?: boolean;
+  lifecycleGeneration?: number;
+  backgroundTasks?: Set<Promise<void>>;
+  distillQueues?: Map<string, Promise<void>>;
+  backgroundDistillerSessions?: Set<any>;
 }

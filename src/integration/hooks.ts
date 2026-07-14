@@ -351,6 +351,8 @@ ${catalog}`,
   });
 
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
+    state.shuttingDown = false;
+    const lifecycleGeneration = state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
     state.widgetCtx = ctx;
     // Capture the ModelRegistry from the full session_start ctx — the reliable
     // handle. The mode-switch ctx that used to feed emitModelCatalog could lack
@@ -373,6 +375,12 @@ ${catalog}`,
       // sessions adopt the running one. No browser tab opens automatically — the
       // header shows the URL. It is NOT torn down on session shutdown (shared).
       void ensureDashboard(state, ctx, EXTENSION_ROOT, { open: false }).then((result) => {
+        // The async health-check/spawn may finish after session_shutdown. Ignore
+        // that stale completion instead of reinstalling UI on a dead session.
+        if (state.shuttingDown || state.lifecycleGeneration !== lifecycleGeneration) {
+          state.obsServer = undefined;
+          return;
+        }
         if (result.running && ctx.mode === "tui") installHeader(state, ctx);
       }).catch(() => { /* best-effort; the dashboard is optional */ });
       const missingSkills = Array.from(state.runtimes.values()).flatMap((runtime) =>
@@ -396,10 +404,38 @@ ${catalog}`,
   });
 
   pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
+    state.shuttingDown = true;
+    state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
+    if (orchestratorSnapshotTimer) clearTimeout(orchestratorSnapshotTimer);
+    orchestratorSnapshotTimer = undefined;
+    orchestratorToolStartedAt.clear();
+    turnStartedAt.clear();
     for (const runtime of state.runtimes.values()) {
       if (runtime.timer) clearInterval(runtime.timer);
-      if (runtime.session) { try { runtime.session.dispose(); } catch { /* noop */ } runtime.session = undefined; }
+      runtime.timer = undefined;
+      if (runtime.session) {
+        try { void Promise.resolve(runtime.session.abort?.()).catch((): void => undefined); } catch { /* noop */ }
+        try { runtime.session.dispose(); } catch { /* noop */ }
+        runtime.session = undefined;
+      }
     }
+    // Distillers are tracked separately from worker runtimes. Abort their
+    // in-memory sessions and give their promises a bounded chance to settle;
+    // their write guard also refuses any completion after shuttingDown is set.
+    for (const session of state.backgroundDistillerSessions || []) {
+      try { void Promise.resolve(session.abort?.()).catch((): void => undefined); } catch { /* noop */ }
+      try { session.dispose?.(); } catch { /* noop */ }
+    }
+    const background = [...(state.backgroundTasks || [])];
+    if (background.length) {
+      await Promise.race([
+        Promise.allSettled(background),
+        new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+      ]);
+    }
+    state.backgroundDistillerSessions?.clear();
+    state.backgroundTasks?.clear();
+    state.distillQueues?.clear();
     // The telemetry dashboard is a SHARED global daemon — other sessions may be
     // using it — so we do NOT kill it here. Just drop this session's reference.
     // Explicit teardown is /hive-observe-stop.

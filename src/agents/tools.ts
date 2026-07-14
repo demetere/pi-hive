@@ -12,7 +12,7 @@ import {
   truncateMiddle,
 } from "../core/utils";
 import { routeAgents } from "../engine/routing";
-import { dispatchAgent, distillMentalModel } from "../engine/dispatch";
+import { dispatchAgent, scheduleMentalModelDistillation } from "../engine/dispatch";
 import { renderHiveSddStatus, resolveHiveSddStatus } from "../engine/sdd";
 import { currentAgentName, currentChangeId } from "../engine/session";
 import { emitHiveEvent } from "../engine/observability";
@@ -183,7 +183,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
       // re-delegating the same agent never races it.
       if (result.exitCode === 0) {
         const distillRuntime = resolveRuntime(state, agent);
-        if (distillRuntime) void distillMentalModel(state, ctx, distillRuntime);
+        if (distillRuntime) void scheduleMentalModelDistillation(state, ctx, distillRuntime);
       }
       const limit = state.config?.settings.subagentOutputLimit || 12_000;
       const finalAnswer = extractFinalAnswer(result.output);
