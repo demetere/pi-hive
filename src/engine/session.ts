@@ -20,6 +20,7 @@ import {
 import { allConfiguredAgents, loadConfig, teamForMode } from "../core/config";
 import { canonicalMode } from "../core/types";
 import { runtimeKey } from "./agent-lookup";
+import { resolveProjectPath } from "../core/safe-path";
 
 export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, _cfg: HiveConfig): SessionState {
   const existing = ctx.sessionManager
@@ -48,7 +49,9 @@ export function restoreOrCreateSession(state: HiveState, ctx: ExtensionContext, 
 }
 
 export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: HiveConfig, agent: AgentConfig): AgentRuntime {
-  const fullPath = resolve(ctx.cwd, agent.path);
+  const safePromptPath = resolveProjectPath(ctx.cwd, agent.path);
+  if (!safePromptPath) throw new Error(`Agent prompt is missing or escapes the project root: ${agent.path}`);
+  const fullPath = safePromptPath.canonicalPath;
   const parsed = parseFrontmatter(safeRead(fullPath));
   const attrs = parsed.attrs || {};
   const agentSlug = slug(String(attrs.slug || agent.slug || agent.name || attrs.name || fullPath));
@@ -70,9 +73,11 @@ export function loadAgentRuntime(state: HiveState, ctx: ExtensionContext, cfg: H
   // targets it). No need to declare it in frontmatter.
   const explicitContext = normalizeKnowledgeRefs(attrs.context || (agent as any).context);
   const mentalModelPath = agent.path.replace(/\.md$/, "-mental-model.yaml");
-  const hasMentalModel = existsSync(resolve(ctx.cwd, mentalModelPath));
-  const alreadyListed = explicitContext.some((ref) => resolve(ctx.cwd, ref.path) === resolve(ctx.cwd, mentalModelPath));
-  const context = hasMentalModel && !alreadyListed
+  const safeMentalModel = resolveProjectPath(ctx.cwd, mentalModelPath);
+  const alreadyListed = safeMentalModel
+    ? explicitContext.some((ref) => resolveProjectPath(ctx.cwd, ref.path)?.canonicalPath === safeMentalModel.canonicalPath)
+    : false;
+  const context = safeMentalModel && !alreadyListed
     ? [{ path: mentalModelPath, useWhen: "Your durable mental model for this role.", updatable: true }, ...explicitContext]
     : explicitContext;
   const mergedConfig: AgentConfig = {

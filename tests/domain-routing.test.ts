@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bashMutationKind, domainAllows, enforceDomainForTool, pathWithin } from "../src/engine/domain.ts";
 import { routeAgents } from "../src/engine/routing.ts";
 import { runAsAgent } from "../src/engine/session.ts";
@@ -65,7 +68,11 @@ test("domainAllows uses most-specific-wins with deny tie-breaks", () => {
 });
 
 test("domainAllows applies include globs more specifically than catch-all denies", () => {
-  const ctx = { cwd: "/repo" } as any;
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-domain-"));
+  mkdirSync(join(cwd, "backend/patient"), { recursive: true });
+  writeFileSync(join(cwd, "backend/patient/search_test.go"), "package patient");
+  writeFileSync(join(cwd, "backend/patient/search.go"), "package patient");
+  const ctx = { cwd } as any;
   const agent = runtime("Core Tester", {
     domain: [
       { path: "backend", read: true, upsert: false, delete: false },
@@ -77,6 +84,30 @@ test("domainAllows applies include globs more specifically than catch-all denies
   assert.equal(domainAllows(ctx, agent, "backend/patient/search_test.go", "upsert"), true);
   assert.equal(domainAllows(ctx, agent, "backend/patient/search.go", "read"), true);
   assert.equal(domainAllows(ctx, agent, "backend/patient/search.go", "upsert"), false);
+});
+
+test("domainAllows rejects existing and new targets through an escaping symlink", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-domain-symlink-"));
+  const outside = mkdtempSync(join(tmpdir(), "pi-hive-domain-outside-"));
+  mkdirSync(join(cwd, "allowed"));
+  writeFileSync(join(cwd, "allowed/inside.txt"), "inside");
+  writeFileSync(join(outside, "secret.txt"), "secret");
+  symlinkSync(outside, join(cwd, "allowed/escape"));
+  symlinkSync(outside, join(cwd, "linked-domain"));
+  const ctx = { cwd } as any;
+  const agent = runtime("Symlink Tester", {
+    domain: [{ path: "allowed", read: true, upsert: true, delete: true }],
+  });
+
+  assert.equal(domainAllows(ctx, agent, "allowed/inside.txt", "read"), true);
+  assert.equal(domainAllows(ctx, agent, "allowed/escape/secret.txt", "read"), false);
+  assert.equal(domainAllows(ctx, agent, "allowed/escape/new.txt", "upsert"), false);
+  assert.equal(domainAllows(ctx, agent, "allowed/escape/secret.txt", "delete"), false);
+  const linkedRootAgent = runtime("Linked Root", {
+    domain: [{ path: "linked-domain", read: true, upsert: true, delete: true }],
+  });
+  assert.equal(domainAllows(ctx, linkedRootAgent, "linked-domain/secret.txt", "read"), false);
+  assert.equal(domainAllows(ctx, linkedRootAgent, "linked-domain/new.txt", "upsert"), false);
 });
 
 test("domainAllows honors exclude globs", () => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -28,6 +28,19 @@ test("isSafeChangeId enforces kebab-case", () => {
   assert.ok(!openspec.isSafeChangeId("../evil"));
   assert.ok(!openspec.isSafeChangeId("Add_Auth"));
   assert.ok(!openspec.isSafeChangeId(""));
+});
+
+test("resolveArtifact rejects symlink escapes", () => {
+  const cwd = scratch();
+  const outside = scratch();
+  mkdirSync(join(cwd, "openspec/changes/add-auth"), { recursive: true });
+  writeFileSync(join(outside, "proposal.md"), "secret");
+  symlinkSync(join(outside, "proposal.md"), join(cwd, "openspec/changes/add-auth/proposal.md"));
+  symlinkSync(outside, join(cwd, "openspec/changes/escaped-change"));
+
+  assert.equal(openspec.resolveArtifact(cwd, "add-auth", "proposal.md"), null);
+  assert.equal(openspec.readArtifact(cwd, "add-auth", "proposal.md"), "");
+  assert.equal(openspec.resolveArtifact(cwd, "escaped-change", "proposal.md"), null);
 });
 
 test("toChangeId normalizes to kebab", () => {

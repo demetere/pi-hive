@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { classify } from "../src/engine/file-class.ts";
 import { checkPlannerStages, checkTypePolicy } from "../src/engine/policy.ts";
 import { bashMutationKind, enforceDomainForTool, isCommitCommand } from "../src/engine/domain.ts";
@@ -187,7 +190,9 @@ test("enforce: coder upsert on plans/**/tasks.md is denied by type policy (G3)",
 
 // ── Both layers via enforceDomainForTool ───────────────────────────────────
 
-const ctx = { cwd: "/repo" } as any;
+const policyRoot = mkdtempSync(join(tmpdir(), "pi-hive-policy-"));
+mkdirSync(join(policyRoot, "src/tmp"), { recursive: true });
+const ctx = { cwd: policyRoot } as any;
 const codeDomain = [{ path: ".", read: true, upsert: true, delete: true }];
 
 function block(state: HiveState, agent: string, event: any): string | undefined {

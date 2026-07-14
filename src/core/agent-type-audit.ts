@@ -1,8 +1,9 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AgentType } from "./types";
 import { parseFrontmatter, parseYamlLite } from "./yaml";
 import { AGENT_TYPES, normalizeAgentType } from "./normalize";
 import { safeRead } from "./fs";
+import { resolveProjectPath } from "./safe-path";
 
 // One agent's agent-type status, resilient to a config that no longer loads
 // because validation now hard-fails on a missing/invalid agent-type. The doctor
@@ -58,7 +59,8 @@ function declaredType(cwd: string, node: RawAgentNode): string | undefined {
   const path = typeof node.path === "string" ? node.path : undefined;
   if (!path) return undefined;
   try {
-    const raw = safeRead(resolve(cwd, path));
+    const safePath = resolveProjectPath(cwd, path);
+    const raw = safePath ? safeRead(safePath.canonicalPath) : "";
     if (!raw) return undefined;
     const { attrs } = parseFrontmatter(raw);
     return normalizeAgentType(attrs.agentType);
@@ -74,7 +76,8 @@ export function auditAgentTypes(cwd: string): AgentTypeAudit {
   const rows: AgentTypeAuditRow[] = [];
   let parsed: any;
   try {
-    const raw = safeRead(join(cwd, ".pi", "hive", "hive-config.yaml"));
+    const configPath = resolveProjectPath(cwd, join(cwd, ".pi", "hive", "hive-config.yaml"));
+    const raw = configPath ? safeRead(configPath.canonicalPath) : "";
     if (!raw) return { rows, offenders: [] };
     parsed = parseYamlLite(raw);
   } catch {
