@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { HIVE_SESSIONS_DIR } from "../core/constants";
@@ -7,6 +7,7 @@ import type { AgentConfig, AgentRuntime, HiveConfig, HiveMode, HiveState, Sessio
 import { parseFrontmatter } from "../core/yaml";
 import {
   ensureDir,
+  forEachJsonlLine,
   normalizeAgentType,
   normalizeCommit,
   normalizeDomainScopes,
@@ -181,20 +182,18 @@ export function reloadTeam(state: HiveState, ctx: ExtensionContext) {
 export function restoreRuntimeCounters(state: HiveState) {
   const logPath = state.session?.observabilityLog;
   if (!logPath || !existsSync(logPath)) return;
-  let text: string;
-  try { text = readFileSync(logPath, "utf8"); } catch { return; }
-
   // latest runtime snapshot keyed by agent name (file order is chronological, so a
-  // later row overwrites an earlier one), plus the monotonic max runCount.
+  // later row overwrites an earlier one), plus the monotonic max runCount. Scan
+  // through a fixed-size JSONL buffer instead of materializing the whole log.
   const latest = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; cost: number; runs: number; tools: number }>();
-  for (const line of text.split("\n")) {
-    if (!line.trim() || !line.includes("delegation_end")) continue;
+  forEachJsonlLine(logPath, (line) => {
+    if (!line.includes("delegation_end")) return;
     let ev: any;
-    try { ev = JSON.parse(line); } catch { continue; }
-    if (ev.type !== "delegation_end") continue;
+    try { ev = JSON.parse(line); } catch { return; }
+    if (ev.type !== "delegation_end") return;
     const rt = ev.payload?.runtime;
     const name = rt?.slug || rt?.name || ev.payload?.from;
-    if (!name || !rt) continue;
+    if (!name || !rt) return;
     const key = slug(String(name));
     const priorRuns = latest.get(key)?.runs ?? 0;
     latest.set(key, {
@@ -211,7 +210,7 @@ export function restoreRuntimeCounters(state: HiveState) {
       runs: Math.max(priorRuns, Number(rt.runCount || 0)),
       tools: Number(rt.toolCount || 0),
     });
-  }
+  });
 
   for (const runtime of state.runtimes.values()) {
     const p = latest.get(runtime.config.slug || slug(runtime.config.name));

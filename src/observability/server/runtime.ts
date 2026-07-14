@@ -7,6 +7,7 @@ import { tryResolveProjectIdentity } from "../../shared/project-identity";
 import { loadConfig } from "../../core/config";
 import type { AgentConfig, HiveTeam } from "../../core/types";
 import { withCrossProcessFileLock } from "../../core/file-lock";
+import { readJsonlPage } from "../../core/fs";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
 import { BOOT_SESSION_ID, CONVERSATION_LOG, PROJECT_CWD, REGISTRY_PATH, SINGLE_LOG_PATH } from "./config";
 import {
@@ -828,13 +829,13 @@ export function agentLogPath(sessionId: string, agentName: string): { file?: str
   return { file: agent.sessionFile, status: agent.status };
 }
 
-function parseMainConversationLog(file: string, fromOffset = 0): { entries: any[]; offset: number; size: number } {
-  let stat: fs.Stats;
-  try { stat = fs.statSync(file); } catch { return { entries: [], offset: 0, size: 0 }; }
-  const start = fromOffset > stat.size ? 0 : fromOffset;
-  const text = fs.readFileSync(file, "utf8").slice(start);
+function parseMainConversationLog(
+  file: string,
+  options: { after?: number; before?: number; maxBytes?: number } = {},
+): { entries: any[]; startOffset: number; offset: number; size: number; hasMoreBefore: boolean; hasMoreAfter: boolean; truncated: boolean } {
+  const page = readJsonlPage(file, options);
   const entries: any[] = [];
-  for (const line of text.split("\n")) {
+  for (const line of page.text.split("\n")) {
     if (!line.trim()) continue;
     let row: any;
     try { row = JSON.parse(line); } catch { continue; }
@@ -845,7 +846,8 @@ function parseMainConversationLog(file: string, fromOffset = 0): { entries: any[
     const body = row.message ? `${heading}\n\n${row.message}` : heading;
     entries.push({ kind: "message", role, parts: [{ type: "text", text: body }], ts: row.timestamp });
   }
-  return { entries, offset: stat.size, size: stat.size };
+  const { text: _text, ...meta } = page;
+  return { entries, ...meta };
 }
 
 // Thinking/reasoning entries live only in per-agent transcripts, not the event
@@ -853,6 +855,23 @@ function parseMainConversationLog(file: string, fromOffset = 0): { entries: any[
 // can interleave "thinking" as first-class activity. Bounded per agent + overall
 // so a huge fleet can't flood the response.
 export interface ThinkingEntry { agent: string; ts: string; text: string; tokens: number; }
+const thinkingTailCache = new Map<string, { offset: number; size: number; entries: ThinkingEntry[] }>();
+
+function thinkingFromEntries(agent: string, entries: any[]): ThinkingEntry[] {
+  const out: ThinkingEntry[] = [];
+  for (const e of entries) {
+    if (e.kind !== "message" || !Array.isArray(e.parts)) continue;
+    const u = (e as any).usage || {};
+    const tokens = Number(u.reasoning || 0) || Number(u.output || 0) || 0;
+    for (const p of e.parts) {
+      if (p.type === "thinking" && p.text && p.text.trim()) {
+        out.push({ agent, ts: e.ts || "", text: p.text.trim(), tokens });
+      }
+    }
+  }
+  return out;
+}
+
 export function recentThinking(sessionId: string, perAgent = 12, overall = 200): ThinkingEntry[] {
   const snap = snapshots.get(sessionId);
   if (!snap || !Array.isArray(snap.agents)) return [];
@@ -860,36 +879,37 @@ export function recentThinking(sessionId: string, perAgent = 12, overall = 200):
   for (const a of snap.agents) {
     const file = a?.sessionFile;
     if (!file || !fs.existsSync(file)) continue;
+    const prior = thinkingTailCache.get(file);
     let parsed;
-    try { parsed = parseAgentLog(file, 0); } catch { continue; }
-    const think: ThinkingEntry[] = [];
-    for (const e of parsed.entries) {
-      if (e.kind !== "message" || !Array.isArray(e.parts)) continue;
-      // Tokens this generation added — prefer the reasoning count, else output.
-      const u = (e as any).usage || {};
-      const tokens = Number(u.reasoning || 0) || Number(u.output || 0) || 0;
-      for (const p of e.parts) {
-        if (p.type === "thinking" && p.text && p.text.trim()) {
-          think.push({ agent: a.name, ts: e.ts || "", text: p.text.trim(), tokens });
-        }
-      }
-    }
-    // keep only the most recent few per agent
-    for (const t of think.slice(-perAgent)) out.push(t);
+    try {
+      parsed = prior && prior.offset <= fs.statSync(file).size
+        ? parseAgentLog(file, { after: prior.offset, maxBytes: 256 * 1024 })
+        : parseAgentLog(file, { before: Number.MAX_SAFE_INTEGER, maxBytes: 256 * 1024 });
+    } catch { continue; }
+    const appended = thinkingFromEntries(a.name, parsed.entries);
+    const entries = [...(prior?.entries || []), ...appended].slice(-Math.max(perAgent, 32));
+    thinkingTailCache.delete(file);
+    thinkingTailCache.set(file, { offset: parsed.offset, size: parsed.size, entries });
+    for (const entry of entries.slice(-perAgent)) out.push(entry);
   }
+  // Bound files retained across deleted/rotated sessions as well as entries.
+  while (thinkingTailCache.size > 512) thinkingTailCache.delete(thinkingTailCache.keys().next().value!);
   out.sort((x, y) => String(y.ts).localeCompare(String(x.ts)));
   return out.slice(0, overall);
 }
 
-export function readAgentLog(sessionId: string, agent: string, offset: number, runId: string): any {
+export function readAgentLog(sessionId: string, agent: string, offset: number, runId: string, before?: number): any {
   const { file: currentFile, status, main } = agentLogPath(sessionId, agent);
   if (!currentFile) return { entries: [], offset: 0, size: 0, status: status || "unknown", exists: false, runs: [] };
+  const pageOptions = before != null
+    ? { before, maxBytes: 256 * 1024 }
+    : offset > 0
+      ? { after: offset, maxBytes: 256 * 1024 }
+      : { before: Number.MAX_SAFE_INTEGER, maxBytes: 256 * 1024 };
   if (main) {
-    const parsed = parseMainConversationLog(currentFile, offset);
+    const parsed = parseMainConversationLog(currentFile, pageOptions);
     return {
-      entries: parsed.entries,
-      offset: parsed.offset,
-      size: parsed.size,
+      ...parsed,
       status: status || "running",
       exists: true,
       running: true,
@@ -900,11 +920,9 @@ export function readAgentLog(sessionId: string, agent: string, offset: number, r
   const runs = agentRuns(currentFile);
   if (!runs.length) return { entries: [], offset: 0, size: 0, status, exists: false, runs: [] };
   const chosen = runs.find((r) => r.id === runId) || runs[0];
-  const parsed = parseAgentLog(chosen.file, offset);
+  const parsed = parseAgentLog(chosen.file, pageOptions);
   return {
-    entries: parsed.entries,
-    offset: parsed.offset,
-    size: parsed.size,
+    ...parsed,
     status,
     exists: true,
     running: status === "running" && chosen.id === "current",

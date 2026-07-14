@@ -312,8 +312,10 @@ const server = Bun.serve({
       const sessionId = url.searchParams.get("session") || "";
       const agent = url.searchParams.get("agent") || "";
       const offset = Number(url.searchParams.get("offset") || 0);
+      const beforeRaw = url.searchParams.get("before");
+      const before = beforeRaw != null && Number.isFinite(Number(beforeRaw)) ? Math.max(0, Number(beforeRaw)) : undefined;
       const runId = url.searchParams.get("run") || "";
-      return json(readAgentLog(sessionId, agent, offset, runId));
+      return json(readAgentLog(sessionId, agent, offset, runId, before));
     }
     if (url.pathname === "/thinking") {
       const sessionId = url.searchParams.get("session") || "";
