@@ -11,6 +11,7 @@ const PROJECT = mkdtempSync(join(tmpdir(), "pi-hive-plansrv-"));
 // server/config.ts reads these at import; point them at throwaway locations.
 process.env.HIVE_PROJECT_CWD = PROJECT;
 process.env.HIVE_TELEMETRY_DB = join(mkdtempSync(join(tmpdir(), "pi-hive-plansrv-db-")), "telemetry.db");
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-hive-plansrv-agent-"));
 
 // Resolve the OpenSpec binary the same way src/engine/openspec.ts does; skip the
 // CLI-dependent assertions when it is absent.
@@ -92,7 +93,7 @@ async function approveProposal(changeId: string, activeProject: string) {
   return review.handlePlanReview(req, new URL(req.url));
 }
 
-test("review approval honors legacy SQLite-only agent verdicts", async () => {
+test("review approval ignores legacy SQLite-only agent verdicts", async () => {
   const activeProject = bridge.resolveProjectCwd(null)!;
   const changeId = "legacy-agent-green";
   const dir = join(activeProject, "openspec", "changes", changeId);
@@ -111,13 +112,30 @@ test("review approval honors legacy SQLite-only agent verdicts", async () => {
   try {
     const res = await approveProposal(changeId, activeProject);
     expect(res?.status).toBe(200);
-    expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBe("green");
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBeNull();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("review approval does not borrow SQLite verdicts when sidecar targets another artifact", async () => {
+test("review approval accepts a current content-bound automated verdict", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "current-agent-green";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Current agent green\n\nReady.\n");
+  openspec.setAgentReviewVerdict(activeProject, changeId, "proposal", "green", "Plan Reviewer");
+
+  try {
+    const res = await approveProposal(changeId, activeProject);
+    expect(res?.status).toBe(200);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal")).toBe("green");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review approval does not borrow SQLite verdicts for another artifact", async () => {
   const activeProject = bridge.resolveProjectCwd(null)!;
   const changeId = "sidecar-mismatch";
   const dir = join(activeProject, "openspec", "changes", changeId);
@@ -132,7 +150,6 @@ test("review approval does not borrow SQLite verdicts when sidecar targets anoth
     cwd: activeProject,
     createdAt: new Date().toISOString(),
   });
-  openspec.setAgentReviewVerdict(activeProject, changeId, "tasks", "green", "Plan Reviewer");
 
   try {
     const res = await approveProposal(changeId, activeProject);
@@ -143,7 +160,7 @@ test("review approval does not borrow SQLite verdicts when sidecar targets anoth
   }
 });
 
-test.if(OSX)("planDetail does not show review-now for artifacts missing sidecar verdicts", () => {
+test.if(OSX)("planDetail does not show review-now for artifacts missing authoritative verdicts", () => {
   const changeId = "sidecar-mismatch-detail";
   osx(["new", "change", changeId]);
   const dir = join(PROJECT, "openspec", "changes", changeId);
@@ -157,7 +174,6 @@ test.if(OSX)("planDetail does not show review-now for artifacts missing sidecar 
     cwd: PROJECT,
     createdAt: new Date().toISOString(),
   });
-  openspec.setAgentReviewVerdict(PROJECT, changeId, "tasks", "green", "Plan Reviewer");
 
   try {
     const detail = routes.planDetail(PROJECT, changeId)!;

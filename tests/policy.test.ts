@@ -213,6 +213,15 @@ test("enforce: planner blocked from code, allowed spec", () => {
   assert.equal(block(state, "Plan", { toolName: "write", input: { path: ".pi/hive/plans/a/proposal.md" } }), undefined);
 });
 
+test("enforce: planner cannot forge global approval records with file tools or classified bash", () => {
+  const state = stateWith([runtime("Plan", { agentType: "planner", domain: [{ path: ".", read: true, upsert: true, delete: true }] })]);
+  const authority = "/home/test/.pi/agent/hive/approvals/project/change/proposal/human.json";
+  for (const toolName of ["write", "edit"]) {
+    assert.match(block(state, "Plan", { toolName, input: { path: authority } }) ?? "", /may not upsert|cannot modify/);
+  }
+  assert.match(block(state, "Plan", { toolName: "bash", input: { command: `cp ./approval.json ${authority}` } }) ?? "", /cannot upsert|may not upsert/);
+});
+
 test("enforce: planner stages narrow which gate files", () => {
   const specDomain = [{ path: ".", read: true, upsert: true, delete: false }];
   const state = stateWith([runtime("Plan", { agentType: "planner", stages: ["design"], domain: specDomain })]);

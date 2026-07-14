@@ -47,18 +47,12 @@ export interface PlanDetail {
   verdicts: ReturnType<typeof listVerdicts>;
 }
 
-// The reviewer AGENT's standing verdict for an artifact. The sidecar is the
-// source of truth for new reviews because it is keyed by artifact and readable
-// by the core dispatch gate. Fall back to old change-level SQLite verdicts only
-// when no sidecar agent-review state exists at all (legacy sessions).
+// Only a current, content-bound automated record clears an artifact. Historical
+// SQLite verdicts and project-controlled legacy sidecars remain visible as
+// history but never become approval authority.
 function agentClearedArtifact(cwd: string, changeId: string, artifact: string): boolean {
-  const sidecarVerdict = openspec.agentReviewVerdict(cwd, changeId, artifact);
-  if (sidecarVerdict) return sidecarVerdict === "green" || sidecarVerdict === "yellow";
-  if (Object.keys(openspec.readAgentReviewLedger(cwd, changeId)).length > 0) return false;
-
-  const verdicts = listVerdicts(changeId, cwd).filter((v) => v.reviewer !== "ui");
-  if (!verdicts.length) return false;
-  return verdicts[0].verdict === "green" || verdicts[0].verdict === "yellow";
+  const verdict = openspec.agentReviewVerdict(cwd, changeId, artifact);
+  return verdict === "green" || verdict === "yellow";
 }
 
 export function planDetail(cwd: string, changeId: string): PlanDetail | null {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { handleReviewSurface, registerReviewSurface, renderReviewInput, type ReviewContext, type ReviewInput, type ReviewSurface } from "../../engine/review";
 import { parseRid } from "../../engine/review";
 import * as openspec from "../../engine/openspec";
-import { insertPlanVerdict, listVerdicts } from "./db";
+import { insertPlanVerdict } from "./db";
 import { enqueueDashboardAction, resolveProjectCwd } from "./plan-bridge";
 
 // Bun-side wiring for the self-hosted Plannotator plan-review surface. Builds the
@@ -29,19 +29,10 @@ function recordVerdict(ctx: ReviewContext, verdict: "green" | "red", feedback: s
 }
 
 function latestAgentVerdict(ctx: ReviewContext): openspec.AgentReviewVerdict {
-  const sidecarVerdict = openspec.agentReviewVerdict(ctx.cwd, ctx.change, ctx.artifact);
-  if (sidecarVerdict) return sidecarVerdict;
-
-  // If any structured per-artifact review state exists, absence for THIS
-  // artifact is meaningful: do not fall back to a change-level SQLite verdict
-  // from another artifact. That mismatch is what made proposal approval look
-  // available and then reject in the live session.
-  if (Object.keys(openspec.readAgentReviewLedger(ctx.cwd, ctx.change)).length > 0) return null;
-
-  // Older reviewer flows may have only persisted a change-level SQLite verdict.
-  // Use it only for fully legacy changes with no sidecar agent-review state.
-  const verdict = listVerdicts(ctx.change, ctx.cwd).find((v) => v.reviewer !== "ui")?.verdict;
-  return verdict === "green" || verdict === "yellow" || verdict === "red" ? verdict : null;
+  // Only a current, content-bound automated-review record can make an artifact
+  // eligible for human approval. SQLite rows and project sidecars are display
+  // history, not authority, and deliberately receive no migration fallback.
+  return openspec.agentReviewVerdict(ctx.cwd, ctx.change, ctx.artifact);
 }
 
 const surface: ReviewSurface | null = registerReviewSurface({
@@ -73,11 +64,11 @@ const surface: ReviewSurface | null = registerReviewSurface({
         });
         return;
       }
-      recordVerdict(ctx, "green", feedback);
-      // Record the human's per-artifact approval in the ledger. This both
-      // advances the planning gate (the next artifact becomes authorable) and,
-      // for tasks, opens the execution gate.
+      // Persist authority first. If the atomic write fails, the exception
+      // reaches the request handler; no success verdict or unblock action is
+      // recorded. This both advances planning and, for tasks, may open execution.
       openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "green");
+      recordVerdict(ctx, "green", feedback);
       // Unblock the live session: the artifact's gate is satisfied; the planner
       // proceeds to the next authorable artifact (or /hive-execute once tasks
       // pass validation).
@@ -96,11 +87,10 @@ const surface: ReviewSurface | null = registerReviewSurface({
       // ("on <quote>: <comment>") so the planner gets anchored, per-location
       // guidance instead of a single blob.
       const feedback = renderReviewInput(input);
-      recordVerdict(ctx, "red", feedback);
-      // Record the human's per-artifact denial. This revokes the artifact's
-      // approval AND (in the ledger) every downstream artifact's approval, since
-      // work built on a rejected upstream artifact can no longer be trusted.
+      // Persist authority before display history or planner actions. A denial
+      // removes downstream human records; write failures propagate fail-closed.
       openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "red");
+      recordVerdict(ctx, "red", feedback);
       // Route the structured feedback back to the planning agent.
       enqueueDashboardAction(ctx.cwd, {
         type: "plan_review_denied",

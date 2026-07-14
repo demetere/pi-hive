@@ -373,7 +373,7 @@ function materializePlanEvent(event: HiveTelemetryEvent) {
   // approvals and comments used to come from the in-house approve_plan tool and
   // the home-grown annotator; both are gone — approval/annotation now happens in
   // the self-hosted Plannotator review surface, which writes plan_verdicts + the
-  // execution-approval sidecar directly (see review-wiring.ts). The
+  // content-bound global approval authority directly (see review-wiring.ts). The
   // plan_approvals / plan_comments tables are left in place (no DROP migration);
   // they simply stop receiving new rows.
   if (event.type === "review_verdict") {
