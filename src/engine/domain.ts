@@ -6,7 +6,7 @@ import { resolveRuntime } from "./agent-lookup";
 import { agentMatches } from "../core/utils";
 import { globToRegExp, globSpecificity, toPosixPath } from "./glob";
 import { classify } from "./file-class";
-import { checkPlannerStages, checkTypePolicy, type PolicyAction } from "./policy";
+import { checkPlannerStages, checkTypePolicy, type PolicyAction, type PolicyDecision } from "./policy";
 import { hasForeignAbsoluteSyntax, isPathInside, resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 
 function runtimeForCaller(state: HiveState, callerName: string): AgentRuntime | undefined {
@@ -143,19 +143,170 @@ export function extractBashPathTokens(command: string): string[] {
     .filter((token) => !token.startsWith("http://") && !token.startsWith("https://"))));
 }
 
+type ParsedCommand = { words: string[]; operatorBefore?: string };
+
+// A deliberately small shell lexer. It supports ordinary quoting and command
+// separators, but marks expansion/redirection syntax as unsafe for read-only
+// agents rather than pretending to understand a full shell grammar.
+function parseShellCommands(command: string): ParsedCommand[] | null {
+  const commands: ParsedCommand[] = [];
+  let words: string[] = [];
+  let word = "";
+  let quote = "";
+  let escaped = false;
+  let pendingOperator: string | undefined;
+  const pushWord = () => { if (word) { words.push(word); word = ""; } };
+  const pushCommand = (operator?: string) => {
+    pushWord();
+    if (!words.length) return false;
+    commands.push({ words, operatorBefore: pendingOperator });
+    words = [];
+    pendingOperator = operator;
+    return true;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (escaped) { word += ch; escaped = false; continue; }
+    if (ch === "\\" && quote !== "'") { escaped = true; continue; }
+    if (quote) {
+      if (ch === quote) quote = "";
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (/\s/.test(ch)) { pushWord(); continue; }
+    if (ch === ";" || ch === "|" || ch === "&") {
+      const pair = command.slice(i, i + 2);
+      const op = pair === "||" || pair === "&&" ? pair : ch;
+      if (op === "&") return null; // background jobs are ambiguous
+      if (!pushCommand(op)) return null;
+      if (op.length === 2) i++;
+      continue;
+    }
+    word += ch;
+  }
+  if (escaped || quote) return null;
+  pushWord();
+  if (words.length) commands.push({ words, operatorBefore: pendingOperator });
+  else if (pendingOperator) return null;
+  return commands.length ? commands : null;
+}
+
+const GIT_GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+
+function gitSubcommand(words: string[]): { subcommand: string; args: string[]; safeGlobals: boolean } | null {
+  if (words[0] !== "git") return null;
+  let i = 1;
+  let safeGlobals = true;
+  while (i < words.length) {
+    const token = words[i];
+    if (GIT_GLOBAL_VALUE_OPTIONS.has(token)) {
+      if (token === "-c") safeGlobals = false;
+      if (i + 1 >= words.length) return { subcommand: "", args: [], safeGlobals: false };
+      i += 2;
+      continue;
+    }
+    if (/^--(?:git-dir|work-tree|namespace)=/.test(token)) { i++; continue; }
+    if (/^-c=/.test(token)) { safeGlobals = false; i++; continue; }
+    if (token.startsWith("-")) { safeGlobals = false; i++; continue; }
+    break;
+  }
+  return { subcommand: words[i] || "", args: words.slice(i + 1), safeGlobals };
+}
+
+function classifiedGitSubcommand(words: string[]): ReturnType<typeof gitSubcommand> {
+  let i = 0;
+  if (words[i] === "command") i++;
+  if (words[i] === "env") {
+    i++;
+    while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i] || "")) i++;
+  }
+  return gitSubcommand(words.slice(i));
+}
+
+const GIT_DELETE_COMMANDS = new Set(["clean", "restore"]);
+const GIT_MUTATION_COMMANDS = new Set([
+  "add", "am", "apply", "checkout", "cherry-pick", "commit", "fetch", "merge",
+  "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
+  "switch", "tag",
+]);
+const READ_ONLY_GIT_COMMANDS = new Set(["status", "diff", "log", "show", "blame", "rev-parse", "ls-files"]);
+const READ_ONLY_COMMANDS = new Set([
+  "basename", "cat", "cd", "cmp", "cut", "dirname", "du", "file", "find", "grep",
+  "head", "ls", "pwd", "readlink", "realpath", "rg", "sort", "stat", "tail",
+  "uniq", "wc",
+]);
+const NETWORK_COMMANDS = new Set(["curl", "wget", "nc", "ncat", "telnet", "ssh", "scp", "sftp", "ftp"]);
+
+function commandUsesNetwork(parsed: ParsedCommand[], command = ""): boolean {
+  return parsed.some(({ words }) => NETWORK_COMMANDS.has(words[0] || ""))
+    || /(?:^|[\s;&|])(?:[^\s;&|]*\/)?(?:curl|wget|nc|ncat|telnet|ssh|scp|sftp|ftp)(?=\s|$)/.test(command);
+}
+
+function targetsDashboardLoopback(command: string): boolean {
+  return /(?:https?:\/\/)?(?:127(?:\.\d{1,3}){3}|localhost|0\.0\.0\.0|\[?::1\]?):43191(?:[\s/'"?]|$)/i.test(command);
+}
+
+// Reviewer/lead shell policy. Unknown commands, shell expansion, interpreters,
+// project scripts, and mutating Git are denied instead of falling through as
+// reads. Network inspection is opt-in and remains unable to reach the local
+// dashboard API.
+export function readOnlyCommandDecision(command: string, networkAllowed = false): PolicyDecision {
+  if (!command.trim()) return { ok: false, reason: "empty or pathless shell command" };
+  if (/[`$<>{}\n]/.test(command)) return { ok: false, reason: "shell expansion, redirection, or multiline syntax is not permitted" };
+  const parsed = parseShellCommands(command);
+  if (!parsed) return { ok: false, reason: "ambiguous shell syntax" };
+  if (targetsDashboardLoopback(command)) return { ok: false, reason: "worker access to the pi-hive dashboard loopback API is blocked" };
+  if (commandUsesNetwork(parsed, command) && !networkAllowed) return { ok: false, reason: "network access is not enabled for this agent" };
+
+  for (const { words } of parsed) {
+    const head = words[0] || "";
+    const git = gitSubcommand(words);
+    if (git) {
+      if (!git.safeGlobals || !READ_ONLY_GIT_COMMANDS.has(git.subcommand)) {
+        return { ok: false, reason: `git ${git.subcommand || "command"} is not an allowed inspection operation` };
+      }
+      if (git.args.some((arg) => arg === "--ext-diff" || arg === "--textconv" || arg === "--output" || arg.startsWith("--output=") || arg.startsWith("--exec="))) {
+        return { ok: false, reason: `git ${git.subcommand} option may execute or write` };
+      }
+      continue;
+    }
+    if (head === "curl" && networkAllowed) {
+      if (!/https?:\/\//i.test(command) || words.slice(1).some((arg) => /^(?:-o|-O|-T|-d|-F|-K|--output|--remote-name|--upload-file|--data(?:-binary|-raw|-urlencode)?|--form|--request|--config|--json|--next|-X)(?:=|$)/.test(arg))) {
+        return { ok: false, reason: "curl is limited to read-only GET/HEAD requests" };
+      }
+      continue;
+    }
+    if (!READ_ONLY_COMMANDS.has(head)) return { ok: false, reason: `${head || "command"} is not in the read-only inspection allowlist` };
+    if (head === "find" && words.some((arg) => /^(?:-delete|-exec|-execdir|-ok|-okdir|-fprint|-fprintf|-fls)$/.test(arg))) {
+      return { ok: false, reason: "find action may execute or write" };
+    }
+    if (head === "sort" && words.some((arg) => arg === "-o" || arg === "--output" || arg.startsWith("--output=") || arg.startsWith("--compress-program="))) {
+      return { ok: false, reason: "sort option may execute or write" };
+    }
+  }
+  return { ok: true };
+}
+
 export function bashMutationKind(command: string): "delete" | "upsert" | "read" {
-  // Deletions. `find ... -delete`, `git clean` (removes untracked files), and
-  // the destructive git working-tree resets (`restore`, `checkout --`) join the
-  // classic rm/rmdir. NOTE: interpreters (node -e, python -c, sh x.sh, npm run)
-  // remain statically unpoliceable — documented as an accepted risk (G1).
+  const parsed = parseShellCommands(command) || [];
+  const gitCommands = parsed.map(({ words }) => classifiedGitSubcommand(words)?.subcommand).filter(Boolean) as string[];
+  // Deletions and destructive working-tree operations.
   if (/\brm\b|\brmdir\b/.test(command)) return "delete";
   if (/\bfind\b[^\n]*\s-delete\b/.test(command)) return "delete";
-  if (/\bgit\s+clean\b/.test(command)) return "delete";
-  if (/\bgit\s+(restore|checkout)\b[^\n]*\s--(\s|$)/.test(command)) return "delete";
-  if (/\bgit\s+restore\b/.test(command)) return "delete";
-  // Upserts (create/overwrite). Adds dd of=, rsync, install, and awk -i inplace
-  // to the classic set; redirections and in-place editors stay.
-  if (/\b(mv|cp|touch|mkdir|chmod|chown|ln|truncate|rsync|install)\b|>>?|\bsed\s+-i\b|\bperl\s+-pi\b|\btee\b/.test(command)) return "upsert";
+  if (gitCommands.some((subcommand) => GIT_DELETE_COMMANDS.has(subcommand))) return "delete";
+  if (parsed.some(({ words }) => {
+    const git = classifiedGitSubcommand(words);
+    return git?.subcommand === "checkout" && git.args.includes("--");
+  })) return "delete";
+  // Upserts include every Git repository/history mutation, patch/archive
+  // extraction, package installation, and known file-writing command.
+  if (gitCommands.some((subcommand) => GIT_MUTATION_COMMANDS.has(subcommand))) return "upsert";
+  if (/\b(mv|cp|touch|mkdir|chmod|chown|ln|truncate|rsync|install|patch|unzip|gunzip|bunzip2|unxz)\b|>>?|\bsed\s+-i\b|\bperl\s+-pi\b|\btee\b/.test(command)) return "upsert";
+  if (/\b(?:tar|bsdtar)\s+(?:-[^\s]*[xcru]|[xcru][^\s]*|--(?:extract|create|append|update))|\b7z\s+(?:x|e|a)\b|\bjar\s+[xcu]/.test(command)) return "upsert";
+  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|remove|uninstall)\b|\b(?:pip|pip3|apt|apt-get|dnf|yum|apk|cargo|gem|go)\s+(?:install|add)\b|\bcomposer\s+(?:install|require|remove)\b/.test(command)) return "upsert";
+  if (/\bcurl\b[^\n]*(?:\s-o(?:\s|$)|\s--output(?:=|\s)|\s-O(?:\s|$)|\s--remote-name(?:\s|$))/.test(command)) return "upsert";
+  if (/\bwget\b/.test(command) && !/\bwget\b[^\n]*(?:\s-O\s*-|\s--output-document=-)/.test(command)) return "upsert";
   if (/\bdd\b[^\n]*\bof=/.test(command)) return "upsert";
   if (/\bawk\b[^\n]*\s-i(\s|$)|\bawk\b[^\n]*inplace/.test(command)) return "upsert";
   return "read";
@@ -208,17 +359,7 @@ function statementIsCommit(statement: string): boolean {
   // Bare git aliases that publish/create history.
   if (/^(gc|gcm|gca|gp|gpf|gcam)$/.test(head)) return true;
   if (head === "git") {
-    // Skip git global flags before the subcommand: -C <dir>, -c <k=v>,
-    // --git-dir=…, --work-tree=…, -c/--namespace etc.
-    let j = 0;
-    while (j < rest.length) {
-      const tok = rest[j];
-      if (tok === "-C" || tok === "-c" || tok === "--namespace") { j += 2; continue; }
-      if (tok.startsWith("--git-dir=") || tok.startsWith("--work-tree=") || tok.startsWith("-c=")) { j++; continue; }
-      if (tok.startsWith("-")) { j++; continue; }
-      break;
-    }
-    const sub = rest[j] || "";
+    const sub = gitSubcommand([head, ...rest])?.subcommand || "";
     if (sub === "commit" || sub === "push" || sub === "tag" || sub === "am") return true;
   }
   if (head === "gh") {
@@ -289,17 +430,40 @@ export function enforceDomainForTool(state: HiveState, event: any, ctx: Extensio
 
   if (toolName === "bash") {
     const command = String(event.input?.command || "");
+    const readOnlyType = runtime.config.agentType === "reviewer" || runtime.config.agentType === "lead";
 
-    // Commit gate: publish/history-creation is blocked unless the agent carries
-    // a non-empty `commit:` field (a static config fact — no DB read). Local
-    // working-tree ops (merge/rebase/add/…) are not commit-class and pass.
+    // Read-only types get a positive allowlist before the broader mutation and
+    // domain checks. A commit: field never turns a reviewer/lead into a writer.
+    if (readOnlyType) {
+      const decision = readOnlyCommandDecision(command, runtime.config.network === true);
+      if (!decision.ok) return { block: true, reason: `${runtime.config.name} cannot run this shell command: ${decision.reason}.` };
+    }
+
+    const parsedCommands = parseShellCommands(command) || [];
+    if (targetsDashboardLoopback(command)) {
+      return { block: true, reason: `${runtime.config.name} cannot access the pi-hive dashboard loopback API from a worker.` };
+    }
+    if (commandUsesNetwork(parsedCommands, command) && runtime.config.network !== true) {
+      return { block: true, reason: `${runtime.config.name} cannot use network commands (network: true is not configured).` };
+    }
+
+    // Commit gate: publish/history creation is blocked unless a write-capable
+    // agent carries a non-empty `commit:` field (a static config fact).
     if (isCommitCommand(command) && !runtime.config.commit?.trim()) {
-      return { block: true, reason: `${runtime.config.name} cannot run commit/publish operations (no commit: field configured). This command creates history or publishes. Only agents with a commit: guidance field may commit; local git merge/rebase/add remain allowed.` };
+      return { block: true, reason: `${runtime.config.name} cannot run commit/publish operations (no commit: field configured). This command creates history or publishes. Only write-capable agents with a commit: guidance field may commit.` };
     }
 
     const kind = bashMutationKind(command);
     const capability = kind === "read" ? "read" : kind;
     const paths = extractBashPathTokens(command);
+    // Git mutates its worktree/repository even when the command names no file.
+    // Treat the effective working directory as an explicit policy target so a
+    // write-capable agent can use granted Git operations without making generic
+    // pathless mutations fail open.
+    if (kind !== "read" && parsedCommands.some(({ words }) => {
+      const git = classifiedGitSubcommand(words);
+      return Boolean(git && GIT_MUTATION_COMMANDS.has(git.subcommand));
+    }) && !paths.includes(".")) paths.push(".");
     // Non-mutating bash is a "command"; mutating bash maps to upsert/delete.
     const policyAction: PolicyAction = kind === "read" ? "command" : kind;
 

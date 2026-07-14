@@ -334,10 +334,10 @@ hive:
 
 // ── Agent-type contract (Phase A) ──────────────────────────────────────────
 
-test("loadConfig reads agent-type/stages/commit from frontmatter onto config", () => {
+test("loadConfig reads agent-type/stages/network/commit from frontmatter onto config", () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-hive-types-"));
   mkdirSync(join(cwd, ".pi", "hive", "agents"), { recursive: true });
-  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\ncommit: \"Only commit after review is green.\"\n---\nLead.");
+  writeFileSync(join(cwd, ".pi", "hive", "agents", "orchestrator.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: lead\nnetwork: true\ncommit: \"Only commit after review is green.\"\n---\nLead.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "plan-main.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "agents", "planner.md"), "---\nmodel: openai/gpt-5\nthinking: off\nagent-type: planner\nstages: [proposal, requirements]\n---\nPlan.");
   writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), `
@@ -359,6 +359,7 @@ hive:
 
   const config = loadConfig(cwd);
   assert.equal(config.orchestrator.agentType, "lead");
+  assert.equal(config.orchestrator.network, true);
   assert.equal(config.orchestrator.commit, "Only commit after review is green.");
   assert.equal(config.agents[0].agentType, "planner");
   assert.deepEqual(config.agents[0].stages, ["proposal", "requirements"]);
@@ -412,6 +413,11 @@ test("loadConfig rejects stages on a non-planner", () => {
 test("loadConfig rejects an invalid stage on a planner", () => {
   const cwd = typedFixture("agent-type: lead", "agent-type: planner\nstages: [proposal, ship]");
   assert.throws(() => loadConfig(cwd), /stages\[1\] must be one of/);
+});
+
+test("loadConfig rejects a non-boolean network capability", () => {
+  const cwd = typedFixture("agent-type: lead", "agent-type: reviewer\nnetwork: yes");
+  assert.throws(() => loadConfig(cwd), /network must be true or false/);
 });
 
 test("inferAgentType applies name/report heuristics", () => {

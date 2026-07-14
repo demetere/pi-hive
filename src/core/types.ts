@@ -117,6 +117,9 @@ export interface AgentConfig {
   // Planner-only: which planning gate artifacts this planner may write.
   // Omitted = all four gates. Ignored for non-planners.
   stages?: PlanStage[];
+  // Optional network capability for bash commands. Disabled by default. This
+  // does not grant access to pi-hive's authenticated local dashboard API.
+  network?: boolean;
   // Optional commit guidance. Its PRESENCE (non-empty) unlocks the commit gate
   // for this agent; the text is injected into the agent's prompt as guidance.
   // DECISION (Phase 5.6): commit capability intentionally follows this `commit:`

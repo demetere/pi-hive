@@ -242,7 +242,8 @@ Every agent (orchestrator, leads, members) is a Markdown file: **YAML frontmatte
 | `thinking` | **yes** | string | One of `off, minimal, low, medium, high, xhigh`. |
 | `agent-type` | **yes** | string | One of `planner, coder, tester, reviewer, lead`. Enforced capability type (see §7.1). Config **hard-fails** if missing/invalid. The orchestrator and every lead/routing node is `lead`. |
 | `stages` | no | list | **Planner-only.** Which planning gates this planner may write: any of `proposal, requirements, design, tasks`. Omitted = all four. Error if set on a non-planner. |
-| `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for this agent (only leads carry it). The text is injected into the agent's prompt. |
+| `network` | no | boolean | Enables network commands for this worker. Defaults to `false`; the local pi-hive dashboard API remains blocked. |
+| `commit` | no | string | Optional commit guidance. Its **presence** unlocks the commit gate for a write-capable agent. It never overrides the read-only `reviewer`/`lead` type policy. |
 | `tools` | no | list | Allow-list of tool names for this agent. Falls back to `default-tools` if omitted. See §7. |
 | `context` | no | list of `{path, use-when}` | Files **always inlined** into the prompt (full content). The agent's always-on knowledge. |
 | `skills` | no | list of `{path, use-when}` | On-demand procedures using Pi's native skill system. Worker launches disable ambient discovery with `--no-skills` and pass these paths explicitly with `--skill`. |
@@ -294,8 +295,8 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 | `planner` | `spec` / `docs` / `tasks` artifacts only — **never `code`** | no | no | Writes `proposal.md` / `requirements.md` / `design.md` / `tasks.md` under `.pi/hive/plans/`. Scope further with `stages`. |
 | `coder` | `code` / `docs` / `tasks` — **never `spec`** | no | only if it has a `commit:` field | Implements production code and tests **within its domain**. |
 | `tester` | tests (drawn by its domain `include`/`exclude` globs) | no | only with `commit:` | Writes tests, not production code. |
-| `reviewer` | **nothing (read-only)** — may run inspection/test `bash` | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; submits a structured red/yellow/green verdict. |
-| `lead` | **nothing (read-only)** | no | only if it has a `commit:` field | Delegates and coordinates. Includes the orchestrator. |
+| `reviewer` | **nothing (read-only)** — explicit inspection-command allowlist only | **yes** — `submit_review_verdict` (reviewer-only tool) | no | Reads and reviews; delegates tests to a tester; submits a structured red/yellow/green verdict. |
+| `lead` | **nothing (read-only)** — explicit inspection-command allowlist only | no | no | Delegates and coordinates. Includes the orchestrator. |
 
 **Two layers gate every mutation; both must pass.** (1) The **domain** globs (§8) — "may this agent touch this path at all?" (2) The **type policy** — "may this *type* perform this *action* on this *kind of file*?" So a `coder` whose domain allows `src/**` still cannot write a `.pi/hive/plans/**` spec file (wrong type), and a `planner` cannot write `src/**` even if its domain allows it (wrong type × class).
 
@@ -303,7 +304,11 @@ Agent type is **separate from the derived tree role** (orchestrator/lead/member)
 
 **Leads (including the orchestrator) cannot mutate files.** All mutation flows through typed `coder`/`tester` agents. Invariant: *if a file changed, a typed mutator did it.*
 
-**Commits are blocked at the tool layer** unless the agent's config has a non-empty **`commit:`** field (a static config fact — no review-state check). Local working-tree ops (`git merge`, `git rebase`, `git add`, `git status`, `git diff`) stay allowed; publish/history-creation (`git commit`, `git push`, `git tag`, `gh pr merge`, `gh release create`, `npm/pnpm/yarn/bun publish`, `just release`) is blocked without `commit:`. Only leads carry `commit:`; a lead commits the working tree that coders/testers produced. "Commit only when green" is prompt guidance in the `commit:` text, not a mechanical gate.
+**Reviewer and lead bash is fail-closed.** They may use the explicit file-inspection allowlist and non-mutating Git inspection (`status`, `diff`, `log`, `show`, `blame`, `rev-parse`, `ls-files`). Unknown commands, interpreters, tests/builds/task runners, patches, archive extraction, package installation, and every Git index/worktree/history mutation are blocked. Tests are potentially mutating project scripts and must be delegated to a `tester`; pi-hive does not provision disposable reviewer checkouts.
+
+**Commits are blocked at the tool layer** unless a write-capable agent's config has a non-empty **`commit:`** field (a static config fact — no review-state check). The field does not override the read-only `reviewer`/`lead` boundary. "Commit only when green" is prompt guidance in the `commit:` text, not a mechanical review-state gate.
+
+**Network commands are disabled by default.** Set `network: true` only on workers that require external access. This capability does not permit worker requests to the local pi-hive dashboard API.
 
 **`stages` (planner scoping).** A `planner` may optionally list which gate artifacts it may write: `stages: [proposal, requirements]`. Omitted = all four gates. One planner can own all gates, or you can run N specialist planners one gate each — same type, config decides granularity.
 
@@ -440,7 +445,6 @@ name: <Lead Name>
 model: inherit          # or a strong reasoning model, e.g. openai-codex/gpt-5.5
 thinking: off           # bump to low/medium for harder coordination
 agent-type: lead
-# commit: "Only commit when the user explicitly asks after review is green."  # uncomment on the lead that commits
 tools:
   - read
   - grep
@@ -591,7 +595,7 @@ Naming: prefix by scope — `behavior-*` (cross-cutting), `<role>-*` (role-owned
 - [ ] `.pi/hive/hive-config.yaml` exists (this is what activates the extension).
 - [ ] Every `path` in the config points to a file that **exists**.
 - [ ] Every agent `.md` has **`name`, `model`, `thinking`, `agent-type`** in frontmatter (these are required — missing `model`/`thinking`/`agent-type` throws at load). The orchestrator and every lead are `agent-type: lead`.
-- [ ] `stages` appears only on `agent-type: planner` agents. `commit:` unlocks the commit gate for whatever agent carries it: commit capability follows this config field, **not** agent-type — there is no "only leads may commit" enforcement, so a small project may deliberately give a leaf agent `commit:`. In practice you will usually put it only on the lead(s).
+- [ ] `stages` appears only on `agent-type: planner` agents. `network` is a boolean and is enabled only where external access is required. `commit:` unlocks the commit gate only for a write-capable agent; it cannot override a `reviewer`/`lead` read-only boundary.
 - [ ] Every `name` is **unique** across the tree and **matches** between config and the agent's frontmatter `name`.
 - [ ] Every agent has a sibling `<stem>-mental-model.yaml` with a valid spine and `owner` = the agent's name.
 - [ ] Every `context`/`skills`/`domain` path referenced in frontmatter **exists** (knowledge files created).
