@@ -556,12 +556,13 @@ const EVENT_COLS = `rowid, event_id, session_id, project_id, seq, ts, type, acto
 // Paginated, cursor-ordered event reads (B5). Replaces the boot-time
 // load-everything-into-memory path. `after` is an events.rowid; results are
 // ordered by rowid so the cursor is stable across restarts.
-export interface EventQuery { session?: string; cwd?: string; type?: string; after?: number; before?: number; limit?: number; }
+export interface EventQuery { session?: string; cwd?: string; type?: string; after?: number; before?: number; through?: number; limit?: number; }
 
 export function queryEvents(q: EventQuery): Array<HiveTelemetryEvent & { cursor: number }> {
   const where: string[] = [];
   const params: any = {};
   if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
+  if (q.through != null) { where.push(`rowid <= $through`); params.$through = q.through; }
   // `before` pages BACKWARD (older events, K7): take the highest rowids below the
   // anchor by ordering DESC + LIMIT, then re-sort ascending so the returned page
   // is chronological like every other read. Bounded by the same limit clamp.

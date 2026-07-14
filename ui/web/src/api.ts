@@ -4,7 +4,13 @@ import type { ArtifactId } from "../../../src/shared/openspec-artifacts";
 export interface InitialData {
   events: HiveEvent[];
   states: Snapshot[];
-  cursor: number;
+}
+
+export interface EventPage {
+  events: HiveEvent[];
+  nextCursor: number;
+  highWaterCursor: number;
+  hasMore: boolean;
 }
 
 // Same-origin bootstrap (Phase D): the per-daemon write token (attached as a
@@ -58,30 +64,99 @@ async function jsonOr<T>(request: Promise<Response>, fallback: T): Promise<T> {
 
 export async function fetchInitialData(): Promise<InitialData> {
   const [ev, st] = await Promise.all([
-    jsonOr<{ events: HiveEvent[]; cursor?: number }>(fetch("/events"), { events: [], cursor: 0 }),
+    jsonOr<Partial<EventPage> & { cursor?: number }>(fetch("/events"), { events: [], nextCursor: 0, highWaterCursor: 0, hasMore: false }),
     jsonOr<{ states: Snapshot[] }>(fetch("/states"), { states: [] }),
   ]);
-  return { events: ev.events || [], states: st.states || [], cursor: Number(ev.cursor || 0) };
+  return { events: ev.events || [], states: st.states || [] };
 }
 
-// Fetch events newer than a cursor (lossless SSE reconnect catch-up, E1). Pages
-// forward until the server returns fewer than the page size.
-export async function fetchEventsAfter(cursor: number): Promise<{ events: HiveEvent[]; cursor: number }> {
-  const all: HiveEvent[] = [];
-  let after = cursor;
-  let latest = cursor;
-  for (let guard = 0; guard < 100; guard++) {
-    const page = await jsonOr<{ events: HiveEvent[]; cursor?: number }>(
-      fetch(`/events?after=${after}&limit=1000`), { events: [], cursor: latest });
-    const evs = page.events || [];
-    all.push(...evs);
-    latest = Math.max(latest, Number(page.cursor || 0));
-    if (evs.length < 1000) break;
-    const lastCursor = evs[evs.length - 1]?.cursor;
-    if (lastCursor == null || lastCursor <= after) break;
-    after = lastCursor;
+export interface EventDrainResult {
+  cursor: number;
+  highWaterCursor: number;
+  pages: number;
+  eventCount: number;
+}
+
+export interface EventDrainOptions {
+  fetchImpl?: typeof fetch;
+  pageSize?: number;
+  highWaterCursor?: number;
+  retryBaseMs?: number;
+  retryMaxMs?: number;
+  maxRetries?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
+}
+
+function validateEventPage(value: unknown, after: number): EventPage {
+  const page = value as Partial<EventPage>;
+  if (!page || !Array.isArray(page.events)) throw new Error("invalid event page");
+  const nextCursor = Number(page.nextCursor);
+  const highWaterCursor = Number(page.highWaterCursor);
+  if (!Number.isFinite(nextCursor) || !Number.isFinite(highWaterCursor)
+    || nextCursor < after || highWaterCursor < nextCursor) throw new Error("invalid event cursors");
+  let previous = after;
+  for (const event of page.events) {
+    const cursor = Number(event?.cursor);
+    if (!Number.isFinite(cursor) || cursor <= previous || cursor > nextCursor) throw new Error("non-monotonic event page");
+    previous = cursor;
   }
-  return { events: all, cursor: latest };
+  if (page.events.length && previous !== nextCursor) throw new Error("event page skipped its last ingested cursor");
+  if (!page.events.length && nextCursor !== after) throw new Error("empty event page advanced its cursor");
+  if (page.hasMore && nextCursor === after) throw new Error("event page made no progress");
+  return { events: page.events, nextCursor, highWaterCursor, hasMore: page.hasMore === true };
+}
+
+// Drain an exact reconnect gap one page at a time. The first response freezes a
+// high-water cursor; later pages request that same bound so a busy live stream
+// cannot keep moving the finish line. A page cursor advances only after onPage
+// resolves, and transient request failures retry with bounded exponential delay.
+export async function drainEventsAfter(
+  cursor: number,
+  onPage: (events: HiveEvent[]) => void | Promise<void>,
+  options: EventDrainOptions = {},
+): Promise<EventDrainResult> {
+  const request = options.fetchImpl || fetch;
+  const pageSize = Math.min(5000, Math.max(1, Math.floor(options.pageSize || 1000)));
+  const sleep = options.sleep || ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const retryBase = Math.max(1, options.retryBaseMs || 100);
+  const retryMax = Math.max(retryBase, options.retryMaxMs || 5000);
+  const maxRetries = options.maxRetries ?? Number.POSITIVE_INFINITY;
+  let after = Math.max(0, Math.floor(cursor));
+  let highWater = Number.isFinite(options.highWaterCursor) ? Math.max(after, Math.floor(options.highWaterCursor!)) : undefined;
+  let pages = 0;
+  let eventCount = 0;
+
+  while (true) {
+    const query = new URLSearchParams({ after: String(after), limit: String(pageSize) });
+    if (highWater != null) query.set("highWater", String(highWater));
+    let body: unknown;
+    let attempt = 0;
+    while (true) {
+      try {
+        const response = await request(`/events?${query.toString()}`);
+        if (!response.ok) throw new Error(`event catch-up failed (${response.status})`);
+        body = await response.json();
+        break;
+      } catch (error) {
+        if (attempt >= maxRetries) throw error;
+        const delay = Math.min(retryMax, retryBase * 2 ** Math.min(attempt, 16));
+        attempt++;
+        await sleep(delay);
+      }
+    }
+
+    const page = validateEventPage(body, after);
+    if (highWater == null) highWater = page.highWaterCursor;
+    else if (page.highWaterCursor !== highWater) throw new Error("event catch-up high-water changed");
+    await onPage(page.events);
+    after = page.nextCursor;
+    pages++;
+    eventCount += page.events.length;
+    if (!page.hasMore) {
+      if (after !== highWater) throw new Error("event catch-up ended before high-water");
+      return { cursor: after, highWaterCursor: highWater, pages, eventCount };
+    }
+  }
 }
 
 // Fetch one page of events OLDER than a cursor (K7 "load older"). Single bounded
