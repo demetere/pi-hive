@@ -39,6 +39,7 @@
     "ui/web/tsconfig.json",
     "ui/web/vite.config.ts",
     "README.md",
+    "SECURITY.md",
     "SETUP.md"
   ],
   "scripts": {

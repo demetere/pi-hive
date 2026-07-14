@@ -203,7 +203,9 @@ During UI development you can run `just dashboard-dev` (Vite HMR on port 43192) 
 telemetry server running on `HIVE_TELEMETRY_PORT`; the dev server proxies the
 `/events`, `/states`, `/stream`, and `/health` endpoints to it.
 
-This is not wired to a third-party observability server. Runtime knobs are hive-specific:
+This is not wired to a third-party observability server. See [`SECURITY.md`](SECURITY.md) for the trust boundaries, approval and path invariants, supported platform, and accepted enforcement limits.
+
+Runtime knobs are hive-specific:
 
 - `HIVE_TELEMETRY_PORT` — dashboard port, default `43191`
 - `HIVE_TELEMETRY_HOST` — dashboard host, default `127.0.0.1`
