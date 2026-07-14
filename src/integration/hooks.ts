@@ -14,6 +14,7 @@ import { ensureDashboard } from "../engine/dashboard";
 import { resolveRuntime } from "../engine/agent-lookup";
 import { emitHiveEvent, emitModelCatalog, writeHiveStateSnapshot } from "../engine/observability";
 import { resolveConfiguredPath } from "../core/safe-path";
+import { cancelWorkerQueue } from "../engine/governance";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -414,6 +415,7 @@ ${catalog}`,
     orchestratorSnapshotTimer = undefined;
     orchestratorToolStartedAt.clear();
     turnStartedAt.clear();
+    cancelWorkerQueue(state);
     for (const runtime of state.runtimes.values()) {
       if (runtime.timer) clearInterval(runtime.timer);
       runtime.timer = undefined;

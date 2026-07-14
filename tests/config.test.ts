@@ -87,6 +87,30 @@ test("loadConfig normalizes settings and enriches model frontmatter", () => {
   assert.equal(config.agents[0].model, "anthropic/claude-sonnet");
 });
 
+test("worker governance is opt-in with settings defaults and per-agent overrides", () => {
+  const unconstrainedCwd = fixtureProject();
+  const unconstrainedPath = join(unconstrainedCwd, ".pi", "hive", "hive-config.yaml");
+  writeFileSync(unconstrainedPath, readFileSync(unconstrainedPath, "utf8").replace("  max-parallel: 2\n", ""));
+  assert.equal(loadConfig(unconstrainedCwd).settings.maxParallel, undefined);
+
+  const cwd = fixtureProject();
+  const cfgPath = join(cwd, ".pi", "hive", "hive-config.yaml");
+  let yaml = readFileSync(cfgPath, "utf8").replace(
+    "  max-parallel: 2",
+    "  max-parallel: 2\n  queue-size: 4\n  worker:\n    timeout-ms: 5000\n    max-runs: 3\n  team-budgets:\n    token-budget: 100000\n    cost-budget-usd: 12.5",
+  );
+  yaml = yaml.replace(
+    "    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md",
+    "    - name: Frontend Dev\n      path: .pi/hive/agents/frontend.md\n      governance:\n        max-runs: 1\n        max-delegation-depth: 2",
+  );
+  writeFileSync(cfgPath, yaml);
+  const config = loadConfig(cwd);
+  assert.equal(config.settings.queueSize, 4);
+  assert.deepEqual(config.settings.worker, { timeoutMs: 5000, maxRuns: 3 });
+  assert.deepEqual(config.settings.teamBudgets, { tokenBudget: 100000, costBudgetUsd: 12.5 });
+  assert.deepEqual(config.hive?.agents[0].governance, { maxRuns: 1, maxDelegationDepth: 2 });
+});
+
 test("loadConfig rejects unsafe telemetry limits and unknown telemetry keys", () => {
   for (const replacement of ["max-log-bytes: 0", "retention-days: 999999", "send-to-cloud: true"]) {
     const cwd = fixtureProject();

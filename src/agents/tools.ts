@@ -20,6 +20,7 @@ import * as openspec from "../engine/openspec";
 import { enqueueQuestion, recordQuestion } from "../engine/questions";
 import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
+import { budgetRemaining } from "../engine/governance";
 
 type ToolUpdate = (result: any) => void;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
@@ -142,6 +143,7 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         contextTokens: runtime.contextTokens,
         contextWindow: runtime.contextWindow,
         contextAdvice: contextAdvice(runtime.contextPct),
+        budgetRemaining: budgetRemaining(state, runtime),
       }));
       const verdicts = Array.from((state.latestVerdicts || new Map()).values());
       const verdictLines = verdicts.length
@@ -151,11 +153,12 @@ export function buildHiveTools(state: HiveState, callerName: string): ToolDefini
         `session: ${state.session?.sessionId || "not initialized"}`,
         `conversation: ${state.session?.conversationLog || "n/a"}`,
         `active_runs: ${state.activeRuns}`,
+        `queued_runs: ${state.workerQueue?.length || 0}`,
         "",
-        ...rows.map((row) => `- ${row.agent} [${row.group}] ${row.status}, runs=${row.runs}, ctx=${formatContextFill(row)} ${row.contextAdvice}, tokens=${row.tokens}, cost=$${row.costUsd.toFixed(3)}${row.task ? ` — ${row.task.slice(0, 120)}` : ""}`),
+        ...rows.map((row) => `- ${row.agent} [${row.group}] ${row.status}, runs=${row.runs}, ctx=${formatContextFill(row)} ${row.contextAdvice}, tokens=${row.tokens}, cost=$${row.costUsd.toFixed(3)}${Object.values(row.budgetRemaining.worker).some((value) => value !== undefined) ? `, remaining=${JSON.stringify(row.budgetRemaining.worker)}` : ""}${row.task ? ` — ${row.task.slice(0, 120)}` : ""}`),
         ...verdictLines,
       ].join("\n");
-      return { content: [{ type: "text", text }], details: { session: state.session, activeRuns: state.activeRuns, agents: rows, verdicts } };
+      return { content: [{ type: "text", text }], details: { session: state.session, activeRuns: state.activeRuns, queuedRuns: state.workerQueue?.length || 0, agents: rows, verdicts } };
     },
   }),
 

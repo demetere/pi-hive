@@ -187,11 +187,17 @@ export function restoreRuntimeCounters(state: HiveState) {
   // latest runtime snapshot keyed by agent name (file order is chronological, so a
   // later row overwrites an earlier one), plus the monotonic max runCount. Scan
   // through a fixed-size JSONL buffer instead of materializing the whole log.
-  const latest = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; cost: number; runs: number; tools: number }>();
+  const latest = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; cost: number; governanceTokens: number; governanceCost: number; runs: number; tools: number }>();
+  const distillerRuns = new Map<string, number>();
   forEachJsonlLine(logPath, (line) => {
-    if (!line.includes("delegation_end")) return;
+    if (!line.includes("delegation_end") && !line.includes("distill_start")) return;
     let ev: any;
     try { ev = JSON.parse(line); } catch { return; }
+    if (ev.type === "distill_start" && ev.payload?.agent) {
+      const key = slug(String(ev.payload.agent));
+      distillerRuns.set(key, Math.max(distillerRuns.get(key) || 0, Number(ev.payload.distillerRunCount || 0)));
+      return;
+    }
     if (ev.type !== "delegation_end") return;
     const rt = ev.payload?.runtime;
     const name = rt?.slug || rt?.name || ev.payload?.from;
@@ -208,6 +214,8 @@ export function restoreRuntimeCounters(state: HiveState) {
       // read back). Per-run deltas were unaffected; this fixes the live total.
       reasoning: Number(rt.reasoningTokens || 0),
       cost: Number(rt.costUsd || 0),
+      governanceTokens: Number(rt.governanceTokens ?? ((rt.inputTokens || 0) + (rt.outputTokens || 0) + (rt.cacheReadTokens || 0) + (rt.cacheWriteTokens || 0) + (rt.reasoningTokens || 0))),
+      governanceCost: Number(rt.governanceCostUsd ?? rt.costUsd ?? 0),
       // Monotonic: never let a later row lower the run count.
       runs: Math.max(priorRuns, Number(rt.runCount || 0)),
       tools: Number(rt.toolCount || 0),
@@ -223,8 +231,11 @@ export function restoreRuntimeCounters(state: HiveState) {
     runtime.cacheWriteTokens = p.cacheWrite;
     runtime.reasoningTokens = p.reasoning;
     runtime.costUsd = p.cost;
+    runtime.governanceTokens = p.governanceTokens;
+    runtime.governanceCostUsd = p.governanceCost;
     runtime.runCount = p.runs;
     runtime.toolCount = p.tools;
+    runtime.distillerRunCount = distillerRuns.get(runtime.config.slug || slug(runtime.config.name)) || 0;
   }
 }
 
@@ -243,6 +254,16 @@ export function currentAgentName(): string {
 
 export function runAsAgent<T>(agentName: string, fn: () => T): T {
   return currentAgentStorage.run(agentName, fn);
+}
+
+const delegationDepthStorage = new AsyncLocalStorage<number>();
+
+export function currentDelegationDepth(): number {
+  return delegationDepthStorage.getStore() || 0;
+}
+
+export function runAtDelegationDepth<T>(depth: number, fn: () => T): T {
+  return delegationDepthStorage.run(depth, fn);
 }
 
 // The active change-id (a planning/execution change under openspec/changes/<id>/)

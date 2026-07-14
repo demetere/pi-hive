@@ -41,6 +41,27 @@ function positiveInteger(value: unknown, label: string, max: number): void {
   }
 }
 
+function positiveNumber(value: unknown, label: string, max: number): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > max) {
+    throw new Error(`${label} must be a positive number no greater than ${max}.`);
+  }
+}
+
+const GOVERNANCE_KEYS = ["timeoutMs", "maxDelegationDepth", "maxRuns", "tokenBudget", "costBudgetUsd", "distillerRuns"] as const;
+
+function governance(value: unknown, label: string): void {
+  if (value === undefined) return;
+  object(value, label);
+  keys(value, GOVERNANCE_KEYS, label);
+  positiveInteger(value.timeoutMs, `${label}.timeoutMs`, 7 * 24 * 60 * 60 * 1000);
+  positiveInteger(value.maxDelegationDepth, `${label}.maxDelegationDepth`, 128);
+  positiveInteger(value.maxRuns, `${label}.maxRuns`, 1_000_000);
+  positiveInteger(value.tokenBudget, `${label}.tokenBudget`, Number.MAX_SAFE_INTEGER);
+  positiveNumber(value.costBudgetUsd, `${label}.costBudgetUsd`, 1_000_000_000);
+  positiveInteger(value.distillerRuns, `${label}.distillerRuns`, 1_000_000);
+}
+
 function stringList(value: unknown, label: string): void {
   if (value === undefined) return;
   if (!Array.isArray(value)) throw new Error(`${label} must be a list of strings.`);
@@ -73,7 +94,7 @@ const DOMAIN_KEYS = ["path", "read", "upsert", "delete", "include", "exclude", "
 const AGENT_KEYS = [
   "name", "slug", "path", "color", "model", "tools", "thinking", "consultWhen",
   "routingTags", "responsibilities", "context", "skills", "domain", "members", "children",
-  "allowedAgents", "agentType", "stages", "network", "commit", "allowOutsideProject",
+  "allowedAgents", "agentType", "stages", "network", "commit", "allowOutsideProject", "governance",
 ] as const;
 
 interface ValidationTotals {
@@ -127,6 +148,7 @@ function agent(cwd: string, value: unknown, label: string, depth: number, totals
   string(value.name, `${label}.name`);
   string(value.path, `${label}.path`);
   optionalBoolean(value.allowOutsideProject, `${label}.allowOutsideProject`);
+  governance(value.governance, `${label}.governance`);
   const prompt = configuredPath(cwd, value.path, `${label}.path`, value.allowOutsideProject === true, { mustExistMarkdown: true });
   addFileBytes(prompt, totals);
   const key = slug(String(value.slug || value.name));
@@ -170,9 +192,18 @@ export function validateRawConfig(cwd: string, raw: string, parsed: unknown): vo
   const settings = parsed.settings;
   if (settings !== undefined) {
     object(settings, "settings");
-    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "secretPaths", "distiller", "telemetry"], "settings");
+    keys(settings, ["subagentOutputLimit", "defaultTools", "maxParallel", "queueSize", "worker", "teamBudgets", "secretPaths", "distiller", "telemetry"], "settings");
     positiveInteger(settings.subagentOutputLimit, "settings.subagentOutputLimit", CONFIG_LIMITS.subagentOutputLimit);
     positiveInteger(settings.maxParallel, "settings.maxParallel", CONFIG_LIMITS.maxParallel);
+    positiveInteger(settings.queueSize, "settings.queueSize", 100_000);
+    governance(settings.worker, "settings.worker");
+    if (settings.teamBudgets !== undefined) {
+      object(settings.teamBudgets, "settings.teamBudgets");
+      keys(settings.teamBudgets, ["maxRuns", "tokenBudget", "costBudgetUsd"], "settings.teamBudgets");
+      positiveInteger(settings.teamBudgets.maxRuns, "settings.teamBudgets.maxRuns", 1_000_000);
+      positiveInteger(settings.teamBudgets.tokenBudget, "settings.teamBudgets.tokenBudget", Number.MAX_SAFE_INTEGER);
+      positiveNumber(settings.teamBudgets.costBudgetUsd, "settings.teamBudgets.costBudgetUsd", 1_000_000_000);
+    }
     if (settings.defaultTools !== undefined) string(settings.defaultTools, "settings.defaultTools");
     stringList(settings.secretPaths, "settings.secretPaths");
     if (settings.distiller !== undefined) {

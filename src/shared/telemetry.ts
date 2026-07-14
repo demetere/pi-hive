@@ -30,10 +30,12 @@ export type HiveTelemetryEventType =
   | "session_fork"
   | "session_tree"
   | "session_info_changed"
-  | "queue_update"
   | "model_catalog"
   | "distill_start"
   | "distill_end"
+  | "budget_warning"
+  | "budget_exhausted"
+  | "queue_update"
   // Plan-store events. Emitted by the core (which cannot reach bun:sqlite) and
   // materialized into typed plan_* tables by the dashboard on ingest (§7.4).
   | "review_verdict"
@@ -123,6 +125,7 @@ export interface TelemetryAgentRuntime {
   task?: string;
   lastWork?: string;
   runCount?: number;
+  distillerRunCount?: number;
   toolCount?: number;
   elapsedMs?: number;
   inputTokens?: number;
@@ -131,6 +134,8 @@ export interface TelemetryAgentRuntime {
   cacheWriteTokens?: number;
   reasoningTokens?: number;
   costUsd?: number;
+  governanceTokens?: number;
+  governanceCostUsd?: number;
   contextPct?: number;
   // Raw context-window fill behind contextPct (Phase 4.7): the tokens currently
   // in context and the model's window. Threaded from the worker poll / main
@@ -146,6 +151,10 @@ export interface TelemetryAgentRuntime {
   // telemetry symmetry and historical consumers.
   runStartInputTokens?: number;
   runStartOutputTokens?: number;
+  budgetRemaining?: {
+    worker: { runs?: number; tokens?: number; costUsd?: number; distillerRuns?: number };
+    team: { runs?: number; tokens?: number; costUsd?: number };
+  };
 }
 
 export interface HiveStateSnapshot {

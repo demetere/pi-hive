@@ -8,6 +8,7 @@ import type { HiveMode, HiveState } from "../../core/types";
 import { activateTeamRuntimes } from "../../engine/session";
 import { startHiveTelemetrySession } from "../../engine/observability";
 import { recordQuestion } from "../../engine/questions";
+import { budgetRemaining } from "../../engine/governance";
 import { updateHiveActivityWidget } from "./activity";
 
 // Surface a delegated planner's promoted clarifying question to the human. With
@@ -201,9 +202,15 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
     render(width: number): string[] {
       const label = modeLabel(state.mode);
       const modeColor = state.mode === "hive" ? "accent" : state.mode === "plan" ? "warning" : "muted";
+      const firstWorker = Array.from(state.runtimes.values()).find((runtime) => runtime.config.role !== "orchestrator");
+      const teamRemaining = firstWorker ? budgetRemaining(state, firstWorker).team : {};
+      const remaining = Object.entries(teamRemaining)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => `${key} ${key === "costUsd" ? `$${Number(value).toFixed(2)}` : Math.floor(Number(value))}`)
+        .join(", ");
       const details = state.mode === "normal"
         ? `normal chat`
-        : `${state.mode === "plan" ? "planning" : "execution"} · ${state.runtimes.size} agents · ${state.activeRuns} running`;
+        : `${state.mode === "plan" ? "planning" : "execution"} · ${state.runtimes.size} agents · ${state.activeRuns} running${state.workerQueue?.length ? ` · ${state.workerQueue.length} queued` : ""}${remaining ? ` · team left: ${remaining}` : ""}`;
       // Dashboard indicator: shown only while the shared daemon is up (its url is
       // recorded on state.obsServer); nothing when it is off.
       const dash = state.obsServer?.url ? theme.fg("success", ` · ◉ ${state.obsServer.url.replace(/^https?:\/\//, "")}`) : "";

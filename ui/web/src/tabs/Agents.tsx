@@ -27,6 +27,17 @@ function fmtMs(ms?: number): string {
 
 // Raw context-window fill behind the percentage (Phase 4.7), as a hover detail:
 // the absolute tokens currently in context over the model's window.
+function remainingBudget(r: ScopeAgent): string {
+  const b = r.budgetRemaining?.worker;
+  if (!b || Object.values(b).every((value) => value == null)) return "unlimited";
+  const parts: string[] = [];
+  if (b.runs != null) parts.push(`${Math.floor(b.runs)} runs`);
+  if (b.tokens != null) parts.push(`${fmtNum(b.tokens)} tok`);
+  if (b.costUsd != null) parts.push(fmtCost(b.costUsd));
+  if (b.distillerRuns != null) parts.push(`${Math.floor(b.distillerRuns)} distill`);
+  return parts.join(" · ");
+}
+
 function contextTitle(r: ScopeAgent): string | undefined {
   if (r.contextTokens == null && r.contextWindow == null) return undefined;
   const tok = r.contextTokens != null ? fmtNum(r.contextTokens) : "?";
@@ -172,7 +183,7 @@ export default function Agents(props: { search: string }) {
         <thead>
           <tr>
             <th>Agent</th><th>Role</th><th>Type</th><th>Domain</th><th>Status</th><th>Model</th>
-            <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Runs</th><th className="num">Tools</th>
+            <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Runs</th><th className="num">Tools</th><th>Remaining</th>
             <th className="num" title="Average per-turn latency of the main session, over turn events in the loaded window. In multi-session scopes each turn is attributed to every session's main row (turn events carry no session key), so the average is an approximation across sessions.">Turn</th>
             {!collapsed && <th className="num">Context</th>}
           </tr>
@@ -193,6 +204,7 @@ export default function Agents(props: { search: string }) {
               <td className="num">{fmtCost(r.cost)}</td>
               <td className="num">{r.runs}</td>
               <td className="num">{r.tools}</td>
+              <td className="muted-cell mono">{remainingBudget(r)}</td>
               <td className="num">{turnLatency.has(r.name) ? fmtMs(turnLatency.get(r.name)!) : "—"}</td>
               {!collapsed && <td className="num" title={contextTitle(r)}>{r.contextPct != null ? `${Math.round(r.contextPct)}%` : "—"}</td>}
             </tr>
