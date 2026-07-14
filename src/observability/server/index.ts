@@ -5,7 +5,7 @@ import {
   IDLE_TIMEOUT_MS, PACKAGE_VERSION, PORT, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH,
   STARTUP_NONCE, expectedHostHeader,
 } from "./config";
-import { broadcastPing, encoder, eventFrame, subscribers } from "./sse";
+import { broadcastPing, encoder, eventFrame, SSE_BUFFER_BYTES, subscribers } from "./sse";
 import type { Subscriber } from "./types";
 import {
   allSnapshots,
@@ -38,6 +38,12 @@ function json(data: unknown, status = 200) {
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store" },
   }), "api");
+}
+
+function fleetPage(url: URL): { offset: number; limit: number } {
+  const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset")) || 0));
+  const limit = Math.min(500, Math.max(1, Math.floor(Number(url.searchParams.get("limit")) || 250)));
+  return { offset, limit };
 }
 
 startTelemetryRuntime();
@@ -247,8 +253,20 @@ const server = Bun.serve({
       const limit = Number(url.searchParams.get("limit") || 1000);
       return json({ toolCalls: queryToolCalls({ session, after: after != null ? Number(after) : undefined, limit }) });
     }
-    if (url.pathname === "/states") return json({ states: allSnapshots() });
-    if (url.pathname === "/sessions") return json({ sessions: sessionSummaries() });
+    if (url.pathname === "/states") {
+      const { offset, limit } = fleetPage(url);
+      const rows = allSnapshots({ offset, limit: limit + 1 });
+      const hasMore = rows.length > limit;
+      const states = hasMore ? rows.slice(0, limit) : rows;
+      return json({ states, offset, nextOffset: offset + states.length, hasMore });
+    }
+    if (url.pathname === "/sessions") {
+      const { offset, limit } = fleetPage(url);
+      const rows = sessionSummaries({ offset, limit: limit + 1 });
+      const hasMore = rows.length > limit;
+      const sessions = hasMore ? rows.slice(0, limit) : rows;
+      return json({ sessions, offset, nextOffset: offset + sessions.length, hasMore });
+    }
 
     // Storage usage + prune preview. Project scope is an exact canonical ID;
     // omit it for fleet-wide storage.
@@ -298,13 +316,16 @@ const server = Bun.serve({
     }
     if (url.pathname === "/stream") {
       let sub: Subscriber | undefined;
-      return applyBrowserSecurityHeaders(new Response(new ReadableStream({
+      return applyBrowserSecurityHeaders(new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           sub = controller;
           subscribers.add(controller);
           controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH, cursor: maxEventCursor() })));
         },
         cancel() { if (sub) subscribers.delete(sub); },
+      }, {
+        highWaterMark: SSE_BUFFER_BYTES,
+        size(chunk) { return chunk.byteLength; },
       }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" } }), "api");
     }
     if (url.pathname === "/conversation") return json({ path: CONVERSATION_LOG });

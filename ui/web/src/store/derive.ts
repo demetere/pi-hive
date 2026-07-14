@@ -33,8 +33,8 @@ export function demoteIfStale(status: string, sessionId: string, now: number): s
 // can rebuild off them without recomputing the heavy work.
 let historyBySession = new Map<string, Map<string, HistPeak>>();
 
-function computeAllEvents(eventMap: Record<string, HiveEvent>): HiveEvent[] {
-  const arr = Object.values(eventMap);
+function computeAllEvents(events: HiveEvent[]): HiveEvent[] {
+  const arr = events;
   arr.sort((a, b) => String(a.ts).localeCompare(String(b.ts)) || (a.seq || 0) - (b.seq || 0));
   return arr;
 }
@@ -173,9 +173,27 @@ function computeFleetStats(ss: SessionView[]): ScopeStats {
 }
 
 // ── heavy tier: events/snapshots changed ─────────────────────────────────────
+// A burst of SSE frames or initial snapshots should trigger one bounded rebuild,
+// not one full derivation per row. 32 ms keeps live UI latency imperceptible while
+// limiting heavy work to roughly one pass per two animation frames.
+let heavyTimer: ReturnType<typeof setTimeout> | undefined;
+export function scheduleHeavyRecompute(): void {
+  if (heavyTimer) return;
+  heavyTimer = setTimeout(() => {
+    heavyTimer = undefined;
+    recomputeHeavy();
+  }, 32);
+}
+
+export function flushHeavyRecompute(): void {
+  if (heavyTimer) clearTimeout(heavyTimer);
+  heavyTimer = undefined;
+  recomputeHeavy();
+}
+
 export function recomputeHeavy() {
   const s = store.getState();
-  const allEvents = computeAllEvents(s.eventMap);
+  const allEvents = computeAllEvents(s.eventRing.values());
   historyBySession = buildHistoryBySession(allEvents);
   const eventStatus = buildEventStatus(allEvents);
   const sessions = computeSessions(allEvents, s.snapshots, eventStatus, s.sessionSummaries);

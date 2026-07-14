@@ -4,6 +4,7 @@ import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { HiveEvent, ProjectGroup, SessionView, Snapshot } from "../types";
 import type { Delegation, ModelInfo, SessionSummary, TopologyDetail, TopologyVersionSummary } from "../api";
+import { EventRing } from "./event-ring";
 
 // ── scope: fleet (all projects) | project (one project, its sessions
 // aggregated) | session (one session detail). The tabs render within whatever
@@ -40,7 +41,10 @@ export type ConfirmState = {
 
 export interface HiveState {
   // ── raw slice ───────────────────────────────────────────────────────────
-  eventMap: Record<string, HiveEvent>;
+  // Mutable bounded ring + revision avoids cloning the complete event map for
+  // every SSE frame. Consumers subscribe to eventRevision, never object identity.
+  eventRing: EventRing;
+  eventRevision: number;
   snapshots: Record<string, Snapshot>;
   // Highest events.rowid seen, for lossless SSE reconnect catch-up (E1).
   lastCursor: number;
@@ -137,7 +141,8 @@ export interface Toast { id: number; kind: "success" | "error" | "info"; message
 const initialStats: ScopeStats = { sessions: 0, live: 0, running: 0, tokens: 0, cost: 0 };
 
 const initialState: HiveState = {
-    eventMap: {},
+    eventRing: new EventRing(),
+    eventRevision: 0,
     snapshots: {},
     lastCursor: 0,
     connection: "connecting",

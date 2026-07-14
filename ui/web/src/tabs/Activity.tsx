@@ -315,6 +315,7 @@ export default function Activity(props: { search: string }) {
                 try {
                   const n = await loadOlderEvents();
                   if (n > 0) setPage((p) => p + 1);
+                  else if (n < 0) pushToast("info", "The live event window is full. Use Replay to inspect complete session history.");
                   else pushToast("info", "No older events — you've reached the beginning.");
                 } finally { setLoadingOlder(false); }
               }}
