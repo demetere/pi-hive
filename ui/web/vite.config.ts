@@ -40,6 +40,7 @@ export default defineConfig({
       "/conversation": target,
       "/thinking": target,
       "/project-overrides": target,
+      "/review-sessions": target,
       "/pl-review": target,
       "/api": target,
     },

@@ -35,8 +35,8 @@ test("write auth requires the daemon token (Phase D)", () => {
   // Correct token accepted (case-insensitive scheme).
   assert.equal(isAuthorizedWrite(req({ authorization: `Bearer ${token}` }), token), true);
   assert.equal(isAuthorizedWrite(req({ authorization: `bearer ${token}` }), token), true);
-  // An empty configured token disables the check (local-only / tests).
-  assert.equal(isAuthorizedWrite(req(), ""), true);
+  // Missing production credentials fail closed rather than disabling auth.
+  assert.equal(isAuthorizedWrite(req(), ""), false);
 });
 
 test("write gate rejects any non-GET/HEAD method without a token (M8c/J7)", () => {
@@ -59,6 +59,9 @@ test("write gate rejects any non-GET/HEAD method without a token (M8c/J7)", () =
   // With the correct token, the gate lets the write proceed (null = continue).
   assert.equal(gate(reqM("PUT", { authorization: `Bearer ${token}` })), null);
   assert.equal(gate(reqM("PATCH", { authorization: `Bearer ${token}` })), null);
+  // A separately validated narrow capability can authorize one route without
+  // weakening empty-token behavior for ordinary writes.
+  assert.equal(writeGateResponse(reqM("POST"), new URL(reqM("POST").url), "", reject, true), null);
 
   // Cross-origin mutations are blocked at 403 before the token is even checked.
   const xorigin = gate(reqM("PUT", { origin: "https://evil.example" }));

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  bootCwd, fetchPlanDetail, fetchPlanFile, fetchPlans,
+  bootCwd, createReviewSession, fetchPlanDetail, fetchPlanFile, fetchPlans,
   type ArtifactReview, type ArtifactState, type PlanDetail, type PlanSummary,
 } from "../api";
 import { useHive } from "../store";
@@ -8,9 +8,9 @@ import RelTime from "../hooks/RelTime";
 
 // The Plans tab is now a slim two-pane status view over OpenSpec changes. The
 // actual review/annotation happens in the self-hosted Plannotator UI, rendered
-// inline in an iframe on our own dashboard server at /pl-review/?rid=<change#artifact>.
-// Navigating between changes/artifacts just re-renders the iframe — zero
-// per-review processes.
+// inline in an iframe on our own dashboard server. The dashboard first mints a
+// short-lived, content-bound review capability; the nonce-bearing URL is then
+// used by the vendored iframe without creating per-review processes.
 
 const STATUS_LABEL: Record<string, string> = {
   "no-tasks": "no tasks",
@@ -188,6 +188,9 @@ export default function Plans(props: { search: string }) {
   const [rid, setRid] = useState<string>("");
   const [fullscreen, setFullscreen] = useState(false);
   const [readOnlyMarkdown, setReadOnlyMarkdown] = useState<string | null>(null);
+  const [reviewSession, setReviewSession] = useState<{ rid: string; url: string } | null>(null);
+  const [reviewSessionPending, setReviewSessionPending] = useState(false);
+  const [reviewSessionFailed, setReviewSessionFailed] = useState(false);
 
   // Esc exits the fullscreen review.
   useEffect(() => {
@@ -223,7 +226,6 @@ export default function Plans(props: { search: string }) {
     return plans.filter((p) => !q || p.changeId.toLowerCase().includes(q));
   }, [plans, props.search]);
 
-  const reviewSrc = rid ? `/pl-review/?rid=${encodeURIComponent(rid)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}` : "";
   const selectedArtifact = useMemo(() => (detail?.artifacts || []).find((a) => ridFor(detail!.changeId, a, detail!.files) === rid), [detail, rid]);
   const selectedReview = useMemo(() => detail?.artifactReview.find((r) => r.id === selectedArtifact?.id), [detail, selectedArtifact]);
   // A red human verdict is not final: it means feedback was requested and the
@@ -231,6 +233,22 @@ export default function Plans(props: { search: string }) {
   // Only green locks the artifact into read-only mode.
   const reviewFinal = selectedReview?.humanVerdict === "green";
   const artifactPath = artifactPathFromRid(rid);
+  const reviewSrc = reviewSession?.rid === rid ? reviewSession.url : "";
+
+  useEffect(() => {
+    let cancelled = false;
+    setReviewSession(null);
+    setReviewSessionFailed(false);
+    if (!rid || !cwd || !selectedArtifact || reviewFinal) { setReviewSessionPending(false); return; }
+    setReviewSessionPending(true);
+    void createReviewSession(rid, cwd).then((session) => {
+      if (cancelled) return;
+      setReviewSessionPending(false);
+      if (session) setReviewSession({ rid, url: session.reviewUrl });
+      else setReviewSessionFailed(true);
+    });
+    return () => { cancelled = true; };
+  }, [cwd, reviewFinal, rid, selectedArtifact?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -329,7 +347,7 @@ export default function Plans(props: { search: string }) {
             </div>
 
             <div className={`tab-card plan-review-frame ${fullscreen ? "fullscreen" : ""}`}>
-              {reviewSrc ? (
+              {reviewSrc || reviewFinal ? (
                 <>
                   <div className="plan-review-bar">
                     <div className="plan-review-title">
@@ -353,13 +371,17 @@ export default function Plans(props: { search: string }) {
                     </div>
                   ) : (
                     <iframe
-                      key={rid}
+                      key={reviewSrc}
                       title="Plan review"
                       src={reviewSrc}
                       className="plan-review-iframe"
                     />
                   )}
                 </>
+              ) : reviewSessionPending ? (
+                <div className="empty">Creating secure review session…</div>
+              ) : reviewSessionFailed ? (
+                <div className="empty">Secure review session unavailable. Refresh and try again.</div>
               ) : <div className="empty">Select an authored artifact to review.</div>}
             </div>
           </>
