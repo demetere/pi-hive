@@ -218,13 +218,27 @@ const server = Bun.serve({
       const session = url.searchParams.get("session") || undefined;
       const cwd = url.searchParams.get("cwd") || undefined;
       const type = url.searchParams.get("type") || undefined;
-      const limit = Number(url.searchParams.get("limit") || 1000);
+      const limit = Math.min(5000, Math.max(1, Math.floor(Number(url.searchParams.get("limit")) || 1000)));
       const afterParam = url.searchParams.get("after");
       const beforeParam = url.searchParams.get("before");
-      const events = afterParam != null || beforeParam != null || type
-        ? queryEvents({ session, cwd, type, after: afterParam != null ? Number(afterParam) : undefined, before: beforeParam != null ? Number(beforeParam) : undefined, limit })
+      const after = afterParam != null && Number.isFinite(Number(afterParam)) ? Math.max(0, Math.floor(Number(afterParam))) : undefined;
+      const before = beforeParam != null && Number.isFinite(Number(beforeParam)) ? Math.max(0, Math.floor(Number(beforeParam))) : undefined;
+      const currentHighWater = maxEventCursor();
+      const highWaterParam = url.searchParams.get("highWater");
+      const requestedHighWater = highWaterParam != null ? Number(highWaterParam) : Number.NaN;
+      // Freeze a reconnect drain at the high-water mark returned by its first
+      // page. New live events can continue over SSE without making catch-up an
+      // endless chase of a moving tail.
+      const highWaterCursor = after != null && Number.isFinite(requestedHighWater) && requestedHighWater >= after
+        ? Math.min(currentHighWater, Math.floor(requestedHighWater))
+        : currentHighWater;
+      const events = after != null || before != null || type
+        ? queryEvents({ session, cwd, type, after, before, through: after != null ? highWaterCursor : undefined, limit })
         : recentEvents(limit, { session, cwd });
-      return json({ events, cursor: maxEventCursor() });
+      const nextCursor = Number(events[events.length - 1]?.cursor ?? after ?? 0);
+      const unfilteredCatchUp = after != null && !session && !cwd && !type && before == null;
+      const hasMore = unfilteredCatchUp ? nextCursor < highWaterCursor : events.length >= limit;
+      return json({ events, cursor: nextCursor, nextCursor, highWaterCursor, hasMore });
     }
     // Single source for cost/token series (E2) and per-session tool detail.
     if (url.pathname === "/delegations") {

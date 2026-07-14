@@ -35,6 +35,8 @@ test("events are cursor-ordered and paginate by rowid (B5)", () => {
 
   const afterTwo = db.queryEvents({ session: "s1", after: first[0].cursor - 1, limit: 100 });
   expect(afterTwo.every((e) => e.cursor >= first[0].cursor)).toBe(true);
+  const frozen = db.queryEvents({ session: "s1", after: first[0].cursor - 1, through: first[1].cursor, limit: 100 });
+  expect(frozen.map((event) => event.cursor)).toEqual([first[0].cursor, first[1].cursor]);
   expect(db.maxEventCursor()).toBeGreaterThanOrEqual(5);
 });
 

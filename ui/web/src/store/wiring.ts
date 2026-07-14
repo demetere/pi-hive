@@ -1,4 +1,4 @@
-import { fetchDelegations, fetchEventsAfter, fetchInitialData, fetchModels, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, fetchTopologies, fetchTopologyDetail, openEventStream, pruneTelemetryRemote, saveProjectOverride } from "../api";
+import { drainEventsAfter, fetchDelegations, fetchInitialData, fetchModels, fetchProjectOverrides, fetchSessionSummaries, fetchStates, fetchThinking, fetchTopologies, fetchTopologyDetail, openEventStream, pruneTelemetryRemote, saveProjectOverride } from "../api";
 import { store } from "./index";
 import { flushHeavyRecompute, recomputeLive, recomputeScoped, scheduleHeavyRecompute } from "./derive";
 import { ingestEvents, ingestSnapshot, purgeLocal, pushToast, setSelectedSession, tick } from "./raw";
@@ -207,12 +207,12 @@ export function connect(): EventSource | undefined {
   void refreshDelegations(true); // load typed delegation deltas for cost/token series
   void refreshModels(); // load model capabilities for the thinking dial (K3)
 
-  const initialFetch = fetchInitialData().then(({ events, states, cursor }) => {
+  const initialFetch = fetchInitialData().then(({ events, states }) => {
+    // ingestEvents advances only through the last delivered event. The initial
+    // recent page ends at the server tail; any fetch-vs-subscribe gap is drained
+    // from the hello frame below.
     ingestEvents(events);
     for (const snap of states) ingestSnapshot(snap);
-    // Seed the cursor high-water mark even if the recent-events page didn't
-    // include the very latest rowid, so reconnect catch-up starts correctly.
-    if (cursor > store.getState().lastCursor) store.setState({ lastCursor: cursor });
     // Initial selection depends on the derived session list. Flush this one boot
     // batch synchronously; subsequent SSE/snapshot bursts stay scheduled.
     flushHeavyRecompute();
@@ -231,13 +231,13 @@ export function connect(): EventSource | undefined {
   // server's 15s heartbeat gap) doesn't flicker the badge.
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let hadConnection = false;
+  let firstHelloPending = true;
   es.addEventListener("open", () => {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
     // Each connection attempt gets a generation stamp. Only the resync launched
     // for the CURRENT generation may flip to "live" — so a drop mid-resync (which
-    // bumps the generation and sets "reconnecting") or a second reconnect whose
-    // resync short-circuits on the in-flight guard cannot overwrite a legitimate
-    // "reconnecting"/"syncing" state (M6).
+    // bumps the generation and sets "reconnecting") or a second reconnect sharing
+    // the in-flight drain cannot overwrite a legitimate reconnecting state (M6).
     const gen = ++connectionGen;
     // On a RE-connect (not the first open), catch up on the exact gap using the
     // global cursor (E1): fetch every event after our high-water mark plus fresh
@@ -246,13 +246,12 @@ export function connect(): EventSource | undefined {
     // "syncing" until the gap-fetch resolves (K7) so the badge doesn't claim
     // "live" over stale data during the async catch-up window.
     if (hadConnection) {
+      firstHelloPending = false; // reconnect catch-up below owns the gap
       store.setState({ connection: "syncing" });
-      void resyncAfterReconnect().then((ran) => {
-        // Only the resync that actually performed the catch-up may declare "live",
-        // and only if no newer connection attempt superseded it (M6). A resync
-        // that short-circuited because an earlier one is still in flight returns
-        // false and does nothing — that earlier resync owns the live flip.
-        if (ran && gen === connectionGen) store.setState({ connection: "live" });
+      void resyncAfterReconnect().then((complete) => {
+        // Only a fully drained gap may declare "live", and only if no newer
+        // connection attempt superseded this one (M6).
+        if (complete && gen === connectionGen) store.setState({ connection: "live" });
       });
     } else {
       store.setState({ connection: "live" });
@@ -280,23 +279,29 @@ export function connect(): EventSource | undefined {
   // server is genuinely ahead.
   es.addEventListener("hello", (e) => {
     try {
+      if (!firstHelloPending) return;
+      firstHelloPending = false;
       const { cursor } = JSON.parse((e as MessageEvent).data) as { cursor?: number };
       if (typeof cursor !== "number") return;
       // W1.3: the hello frame can arrive BEFORE fetchInitialData() resolves. Acting
-      // on it then would gap-fetch from lastCursor=0 — the entire unbounded history
-      // into the client eventMap. Wait for the initial fetch to seed lastCursor
-      // first, then re-read it and only fetch the genuine tail gap. event_id dedup
+      // on it then would unnecessarily drain all history from lastCursor=0. Wait
+      // for the initial fetch to seed lastCursor first, then re-read it and only
+      // fetch the genuine tail gap. event_id dedup
       // makes the small overlap with the initial page harmless. On reconnect the
       // open-handler resync already covers the gap, so this only fires meaningfully
       // when the server is genuinely ahead of our seeded high-water mark.
-      void initialFetch.then(() => {
+      const gen = connectionGen;
+      void initialFetch.then(async () => {
         const from = store.getState().lastCursor;
         if (cursor <= from) return;
-        return fetchEventsAfter(from).then(({ events, cursor: c }) => {
-          if (events.length) ingestEvents(events);
-          if (c > store.getState().lastCursor) store.setState({ lastCursor: c });
-          if (events.some((ev) => ev.type === "delegation_end")) scheduleDelegationsRefresh();
-        });
+        store.setState({ connection: "syncing" });
+        try {
+          await drainEventsAfter(from, ingestCatchUpPage, { highWaterCursor: cursor });
+          if (gen === connectionGen) store.setState({ connection: "live" });
+        } catch {
+          // Do not claim live over an incomplete gap. A reconnect starts another
+          // drain; request failures already retry with exponential backoff.
+        }
       });
     } catch { /* */ }
   });
@@ -334,28 +339,37 @@ function scheduleDelegationsRefresh() {
   }, 800);
 }
 
-// Lossless SSE catch-up after a reconnect (E1). Fetch the exact gap since our
-// last-seen cursor plus the current snapshots, then ingest. Best-effort: any
-// failure leaves the live stream to carry on.
-let resyncInFlight = false;
+function ingestCatchUpPage(events: Parameters<typeof ingestEvents>[0]): void {
+  if (!events.length) return;
+  ingestEvents(events);
+  if (events.some((event) => event.type === "delegation_end")) scheduleDelegationsRefresh();
+}
+
+// Lossless SSE catch-up after a reconnect (E1). Share an in-flight drain across
+// overlapping reconnect notifications; every caller awaits the same completion
+// before it may claim the UI is live.
+let resyncInFlight: Promise<boolean> | undefined;
 // Monotonic connection-attempt stamp; guards which resync may declare "live" (M6).
 let connectionGen = 0;
-// Returns true when it actually ran the catch-up, false when it short-circuited
-// because an earlier resync is still in flight (so the caller must NOT flip to
-// "live" — the in-flight resync will when it finishes).
 async function resyncAfterReconnect(): Promise<boolean> {
-  if (resyncInFlight) return false;
-  resyncInFlight = true;
-  try {
-    const cursor = store.getState().lastCursor;
-    const [{ events }, states] = await Promise.all([fetchEventsAfter(cursor), fetchStates()]);
-    if (events.length) ingestEvents(events);
-    for (const snap of states) ingestSnapshot(snap);
-    void refreshSessionSummaries(); // event counts may have advanced during the gap
-    void refreshDelegations(); // catch up any delegations completed during the gap
-  } catch { /* transient; the live stream continues */ }
-  finally { resyncInFlight = false; }
-  return true;
+  if (resyncInFlight) return resyncInFlight;
+  resyncInFlight = (async () => {
+    try {
+      const cursor = store.getState().lastCursor;
+      const statesPromise = fetchStates();
+      await drainEventsAfter(cursor, ingestCatchUpPage);
+      const states = await statesPromise;
+      for (const snap of states) ingestSnapshot(snap);
+      void refreshSessionSummaries(); // event counts may have advanced during the gap
+      void refreshDelegations(); // catch up any delegations completed during the gap
+      return true;
+    } catch {
+      // Invalid/incomplete pages must leave the connection visibly syncing.
+      return false;
+    }
+  })();
+  try { return await resyncInFlight; }
+  finally { resyncInFlight = undefined; }
 }
 
 // After a remote delete broadcast, drop stale scope/selection.
