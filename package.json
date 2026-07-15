@@ -31,6 +31,7 @@
   },
   "files": [
     "LICENSE",
+    "CHANGELOG.md",
     "THIRD_PARTY_NOTICES.md",
     "index.ts",
     "src/",
@@ -59,6 +60,8 @@
     "verify:dashboard": "just dashboard-verify",
     "verify:package": "just verify-package",
     "verify:licenses": "just verify-licenses",
+    "verify:release": "just release-verify",
+    "release:artifacts": "just release-artifacts",
     "ci": "just ci",
     "prepack": "just prepack",
     "prepublishOnly": "just prepublish"

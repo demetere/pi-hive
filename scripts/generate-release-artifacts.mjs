@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const outputDir = join(root, "release-artifacts");
+const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const vendor = JSON.parse(readFileSync(join(root, "ui", "review", "vendor.json"), "utf8"));
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function npmSbom(cwd) {
+  const raw = execFileSync("npm", ["sbom", "--sbom-format=cyclonedx"], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return JSON.parse(raw);
+}
+
+rmSync(outputDir, { recursive: true, force: true });
+mkdirSync(outputDir, { recursive: true });
+
+const packageSbomName = `pi-hive-${pkg.version}.sbom.cdx.json`;
+const dashboardSbomName = `pi-hive-dashboard-${pkg.version}.sbom.cdx.json`;
+writeFileSync(join(outputDir, packageSbomName), `${JSON.stringify(npmSbom(root), null, 2)}\n`);
+writeFileSync(join(outputDir, dashboardSbomName), `${JSON.stringify(npmSbom(join(root, "ui", "web")), null, 2)}\n`);
+
+const manifest = {
+  schemaVersion: 1,
+  package: { name: pkg.name, version: pkg.version },
+  commit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+  lockfiles: {
+    "package-lock.json": sha256(join(root, "package-lock.json")),
+    "ui/web/package-lock.json": sha256(join(root, "ui", "web", "package-lock.json")),
+  },
+  builds: {
+    dashboardSourceSha256: readFileSync(join(root, "ui", "web", "dist", ".build-hash"), "utf8").trim(),
+    reviewVendor: vendor.package,
+  },
+  sboms: [packageSbomName, dashboardSbomName],
+};
+const manifestName = `pi-hive-${pkg.version}.dependency-manifest.json`;
+writeFileSync(join(outputDir, manifestName), `${JSON.stringify(manifest, null, 2)}\n`);
+
+const checksums = [packageSbomName, dashboardSbomName, manifestName]
+  .map((name) => `${sha256(join(outputDir, name))}  ${name}`)
+  .join("\n");
+writeFileSync(join(outputDir, "SHA256SUMS"), `${checksums}\n`);
+console.log(`✓ generated ${packageSbomName}, ${dashboardSbomName}, ${manifestName}, and SHA256SUMS`);

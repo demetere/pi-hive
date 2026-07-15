@@ -21,11 +21,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  id-token: write # required for npm provenance
+  contents: write # attach SBOMs and dependency manifests to the GitHub Release
+  id-token: write # npm trusted publishing and provenance
 
 jobs:
   publish:
+    environment: npm
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -34,7 +35,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
-        run: echo "value=${RELEASE_TAG:-$INPUT_TAG}" >> "$GITHUB_OUTPUT"
+        run: |
+          TAG="${RELEASE_TAG:-$INPUT_TAG}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must be a v-prefixed semantic version"
+            exit 1
+          fi
+          printf 'value=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -47,6 +54,9 @@ jobs:
           node-version: "24"
           cache: "npm"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Install trusted-publishing-capable npm
+        run: npm install --global npm@11.18.0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -77,10 +87,35 @@ jobs:
           fi
           echo "Releasing v$PKG"
 
+      - name: Verify GitHub Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          NOTES="$(gh release view "$RELEASE_TAG" --json body --jq .body)"
+          if [ -z "${NOTES//[[:space:]]/}" ]; then
+            echo "::error::GitHub Release $RELEASE_TAG has no maintained release notes"
+            exit 1
+          fi
+
       - name: Run release gates
         run: just ci
 
-      - name: Publish to npm
-        run: npm publish --provenance --access public
+      - name: Verify tagged release state
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+        run: just release-verify
+
+      - name: Publish to npm with trusted publishing
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+        run: npm publish --provenance --access public
+
+      - name: Generate release SBOMs and dependency manifest
+        run: just release-artifacts
+
+      - name: Attach release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+        run: gh release upload "$RELEASE_TAG" release-artifacts/* --clobber

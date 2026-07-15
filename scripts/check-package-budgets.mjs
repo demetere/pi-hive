@@ -15,6 +15,7 @@ export const MAX_REGRESSION_RATIO = 0.1;
 
 const exactPackagePaths = new Set([
   "LICENSE",
+  "CHANGELOG.md",
   "THIRD_PARTY_NOTICES.md",
   "README.md",
   "SECURITY.md",
