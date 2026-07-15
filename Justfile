@@ -345,6 +345,11 @@ verify-budgets:
 verify-licenses:
   node scripts/check-licenses.mjs
 
+# Install the packed artifact and load it in an isolated, non-opted Pi environment.
+[group('package')]
+verify-packed-install:
+  node scripts/verify-packed-install.mjs
+
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
 verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses
@@ -352,7 +357,7 @@ verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashb
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets verify-licenses pack-dry-run
+ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets verify-licenses pack-dry-run verify-packed-install
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================
