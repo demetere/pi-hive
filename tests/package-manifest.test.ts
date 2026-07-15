@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const reviewVendor = JSON.parse(readFileSync(new URL("../ui/review/vendor.json", import.meta.url), "utf8"));
 
 test("Pi package manifest keeps a safe extension entrypoint", () => {
   assert.equal(pkg.main, "index.ts");
@@ -23,7 +24,7 @@ test("Pi runtime dependencies stay peer dependencies with wildcard ranges", () =
 });
 
 test("Plannotator is pinned only as a reproducibility dependency", () => {
-  assert.equal(pkg.devDependencies["@plannotator/pi-extension"], "0.21.4");
+  assert.equal(pkg.devDependencies["@plannotator/pi-extension"], reviewVendor.package.version);
   assert.equal(pkg.dependencies?.["@plannotator/pi-extension"], undefined);
 });
 

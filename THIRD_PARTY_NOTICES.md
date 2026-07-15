@@ -7,10 +7,10 @@ and do not replace pi-hive's MIT license.
 ## Plannotator
 
 The review-only UI in `ui/review/` is derived from
-`@plannotator/pi-extension` version 0.21.4:
+`@plannotator/pi-extension` version 0.23.1:
 
 - Project: Plannotator
-- Source: https://github.com/backnotprop/plannotator/tree/v0.21.4
+- Source: https://github.com/backnotprop/plannotator/tree/v0.23.1
 - Copyright: Copyright (c) 2025 backnotprop
 - Upstream license: MIT OR Apache-2.0
 - License used for this redistribution: MIT
