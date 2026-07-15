@@ -10,8 +10,8 @@ test("Pi package manifest keeps a safe extension entrypoint", () => {
   assert.deepEqual(pkg.pi.extensions, ["./index.ts"]);
 });
 
-test("package includes runtime assets and prebuilt dashboard", () => {
-  for (const entry of ["index.ts", "src/", "ui/web/dist/"]) {
+test("package includes runtime assets, prebuilt UIs, and review provenance", () => {
+  for (const entry of ["index.ts", "src/", "ui/web/dist/", "ui/review/dist/", "ui/review/vendor.json", "scripts/check-review-vendor.mjs"]) {
     assert.ok(pkg.files.includes(entry), `files[] should include ${entry}`);
   }
 });
@@ -20,6 +20,11 @@ test("Pi runtime dependencies stay peer dependencies with wildcard ranges", () =
   for (const dep of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"]) {
     assert.equal(pkg.peerDependencies[dep], "*");
   }
+});
+
+test("Plannotator is pinned only as a reproducibility dependency", () => {
+  assert.equal(pkg.devDependencies["@plannotator/pi-extension"], "0.21.4");
+  assert.equal(pkg.dependencies?.["@plannotator/pi-extension"], undefined);
 });
 
 test("package scripts delegate to Justfile commands", () => {
