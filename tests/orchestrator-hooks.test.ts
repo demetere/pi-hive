@@ -22,7 +22,9 @@ function fakePi() {
       handlers.set(event, list);
     },
     async fire(event: string, payload: any, ctx: any) {
-      for (const h of handlers.get(event) || []) await h(payload, ctx);
+      let result: any;
+      for (const h of handlers.get(event) || []) result = await h(payload, ctx);
+      return result;
     },
   };
 }
@@ -137,4 +139,101 @@ test("model_select re-emits a catalog covering the event's newly-selected model 
   assert.ok(catalog, "expected a model_catalog event after model_select");
   const models = (catalog.payload.models || []).map((m: any) => `${m.provider}/${m.modelId}`);
   assert.ok(models.includes("openai-codex/gpt-5.5"), `catalog should describe the switched-to model; got ${JSON.stringify(models)}`);
+});
+
+test("orchestrator hooks emit bounded telemetry for the full SDK event surface", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-orch-events-"));
+  const obsLog = join(dir, "events.jsonl");
+  const state: HiveState = {
+    mode: "hive",
+    session: { sessionId: "events", sessionDir: dir, observabilityLog: obsLog, conversationLog: join(dir, "conversation.jsonl") },
+    widgetCtx: { cwd: dir },
+    obsSeq: 0,
+    runtimes: new Map(),
+    backgroundTasks: new Set(),
+    backgroundDistillerSessions: new Set(),
+    distillQueues: new Map(),
+    orchestratorRuntime: {
+      config: { name: "Orchestrator" }, status: "idle", toolCount: 0,
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      reasoningTokens: 0, costUsd: 0, elapsedMs: 0,
+    },
+    config: {
+      orchestrator: { name: "Orchestrator", path: "o.md", model: "inherit" },
+      agents: [{
+        name: "Lead", slug: "lead", path: "lead.md", routingTags: ["code"], consultWhen: "implementation",
+        children: [{
+          name: "Worker", slug: "worker", path: "worker.md", routingTags: ["tests"], consultWhen: "verification",
+          children: [{ name: "Nested", slug: "nested", path: "nested.md", children: [] }],
+        }],
+      }],
+    },
+  } as any;
+  const pi = fakePi();
+  registerHooks(pi as any, state);
+  const ctx = {
+    cwd: dir,
+    mode: "rpc",
+    hasUI: false,
+    modelRegistry: { getAll: (): any[] => [] },
+    getContextUsage: () => ({ percent: 42, tokens: 420, contextWindow: 1_000 }),
+    ui: { setStatus() {}, setHeader() {}, setWidget() {}, setWorkingVisible() {} },
+  } as any;
+
+  await pi.fire("model_select", {
+    model: { provider: "test", id: "new" }, previousModel: { provider: "test", id: "old" }, source: "user",
+  }, ctx);
+  await pi.fire("thinking_level_select", { level: "high", previousLevel: "low" }, ctx);
+  await pi.fire("session_compact", { reason: "threshold", willRetry: true, fromExtension: true }, ctx);
+
+  for (let turnIndex = 0; turnIndex < 65; turnIndex++) await pi.fire("turn_start", { turnIndex }, ctx);
+  await pi.fire("turn_start", { turnIndex: "not-a-number" }, ctx);
+  await pi.fire("turn_end", { turnIndex: 64 }, ctx);
+  await pi.fire("turn_end", {}, ctx);
+
+  await pi.fire("after_provider_response", { status: 200 }, ctx);
+  await pi.fire("after_provider_response", { status: "invalid" }, ctx);
+  await pi.fire("after_provider_response", {
+    status: 429,
+    headers: { "retry-after": "3", "x-ratelimit-remaining": "0" },
+  }, ctx);
+  await pi.fire("user_bash", { command: "x".repeat(700), excludeFromContext: true }, ctx);
+  await pi.fire("input", { source: "interactive", streamingBehavior: "steer", images: [{}] }, ctx);
+  await pi.fire("session_before_fork", { entryId: "e1", position: 2 }, ctx);
+  await pi.fire("session_tree", { newLeafId: "new", oldLeafId: "old", fromExtension: true }, ctx);
+  await pi.fire("session_info_changed", { name: "n".repeat(300) }, ctx);
+  const prompt = await pi.fire("before_agent_start", { systemPrompt: "base prompt" }, ctx);
+  assert.match(prompt.systemPrompt, /Hive orchestrator mode/);
+  assert.match(prompt.systemPrompt, /Lead/);
+  assert.match(prompt.systemPrompt, /Worker/);
+  assert.match(prompt.systemPrompt, /Nested/);
+
+  state.mode = "plan";
+  const planPrompt = await pi.fire("before_agent_start", { systemPrompt: "base prompt" }, ctx);
+  assert.match(planPrompt.systemPrompt, /Plan mode/);
+  state.mode = "hive";
+
+  await pi.fire("message_end", { message: {
+    role: "assistant",
+    content: [{ type: "text", text: "finished" }],
+    model: "requested", responseModel: "served", provider: "provider", api: "api", responseId: "r1",
+    stopReason: "stop", errorMessage: "e".repeat(700), diagnostics: [{ message: "diagnostic" }],
+    usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, reasoning: 3, cost: { total: 0.25 } },
+  } }, ctx);
+  await pi.fire("message_end", { message: { role: "user", content: [{ type: "text", text: "hello" }] } }, ctx);
+  await pi.fire("message_end", { message: { role: "toolResult", content: "ignored" } }, ctx);
+  await pi.fire("message_end", { message: { role: "assistant", content: [] } }, ctx);
+
+  const events = readEvents(obsLog);
+  for (const type of [
+    "model_select", "thinking_level_select", "orchestrator_compaction", "turn", "provider_response",
+    "user_bash", "input", "session_fork", "session_tree", "session_info_changed",
+    "orchestrator_message", "assistant_message", "user_message",
+  ]) assert.ok(events.some((event) => event.type === type), `missing ${type}`);
+  assert.equal(state.orchestratorRuntime?.contextPct, 42);
+  assert.equal(state.orchestratorRuntime?.inputTokens, 10);
+  assert.equal(state.orchestratorRuntime?.outputTokens, 5);
+  assert.equal(state.orchestratorRuntime?.costUsd, 0.25);
+
+  await pi.fire("session_shutdown", {}, ctx);
 });

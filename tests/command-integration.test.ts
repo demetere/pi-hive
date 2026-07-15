@@ -175,3 +175,86 @@ test("dashboard commands cover uninitialized, restart, stop, and authenticated p
   assert.deepEqual(JSON.parse(String(requests[0].init?.body)), { olderThanDays: 30 });
   assert.match(notifications.at(-1)?.message || "", /Pruned 7 events and 2 sessions/);
 });
+
+test("plan and execute commands report every fail-closed artifact state", async () => {
+  const cases: Array<{ overrides: Partial<typeof openspec>; expected: RegExp }> = [
+    { overrides: {}, expected: /Usage: \/hive-execute/ },
+    { overrides: { changeExists: () => false }, expected: /No OpenSpec change/ },
+    { overrides: { hasTasks: () => false }, expected: /has no tasks\.md/ },
+    { overrides: { isReadyToExecute: () => false }, expected: /is not ready/ },
+    { overrides: { isApprovedForExecution: () => false }, expected: /is not approved/ },
+  ];
+
+  for (const [index, entry] of cases.entries()) {
+    const h = harness();
+    const state = createState(h.pi);
+    const { ctx, notifications } = context();
+    registerCommands(h.pi, state, commandDeps({ openspec: fakeOpenSpec(entry.overrides) }));
+    await h.commands.get("hive-execute").handler(index === 0 ? "" : "candidate", ctx);
+    assert.match(notifications.at(-1)?.message || "", entry.expected);
+    assert.equal(h.messages.length, 0);
+  }
+});
+
+test("plan command selects, lists, and rejects changes", async () => {
+  const h = harness();
+  const state = createState(h.pi);
+  const { ctx, notifications } = context();
+  registerCommands(h.pi, state, commandDeps({
+    openspec: fakeOpenSpec({
+      listChanges: () => [
+        { name: "ready", status: "in-progress", completedTasks: 0, totalTasks: 1 },
+        { name: "draft", status: "in-progress", completedTasks: 0, totalTasks: 0 },
+      ],
+      changeExists: (_cwd, id) => id === "ready",
+      hasTasks: (_cwd, id) => id === "ready",
+    }),
+  }));
+
+  const execute = h.commands.get("hive-execute");
+  state.widgetCtx = { cwd: ctx.cwd } as any;
+  assert.deepEqual(execute.getArgumentCompletions("re"), [{ value: "ready", label: "ready" }]);
+
+  await h.commands.get("hive-plan").handler("missing", ctx);
+  assert.match(notifications.at(-1)?.message || "", /No OpenSpec change/);
+
+  await h.commands.get("hive-plan").handler("ready", ctx);
+  assert.equal(state.activeChangeId, "ready");
+  assert.match(notifications.at(-1)?.message || "", /Active plan change/);
+
+  await h.commands.get("hive-plan").handler("", ctx);
+  assert.match(notifications.at(-1)?.message || "", /ready \(active\).*tasks ready/s);
+  assert.match(notifications.at(-1)?.message || "", /draft/);
+});
+
+test("dashboard command error paths stay visible and bounded", async () => {
+  const h = harness();
+  const state = createState(h.pi);
+  const { ctx, notifications } = context();
+  state.session = { sessionId: "s1", sessionDir: ctx.cwd, conversationLog: "", observabilityLog: "" };
+  let observeResult: any = { running: false, url: "", adopted: false, spawned: false, bunMissing: true };
+  let pruneMode: "status" | "throw" = "status";
+  registerCommands(h.pi, state, commandDeps({
+    ensureDashboard: async () => observeResult,
+    stopDashboard: async () => [],
+    fetch: async () => {
+      if (pruneMode === "throw") throw new Error("connection refused");
+      return new Response("no", { status: 503 });
+    },
+  }));
+
+  await h.commands.get("hive-observe").handler("", ctx);
+  assert.match(notifications.at(-1)?.message || "", /Bun is not installed/);
+  observeResult = { running: false, url: "", adopted: false, spawned: false, error: "bind failed" };
+  await h.commands.get("hive-observe").handler("", ctx);
+  assert.match(notifications.at(-1)?.message || "", /bind failed/);
+
+  await h.commands.get("hive-observe-stop").handler("", ctx);
+  assert.match(notifications.at(-1)?.message || "", /No pi-hive telemetry dashboard/);
+
+  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  assert.match(notifications.at(-1)?.message || "", /Prune failed \(503\)/);
+  pruneMode = "throw";
+  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  assert.match(notifications.at(-1)?.message || "", /connection refused/);
+});

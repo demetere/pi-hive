@@ -12,6 +12,10 @@ import {
   dashboardUrl,
   daemonTokenPath,
   ensureDashboard,
+  isHiveDashboard,
+  probeDashboard,
+  readDaemonToken,
+  requestDaemonShutdown,
   stopDashboard,
   type EnsureDeps,
 } from "../src/engine/dashboard.ts";
@@ -242,6 +246,111 @@ test("refuses to stop a daemon belonging to different storage", async () => {
   });
   assert.deepEqual(stopped, []);
   assert.equal(shutdownCalls, 0);
+});
+
+test("health probing accepts migration fields and rejects unrelated listeners", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      ok: true, mode: "global", registry: dashboardRegistryPath(), db: dashboardDbPath(),
+    }), { status: 200 }) as any;
+    assert.deepEqual(await probeDashboard(), {
+      ok: true, mode: "global", registry: dashboardRegistryPath(), db: dashboardDbPath(),
+      registryPath: dashboardRegistryPath(), dbPath: dashboardDbPath(),
+    });
+    assert.equal(await isHiveDashboard(), true);
+
+    globalThis.fetch = async () => new Response("no", { status: 503 }) as any;
+    assert.equal(await probeDashboard(), null);
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, mode: "other" })) as any;
+    assert.equal(await probeDashboard(), null);
+    globalThis.fetch = async () => { throw new Error("offline"); };
+    assert.equal(await probeDashboard(), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("authenticated shutdown validates token, response, and network failures", async () => {
+  const originalFetch = globalThis.fetch;
+  const health = healthy(expectedIdentity("shutdown"));
+  try {
+    let calls = 0;
+    globalThis.fetch = async (_input, init) => {
+      calls++;
+      assert.equal(new Headers(init?.headers).get("authorization"), "Bearer secret");
+      assert.deepEqual(JSON.parse(String(init?.body)), { startupNonce: "shutdown" });
+      return new Response(null, { status: 202 });
+    };
+    assert.equal(await requestDaemonShutdown(dashboardHost(), dashboardPort(), health, ""), false);
+    assert.equal(calls, 0);
+    assert.equal(await requestDaemonShutdown(dashboardHost(), dashboardPort(), health, "secret"), true);
+    globalThis.fetch = async () => new Response(null, { status: 403 });
+    assert.equal(await requestDaemonShutdown(dashboardHost(), dashboardPort(), health, "secret"), false);
+    globalThis.fetch = async () => { throw new Error("offline"); };
+    assert.equal(await requestDaemonShutdown(dashboardHost(), dashboardPort(), health, "secret"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("startup failures never report a daemon as running", async () => {
+  const invalidPort = process.env.HIVE_TELEMETRY_PORT;
+  process.env.HIVE_TELEMETRY_PORT = "bad";
+  assert.match((await ensureDashboard(state(), ctx, ROOT)).error || "", /Invalid HIVE_TELEMETRY_PORT/);
+  if (invalidPort === undefined) delete process.env.HIVE_TELEMETRY_PORT;
+  else process.env.HIVE_TELEMETRY_PORT = invalidPort;
+
+  const current = healthy(expectedIdentity());
+  const force = deps({ probe: async () => current, stop: async () => [] });
+  assert.match((await ensureDashboard(state(), ctx, ROOT, { forceRestart: true }, force.deps)).error || "", /still running/);
+
+  let probes = 0;
+  const incompatible = deps({
+    probe: async () => (++probes <= 2 ? healthy({ ...expectedIdentity(), packageVersion: "old" }) : null),
+    stop: async () => [],
+  });
+  assert.match((await ensureDashboard(state(), ctx, ROOT, {}, incompatible.deps)).error || "", /Incompatible dashboard is still running/);
+
+  const spawnFailure = deps({ spawn: () => ({ ok: false, error: "spawn denied" }) });
+  assert.equal((await ensureDashboard(state(), ctx, ROOT, {}, spawnFailure.deps)).error, "spawn denied");
+
+  const wrongReady = deps({ waitForReady: async (_host, _port, identity) => healthy({ ...identity, startupNonce: "wrong" }) });
+  assert.match((await ensureDashboard(state(), ctx, ROOT, {}, wrongReady.deps)).error || "", /identity-checked/);
+
+  const lockFailure = deps({ withLock: async () => { throw new Error("lock denied"); } });
+  assert.equal((await ensureDashboard(state(), ctx, ROOT, {}, lockFailure.deps)).error, "lock denied");
+});
+
+test("stop falls back only to its live managed child handle", async () => {
+  const managed = { pid: 777, killed: false, kill() { this.killed = true; return true; }, on() {} } as any;
+  const s = state();
+  s.obsServer = { proc: managed, url: dashboardUrl(), port: dashboardPort(), host: dashboardHost(), adopted: false };
+  let kills = 0;
+  const stopped = await stopDashboard(s, dashboardHost(), dashboardPort(), {
+    probe: async () => null,
+    killManaged: () => { kills++; return 777; },
+    withLock: async (_path, fn) => fn(),
+  });
+  assert.deepEqual(stopped, [777]);
+  assert.equal(kills, 1);
+  assert.equal(s.obsServer, undefined);
+});
+
+test("token reads and IPv6 dashboard URLs fail safely", () => {
+  const isolated = mkdtempSync(join(tmpdir(), "pi-hive-dashboard-token-"));
+  process.env.HIVE_TELEMETRY_REGISTRY = join(isolated, "registry.jsonl");
+  try {
+    assert.equal(readDaemonToken(), undefined);
+    mkdirSync(isolated, { recursive: true });
+    writeFileSync(daemonTokenPath(), "\n");
+    assert.equal(readDaemonToken(), undefined);
+    writeFileSync(daemonTokenPath(), " token \n");
+    assert.equal(readDaemonToken(), "token");
+    assert.equal(dashboardUrl("::1", 1234), "http://[::1]:1234");
+  } finally {
+    delete process.env.HIVE_TELEMETRY_REGISTRY;
+  }
 });
 
 test("host and port validation fail closed; non-loopback requires dangerous opt-in", () => {
