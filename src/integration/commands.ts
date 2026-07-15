@@ -9,13 +9,32 @@ import { dashboardUrl, ensureDashboard, readDaemonToken, stopDashboard } from ".
 import * as openspec from "../engine/openspec";
 import { truncateMiddle } from "../core/utils";
 
-function listChangeIds(cwd: string): string[] {
-  return openspec.listChanges(cwd).map((c) => c.name);
+function listChangeIds(cwd: string, api: typeof openspec): string[] {
+  return api.listChanges(cwd).map((c) => c.name);
 }
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-export function registerCommands(pi: ExtensionAPI, state: HiveState) {
+export interface CommandDeps {
+  openspec: typeof openspec;
+  ensureDashboard: typeof ensureDashboard;
+  stopDashboard: typeof stopDashboard;
+  dashboardUrl: typeof dashboardUrl;
+  readDaemonToken: typeof readDaemonToken;
+  fetch: typeof globalThis.fetch;
+}
+
+const defaultCommandDeps: CommandDeps = {
+  openspec,
+  ensureDashboard,
+  stopDashboard,
+  dashboardUrl,
+  readDaemonToken,
+  fetch: globalThis.fetch.bind(globalThis),
+};
+
+export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: Partial<CommandDeps> = {}) {
+  const deps: CommandDeps = { ...defaultCommandDeps, ...overrides };
   // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
   pi.registerCommand("hive-normal", {
     description: "Switch to normal Pi chat (no hive, no enforcement)",
@@ -52,30 +71,30 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
     description: "Execute a plan change's tasks.md through the hive (usage: /hive-execute <change-id>)",
     getArgumentCompletions: (prefix: string) => {
       const cwd = state.widgetCtx?.cwd || process.cwd();
-      return listChangeIds(cwd)
+      return listChangeIds(cwd, deps.openspec)
         .filter((id) => id.startsWith(prefix))
         .map((id) => ({ value: id, label: id }));
     },
     handler: async (args: string, ctx: ExtensionContext) => {
       const changeId = args.trim().split(/\s+/)[0] || "";
       if (!changeId) {
-        const available = listChangeIds(ctx.cwd);
+        const available = listChangeIds(ctx.cwd, deps.openspec);
         if (ctx.hasUI) ctx.ui.notify(`Usage: /hive-execute <change-id>. Available: ${available.join(", ") || "none (create one first)"}`, "warning");
         return;
       }
-      if (!openspec.changeExists(ctx.cwd, changeId)) {
-        if (ctx.hasUI) ctx.ui.notify(`No OpenSpec change "${changeId}" under openspec/changes/. Available: ${listChangeIds(ctx.cwd).join(", ") || "none"}`, "error");
+      if (!deps.openspec.changeExists(ctx.cwd, changeId)) {
+        if (ctx.hasUI) ctx.ui.notify(`No OpenSpec change "${changeId}" under openspec/changes/. Available: ${listChangeIds(ctx.cwd, deps.openspec).join(", ") || "none"}`, "error");
         return;
       }
-      if (!openspec.hasTasks(ctx.cwd, changeId)) {
+      if (!deps.openspec.hasTasks(ctx.cwd, changeId)) {
         if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" has no tasks.md yet. Author the change (proposal → design/specs → tasks) via /opsx-propose first.`, "error");
         return;
       }
-      if (!openspec.isReadyToExecute(ctx.cwd, changeId)) {
+      if (!deps.openspec.isReadyToExecute(ctx.cwd, changeId)) {
         if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not ready: tasks.md must be authored and \`openspec validate\` must pass.`, "error");
         return;
       }
-      if (!openspec.isApprovedForExecution(ctx.cwd, changeId)) {
+      if (!deps.openspec.isApprovedForExecution(ctx.cwd, changeId)) {
         if (ctx.hasUI) ctx.ui.notify(`Change "${changeId}" is not approved for execution yet. Current human approvals are required for proposal, design, specs, and tasks.`, "error");
         return;
       }
@@ -94,7 +113,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         else console.warn(`[pi-hive] ${msg}`);
         return;
       }
-      const tasks = truncateMiddle(openspec.readArtifact(ctx.cwd, changeId, "tasks.md"), 12_000);
+      const tasks = truncateMiddle(deps.openspec.readArtifact(ctx.cwd, changeId, "tasks.md"), 12_000);
       pi.sendUserMessage(
         `Execute the approved plan for change "${changeId}" (openspec/changes/${changeId}/). This is the active change; delegate each task to the appropriate coder/tester lead. After verifying a task's implementation evidence, call plan_task_complete with its checkbox ID and evidence. Do not edit tasks.md or any project files yourself.\n\n## tasks.md\n${tasks}`,
       );
@@ -106,9 +125,9 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
     description: "List plan changes, or show the active one (usage: /hive-plan [change-id])",
     handler: async (args: string, ctx: ExtensionContext) => {
       const requested = args.trim().split(/\s+/)[0] || "";
-      const available = listChangeIds(ctx.cwd);
+      const available = listChangeIds(ctx.cwd, deps.openspec);
       if (requested) {
-        if (!openspec.changeExists(ctx.cwd, requested)) {
+        if (!deps.openspec.changeExists(ctx.cwd, requested)) {
           if (ctx.hasUI) ctx.ui.notify(`No OpenSpec change "${requested}". Available: ${available.join(", ") || "none"}`, "error");
           return;
         }
@@ -117,7 +136,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         return;
       }
       const lines = available.length
-        ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}${openspec.hasTasks(ctx.cwd, id) ? " — tasks ready" : ""}`).join("\n")
+        ? available.map((id) => `- ${id}${state.activeChangeId === id ? " (active)" : ""}${deps.openspec.hasTasks(ctx.cwd, id) ? " — tasks ready" : ""}`).join("\n")
         : "No OpenSpec changes yet. Ask the orchestrator to plan a change, or a lead to run plan_new.";
       if (ctx.hasUI) ctx.ui.notify(`OpenSpec changes under openspec/changes/:\n${lines}`, "info");
     },
@@ -131,7 +150,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
         return;
       }
       // Explicit command: force a clean restart and open the browser tab.
-      const result = await ensureDashboard(state, ctx, EXTENSION_ROOT, { open: true, forceRestart: true });
+      const result = await deps.ensureDashboard(state, ctx, EXTENSION_ROOT, { open: true, forceRestart: true });
       if (!ctx.hasUI) return;
       if (result.running) ctx.ui.notify(`pi-hive telemetry restarted: ${result.url}`, "info");
       else ctx.ui.notify(result.bunMissing ? "Cannot start dashboard: Bun is not installed." : `Failed to start dashboard: ${result.error || "unknown error"}`, "error");
@@ -141,7 +160,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
   pi.registerCommand("hive-observe-stop", {
     description: "Stop the global pi-hive telemetry dashboard",
     handler: async (_args: string, ctx: ExtensionContext) => {
-      const killed = await stopDashboard(state);
+      const killed = await deps.stopDashboard(state);
       if (ctx.hasUI) ctx.ui.notify(killed.length ? `Stopped pi-hive telemetry dashboard (${killed.join(", ")})` : "No pi-hive telemetry dashboard was running.", "info");
     },
   });
@@ -157,9 +176,9 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState) {
       try {
         // Goes through the daemon's auth-gated POST /prune using the shared
         // token file (Decision 2) — the same endpoint the Settings tab calls.
-        const res = await fetch(`${dashboardUrl()}/prune`, {
+        const res = await deps.fetch(`${deps.dashboardUrl()}/prune`, {
           method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${readDaemonToken() || ""}` },
+          headers: { "content-type": "application/json", authorization: `Bearer ${deps.readDaemonToken() || ""}` },
           body: JSON.stringify({ olderThanDays: days }),
         });
         if (!res.ok) {
