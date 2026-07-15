@@ -120,6 +120,9 @@ describe("dashboard HTTP handler", () => {
     expect(states.body.offset).toBe(0);
     const sessions = await json("/sessions?offset=-2&limit=9999");
     expect(sessions.body.offset).toBe(0);
+    expect((await handle(request("/topologies/missing-hash"))).status).toBe(404);
+    const thinking = await json("/thinking?session=missing-session");
+    expect(thinking.body.thinking).toEqual([]);
   });
 
   test("covers plan and source-log reads without exposing unknown paths", async () => {

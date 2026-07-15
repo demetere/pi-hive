@@ -9,9 +9,10 @@ const SCRIPT = resolve("scripts/check-bun-coverage.mjs");
 const THRESHOLDS: Record<string, number> = {
   "src/observability/server/config.ts": 90,
   "src/observability/server/db.ts": 90,
+  "src/observability/server/http-handler.ts": 90,
   "src/observability/server/jsonl-reader.ts": 90,
   "src/observability/server/plan-routes.ts": 90,
-  "src/observability/server/runtime.ts": 65,
+  "src/observability/server/runtime.ts": 80,
   "src/observability/server/topology-hash.ts": 90,
 };
 
@@ -33,10 +34,10 @@ test("Bun server coverage gate accepts every enforced threshold", () => {
 });
 
 test("Bun server coverage gate rejects low and missing runtime coverage", () => {
-  const low = { ...THRESHOLDS, "src/observability/server/runtime.ts": 64 };
+  const low = { ...THRESHOLDS, "src/observability/server/runtime.ts": 79 };
   const failed = run(low);
   assert.equal(failed.status, 1);
-  assert.match(failed.stderr, /runtime\.ts: 64\.00% lines/);
+  assert.match(failed.stderr, /runtime\.ts: 79\.00% lines/);
 
   const { "src/observability/server/runtime.ts": _missing, ...withoutRuntime } = THRESHOLDS;
   const missing = run(withoutRuntime);
