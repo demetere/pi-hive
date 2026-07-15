@@ -1,11 +1,19 @@
 {
-  "version": 1,
+  "version": 2,
+  "vendor": {
+    "name": "@plannotator/pi-extension",
+    "version": "0.21.4",
+    "integrity": "sha512-Lt0rbT4p6HHFS4/JmaKSBpP7lVGjWfsIeS9ztPIfywB8s00sky3bRZx4MPj4THfQ6IXskMIj1SPzjwre2Qi48A==",
+    "artifact": "plannotator.html",
+    "artifactSha256": "65c2345124f4e101e88d4cba095fb8bdd179b900fd80976ced9770718cc3c297"
+  },
   "files": {
     "review.html": {
       "path": "review.html.gz",
       "contentType": "text/html; charset=utf-8",
       "bytes": 1781,
       "compressedBytes": 735,
+      "sourceSha256": "a821eb48a2e0c563f0f57bde80b594e01c5067e3ee44cb5be003ee985a10f319",
       "sha256": "c59ade15144aedc62b15885c2a72af4443f4bb116994b88fca6eabda54789f34"
     },
     "review.css": {
@@ -13,6 +21,7 @@
       "contentType": "text/css; charset=utf-8",
       "bytes": 3533,
       "compressedBytes": 1316,
+      "sourceSha256": "a36d17e509875df3f33db0eae9a2c26615cb8b246734c9c34ee5a30c8f07f1ef",
       "sha256": "2c2ab0a5b1a0dea10ade28fa072d64cdeb11deedb083bbf78d1bb81517f2c7f7"
     },
     "review.js": {
@@ -20,6 +29,7 @@
       "contentType": "text/javascript; charset=utf-8",
       "bytes": 7311,
       "compressedBytes": 2253,
+      "sourceSha256": "563557f400de954dfb2c3891524868b3cd8701cb78f1d2759a8744afc74c31b4",
       "sha256": "92c9747e6cc0f3ab0f8c3a80727754927c69e4856106968d372d3b8ddeb3259d"
     }
   }

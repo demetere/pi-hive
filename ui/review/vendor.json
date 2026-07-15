@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "@plannotator/pi-extension",
+    "version": "0.21.4",
+    "integrity": "sha512-Lt0rbT4p6HHFS4/JmaKSBpP7lVGjWfsIeS9ztPIfywB8s00sky3bRZx4MPj4THfQ6IXskMIj1SPzjwre2Qi48A==",
+    "artifact": "plannotator.html",
+    "artifactSha256": "65c2345124f4e101e88d4cba095fb8bdd179b900fd80976ced9770718cc3c297"
+  },
+  "derivedSources": {
+    "review.html": "a821eb48a2e0c563f0f57bde80b594e01c5067e3ee44cb5be003ee985a10f319",
+    "review.css": "a36d17e509875df3f33db0eae9a2c26615cb8b246734c9c34ee5a30c8f07f1ef",
+    "review.js": "563557f400de954dfb2c3891524868b3cd8701cb78f1d2759a8744afc74c31b4"
+  }
+}

@@ -5,6 +5,7 @@ import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dashboardSourceHash, STAMP_PATH } from "./dashboard-hash.mjs";
+import { verifyReviewVendor } from "./check-review-vendor.mjs";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -26,12 +27,14 @@ const requiredPaths = [
   "ui/review/src/review.html",
   "ui/review/src/review.css",
   "ui/review/src/review.js",
+  "ui/review/vendor.json",
   "ui/review/dist/review.html.gz",
   "ui/review/dist/review.css.gz",
   "ui/review/dist/review.js.gz",
   "ui/review/dist/manifest.json",
   "scripts/build-review-bundle.mjs",
   "scripts/check-package-budgets.mjs",
+  "scripts/check-review-vendor.mjs",
   "README.md",
   "SETUP.md",
 ];
@@ -42,8 +45,10 @@ const requiredPackageFileEntries = [
   "ui/web/dist/",
   "ui/review/src/",
   "ui/review/dist/",
+  "ui/review/vendor.json",
   "scripts/build-review-bundle.mjs",
   "scripts/check-package-budgets.mjs",
+  "scripts/check-review-vendor.mjs",
   "README.md",
   "SETUP.md",
 ];
@@ -69,18 +74,24 @@ for (const entry of requiredPackageFileEntries) {
 for (const entry of ["ui/web/src/", "ui/web/vendor/", "ui/web/package.json", "ui/web/index.html", "ui/web/tsconfig.json", "ui/web/vite.config.ts"]) {
   if (pkg.files?.includes(entry)) failures.push(`runtime package must not include dashboard build input: ${entry}`);
 }
-if (pkg.devDependencies?.["@plannotator/pi-extension"] || pkg.dependencies?.["@plannotator/pi-extension"]) {
+if (pkg.dependencies?.["@plannotator/pi-extension"]) {
   failures.push("the runtime package must not depend on the full Plannotator extension");
 }
+failures.push(...verifyReviewVendor(root));
 
 try {
   const manifest = JSON.parse(readFileSync(join(root, "ui/review/dist/manifest.json"), "utf8"));
+  const vendor = JSON.parse(readFileSync(join(root, "ui/review/vendor.json"), "utf8"));
+  if (manifest.version !== 2 || JSON.stringify(manifest.vendor) !== JSON.stringify(vendor.package)) {
+    failures.push("review dist vendor metadata is stale; run just review-build");
+  }
   for (const name of ["review.html", "review.css", "review.js"]) {
     const source = readFileSync(join(root, "ui/review/src", name));
     const compressed = gzipSync(source, { level: 9, mtime: 0 });
     const entry = manifest.files?.[name];
     const hash = createHash("sha256").update(compressed).digest("hex");
-    if (!entry || entry.sha256 !== hash || entry.compressedBytes !== compressed.byteLength) failures.push(`review dist is stale for ${name}; run just review-build`);
+    const sourceHash = createHash("sha256").update(source).digest("hex");
+    if (!entry || entry.sha256 !== hash || entry.sourceSha256 !== sourceHash || entry.compressedBytes !== compressed.byteLength) failures.push(`review dist is stale for ${name}; run just review-build`);
   }
 } catch (error) {
   failures.push(`review bundle manifest is invalid: ${error instanceof Error ? error.message : String(error)}`);

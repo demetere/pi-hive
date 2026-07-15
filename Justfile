@@ -210,9 +210,14 @@ dashboard-install:
 dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
 
+# Verify the review-only source against the pinned Plannotator package.
+[group('dashboard')]
+review-vendor-verify:
+  node scripts/check-review-vendor.mjs
+
 # Build the committed, review-only UI and deterministic gzip artifacts.
 [group('dashboard')]
-review-build:
+review-build: review-vendor-verify
   node scripts/build-review-bundle.mjs
 
 # Run every strict TypeScript project checker.
@@ -265,6 +270,11 @@ dashboard-test-e2e:
 [group('dashboard')]
 dashboard-verify:
   node scripts/check-dashboard-fresh.mjs
+
+# Rebuild every committed UI artifact and reject any uncommitted output.
+[group('quality')]
+generated-verify: dashboard-build review-build
+  git diff --exit-code -- ui/web/dist ui/review/dist
 
 # Start the dashboard Vite dev server.
 [group('dashboard')]
@@ -332,12 +342,12 @@ verify-budgets:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets
+verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets pack-dry-run
+ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================
