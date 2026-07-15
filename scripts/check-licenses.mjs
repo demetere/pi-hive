@@ -79,7 +79,7 @@ try {
 }
 
 const requiredNoticeText = [
-  "@plannotator/pi-extension` version 0.21.4",
+  "@plannotator/pi-extension` version 0.23.1",
   "Copyright (c) 2025 backnotprop",
   "MIT License",
   "Copyright 2021 The Hanken Grotesk Project Authors",
@@ -99,7 +99,7 @@ try {
   const version = vendor.package?.version;
   const lock = readJson("package-lock.json");
   const license = normalizedLicense(lock.packages?.[`node_modules/${packageName}`]?.license);
-  if (packageName !== "@plannotator/pi-extension" || version !== "0.21.4") {
+  if (packageName !== "@plannotator/pi-extension" || version !== "0.23.1") {
     failures.push("Plannotator vendor changed; refresh THIRD_PARTY_NOTICES.md and the license checks");
   }
   if (license !== "MIT OR Apache-2.0") failures.push(`unexpected Plannotator license: ${license ?? "missing"}`);

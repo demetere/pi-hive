@@ -2,10 +2,10 @@
   "version": 2,
   "vendor": {
     "name": "@plannotator/pi-extension",
-    "version": "0.21.4",
-    "integrity": "sha512-Lt0rbT4p6HHFS4/JmaKSBpP7lVGjWfsIeS9ztPIfywB8s00sky3bRZx4MPj4THfQ6IXskMIj1SPzjwre2Qi48A==",
+    "version": "0.23.1",
+    "integrity": "sha512-YjzIsQ+nv+MFe+KItLlGRf/OIaG6m5/oIBLcQkKTM8hmDvjtXraRqTo91GRWzJ3s3fQeXcfzQFBc4APaUYkTsg==",
     "artifact": "plannotator.html",
-    "artifactSha256": "65c2345124f4e101e88d4cba095fb8bdd179b900fd80976ced9770718cc3c297"
+    "artifactSha256": "d843509878458c8f369d643c082b9cec04e30905bb6ee6c706c756443c4716e5"
   },
   "files": {
     "review.html": {
