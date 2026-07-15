@@ -59,6 +59,7 @@
     "test": "just test",
     "verify:dashboard": "just dashboard-verify",
     "verify:package": "just verify-package",
+    "verify:install": "just verify-packed-install",
     "verify:licenses": "just verify-licenses",
     "verify:release": "just release-verify",
     "release:artifacts": "just release-artifacts",

@@ -184,6 +184,40 @@ test("editing approved bytes invalidates that artifact and downstream approvals"
   assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
 });
 
+test("plan advances through automated review and human approval before execution", () => {
+  const cwd = scratch();
+  const dir = changeDir(cwd);
+  writeFileSync(join(dir, "proposal.md"), "# Proposal\n\nAdd authentication.\n");
+  writeFileSync(join(dir, "design.md"), "# Design\n\nUse the existing session boundary.\n");
+  mkdirSync(join(dir, "specs", "auth"), { recursive: true });
+  writeFileSync(join(dir, "specs", "auth", "spec.md"), [
+    "# Authentication specification",
+    "",
+    "## ADDED Requirements",
+    "",
+    "### Requirement: Authenticate users",
+    "The system SHALL authenticate a user with a valid session.",
+    "",
+    "#### Scenario: Valid session",
+    "- **WHEN** a user presents a valid session",
+    "- **THEN** access is granted",
+    "",
+  ].join("\n"));
+  writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [ ] 1.1 Implement authentication\n");
+
+  for (const artifact of openspec.ARTIFACT_ORDER) {
+    assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), artifact);
+    openspec.setAgentReviewVerdict(cwd, "add-auth", artifact, "green", "Plan Reviewer");
+    assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), false);
+    openspec.setArtifactApproval(cwd, "add-auth", artifact, "green", "Human Reviewer");
+  }
+
+  assert.equal(openspec.isAwaitingHumanApproval(cwd, "add-auth"), null);
+  assert.equal(openspec.isApprovedForExecution(cwd, "add-auth"), true);
+  openspec.markExecutionTaskComplete(cwd, "add-auth", "1.1", "Execution Lead", "acceptance suite passed");
+  assert.equal(openspec.executionTaskProgress(cwd, "add-auth")[0]?.completed, true);
+});
+
 test("denying an upstream artifact removes downstream human records", () => {
   const cwd = scratch();
   const dir = changeDir(cwd);
