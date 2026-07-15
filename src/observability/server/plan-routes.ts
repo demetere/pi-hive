@@ -198,6 +198,7 @@ export interface PlanFile {
 const MAX_FILE_BYTES = 512_000;
 
 export function planFile(cwd: string, changeId: string, relPath: string): PlanFile | null {
+  if (!openspec.changeExists(cwd, changeId)) return null;
   const target = openspec.resolveArtifact(cwd, changeId, relPath);
   if (!target) return null;
   const content = openspec.readArtifact(cwd, changeId, relPath);
