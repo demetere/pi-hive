@@ -11,6 +11,7 @@ import {
   dashboardRegistryPath,
   dashboardUrl,
   daemonTokenPath,
+  bunAvailable,
   ensureDashboard,
   isHiveDashboard,
   probeDashboard,
@@ -176,6 +177,65 @@ test("concurrent startup calls serialize and spawn exactly one daemon", async ()
   } finally {
     delete process.env.HIVE_TELEMETRY_REGISTRY;
   }
+});
+
+test("default startup path validates session and server before spawning", async () => {
+  assert.equal(bunAvailable(), true);
+  const base: EnsureDeps = {
+    probe: async () => null,
+    stop: async () => [],
+    waitForReady: async () => null,
+    withLock: async (_path: string, fn: () => Promise<any>) => fn(),
+  };
+  const noSession = await ensureDashboard({} as any, ctx, ROOT, {}, base);
+  assert.match(noSession.error || "", /session not initialized/);
+  const missingRoot = mkdtempSync(join(tmpdir(), "pi-hive-dashboard-missing-server-"));
+  const missingServer = await ensureDashboard(state(), ctx, missingRoot, {}, base);
+  assert.match(missingServer.error || "", /missing observability server/);
+});
+
+test("default spawn forwards bounded telemetry settings and is explicitly cleaned up", async () => {
+  const isolated = mkdtempSync(join(tmpdir(), "pi-hive-dashboard-real-spawn-"));
+  const original = {
+    registry: process.env.HIVE_TELEMETRY_REGISTRY,
+    port: process.env.HIVE_TELEMETRY_PORT,
+  };
+  process.env.HIVE_TELEMETRY_REGISTRY = join(isolated, "registry.jsonl");
+  process.env.HIVE_TELEMETRY_PORT = String(48_000 + Math.floor(Math.random() * 1_000));
+  const s = state();
+  s.config = { settings: { telemetry: { retentionDays: 7, maxLogBytes: 123_456, captureThinking: true } } } as any;
+  try {
+    const result = await ensureDashboard(s, { ...ctx, cwd: isolated }, ROOT, {}, {
+      probe: async () => null,
+      stop: async () => [],
+      waitForReady: async (_host, _port, identity) => healthy(identity, { pid: s.obsServer?.proc?.pid || 1 }),
+      withLock: async (_path, fn) => fn(),
+    });
+    assert.equal(result.spawned, true);
+    assert.equal(typeof s.obsServer?.proc?.pid, "number");
+  } finally {
+    try { s.obsServer?.proc?.kill("SIGTERM"); } catch { /* best effort */ }
+    if (original.registry === undefined) delete process.env.HIVE_TELEMETRY_REGISTRY; else process.env.HIVE_TELEMETRY_REGISTRY = original.registry;
+    if (original.port === undefined) delete process.env.HIVE_TELEMETRY_PORT; else process.env.HIVE_TELEMETRY_PORT = original.port;
+  }
+});
+
+test("default readiness polling accepts the exact spawned identity", async () => {
+  let identity: DaemonIdentity | undefined;
+  const s = state();
+  const result = await ensureDashboard(s, ctx, ROOT, {}, {
+    probe: async () => identity ? healthy(identity) : null,
+    bunAvailable: () => true,
+    spawn: (current, _ctx, _root, request) => {
+      identity = request.identity;
+      current.obsServer = { url: dashboardUrl(), port: request.port, host: request.host, adopted: false };
+      return { ok: true, pid: 43210 };
+    },
+    stop: async () => [],
+    withLock: async (_path, fn) => fn(),
+  });
+  assert.equal(result.running, true);
+  assert.equal(result.spawned, true);
 });
 
 test("is Bun-gated and browser opening remains explicit", async () => {
