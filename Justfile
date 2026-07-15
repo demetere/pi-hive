@@ -279,6 +279,7 @@ coverage-core:
 coverage-db:
   rm -rf coverage/bun
   bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage/bun ./tests/*.spec.ts
+  node scripts/check-bun-coverage.mjs
 
 # Produce all machine-readable coverage reports consumed by CI.
 [group('quality')]
