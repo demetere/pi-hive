@@ -47,6 +47,7 @@ alias dd := dashboard-dev
 alias di := dashboard-install
 alias dt := dashboard-typecheck
 alias dtu := dashboard-test-unit
+alias dtc := dashboard-test-coverage
 alias de2e := dashboard-test-e2e
 alias dv := dashboard-verify
 alias ds := dashboard-serve
@@ -229,6 +230,11 @@ dashboard-typecheck:
 dashboard-test-unit:
   cd {{dashboard_dir}} && npm run test:unit
 
+# Generate dashboard unit-test coverage reports.
+[group('dashboard')]
+dashboard-test-coverage:
+  cd {{dashboard_dir}} && npm run test:coverage
+
 # Run dashboard browser workflows and axe accessibility checks.
 [group('dashboard')]
 dashboard-test-e2e:
@@ -259,6 +265,24 @@ test:
 [group('quality')]
 test-db:
   bun test ./tests/*.spec.ts
+
+# Generate Node coverage for the Bun-independent extension modules.
+[group('quality')]
+coverage-core:
+  rm -rf coverage/core
+  npx c8 --all --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  rm -rf coverage/.tmp
+
+# Generate Bun coverage for SQLite and dashboard-server modules.
+[group('quality')]
+coverage-db:
+  rm -rf coverage/bun
+  bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage/bun ./tests/*.spec.ts
+
+# Produce all machine-readable coverage reports consumed by CI.
+[group('quality')]
+coverage: coverage-core coverage-db dashboard-test-coverage
+  @printf "{{GREEN}}Coverage reports generated under coverage/.{{NC}}\n"
 
 # Verify package manifest, required files, peer deps, and committed build stamps.
 [group('quality')]
