@@ -141,3 +141,52 @@ test("session start loads an opted-in team and shutdown aborts an active worker 
   assert.equal(state.obsServer, undefined);
   assert.ok(statuses.some(([name, value]) => name === "hive" && value === undefined));
 });
+
+test("session start fails back to normal mode for malformed opted-in configuration", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-session-invalid-"));
+  mkdirSync(join(cwd, ".pi", "hive"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "hive", "hive-config.yaml"), "settings:\n  unknown-setting: true\n");
+  const h = extensionHarness();
+  const state = createState(h.pi);
+  const { ctx, notifications } = lifecycleContext(cwd, h.entries);
+  registerHooks(h.pi, state);
+
+  await h.pi.fire("session_start", {}, ctx);
+
+  assert.equal(state.mode, "normal");
+  assert.match(notifications.at(-1)?.[0] || "", /Hive failed to load/);
+});
+
+test("shutdown cleanup is best-effort across failing worker and distiller sessions", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-hive-session-cleanup-"));
+  const h = extensionHarness();
+  const state = createState(h.pi);
+  const workerTimer = setInterval(() => undefined, 10_000);
+  const dashboardTimer = setInterval(() => undefined, 10_000);
+  state.runtimes.set("worker", {
+    timer: workerTimer,
+    session: {
+      abort() { throw new Error("abort failed"); },
+      dispose() { throw new Error("dispose failed"); },
+    },
+  } as any);
+  state.backgroundDistillerSessions = new Set([{
+    abort() { throw new Error("distiller abort failed"); },
+    dispose() { throw new Error("distiller dispose failed"); },
+  } as any]);
+  state.backgroundTasks = new Set([Promise.resolve()]);
+  state.distillQueues = new Map([["target", Promise.resolve()]]);
+  state.dashboardActionTimer = dashboardTimer;
+  const { ctx, statuses, widgets } = lifecycleContext(cwd, h.entries);
+  ctx.mode = "tui";
+  registerHooks(h.pi, state);
+
+  await h.pi.fire("session_shutdown", {}, ctx);
+
+  assert.equal(state.runtimes.get("worker")?.session, undefined);
+  assert.equal(state.backgroundDistillerSessions.size, 0);
+  assert.equal(state.backgroundTasks.size, 0);
+  assert.equal(state.distillQueues.size, 0);
+  assert.ok(widgets.some(([name, value]) => name === "hive-tree" && value === undefined));
+  assert.ok(statuses.some(([name, value]) => name === "hive" && value === undefined));
+});
