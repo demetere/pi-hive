@@ -5,6 +5,7 @@ ui/web/node_modules/
 
 # Build caches / logs
 *.log
+coverage/
 .DS_Store
 .vite/
 /ui/web/test-results/

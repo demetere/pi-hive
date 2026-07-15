@@ -63,7 +63,8 @@
     "typebox": { "optional": false }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.3"
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "c8": "^10.1.3"
   },
   "dependencies": {
     "@fission-ai/openspec": "1.5.0"
