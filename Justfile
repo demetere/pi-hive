@@ -270,7 +270,7 @@ test-db:
 [group('quality')]
 coverage-core:
   rm -rf coverage/core
-  npx c8 --all --check-coverage --lines=85 --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  npx c8 --all --check-coverage --lines=85 --branches=75 --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
   rm -rf coverage/.tmp
 
 # Generate Bun coverage for SQLite and dashboard-server modules.

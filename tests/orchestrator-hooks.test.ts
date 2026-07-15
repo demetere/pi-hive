@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -236,4 +236,67 @@ test("orchestrator hooks emit bounded telemetry for the full SDK event surface",
   assert.equal(state.orchestratorRuntime?.costUsd, 0.25);
 
   await pi.fire("session_shutdown", {}, ctx);
+});
+
+test("normal mode suppresses every orchestrator telemetry hook", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-orch-normal-"));
+  const obsLog = join(dir, "events.jsonl");
+  const state = {
+    mode: "normal",
+    session: { sessionId: "normal", sessionDir: dir, observabilityLog: obsLog, conversationLog: join(dir, "conversation.jsonl") },
+    runtimes: new Map(),
+  } as any;
+  const pi = fakePi();
+  registerHooks(pi as any, state);
+  const ctx = { cwd: dir, mode: "rpc", hasUI: false } as any;
+  for (const event of [
+    "tool_call", "tool_result", "model_select", "thinking_level_select", "session_compact",
+    "turn_start", "turn_end", "after_provider_response", "user_bash", "input",
+    "session_before_fork", "session_tree", "session_info_changed", "before_agent_start", "message_end",
+  ]) await pi.fire(event, event === "message_end" ? { message: { role: "user", content: "ignored" } } : {}, ctx);
+  assert.equal(existsSync(obsLog), false);
+});
+
+test("orchestrator telemetry tolerates sparse SDK payloads and missing runtime state", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-orch-sparse-"));
+  const obsLog = join(dir, "events.jsonl");
+  const state = {
+    mode: "hive",
+    session: { sessionId: "sparse", sessionDir: dir, observabilityLog: obsLog, conversationLog: join(dir, "conversation.jsonl") },
+    obsSeq: 0,
+    runtimes: new Map(),
+    config: { orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [] },
+  } as any;
+  const pi = fakePi();
+  registerHooks(pi as any, state);
+  const ctx = {
+    cwd: dir, mode: "rpc", hasUI: false,
+    model: { provider: "fallback", id: "model" },
+    modelRegistry: { getAll: (): any[] => [] },
+  } as any;
+
+  await pi.fire("tool_call", { name: "custom" }, ctx);
+  await pi.fire("tool_result", { name: "custom", result: [{ type: "text", text: "done" }] }, ctx);
+  await pi.fire("model_select", {}, ctx);
+  await pi.fire("thinking_level_select", {}, ctx);
+  await pi.fire("session_compact", {}, ctx);
+  await pi.fire("turn_end", { turnIndex: "unknown" }, ctx);
+  await pi.fire("after_provider_response", {
+    status: 529,
+    headers: { "retry-after": "1", "anthropic-ratelimit-requests-remaining": "2" },
+  }, ctx);
+  await pi.fire("user_bash", {}, ctx);
+  await pi.fire("input", {}, ctx);
+  await pi.fire("session_before_fork", {}, ctx);
+  await pi.fire("session_tree", {}, ctx);
+  await pi.fire("session_info_changed", {}, ctx);
+  await pi.fire("message_end", { message: {
+    role: "assistant", content: "fallback response", responseModel: "served", errorMessage: "failed", diagnostics: "invalid",
+  } }, ctx);
+
+  const events = readEvents(obsLog);
+  assert.ok(events.some((event) => event.type === "orchestrator_tool_start" && event.payload.toolName === "custom"));
+  assert.ok(events.some((event) => event.type === "model_select" && event.payload.model === "fallback/model"));
+  assert.ok(events.some((event) => event.type === "provider_response" && event.payload.rateLimitRemaining === "2"));
+  assert.ok(events.some((event) => event.type === "assistant_message"));
 });
