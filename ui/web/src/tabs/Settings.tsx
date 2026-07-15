@@ -156,14 +156,14 @@ export default function Settings() {
                     placeholder={r.derived}
                     aria-label={`Dashboard name for ${r.derived}`}
                     onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
-                    onKeyDown={(e) => { if (e.key === "Enter" && dirty) save(r.projectId, r.key, value); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && dirty) void save(r.projectId, r.key, value); }}
                   />
                   <div className="setting-actions">
-                    <button type="button" className="btn sm primary" disabled={!dirty || busy === r.key} onClick={() => save(r.projectId, r.key, value)}>
+                    <button type="button" className="btn sm primary" disabled={!dirty || busy === r.key} onClick={() => { void save(r.projectId, r.key, value); }}>
                       {busy === r.key ? "Saving…" : "Save"}
                     </button>
                     {r.overridden && (
-                      <button type="button" className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); save(r.projectId, r.key, ""); }}>Reset</button>
+                      <button type="button" className="btn sm" disabled={busy === r.key} onClick={() => { setDraft((d) => ({ ...d, [r.key]: r.derived })); void save(r.projectId, r.key, ""); }}>Reset</button>
                     )}
                     <button type="button" className="btn sm danger" disabled={busy === r.key} onClick={() => requestDelete(r.projectId, r.label, r.sessions)}>Delete DB…</button>
                     <button type="button" className="btn sm danger" disabled={busy === r.key} onClick={() => requestDeleteSourceLogs(r.projectId, r.label)}>Delete logs…</button>

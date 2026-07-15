@@ -1,6 +1,5 @@
 import { withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { spawnManaged } from "./process";
 import { copyFileSync, existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { TYPE_SCOPED_TOOL_NAMES } from "../core/constants";

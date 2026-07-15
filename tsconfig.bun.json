@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["bun", "node"]
+  },
+  "include": ["src/observability/server.ts", "src/observability/server/**/*.ts", "src/observability/db.ts", "src/shared/**/*.ts"]
+}

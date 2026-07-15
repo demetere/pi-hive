@@ -215,10 +215,30 @@ dashboard-build:
 review-build:
   node scripts/build-review-bundle.mjs
 
-# Run the root extension TypeScript checker.
+# Run every strict TypeScript project checker.
+[group('quality')]
+typecheck: typecheck-core typecheck-bun typecheck-tests dashboard-typecheck
+
+# Run the Bun-independent extension TypeScript checker.
 [group('quality')]
 typecheck-core:
-  cd {{dashboard_dir}} && npm install && ./node_modules/.bin/tsc -p ../../tsconfig.json
+  ./node_modules/.bin/tsc -p tsconfig.core.json
+
+# Typecheck the Bun dashboard server with Bun's runtime types.
+[group('quality')]
+typecheck-bun:
+  ./node_modules/.bin/tsc -p tsconfig.bun.json
+
+# Typecheck Node and Bun test suites with their respective runtime types.
+[group('quality')]
+typecheck-tests:
+  ./node_modules/.bin/tsc -p tsconfig.tests.json
+  ./node_modules/.bin/tsc -p tsconfig.tests-bun.json
+
+# Run ESLint, including type-aware promise/switch rules and format invariants.
+[group('quality')]
+lint:
+  ./node_modules/.bin/eslint index.ts src tests ui/web/src ui/web/playwright.config.ts ui/web/vite.config.ts ui/web/vitest.config.ts scripts eslint.config.js
 
 # Run the dashboard type checker.
 [group('dashboard')]
@@ -299,12 +319,12 @@ verify-budgets:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck-core dashboard-typecheck dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets
+verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck-core dashboard-typecheck dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets pack-dry-run
+ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================

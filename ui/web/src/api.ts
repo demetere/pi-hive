@@ -1,33 +1,37 @@
 import type { HiveEvent, Snapshot } from "./types";
 import type { ArtifactId } from "../../../src/shared/openspec-artifacts";
+import type { TelemetrySessionSummary } from "../../../src/shared/telemetry";
+import type {
+  DashboardBootstrap,
+  DashboardDelegation,
+  DashboardEventPage,
+  DashboardModelInfo,
+  DashboardStorageBreakdown,
+  DashboardTopologyDetail,
+  DashboardTopologyVersion,
+} from "../../../src/shared/dashboard-api";
 
 export interface InitialData {
   events: HiveEvent[];
   states: Snapshot[];
 }
 
-export interface EventPage {
-  events: HiveEvent[];
-  nextCursor: number;
-  highWaterCursor: number;
-  hasMore: boolean;
-}
+export type EventPage = DashboardEventPage;
 
 // Same-origin bootstrap (Phase D): the per-daemon write token (attached as a
 // Bearer header on every POST/DELETE) and the server's boot project cwd (the
 // project the dashboard was started for). Fetched once and cached; the promise
 // dedupes concurrent first calls.
-interface Bootstrap { token: string | null; bootCwd: string | null }
-let bootstrapPromise: Promise<Bootstrap> | null = null;
-function bootstrap(): Promise<Bootstrap> {
+let bootstrapPromise: Promise<DashboardBootstrap> | null = null;
+function bootstrap(): Promise<DashboardBootstrap> {
   if (!bootstrapPromise) {
     bootstrapPromise = fetch("/bootstrap.json")
-      .then(async (r): Promise<Bootstrap> => {
+      .then(async (r): Promise<DashboardBootstrap> => {
         if (!r.ok) return { token: null, bootCwd: null };
-        const body = (await r.json()) as Partial<Bootstrap>;
+        const body = (await r.json()) as Partial<DashboardBootstrap>;
         return { token: body.token ?? null, bootCwd: body.bootCwd ?? null };
       })
-      .catch((): Bootstrap => ({ token: null, bootCwd: null }));
+      .catch((): DashboardBootstrap => ({ token: null, bootCwd: null }));
   }
   return bootstrapPromise;
 }
@@ -214,28 +218,7 @@ export async function fetchSessionEvents(
 // here is the DB's true row count for the session — unlike the client-derived
 // SessionView count (which only ever counts the events currently loaded), so it
 // is the correct baseline for detecting pruned/absent early history (I4/F3).
-export interface SessionSummary {
-  session_id: string;
-  project_id?: string;
-  project_root?: string;
-  project_label?: string;
-  cwd?: string;
-  session_dir?: string;
-  first_ts?: string;
-  last_ts?: string;
-  event_count: number;
-  running?: number;
-  // Authoritative token/cost totals from the SQL sessions row (B2). Carried so
-  // the KPI TOKENS + CACHE cards read one consistent source instead of TOKENS
-  // from the snapshot and CACHE re-derived from the raw event window (Phase 3.0).
-  tokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  reasoningTokens?: number;
-  cost?: number;
-  usageStatus?: "verified" | "legacy-unverified";
-  topologyHash?: string;
-}
+export type SessionSummary = TelemetrySessionSummary;
 export async function fetchSessionSummaries(): Promise<SessionSummary[]> {
   const data = await jsonOr<{ sessions: SessionSummary[] }>(fetch("/sessions"), { sessions: [] });
   return data.sessions || [];
@@ -245,26 +228,7 @@ export async function fetchSessionSummaries(): Promise<SessionSummary[]> {
 // and cost figures are PER-RUN DELTAS (schemaVersion 1) — additive across rows,
 // so summing them never double-counts a re-run agent. Legacy cumulative rows
 // (schemaVersion 0) are excluded server-side when deltasOnly is passed.
-export interface Delegation {
-  cursor: number;
-  sessionId: string;
-  cwd?: string;
-  agent?: string;
-  parent?: string;
-  startedAt?: string;
-  endedAt?: string;
-  durationMs?: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  reasoningTokens?: number;
-  costUsd: number;
-  schemaVersion: number;
-  status?: string;
-  stopReason?: string;
-  model?: string;
-}
+export type Delegation = DashboardDelegation;
 // Typed delegations for cost/token aggregation (Phase 3.1). ALWAYS request
 // deltasOnly for anything that SUMS these rows — mixing per-run deltas with
 // legacy cumulative rows would double-count. `after` pages forward by cursor.
@@ -282,14 +246,7 @@ export async function fetchDelegations(opts: { session?: string; cwd?: string; a
 // Storage usage + prune preview (GET /storage). `projectId` scopes to an exact
 // canonical project; add `olderThanDays` for the remove/keep estimate. `bytes` is logical
 // telemetry content (payloads + projection text), not the physical .db size.
-export interface StorageBreakdown {
-  bytes: number;
-  events: number;
-  sessions: number;
-  database: { logicalBytes: number; fileBytes: number };
-  sourceLogs: { bytes: number; files: number };
-  prune?: { removeBytes: number; removeEvents: number; removeSessions: number; keepBytes: number; keepEvents: number };
-}
+export type StorageBreakdown = DashboardStorageBreakdown;
 export async function fetchStorage(projectId?: string, olderThanDays?: number): Promise<StorageBreakdown | null> {
   const q = new URLSearchParams();
   if (projectId) q.set("projectId", projectId);
@@ -302,19 +259,7 @@ export async function fetchStorage(projectId?: string, olderThanDays?: number): 
 // when a node lacks its own thinkingLevels sidecar, we look the effective model
 // up here for its SDK-reported levels (K3/Decision 6) instead of inventing a
 // full 6-level ladder.
-export interface ModelInfo {
-  provider: string;
-  modelId: string;
-  name?: string;
-  reasoning: boolean;
-  thinkingLevels: string[];
-  // Capability richness (Phase 6.5) — previously dropped on the client. Cost
-  // rates are USD per token (the SDK's own pricing); context window / max output
-  // in tokens.
-  contextWindow?: number;
-  maxTokens?: number;
-  costRates?: { input?: number | null; output?: number | null; cacheRead?: number | null; cacheWrite?: number | null };
-}
+export type ModelInfo = DashboardModelInfo;
 export async function fetchModels(): Promise<ModelInfo[]> {
   const data = await jsonOr<{ models: ModelInfo[] }>(fetch("/models"), { models: [] });
   return data.models || [];
@@ -322,17 +267,12 @@ export async function fetchModels(): Promise<ModelInfo[]> {
 
 // Versioned topology surface (K2). A cwd's distinct topology versions ordered by
 // first_seen_at (rank = "v1", "v2", …); and one reassembled tree by hash.
-export interface TopologyVersionSummary { hash: string; firstSeenAt: string; lastSeenAt: string; sessionCount: number; }
+export type TopologyVersionSummary = DashboardTopologyVersion;
 export async function fetchTopologies(cwd?: string): Promise<TopologyVersionSummary[]> {
   const data = await jsonOr<{ topologies: TopologyVersionSummary[] }>(fetch(`/topologies${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`), { topologies: [] });
   return data.topologies || [];
 }
-export interface TopologyDetail {
-  hash: string; cwd: string; firstSeenAt: string; lastSeenAt: string;
-  planning?: { orchestrator?: any; agents: any[] };
-  hive?: { orchestrator?: any; agents: any[] };
-  canonicalJson?: string;
-}
+export type TopologyDetail = DashboardTopologyDetail;
 export async function fetchTopologyDetail(hash: string): Promise<TopologyDetail | null> {
   return jsonOr<TopologyDetail | null>(fetch(`/topologies/${encodeURIComponent(hash)}`), null);
 }

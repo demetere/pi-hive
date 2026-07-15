@@ -13,6 +13,7 @@ export function statusKey(s: string | undefined): StatusKey {
     case "waiting": return "waiting";
     case "done": return "done";
     case "error": return "error";
+    case undefined: return "idle";
     default: return "idle";
   }
 }
@@ -23,7 +24,8 @@ export function statusColorVar(s: string | undefined): string {
     case "running": return "var(--run)";
     case "done": return "var(--done)";
     case "error": return "var(--crit)";
-    default: return "var(--wait)";
+    case "waiting":
+    case "idle": return "var(--wait)";
   }
 }
 

@@ -26,7 +26,7 @@ test("process cleanup handles child, managed, absent, and throwing handles", () 
   const nestedChild = {
     pid: 456,
     killed: false,
-    kill(signal?: string) { signals.push(signal); this.killed = true; return true; },
+    kill(signal?: string) { if (signal) signals.push(signal); this.killed = true; return true; },
   } as any;
   assert.equal(killProcess({ proc: nestedChild, pid: 456, kill: () => true }), 456);
   assert.equal(killProcess(undefined), undefined);

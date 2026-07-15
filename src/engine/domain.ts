@@ -340,7 +340,7 @@ export function isCommitCommand(command: string): boolean {
 // `bash -c "<str>"` / `sh -c "<str>"` by recursing into the quoted string, then
 // classify the remaining head token.
 function statementIsCommit(statement: string): boolean {
-  let trimmed = statement.trim();
+  const trimmed = statement.trim();
   if (!trimmed) return false;
 
   // Unwrap bash -c "<str>" / sh -c '<str>' — recurse into the inner command.

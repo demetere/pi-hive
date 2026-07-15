@@ -2,7 +2,7 @@ import { fetchSessionEvents } from "../api";
 import { store, type ReplayState } from "./index";
 import { ensureTopologyDetail } from "./wiring";
 import { buildEventStatus } from "./status";
-import type { AgentRuntime, HiveEvent } from "../types";
+import type { AgentRuntime, HiveEvent, TeamTopologies } from "../types";
 import type { TopoSource } from "../components/TopologyGraph";
 
 // Replay controller (Phase F). A self-contained slice: entering replay pages the
@@ -109,7 +109,8 @@ export function replayTopoSource(slice: HiveEvent[]): TopoSource | undefined {
     const liveActive = st.sessionsById.get(sessionId)?.topologies?.active;
     const active: "hive" | "planning" = liveActive
       ?? (detail.hive?.orchestrator || detail.hive?.agents?.length ? "hive" : "planning");
-    return { session_id: sessionId, topologies: { active, hive: detail.hive, planning: detail.planning } as any, agents };
+    const topologies: TeamTopologies = { active, hive: detail.hive, planning: detail.planning };
+    return { session_id: sessionId, topologies, agents };
   }
   const live = st.sessionsById.get(sessionId);
   if (live) return { session_id: sessionId, topology: live.topology, topologies: live.topologies, agents };

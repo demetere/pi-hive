@@ -275,8 +275,10 @@ test("orchestrator telemetry tolerates sparse SDK payloads and missing runtime s
     modelRegistry: { getAll: (): any[] => [] },
   } as any;
 
-  await pi.fire("tool_call", { name: "custom" }, ctx);
-  await pi.fire("tool_result", { name: "custom", result: [{ type: "text", text: "done" }] }, ctx);
+  await pi.fire("tool_call", { toolName: "custom", toolCallId: "tc-1", input: {} }, ctx);
+  await pi.fire("tool_result", {
+    toolName: "custom", toolCallId: "tc-1", input: {}, content: [{ type: "text", text: "done" }], details: undefined, isError: false,
+  }, ctx);
   await pi.fire("model_select", {}, ctx);
   await pi.fire("thinking_level_select", {}, ctx);
   await pi.fire("session_compact", {}, ctx);

@@ -6,7 +6,6 @@ import { HIVE_SESSIONS_DIR } from "../core/constants";
 import type { AgentConfig, AgentRuntime, HiveConfig, HiveMode, HiveState, SessionState } from "../core/types";
 import { parseFrontmatter } from "../core/yaml";
 import {
-  ensureDir,
   forEachJsonlLine,
   normalizeAgentType,
   normalizeCommit,

@@ -25,7 +25,7 @@ async function handlePromotedQuestion(state: HiveState, ctx: ExtensionContext, a
       answer = await (ctx.ui as any).input(`Planning question from ${action.askedBy || "a planner"}: ${question}`, question);
     } catch { answer = undefined; }
   }
-  if (action.change) recordQuestion(ctx.cwd, action.change, question, answer || undefined);
+  if (action.change) await recordQuestion(ctx.cwd, action.change, question, answer || undefined);
   if (answer && answer.trim()) {
     state.pi.sendUserMessage(`The human answered a planning question from ${action.askedBy || "a planner"}:\n\nQ: ${question}\nA: ${answer.trim()}\n\nRelay this answer to that planner (resume its delegation) so it can continue.`);
   } else {
@@ -188,7 +188,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     const msg = mode === "plan"
       ? "Plan mode enabled — drive planners to produce full specs, then switch to hive to execute."
       : "Hive mode enabled — delegate execution to coders/testers/reviewers.";
-    ctx.ui.notify(msg, "success");
+    ctx.ui.notify(msg, "info");
   }
   return true;
 }

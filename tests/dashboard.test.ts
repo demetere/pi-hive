@@ -173,7 +173,8 @@ test("concurrent startup calls serialize and spawn exactly one daemon", async ()
     assert.equal(results.filter((result) => result.adopted).length, 19);
     assert.equal(new Set(results.map((result) => result.url)).size, 1);
     assert.equal(readFileSync(daemonTokenPath(), "utf8").trim(), launchedToken);
-    assert.equal(JSON.parse(readFileSync(dashboardMetadataPath(), "utf8")).startupNonce, running?.startupNonce);
+    const runningHealth = running as DaemonHealth | null;
+    assert.equal(JSON.parse(readFileSync(dashboardMetadataPath(), "utf8")).startupNonce, runningHealth?.startupNonce);
   } finally {
     delete process.env.HIVE_TELEMETRY_REGISTRY;
   }

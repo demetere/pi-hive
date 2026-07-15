@@ -54,7 +54,6 @@ export async function refreshDelegations(reset = false): Promise<void> {
     let maxCursor = store.getState().delegationsCursor;
     let after = reset ? 0 : maxCursor;
     let addedAny = false;
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const rows = await fetchDelegations({ after, limit: DELEGATIONS_PAGE });
       if (!rows.length) break; // reached the tail

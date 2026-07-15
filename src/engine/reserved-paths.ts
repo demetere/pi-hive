@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, isAbsolute, resolve, sep } from "node:path";
 import { HIVE_SESSIONS_DIR } from "../core/constants";
 import { isPathInside, resolveCanonicalPath } from "../core/safe-path";
 

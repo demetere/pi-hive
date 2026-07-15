@@ -53,7 +53,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     try { writeHiveStateSnapshot(state); } catch { /* best-effort */ }
   };
 
-  pi.on("tool_call", async (event: any, ctx: ExtensionContext) => {
+  pi.on("tool_call", async (event, ctx: ExtensionContext) => {
     // Enforcement (domain + agent-type policy) runs in plan AND hive mode; only
     // normal mode is unguarded plain Pi.
     if (state.mode === "normal") return;
@@ -62,10 +62,10 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     const orch = state.orchestratorRuntime;
     if (orch) orch.toolCount++;
     if (event.toolCallId) orchestratorToolStartedAt.set(event.toolCallId, Date.now());
-    const argsJson = safeJson(event.args ?? {});
+    const argsJson = safeJson(event.input);
     emitHiveEvent(state, "orchestrator_tool_start", {
       agent: "Orchestrator",
-      toolName: event.toolName || event.name || "unknown",
+      toolName: event.toolName || "unknown",
       toolCallId: event.toolCallId,
       args: truncateMiddle(argsJson, 500),
       truncated: argsJson.length > 500,
@@ -73,17 +73,17 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     return enforceDomainForTool(state, event, ctx);
   });
 
-  pi.on("tool_result", async (event: any) => {
+  pi.on("tool_result", async (event) => {
     // Always release the start-time entry, even when we bail below — otherwise a
     // mode flip to normal between tool_call and tool_result strands the key
     // forever (M-misc leak).
     const startedAt = event.toolCallId ? orchestratorToolStartedAt.get(event.toolCallId) : undefined;
     if (event.toolCallId) orchestratorToolStartedAt.delete(event.toolCallId);
     if (state.mode === "normal") return;
-    const resultText = textOfResult(event.result);
+    const resultText = textOfResult(event.content);
     emitHiveEvent(state, "orchestrator_tool_end", {
       agent: "Orchestrator",
-      toolName: event.toolName || event.name || "unknown",
+      toolName: event.toolName || "unknown",
       toolCallId: event.toolCallId,
       isError: event.isError === true,
       resultPreview: truncateMiddle(resultText, 500),
@@ -95,12 +95,13 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // J3: re-emit the model catalog when the main model changes mid-session, so
   // `inherit` workers aren't left described by a stale catalog. Gated off in
   // normal mode (the extension does nothing there). The DB upsert is idempotent.
-  pi.on("model_select", async (event: any, ctx: ExtensionContext) => {
+  pi.on("model_select", async (event, ctx: ExtensionContext) => {
     if (state.mode === "normal") return;
     // The event carries the newly-selected model; pass it through so the catalog
     // covers what `inherit` workers now resolve to, even if it isn't config-
     // declared (M1). Fall back to ctx.model if the event shape lacks it.
-    const m = event?.model || (ctx as any).model;
+    const contextModel = (ctx as ExtensionContext & { model?: { provider?: string; id?: string } }).model;
+    const m = event.model || contextModel;
     const effectiveModel = m?.provider && m?.id ? `${m.provider}/${m.id}` : undefined;
     try { emitModelCatalog(state, state.modelRegistry ?? ctx.modelRegistry, effectiveModel); } catch { /* best-effort */ }
     // Phase 4.4: emit the SWITCH itself (not just the catalog re-emit) so the
@@ -113,7 +114,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   });
 
   // Phase 4.4: the main session's thinking-level changes, previously invisible.
-  pi.on("thinking_level_select", async (event: any) => {
+  pi.on("thinking_level_select", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "thinking_level_select", {
       agent: "Orchestrator", level: event?.level, previousLevel: event?.previousLevel,
@@ -122,7 +123,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
 
   // Phase 4.1: main-session compactions produced zero telemetry — the orchestrator
   // was a second-class citizen next to its own workers (which emit worker_compaction).
-  pi.on("session_compact", async (event: any) => {
+  pi.on("session_compact", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "orchestrator_compaction", {
       agent: "Orchestrator",
@@ -141,7 +142,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // insertion (Map preserves insertion order) whenever it grows past the bound —
   // only the newest in-flight turns can still legitimately match a turn_end.
   const MAX_TRACKED_TURNS = 64;
-  pi.on("turn_start", async (event: any) => {
+  pi.on("turn_start", async (event) => {
     if (state.mode === "normal") return;
     setOrchestratorStatus("running");
     if (typeof event?.turnIndex !== "number") return;
@@ -152,7 +153,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       turnStartedAt.delete(oldest);
     }
   });
-  pi.on("turn_end", async (event: any) => {
+  pi.on("turn_end", async (event) => {
     if (state.mode === "normal") return;
     setOrchestratorStatus("done");
     const started = typeof event?.turnIndex === "number" ? turnStartedAt.get(event.turnIndex) : undefined;
@@ -168,7 +169,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // rate-limit / overload responses (429/529) and their retry-after headers so a
   // stalled session has a visible cause. Only emit non-2xx to avoid one row per
   // successful call flooding the log.
-  pi.on("after_provider_response", async (event: any) => {
+  pi.on("after_provider_response", async (event) => {
     if (state.mode === "normal") return;
     const status = Number(event?.status);
     if (!Number.isFinite(status) || (status >= 200 && status < 300)) return;
@@ -186,7 +187,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // emitted with a bounded payload and rendered generically in the Activity feed
   // (the feed titles the common ones and dumps the payload for the rest). None
   // carries unbounded bodies.
-  pi.on("user_bash", async (event: any) => {
+  pi.on("user_bash", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "user_bash", {
       agent: "Orchestrator",
@@ -197,7 +198,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
   // `input` telemetry is source-only (the footer already re-renders on input, a
   // separate concern): record where user input came from and how it will be
   // delivered, not the text (that lands as a user_message already).
-  pi.on("input", async (event: any) => {
+  pi.on("input", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "input", {
       agent: "User",
@@ -206,7 +207,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       hasImages: Array.isArray(event?.images) && event.images.length > 0,
     }, "User");
   });
-  pi.on("session_before_fork", async (event: any) => {
+  pi.on("session_before_fork", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "session_fork", {
       agent: "Orchestrator",
@@ -214,7 +215,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       position: event?.position,
     }, "Orchestrator");
   });
-  pi.on("session_tree", async (event: any) => {
+  pi.on("session_tree", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "session_tree", {
       agent: "Orchestrator",
@@ -223,7 +224,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
       fromExtension: event?.fromExtension === true,
     }, "Orchestrator");
   });
-  pi.on("session_info_changed", async (event: any) => {
+  pi.on("session_info_changed", async (event) => {
     if (state.mode === "normal") return;
     emitHiveEvent(state, "session_info_changed", {
       agent: "Orchestrator",
@@ -231,7 +232,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
     }, "Orchestrator");
   });
 
-  pi.on("before_agent_start", async (event: any, _ctx: ExtensionContext) => {
+  pi.on("before_agent_start", async (event, _ctx: ExtensionContext) => {
     if (!state.config || state.mode === "normal") return;
     const planMode = state.mode === "plan";
     const catalog = state.config.agents.map((root) => {
@@ -271,14 +272,14 @@ ${catalog}`,
     };
   });
 
-  pi.on("message_end", async (event: any, ctx: ExtensionContext) => {
-    if ((event as any).message?.role === "assistant") {
+  pi.on("message_end", async (event, ctx: ExtensionContext) => {
+    if (event.message.role === "assistant") {
       // Phase 4.3: capture the MAIN session's live context-window fill, mirroring
       // the per-worker poll in dispatch.ts. tokens is null right after compaction
       // until the next response, so keep the last known percent rather than
       // flashing to 0.
       try {
-        const usage = (ctx as any).getContextUsage?.();
+        const usage = ctx.getContextUsage();
         if (usage && state.orchestratorRuntime) {
           if (usage.percent != null) state.orchestratorRuntime.contextPct = usage.percent;
           if (usage.tokens != null) state.orchestratorRuntime.tokens = usage.tokens;
@@ -294,7 +295,7 @@ ${catalog}`,
     // (read it via team_conversation(agent)) — unbounded worker output (a
     // mental-model YAML can be hundreds of KB) never reaches the shared log.
     if (state.mode === "normal") return;
-    const message = (event as any).message;
+    const message = event.message;
     const role = message?.role;
     if (!role || role === "toolResult") return;
     // Accumulate the orchestrator's own usage/cost so the main session gets the
@@ -351,7 +352,7 @@ ${catalog}`,
     emitHiveEvent(state, role === "user" ? "user_message" : "assistant_message", { text: clipped.text, truncated: clipped.truncated }, from);
   });
 
-  pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
+  pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     state.shuttingDown = false;
     const lifecycleGeneration = state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
     state.widgetCtx = ctx;
@@ -361,7 +362,7 @@ ${catalog}`,
     state.modelRegistry = ctx.modelRegistry;
     state.onRuntimeUpdate = () => updateWidget(state);
     state.onRuntimeFinish = (runtime, finishCtx) => {
-      if (finishCtx.hasUI) finishCtx.ui.notify(`${runtime.config.name} ${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s`, runtime.status === "done" ? "success" : "error");
+      if (finishCtx.hasUI) finishCtx.ui.notify(`${runtime.config.name} ${runtime.status} in ${Math.round(runtime.elapsedMs / 1000)}s`, runtime.status === "done" ? "info" : "error");
     };
     try {
       reloadTeam(state, ctx);
@@ -395,7 +396,7 @@ ${catalog}`,
       );
       const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";
       if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
-    } catch (error: any) {
+    } catch (error: unknown) {
       // H5: on a config-load failure, force the session back to plain-Pi normal
       // mode so it is never left with hive tools registered but unconfigured.
       // Best-effort — capture whatever the current tool set is and restore it.
@@ -404,11 +405,12 @@ ${catalog}`,
         captureNormalTools(state);
         applyMode(state, ctx, "normal", { notify: false });
       } catch { /* nothing more we can do; the notify below tells the user */ }
-      if (ctx.hasUI) ctx.ui.notify(`Hive failed to load: ${error?.message || error}`, "error");
+      const message = error instanceof Error ? error.message : String(error);
+      if (ctx.hasUI) ctx.ui.notify(`Hive failed to load: ${message}`, "error");
     }
   });
 
-  pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
+  pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
     state.shuttingDown = true;
     state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
     if (orchestratorSnapshotTimer) clearTimeout(orchestratorSnapshotTimer);

@@ -38,15 +38,15 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
   // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
   pi.registerCommand("hive-normal", {
     description: "Switch to normal Pi chat (no hive, no enforcement)",
-    handler: async (_args: string, ctx: ExtensionContext) => applyMode(state, ctx, "normal"),
+    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "normal"); },
   });
   pi.registerCommand("hive-plan-mode", {
     description: "Switch to plan mode — planning team produces full specs",
-    handler: async (_args: string, ctx: ExtensionContext) => applyMode(state, ctx, "plan"),
+    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "plan"); },
   });
   pi.registerCommand("hive", {
     description: "Switch to hive mode — execution team builds the specs",
-    handler: async (_args: string, ctx: ExtensionContext) => applyMode(state, ctx, "hive"),
+    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "hive"); },
   });
   // Back-compat alias: /hive-toggle now cycles through the three modes.
   pi.registerCommand("hive-toggle", {
