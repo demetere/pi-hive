@@ -153,6 +153,31 @@ test("routeAgents scores specialists and respects delegation hierarchy", () => {
   }
 });
 
+test("routeAgents scores capability types and SDD phase groups", () => {
+  const specialists = [
+    runtime("Planning Specialist", { role: "lead", agentType: "planner", groupName: "Planning", consultWhen: "requirements and product scope", routingTags: ["proposal"], responsibilities: ["design specs"] }),
+    runtime("Implementation Coder", { role: "lead", agentType: "coder", groupName: "Engineering", consultWhen: "backend component", domain: [{ path: "src/api", description: "service migration", read: true, upsert: true, delete: false }] }),
+    runtime("QA Tester", { role: "lead", agentType: "tester", groupName: "QA Validation", consultWhen: "acceptance evidence" }),
+    runtime("Security Reviewer", { role: "lead", agentType: "reviewer", groupName: "Validation", consultWhen: "auth permission review" }),
+  ];
+  const state = stateWith([
+    runtime("Orchestrator", { role: "orchestrator", allowedAgents: specialists.map((entry) => entry.config.name) }),
+    ...specialists,
+  ]);
+
+  const task = "plan product requirements proposal design specs tasks; implement backend API service migration component; test QA acceptance evidence; security auth permission review; apply-progress implementation; verify-report release confidence";
+  const matches = runAsAgent("Orchestrator", () => routeAgents(state, task, 1000));
+  assert.deepEqual(new Set(matches.map((match) => match.name)), new Set(specialists.map((entry) => entry.config.name)));
+  assert.ok(matches.find((match) => match.name === "Planning Specialist")?.reasons.includes("planning-group"));
+  assert.ok(matches.find((match) => match.name === "Implementation Coder")?.reasons.includes("coder-type"));
+  assert.ok(matches.find((match) => match.name === "QA Tester")?.reasons.includes("tester-type"));
+  assert.ok(matches.find((match) => match.name === "Security Reviewer")?.reasons.includes("reviewer-type"));
+
+  state.mode = "plan";
+  const planning = runAsAgent("Orchestrator", () => routeAgents(state, task));
+  assert.equal(planning.some((match) => ["Implementation Coder", "QA Tester"].includes(match.name)), false);
+});
+
 test("buildOrchestratorPrompt routes to the ACTUAL configured leads, nothing hardcoded (H3/L4)", () => {
   // A team with entirely custom lead names — no "Engineering Lead"/"Planning
   // Lead" anywhere. The routing block must name these leads and their cues.

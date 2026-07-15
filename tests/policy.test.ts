@@ -8,7 +8,7 @@ import { checkPlannerStages, checkTypePolicy } from "../src/engine/policy.ts";
 import { bashMutationKind, enforceDomainForTool, isCommitCommand, readOnlyCommandDecision } from "../src/engine/domain.ts";
 import { checkReservedPath } from "../src/engine/reserved-paths.ts";
 import { runAsAgent } from "../src/engine/session.ts";
-import { buildOperatingContract } from "../src/engine/prompts.ts";
+import { buildDistillerPrompt, buildOperatingContract, buildWorkerPrompt, extractTagged } from "../src/engine/prompts.ts";
 import type { AgentRuntime, AgentType, HiveState, PlanStage } from "../src/core/types.ts";
 
 function runtime(name: string, extra: Partial<AgentRuntime["config"]> = {}): AgentRuntime {
@@ -377,5 +377,37 @@ test("buildOperatingContract states the type's boundary", () => {
   assert.match(buildOperatingContract(runtime("P", { agentType: "planner", stages: ["proposal", "design"] })), /proposal, design/);
   assert.match(buildOperatingContract(runtime("R", { agentType: "reviewer" })), /submit_review_verdict/);
   assert.match(buildOperatingContract(runtime("L", { agentType: "lead", commit: "only when green" })), /Commit guidance: only when green/);
+  assert.match(buildOperatingContract(runtime("L", { agentType: "lead" })), /Network commands are disabled/);
+  assert.match(buildOperatingContract(runtime("C", { agentType: "coder", network: true })), /coder.*interpreter.*Network capability/is);
+  assert.match(buildOperatingContract(runtime("T", { agentType: "tester", network: false })), /tester.*interpreter.*Network commands are disabled/is);
   assert.equal(buildOperatingContract(runtime("U")), ""); // no type → no block
+});
+
+test("worker prompt covers lead delegation and leaf fallback context", () => {
+  const state = stateWith([]);
+  state.config = {
+    orchestrator: { name: "Orchestrator", path: "o.md" }, agents: [], sharedContext: [], settings: {},
+  } as any;
+  const lead = runtime("Lead", {
+    agentType: "lead", groupName: "Engineering", responsibilities: ["Coordinate", "Synthesize"],
+    allowedAgents: ["Coder", "Tester"], context: [], domain: [],
+  });
+  const leadPrompt = buildWorkerPrompt(state, { cwd: "/repo" } as any, lead, "Coordinate work");
+  assert.match(leadPrompt, /Group: Engineering/);
+  assert.match(leadPrompt, /Coder, Tester/);
+  assert.match(leadPrompt, /- Coordinate/);
+
+  const leaf = runtime("Leaf", { context: undefined, domain: undefined, responsibilities: undefined, allowedAgents: undefined });
+  const leafPrompt = buildWorkerPrompt(state, { cwd: "/repo" } as any, leaf, "Inspect");
+  assert.match(leafPrompt, /Group: Orchestration/);
+  assert.match(leafPrompt, /Use your role prompt/);
+  assert.match(leafPrompt, /No shared context files were readable/);
+  assert.doesNotMatch(leafPrompt, /Nested delegation/);
+});
+
+test("distiller prompt and tagged extraction handle empty and populated content", () => {
+  assert.match(buildDistillerPrompt("Agent", "", "", "2026-07-15"), /\(empty\).*\(none\)/s);
+  assert.match(buildDistillerPrompt("Agent", "current", "conversation", "2026-07-15"), /current.*conversation/s);
+  assert.equal(extractTagged("before <result> value </result>", "result"), "value");
+  assert.equal(extractTagged("missing", "result"), null);
 });

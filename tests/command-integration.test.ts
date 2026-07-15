@@ -227,6 +227,51 @@ test("plan command selects, lists, and rejects changes", async () => {
   assert.match(notifications.at(-1)?.message || "", /draft/);
 });
 
+test("headless command handlers fail safely without attempting UI notifications", async () => {
+  const h = harness();
+  const state = createState(h.pi);
+  const { ctx } = context();
+  ctx.hasUI = false;
+  let fetchMode: "status" | "throw" = "status";
+  registerCommands(h.pi, state, commandDeps({
+    openspec: fakeOpenSpec({ changeExists: () => false }),
+    fetch: async () => {
+      if (fetchMode === "throw") throw new Error("offline");
+      return new Response("no", { status: 503 });
+    },
+  }));
+
+  await h.commands.get("hive-doctor").handler("", ctx);
+  await h.commands.get("hive-execute").handler("", ctx);
+  await h.commands.get("hive-execute").handler("missing", ctx);
+  await h.commands.get("hive-plan").handler("missing", ctx);
+  await h.commands.get("hive-plan").handler("", ctx);
+  await h.commands.get("hive-observe").handler("", ctx);
+
+  state.session = { sessionId: "s1", sessionDir: ctx.cwd, conversationLog: "", observabilityLog: "" };
+  await h.commands.get("hive-observe").handler("", ctx);
+  await h.commands.get("hive-observe-stop").handler("", ctx);
+  await h.commands.get("hive-observe-prune").handler("bad", ctx);
+  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  fetchMode = "throw";
+  await h.commands.get("hive-observe-prune").handler("1", ctx);
+
+  const blocked = harness();
+  const blockedState = createState(blocked.pi);
+  blockedState.mode = "plan";
+  blockedState.activeRuns = 2;
+  const warning = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: any[]) => warnings.push(args.join(" "));
+  try {
+    registerCommands(blocked.pi, blockedState, commandDeps());
+    await blocked.commands.get("hive-execute").handler("approved-change", ctx);
+  } finally {
+    console.warn = warning;
+  }
+  assert.match(warnings.join("\n"), /Cannot execute/);
+});
+
 test("dashboard command error paths stay visible and bounded", async () => {
   const h = harness();
   const state = createState(h.pi);

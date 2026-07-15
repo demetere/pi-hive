@@ -304,7 +304,16 @@ test("dispatchAgent enforces optional timeout and nested delegation depth", asyn
     dispose(): void { /* noop */ },
   } } as any)) as any;
 
-  const timed = await dispatchAgent(state, "Builder", "slow task", ctx, false, create);
+  // dispatchAgent deliberately unrefs its timeout so a worker cannot keep Pi
+  // alive by itself. Keep this test process referenced while awaiting that
+  // timeout; coverage instrumentation can otherwise leave no active handles.
+  const keepAlive = setInterval(() => undefined, 1_000);
+  let timed;
+  try {
+    timed = await dispatchAgent(state, "Builder", "slow task", ctx, false, create);
+  } finally {
+    clearInterval(keepAlive);
+  }
   assert.equal(timed.exitCode, 1);
   assert.match(timed.output, /timed out after 10ms/i);
   assert.equal(state.activeRuns, 0);
