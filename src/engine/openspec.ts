@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureDir, readIfSmall } from "../core/fs";
+import { readIfSmall } from "../core/fs";
 import { resolveContainedPath, resolveProjectPath } from "../core/safe-path";
 import { resolveProjectIdentity, type ProjectIdentity } from "../shared/project-identity";
 import { withCrossProcessFileLock } from "../core/file-lock";

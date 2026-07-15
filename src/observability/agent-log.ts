@@ -27,7 +27,39 @@ export function agentRuns(sessionFile: string): { id: string; label: string; fil
 // Parse pi session JSONL into UI-friendly entries. Each pi "message" record has
 // a role and a content array of {text|thinking|toolCall|toolResult}. We flatten
 // into a sequence the viewer renders as bubbles + collapsible tool calls.
-export interface ParsedAgentLog extends Omit<JsonlPage, "text"> { entries: any[]; }
+export type AgentLogPart =
+  | { type: "text" | "thinking"; text: string }
+  | { type: "toolResult"; name?: string; result: string; resultError: boolean }
+  | AgentLogToolCallPart;
+
+export interface AgentLogToolCallPart {
+  type: "toolCall";
+  id?: string;
+  name?: string;
+  args: unknown;
+  result: string | null;
+  resultError: boolean;
+}
+
+export type AgentLogEntry =
+  | { kind: "meta"; text: string; ts?: string | number }
+  | { kind: "message"; role: string; parts: AgentLogPart[]; ts?: string | number; usage?: unknown };
+
+export interface ParsedAgentLog extends Omit<JsonlPage, "text"> { entries: AgentLogEntry[]; }
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalTimestamp(value: unknown): string | number | undefined {
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
 
 export function parseAgentLog(
   file: string,
@@ -37,53 +69,80 @@ export function parseAgentLog(
     ? (options > 0 ? { after: options } : { before: Number.MAX_SAFE_INTEGER })
     : options;
   const page = readJsonlPage(file, pageOptions);
-  const entries: any[] = [];
+  const entries: AgentLogEntry[] = [];
   // Maps a toolCallId -> its toolCall part, so a later toolResult message can be
   // merged onto the call it answers (within this parse pass).
-  const toolCallIndex = new Map<string, any>();
+  const toolCallIndex = new Map<string, AgentLogToolCallPart>();
   for (const line of page.text.split("\n")) {
     if (!line.trim()) continue;
-    let o: any;
-    try { o = JSON.parse(line); } catch { continue; }
-    if (o.type === "model_change") {
-      const model = o.modelId || o.model || "";
-      if (model) entries.push({ kind: "meta", text: `model → ${o.provider ? o.provider + "/" : ""}${model}`, ts: o.timestamp });
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { continue; }
+    const record = objectRecord(parsed);
+    if (!record) continue;
+    const timestamp = optionalTimestamp(record.timestamp);
+    if (record.type === "model_change") {
+      const model = optionalString(record.modelId) || optionalString(record.model);
+      const provider = optionalString(record.provider);
+      if (model) entries.push({ kind: "meta", text: `model → ${provider ? `${provider}/` : ""}${model}`, ts: timestamp });
       continue;
     }
-    if (o.type === "thinking_level_change") {
-      const level = o.thinkingLevel || o.level || "";
-      if (level) entries.push({ kind: "meta", text: `thinking → ${level}`, ts: o.timestamp });
+    if (record.type === "thinking_level_change") {
+      const level = optionalString(record.thinkingLevel) || optionalString(record.level);
+      if (level) entries.push({ kind: "meta", text: `thinking → ${level}`, ts: timestamp });
       continue;
     }
-    if (o.type !== "message") continue;
-    const m = o.message || o;
-    const role = m.role || "assistant";
+    if (record.type !== "message") continue;
+    const message = objectRecord(record.message) || record;
+    const role = optionalString(message.role) || "assistant";
 
     // A toolResult arrives as its own message (role:"toolResult") carrying the
     // toolCallId of the call it answers. Attach it to the matching toolCall
     // part so the UI can render call+result as one collapsible card.
     if (role === "toolResult") {
-      const text = typeof m.content === "string" ? m.content
-        : Array.isArray(m.content) ? m.content.map((x: any) => x.text ?? (typeof x === "string" ? x : "")).join("\n")
+      const text = typeof message.content === "string" ? message.content
+        : Array.isArray(message.content) ? message.content.map((item) => {
+          if (typeof item === "string") return item;
+          return optionalString(objectRecord(item)?.text) || "";
+        }).join("\n")
         : "";
-      const part = m.toolCallId && toolCallIndex.get(m.toolCallId);
-      if (part) { part.result = text; part.resultError = !!m.isError; }
-      else entries.push({ kind: "message", role: "toolResult", parts: [{ type: "toolResult", name: m.toolName, result: text, resultError: !!m.isError }], ts: o.timestamp });
+      const toolCallId = optionalString(message.toolCallId);
+      const part = toolCallId ? toolCallIndex.get(toolCallId) : undefined;
+      if (part) { part.result = text; part.resultError = message.isError === true; }
+      else entries.push({
+        kind: "message",
+        role: "toolResult",
+        parts: [{ type: "toolResult", name: optionalString(message.toolName), result: text, resultError: message.isError === true }],
+        ts: timestamp,
+      });
       continue;
     }
 
-    const content = Array.isArray(m.content) ? m.content : [{ type: "text", text: String(m.content ?? "") }];
-    const parts: any[] = [];
-    for (const c of content) {
-      if (c.type === "text" && c.text) parts.push({ type: "text", text: c.text });
-      else if (c.type === "thinking" && c.thinking) parts.push({ type: "thinking", text: c.thinking });
-      else if (c.type === "toolCall") {
-        const part: any = { type: "toolCall", id: c.id, name: c.name, args: c.arguments ?? c.input ?? {}, result: null, resultError: false };
-        if (c.id) toolCallIndex.set(c.id, part);
+    const content: unknown[] = Array.isArray(message.content)
+      ? message.content
+      : [{ type: "text", text: String(message.content ?? "") }];
+    const parts: AgentLogPart[] = [];
+    for (const value of content) {
+      const partRecord = objectRecord(value);
+      if (!partRecord) continue;
+      if (partRecord.type === "text" && typeof partRecord.text === "string" && partRecord.text) {
+        parts.push({ type: "text", text: partRecord.text });
+      } else if (partRecord.type === "thinking" && typeof partRecord.thinking === "string" && partRecord.thinking) {
+        parts.push({ type: "thinking", text: partRecord.thinking });
+      } else if (partRecord.type === "toolCall") {
+        const id = optionalString(partRecord.id);
+        const part: AgentLogToolCallPart = {
+          type: "toolCall",
+          id,
+          name: optionalString(partRecord.name),
+          args: partRecord.arguments ?? partRecord.input ?? {},
+          result: null,
+          resultError: false,
+        };
+        if (id) toolCallIndex.set(id, part);
         parts.push(part);
       }
     }
-    if (parts.length) entries.push({ kind: "message", role, parts, ts: o.timestamp, usage: m.usage });
+    if (parts.length) entries.push({ kind: "message", role, parts, ts: timestamp, usage: message.usage });
   }
   const { text: _text, ...meta } = page;
   return { entries, ...meta };

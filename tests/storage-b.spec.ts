@@ -115,7 +115,7 @@ test("queryDelegations/queryToolCalls honor the after cursor (I1)", () => {
 });
 
 test("session usage is event-derived while snapshots update metadata only (B2/T14)", () => {
-  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "x", session_id: "s2", ts: "2026-07-01T02:00:00.000Z", cwd: "/proj2", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "x", session_id: "s2", ts: "2026-07-01T02:00:00.000Z", cwd: "/proj2", type: "session_start", actor: "System", pid: 1, seq: 1, payload: {} }));
   db.projectUsageEvent({
     eventId: "s2-worker", sessionId: "s2", ts: "2026-07-01T02:05:00.000Z", type: "delegation_end",
     payload: { delegationsSchema: 1, delta: { inputTokens: 300, outputTokens: 80, cacheReadTokens: 400, cacheWriteTokens: 10, costUsd: 0.08 } },
@@ -164,7 +164,7 @@ test("ingest offsets persist and resume (B4)", () => {
 
 test("plan-table cwd is backfilled from the owning session (J2)", () => {
   // Legacy row: has a session_id but NULL cwd (written before B1's cwd column).
-  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "bf", session_id: "bf-sess", ts: "2026-07-01T06:00:00.000Z", cwd: "/backfilled", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "bf", session_id: "bf-sess", ts: "2026-07-01T06:00:00.000Z", cwd: "/backfilled", type: "session_start", actor: "System", pid: 1, seq: 1, payload: {} }));
   db.insertPlanComment({ id: "pc-legacy2", changeId: "bf-change", author: "a", body: "legacy row", sessionId: "bf-sess", createdAt: "2026-07-01T06:01:00.000Z" });
   // Orphan row: session_id points nowhere — must stay NULL (wildcard-visible).
   db.insertPlanComment({ id: "pc-orphan", changeId: "bf-change", author: "b", body: "orphan row", sessionId: "no-such-sess", createdAt: "2026-07-01T06:02:00.000Z" });
@@ -189,7 +189,7 @@ test("plan-table cwd is backfilled from the owning session (J2)", () => {
 });
 
 test("prune removes sessions fully older than the cutoff and shrinks projections (B6/J1)", () => {
-  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "old", session_id: "old-sess", ts: "2020-01-01T00:00:00.000Z", cwd: "/old", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "old", session_id: "old-sess", ts: "2020-01-01T00:00:00.000Z", cwd: "/old", type: "session_start", actor: "System", pid: 1, seq: 1, payload: {} }));
   insertEvent({ event_id: "old-ev", session_id: "old-sess", seq: 0, ts: "2020-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/old", payload: {} });
   // Populate every projection with pre-cutoff rows so we can assert they shrink.
   db.materializeDelegationStart({ eventId: "old-d-s", sessionId: "old-sess", cwd: "/old", agent: "Coder", parent: "Orchestrator", startedAt: "2020-01-01T00:00:00.000Z", model: "anthropic/x" });
@@ -251,9 +251,9 @@ test("cursors are stable and gapless across a DB reopen (L5)", () => {
 
 test("storageBreakdown scopes by cwd and previews prune remove/keep split", () => {
   // Two cwds; one old (pre-cutoff), one new (post-cutoff). Distinct session ids.
-  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-o", session_id: "sb-old", ts: "2020-01-01T00:00:00.000Z", cwd: "/sb", type: "session_start", actor: "System", pid: 1, payload: {} }));
-  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-n", session_id: "sb-new", ts: "2030-01-01T00:00:00.000Z", cwd: "/sb", type: "session_start", actor: "System", pid: 1, payload: {} }));
-  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-x", session_id: "sb-other", ts: "2030-01-01T00:00:00.000Z", cwd: "/other", type: "session_start", actor: "System", pid: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-o", session_id: "sb-old", ts: "2020-01-01T00:00:00.000Z", cwd: "/sb", type: "session_start", actor: "System", pid: 1, seq: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-n", session_id: "sb-new", ts: "2030-01-01T00:00:00.000Z", cwd: "/sb", type: "session_start", actor: "System", pid: 1, seq: 1, payload: {} }));
+  db.upsertSession.run(db.dbSessionRowFromEvent({ event_id: "sb-x", session_id: "sb-other", ts: "2030-01-01T00:00:00.000Z", cwd: "/other", type: "session_start", actor: "System", pid: 1, seq: 1, payload: {} }));
   insertEvent({ event_id: "sb-e-old", session_id: "sb-old", seq: 0, ts: "2020-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/sb", payload: { text: "old-in-scope" } });
   insertEvent({ event_id: "sb-e-new", session_id: "sb-new", seq: 0, ts: "2030-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/sb", payload: { text: "new-in-scope" } });
   insertEvent({ event_id: "sb-e-other", session_id: "sb-other", seq: 0, ts: "2030-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1, cwd: "/other", payload: { text: "out-of-scope" } });

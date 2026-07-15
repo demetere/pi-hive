@@ -84,7 +84,7 @@ function waitForShared<T>(entry: SharedEntry<T>, signal?: AbortSignal): Promise<
     signal?.addEventListener("abort", onAbort, { once: true });
     entry.promise.then(
       (value) => { if (!released) { release(); resolvePromise(value); } },
-      (error) => { if (!released) { release(); rejectPromise(error); } },
+      (error: unknown) => { if (!released) { release(); rejectPromise(error); } },
     );
   });
 }

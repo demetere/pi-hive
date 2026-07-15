@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DB_PATH } from "./config";
-import type { HiveStateSnapshot, HiveTelemetryEvent } from "../../shared/telemetry";
+import type { HiveStateSnapshot, HiveTelemetryEvent, JsonRecord } from "../../shared/telemetry";
 import { tryResolveProjectIdentity } from "../../shared/project-identity";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true, mode: 0o700 });
@@ -529,9 +529,29 @@ export function dbSessionRowFromEvent(event: HiveTelemetryEvent) {
   };
 }
 
-export function rowToEvent(row: any): HiveTelemetryEvent {
-  let payload = {};
-  try { payload = JSON.parse(row.payload_json || "{}"); } catch { /* ignore */ }
+interface EventDbRow {
+  rowid?: number;
+  event_id: string;
+  session_id: string;
+  project_id: string | null;
+  seq: number;
+  ts: string;
+  type: string;
+  actor: string;
+  pid: number;
+  cwd: string | null;
+  telemetry_log: string | null;
+  payload_json: string;
+}
+
+type EventQueryParams = Record<string, string | number>;
+
+export function rowToEvent(row: EventDbRow): HiveTelemetryEvent {
+  let payload: JsonRecord = {};
+  try {
+    const parsed: unknown = JSON.parse(row.payload_json || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed as JsonRecord;
+  } catch { /* ignore */ }
   return {
     event_id: row.event_id,
     session_id: row.session_id,
@@ -541,8 +561,8 @@ export function rowToEvent(row: any): HiveTelemetryEvent {
     type: row.type,
     actor: row.actor,
     pid: row.pid,
-    cwd: row.cwd,
-    telemetry_log: row.telemetry_log,
+    cwd: row.cwd || undefined,
+    telemetry_log: row.telemetry_log || undefined,
     payload,
   };
 }
@@ -550,7 +570,7 @@ export function rowToEvent(row: any): HiveTelemetryEvent {
 // The events table's rowid is a global monotonic cursor: it doubles as the SSE
 // resume token, so reconnect catch-up is exact (B5). rowToEvent enriches with
 // it when present.
-function rowToEventWithCursor(row: any): HiveTelemetryEvent & { cursor: number } {
+function rowToEventWithCursor(row: EventDbRow): HiveTelemetryEvent & { cursor: number } {
   return { ...rowToEvent(row), cursor: Number(row.rowid) };
 }
 
@@ -565,7 +585,7 @@ export interface EventQuery { session?: string; cwd?: string; type?: string; aft
 
 export function queryEvents(q: EventQuery): Array<HiveTelemetryEvent & { cursor: number }> {
   const where: string[] = [];
-  const params: any = {};
+  const params: EventQueryParams = {};
   if (q.after != null) { where.push(`rowid > $after`); params.$after = q.after; }
   if (q.through != null) { where.push(`rowid <= $through`); params.$through = q.through; }
   // `before` pages BACKWARD (older events, K7): take the highest rowids below the
@@ -578,9 +598,9 @@ export function queryEvents(q: EventQuery): Array<HiveTelemetryEvent & { cursor:
   const limit = Math.min(Math.max(1, q.limit || 1000), 5000);
   params.$limit = limit;
   const order = q.before != null ? "DESC" : "ASC";
-  const rows = db.query(
+  const rows = db.query<EventDbRow, EventQueryParams>(
     `SELECT ${EVENT_COLS} FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid ${order} LIMIT $limit`,
-  ).all(params) as any[];
+  ).all(params);
   if (q.before != null) rows.reverse(); // return chronological regardless of paging direction
   return rows.map(rowToEventWithCursor);
 }
@@ -589,22 +609,22 @@ export function queryEvents(q: EventQuery): Array<HiveTelemetryEvent & { cursor:
 // ascending for the client's append model).
 export function recentEvents(limit: number, filter: { session?: string; cwd?: string } = {}): Array<HiveTelemetryEvent & { cursor: number }> {
   const where: string[] = [];
-  const params: any = { $limit: Math.min(Math.max(1, limit), 5000) };
+  const params: EventQueryParams = { $limit: Math.min(Math.max(1, limit), 5000) };
   if (filter.session) { where.push(`session_id = $session`); params.$session = filter.session; }
   if (filter.cwd) { where.push(`cwd = $cwd`); params.$cwd = filter.cwd; }
-  const rows = db.query(
+  const rows = db.query<EventDbRow, EventQueryParams>(
     `SELECT ${EVENT_COLS} FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid DESC LIMIT $limit`,
-  ).all(params) as any[];
+  ).all(params);
   return rows.map(rowToEventWithCursor).reverse();
 }
 
 export function maxEventCursor(): number {
-  const row = db.query(`SELECT MAX(rowid) AS m FROM events`).get() as any;
+  const row = db.query<{ m: number | null }, Record<string, never>>(`SELECT MAX(rowid) AS m FROM events`).get({});
   return Number(row?.m || 0);
 }
 
 export function loadPersistedStates(): HiveStateSnapshot[] {
-  const stateRows = db.query(`SELECT json(state_json) AS state_json FROM states`).all() as any[];
+  const stateRows = db.query<{ state_json: string }, Record<string, never>>(`SELECT json(state_json) AS state_json FROM states`).all({});
   const states: HiveStateSnapshot[] = [];
   for (const row of stateRows) {
     try {

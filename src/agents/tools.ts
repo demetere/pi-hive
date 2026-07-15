@@ -1,7 +1,7 @@
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { defineTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool as definePiTool, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import { resolve } from "node:path";
 import type { AgentType, HiveState, ReviewVerdictLevel } from "../core/types";
 import {
@@ -22,8 +22,17 @@ import { agentRef, agentRoster, resolveRuntime } from "../engine/agent-lookup";
 import { agentSlug } from "../core/utils";
 import { budgetRemaining } from "../engine/governance";
 
-type ToolUpdate = (result: any) => void;
+type ToolUpdate = AgentToolUpdateCallback<object>;
 type ToolRenderOptions = { isPartial?: boolean; expanded?: boolean };
+
+// Pi infers a tool's details shape from the first return branch. Hive tools
+// intentionally return several bounded detail variants, so widen details to a
+// JSON-like record while preserving each TypeBox parameter schema.
+function defineTool<TParams extends TSchema>(
+  tool: ToolDefinition<TParams, object>,
+) {
+  return definePiTool(tool);
+}
 
 // Structural Component shape. Avoid importing pi-tui's `Component` type: its
 // barrel re-exports it with a `.ts` specifier that tsc (moduleResolution

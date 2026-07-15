@@ -24,8 +24,10 @@ export function buildEventStatus(events: HiveEvent[]): AgentStatusBySession {
   const parentOf = new Map<string, Map<string, string>>();
   const outstanding = new Map<string, Map<string, Set<string>>>();
 
-  const ses = (map: Map<string, Map<string, any>>, sid: string) => {
-    let m = map.get(sid); if (!m) { m = new Map(); map.set(sid, m); } return m;
+  const ses = <T>(map: Map<string, Map<string, T>>, sid: string): Map<string, T> => {
+    let values = map.get(sid);
+    if (!values) { values = new Map(); map.set(sid, values); }
+    return values;
   };
   const setStatus = (sid: string, name: string | undefined, status: string) => {
     if (!name) return; ses(bySession, sid).set(name, status);

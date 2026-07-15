@@ -1,4 +1,5 @@
-import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView } from "../types";
+import type { AgentRuntime, HiveEvent, ProjectGroup, SessionView, Snapshot, TopologyNode } from "../types";
+import type { SessionSummary } from "../api";
 import { projectName, sessionSlug } from "../lib/format";
 import { applyHistoryToRuntime, buildHistoryBySession, type HistPeak } from "./history";
 import { buildEventStatus } from "./status";
@@ -47,7 +48,7 @@ function projectFields(source: ProjectFields, sessionId: string) {
   return { key, label };
 }
 
-function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, ProjectFields & { first_ts?: string; last_ts?: string; event_count?: number; tokens?: number; cost?: number; usageStatus?: "verified" | "legacy-unverified" }>): SessionView[] {
+function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, Snapshot>, eventStatus: Map<string, Map<string, string>>, summaries: Map<string, SessionSummary>): SessionView[] {
   const present = new Set<string>();
 
   const ensure = (id: string, source: ProjectFields = {}, ts?: string): SessionView => {
@@ -93,7 +94,7 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
     v.event_count++;
   }
 
-  for (const snap of Object.values(snapshots) as any[]) {
+  for (const snap of Object.values(snapshots)) {
     const id = snap.session_id;
     const v = ensure(id, snap, snap.updated_at);
     if (!v.cwd && snap.cwd) v.cwd = snap.cwd;
@@ -110,8 +111,8 @@ function computeSessions(allEvents: HiveEvent[], snapshots: Record<string, any>,
       }
     }
     const agents = snap.agents || [];
-    v.tokens = agents.reduce((s: number, a: any) => s + (a.inputTokens || 0) + (a.outputTokens || 0), 0);
-    v.cost = agents.reduce((s: number, a: any) => s + (a.costUsd || 0), 0);
+    v.tokens = agents.reduce((sum, agent) => sum + (agent.inputTokens || 0) + (agent.outputTokens || 0), 0);
+    v.cost = agents.reduce((sum, agent) => sum + (agent.costUsd || 0), 0);
   }
 
   // Union with the server-authoritative session list (Phase 3.4): a session whose
@@ -362,15 +363,15 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
   for (const sess of scopedSessions) {
     const sessHist = hist.get(sess.session_id);
     const seen = new Set<string>();
-    const topo = sess.topologies?.active ? (sess.topologies as any)[sess.topologies.active] : sess.topology;
+    const topo = sess.topologies ? sess.topologies[sess.topologies.active] : sess.topology;
     const rootName = topo?.orchestrator?.name;
     const norm = (name: string | undefined) => (name || "").trim().toLowerCase();
-    const inferredRole = (node: any, depth: number, rt?: AgentRuntime) => {
+    const inferredRole = (node: TopologyNode, depth: number, rt?: AgentRuntime) => {
       if (node.role || rt?.role) return node.role || rt?.role;
       if (rootName && norm(node.name) === norm(rootName) && depth === 0) return "orchestrator";
       return depth <= (rootName ? 1 : 0) || (node.children || []).length ? "lead" : "member";
     };
-    const walk = (node: any, depth: number) => {
+    const walk = (node: TopologyNode, depth: number) => {
       const key = norm(node?.name);
       if (!node || !key || seen.has(key)) return;
       seen.add(key);
@@ -380,7 +381,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
       const cost = Math.max(rt?.costUsd || 0, h?.cost || 0);
       out.push({
-        key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || (rt as any)?.agentType, model: node.model || rt?.model, color: node.color,
+        key: sess.session_id + "::" + key, name: node.name, role: inferredRole(node, depth, rt), agentType: node.agentType || rt?.agentType, model: node.model || rt?.model, color: node.color,
         status: statusOf(sess.session_id, node.name, rt?.status), tokens, cost, runs: Math.max(rt?.runCount || 0, h?.runs || 0), tools: Math.max(rt?.toolCount || 0, h?.tools || 0),
         elapsedMs: rt?.elapsedMs, contextPct: rt?.contextPct, contextTokens: rt?.contextTokens, contextWindow: rt?.contextWindow, budgetRemaining: rt?.budgetRemaining, task: rt?.task || rt?.lastWork, session_id: sess.session_id, depth, order: order++,
         // Enforcement contract carried from the topology node (Phase 6.1).
@@ -401,7 +402,7 @@ function computeScopedAgents(scopedSessions: SessionView[]): ScopeAgent[] {
       const tokens = Math.max(snapTok, h ? h.input + h.output : 0);
       const cost = Math.max(rt.costUsd || 0, h?.cost || 0);
       out.push({
-        key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", agentType: (rt as any).agentType, model: rt.model, color: undefined,
+        key: sess.session_id + "::" + key, name: rt.name, role: rt.role || "member", agentType: rt.agentType, model: rt.model, color: undefined,
         status: statusOf(sess.session_id, rt.name, rt.status), tokens, cost, runs: Math.max(rt.runCount || 0, h?.runs || 0), tools: Math.max(rt.toolCount || 0, h?.tools || 0),
         elapsedMs: rt.elapsedMs, contextPct: rt.contextPct, contextTokens: rt.contextTokens, contextWindow: rt.contextWindow, budgetRemaining: rt.budgetRemaining, task: rt.task || rt.lastWork, session_id: sess.session_id, depth: 0, order: order++,
       });

@@ -134,7 +134,7 @@ test("thinking_levels backfills from model_versions via the model soft-join (C3)
 
   // Catalog lands (Workstream A path), then the backfill soft-joins by model.
   db.upsertModel({ provider: "vendor", modelId: "reasoner", reasoning: true, thinkingLevels: ["off", "low", "high"] }, "2026-07-02T04:01:00.000Z");
-  const levelsByModel = new Map(db.listModels().map((m) => [`${m.provider}/${m.modelId}`, m.thinkingLevels] as const));
+  const levelsByModel = new Map<string, string[]>(db.listModels().map((m) => [`${m.provider}/${m.modelId}`, m.thinkingLevels]));
   for (const node of db.topologyNodes(h)) {
     if (node.model && (!node.thinkingLevels || !node.thinkingLevels.length)) {
       const lv = levelsByModel.get(node.model);

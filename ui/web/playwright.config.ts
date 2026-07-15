@@ -11,7 +11,7 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:43192",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    reducedMotion: "reduce",
+    contextOptions: { reducedMotion: "reduce" },
   },
   webServer: {
     command: "npm run dev -- --host 127.0.0.1",

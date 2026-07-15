@@ -17,9 +17,17 @@ test("parseAgentLog flattens messages and joins tool calls with results", () => 
 
   const parsed = parseAgentLog(file);
   assert.equal(parsed.entries.length, 1);
-  assert.equal(parsed.entries[0].parts[0].text, "working");
-  assert.equal(parsed.entries[0].parts[1].name, "read");
-  assert.equal(parsed.entries[0].parts[1].result, "contents");
+  const entry = parsed.entries[0];
+  assert.equal(entry.kind, "message");
+  if (entry.kind !== "message") throw new Error("expected message entry");
+  const textPart = entry.parts[0];
+  const callPart = entry.parts[1];
+  assert.equal(textPart.type, "text");
+  assert.equal(callPart.type, "toolCall");
+  if (textPart.type !== "text" || callPart.type !== "toolCall") throw new Error("expected text and tool call parts");
+  assert.equal(textPart.text, "working");
+  assert.equal(callPart.name, "read");
+  assert.equal(callPart.result, "contents");
   assert.equal(parsed.offset, parsed.size);
 });
 
@@ -53,7 +61,7 @@ test("readJsonlPage provides bounded backward pages and retains partial tails", 
 test("forEachJsonlLine scans large logs with a fixed buffer and ignores incomplete tail", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-jsonl-scan-"));
   const file = join(dir, "events.jsonl");
-  writeFileSync(file, `${Array.from({ length: 5000 }, (_, i) => JSON.stringify({ i })).join("\n")}\n{\"partial\":`);
+  writeFileSync(file, `${Array.from({ length: 5000 }, (_, i) => JSON.stringify({ i })).join("\n")}\n{"partial":`);
   let count = 0;
   let last = -1;
   forEachJsonlLine(file, (line) => { count++; last = JSON.parse(line).i; }, 1024);
@@ -73,7 +81,7 @@ test("parseAgentLog bounds its initial response and pages older entries", () => 
   assert.equal(newest.hasMoreBefore, true);
   const older = parseAgentLog(file, { before: newest.startOffset, maxBytes: 2048 });
   assert.ok(older.entries.length > 0);
-  assert.ok(Number(older.entries.at(-1).ts) < Number(newest.entries[0].ts));
+  assert.ok(Number(older.entries.at(-1)?.ts) < Number(newest.entries[0]?.ts));
 });
 
 test("parseAgentLog handles metadata, sparse messages, and unmatched tool results", () => {
@@ -104,11 +112,17 @@ test("parseAgentLog handles metadata, sparse messages, and unmatched tool result
 
   const parsed = parseAgentLog(file, 0);
   assert.equal(parsed.entries.filter((entry) => entry.kind === "meta").length, 4);
-  assert.ok(parsed.entries.some((entry) => entry.role === "assistant" && entry.parts[0]?.text === "plain"));
-  const call = parsed.entries.flatMap((entry) => entry.parts || []).find((part) => part.id === "t1");
+  assert.ok(parsed.entries.some((entry) => {
+    const first = entry.kind === "message" ? entry.parts[0] : undefined;
+    return entry.kind === "message" && entry.role === "assistant" && first?.type === "text" && first.text === "plain";
+  }));
+  const call = parsed.entries
+    .flatMap((entry) => entry.kind === "message" ? entry.parts : [])
+    .find((part) => part.type === "toolCall" && part.id === "t1");
+  assert.ok(call && call.type === "toolCall");
   assert.equal(call.result, "ok\ntail");
   assert.equal(call.resultError, true);
-  assert.ok(parsed.entries.some((entry) => entry.role === "toolResult"));
+  assert.ok(parsed.entries.some((entry) => entry.kind === "message" && entry.role === "toolResult"));
   assert.ok(parseAgentLog(file, 1).offset >= 1);
 });
 

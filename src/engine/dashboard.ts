@@ -258,7 +258,12 @@ export async function requestDaemonShutdown(
   }
 }
 
-async function waitForReady(host: string, port: number, expected: DaemonIdentity, probe = probeDashboard): Promise<DaemonHealth | null> {
+async function waitForReady(
+  host: string,
+  port: number,
+  expected: DaemonIdentity,
+  probe: (host: string, port: number) => Promise<DashboardProbe | null> = probeDashboard,
+): Promise<DaemonHealth | null> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const health = await probe(host, port);

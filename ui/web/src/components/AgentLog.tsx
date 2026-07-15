@@ -107,7 +107,7 @@ export default function AgentLog() {
     setSelectedRun(runId);
     selectedRunRef.current = runId;
     offset.current = 0; startOffset.current = 0; setEntries([]); setHasOlder(false); setLoading(true);
-    poll(true);
+    void poll(true);
   }
 
   // (re)load when the target agent changes
@@ -115,7 +115,7 @@ export default function AgentLog() {
     if (timer.current) { clearInterval(timer.current); timer.current = undefined; }
     offset.current = 0; startOffset.current = 0; setEntries([]); setHasOlder(false); setLoading(true); setLoadError(""); setExists(true); setRuns([]); setSelectedRun("current");
     selectedRunRef.current = "current";
-    if (openAgent) poll(true);
+    if (openAgent) void poll(true);
     return () => { if (timer.current) { clearInterval(timer.current); timer.current = undefined; } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openAgent]);
@@ -132,7 +132,7 @@ export default function AgentLog() {
   useEffect(() => {
     if (!openAgent) return;
     function onVisible() {
-      if (document.visibilityState === "visible" && status === "running" && selectedRunRef.current === "current") poll(false);
+      if (document.visibilityState === "visible" && status === "running" && selectedRunRef.current === "current") void poll(false);
     }
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);

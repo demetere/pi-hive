@@ -336,7 +336,9 @@ export default function Plans(props: { search: string }) {
       controller = request;
       void fetchPlanDetail(selected, cwd, request.signal)
         .then((next) => { if (next) setDetail(next); })
-        .catch((error: any) => { if (!request.signal.aborted) setDetailError(error?.message || "Unable to refresh OpenSpec change."); });
+        .catch((error: unknown) => {
+          if (!request.signal.aborted) setDetailError(error instanceof Error ? error.message : "Unable to refresh OpenSpec change.");
+        });
     }, 3000);
     return () => { window.clearInterval(timer); controller?.abort(); };
   }, [cwd, detail, selected, selectedReview]);

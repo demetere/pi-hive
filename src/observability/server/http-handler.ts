@@ -34,6 +34,17 @@ import { resolveProjectCwd } from "./plan-bridge";
 import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wiring";
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
 import { OpenSpecCommandError } from "../../engine/openspec";
+import type {
+  DashboardBootstrap,
+  DashboardDelegationsResponse,
+  DashboardEventPage,
+  DashboardModelsResponse,
+  DashboardSessionsPage,
+  DashboardStatesPage,
+  DashboardStorageBreakdown,
+  DashboardTopologiesResponse,
+  DashboardTopologyDetail,
+} from "../../shared/dashboard-api";
 
 function json(data: unknown, status = 200) {
   return applyBrowserSecurityHeaders(new Response(JSON.stringify(data), {
@@ -198,7 +209,7 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
     // a same-origin GET — the token never appears in a URL or in cached HTML.
     // The browser attaches it as the Bearer header on POST/DELETE.
     if (url.pathname === "/bootstrap.json") {
-      const response = json({ token: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null });
+      const response = json({ token: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null } satisfies DashboardBootstrap);
       response.headers.set("cache-control", "no-store");
       return response;
     }
@@ -250,7 +261,7 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
       const nextCursor = Number(events[events.length - 1]?.cursor ?? after ?? 0);
       const unfilteredCatchUp = after != null && !session && !cwd && !type && before == null;
       const hasMore = unfilteredCatchUp ? nextCursor < highWaterCursor : events.length >= limit;
-      return json({ events, cursor: nextCursor, nextCursor, highWaterCursor, hasMore });
+      return json({ events, cursor: nextCursor, nextCursor, highWaterCursor, hasMore } satisfies DashboardEventPage);
     }
     // Single source for cost/token series (E2) and per-session tool detail.
     if (url.pathname === "/delegations") {
@@ -261,7 +272,7 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
       // deltasOnly=1: exclude legacy cumulative rows so cost/token SUMs are safe
       // (Decision 1). The Activity feed omits it to see every delegation row.
       const deltasOnly = url.searchParams.get("deltasOnly") === "1";
-      return json({ delegations: queryDelegations({ session, cwd, after: after != null ? Number(after) : undefined, limit, deltasOnly }) });
+      return json({ delegations: queryDelegations({ session, cwd, after: after != null ? Number(after) : undefined, limit, deltasOnly }) } satisfies DashboardDelegationsResponse);
     }
     // ACCEPTED DESCOPE (Round 3 decision): the dashboard UI does NOT consume this
     // endpoint. Deep per-tool history is reachable via `/events?before=` paging
@@ -284,14 +295,14 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
       const rows = allSnapshots({ offset, limit: limit + 1 });
       const hasMore = rows.length > limit;
       const states = hasMore ? rows.slice(0, limit) : rows;
-      return json({ states, offset, nextOffset: offset + states.length, hasMore });
+      return json({ states, offset, nextOffset: offset + states.length, hasMore } satisfies DashboardStatesPage);
     }
     if (url.pathname === "/sessions") {
       const { offset, limit } = fleetPage(url);
       const rows = sessionSummaries({ offset, limit: limit + 1 });
       const hasMore = rows.length > limit;
       const sessions = hasMore ? rows.slice(0, limit) : rows;
-      return json({ sessions, offset, nextOffset: offset + sessions.length, hasMore });
+      return json({ sessions, offset, nextOffset: offset + sessions.length, hasMore } satisfies DashboardSessionsPage);
     }
 
     // Storage usage + prune preview. Project scope is an exact canonical ID;
@@ -300,23 +311,23 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
       const projectId = url.searchParams.get("projectId") || undefined;
       const daysRaw = url.searchParams.get("olderThanDays");
       const days = daysRaw != null ? Number(daysRaw) : undefined;
-      return json(telemetryStorage(projectId, days));
+      return json(telemetryStorage(projectId, days) satisfies DashboardStorageBreakdown);
     }
 
     // Versioned topology (Phase C). List versions for a project, or fetch one
     // reassembled tree by hash. /models is the capability lookup for the dial.
     if (url.pathname === "/topologies") {
       const cwd = url.searchParams.get("cwd") || undefined;
-      return json({ topologies: listTopologies(cwd) });
+      return json({ topologies: listTopologies(cwd) } satisfies DashboardTopologiesResponse);
     }
     const topoMatch = url.pathname.match(/^\/topologies\/([^/]+)$/);
     if (topoMatch) {
       const detail = topologyDetail(decodeURIComponent(topoMatch[1]));
-      return detail ? json(detail) : json({ error: "not found" }, 404);
+      return detail ? json(detail satisfies DashboardTopologyDetail) : json({ error: "not found" }, 404);
     }
     if (url.pathname === "/models") {
       const all = url.searchParams.get("all") === "1" || url.searchParams.get("all") === "true";
-      return json({ models: listModels(all) });
+      return json({ models: listModels(all) } satisfies DashboardModelsResponse);
     }
 
     // Plan store (read). All scoped to a known project cwd (?cwd=..., defaults
@@ -356,7 +367,7 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
         cancel() { if (sub) subscribers.delete(sub); },
       }, {
         highWaterMark: SSE_BUFFER_BYTES,
-        size(chunk) { return chunk.byteLength; },
+        size(chunk) { return chunk?.byteLength ?? 0; },
       }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" } }), "api");
     }
     if (url.pathname === "/conversation") return json({ path: CONVERSATION_LOG });

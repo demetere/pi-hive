@@ -10,7 +10,7 @@ function ensureAgent(history: Map<string, Map<string, HistPeak>>, sessionId: str
   return cur;
 }
 
-function applyRuntimePeak(cur: HistPeak, rt: any) {
+function applyRuntimePeak(cur: HistPeak, rt: Partial<AgentRuntime> | undefined) {
   if (!rt || typeof rt !== "object") return;
   cur.input = Math.max(cur.input, Number(rt.inputTokens || 0));
   cur.output = Math.max(cur.output, Number(rt.outputTokens || 0));

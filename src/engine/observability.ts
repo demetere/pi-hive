@@ -240,12 +240,40 @@ function configuredModels(state: HiveState): string[] {
   return [...models];
 }
 
+interface CatalogModel {
+  provider: string;
+  id: string;
+  name?: string;
+  api?: string;
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, unknown>;
+  contextWindow?: number;
+  maxTokens?: number;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+}
+
+function catalogModels(registry: unknown): CatalogModel[] | undefined {
+  if (!registry || typeof registry !== "object") return undefined;
+  const getAll = (registry as { getAll?: unknown }).getAll;
+  if (typeof getAll !== "function") return undefined;
+  let rows: unknown;
+  try { rows = getAll.call(registry); } catch { return undefined; }
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((row): row is CatalogModel => {
+    if (!row || typeof row !== "object") return false;
+    const candidate = row as { provider?: unknown; id?: unknown };
+    return typeof candidate.provider === "string" && typeof candidate.id === "string";
+  });
+}
+
 // Emit one model_catalog event describing every model the active config
 // references, sourced from the SDK ModelRegistry (A10). Best-effort: if the
 // registry is unavailable the per-worker getAvailableThinkingLevels() path
 // (dispatch.ts) still supplies authoritative levels incrementally.
-export function emitModelCatalog(state: HiveState, registry: any, effectiveModel?: string) {
-  if (!state.session || state.mode === "normal" || !registry?.getAll) return;
+export function emitModelCatalog(state: HiveState, registry: unknown, effectiveModel?: string) {
+  if (!state.session || state.mode === "normal") return;
+  const all = catalogModels(registry);
+  if (!all) return;
   const wanted = new Set(configuredModels(state));
   // Include the session's current effective model (M1): `inherit` workers resolve
   // to it, so after a mid-session model switch the catalog must describe it even
@@ -253,10 +281,8 @@ export function emitModelCatalog(state: HiveState, registry: any, effectiveModel
   // undescribed model. `configuredModels` deliberately skips "inherit".
   if (effectiveModel && effectiveModel !== "inherit") wanted.add(effectiveModel);
   if (!wanted.size) return;
-  let all: any[] = [];
-  try { all = registry.getAll() || []; } catch { return; }
   const VOCAB = ["off", "minimal", "low", "medium", "high", "xhigh"];
-  const thinkingLevelsOf = (model: any): string[] => {
+  const thinkingLevelsOf = (model: CatalogModel): string[] => {
     if (!model?.reasoning) return ["off"];
     const map = model?.thinkingLevelMap;
     // Mirror pi-ai's getSupportedThinkingLevels() semantics exactly. The model
@@ -275,7 +301,7 @@ export function emitModelCatalog(state: HiveState, registry: any, effectiveModel
   // filtering the registry down to them. A registry hit enriches the row; a miss
   // still persists a best-effort row so the dashboard has a record for every
   // config model — an empty ladder degrades to plain text, not a missing dial.
-  const byKey = new Map<string, any>();
+  const byKey = new Map<string, CatalogModel>();
   for (const model of all) byKey.set(`${model.provider}/${model.id}`, model);
   const models = [...wanted].map((key) => {
     const model = byKey.get(key);

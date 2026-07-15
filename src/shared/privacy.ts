@@ -4,7 +4,7 @@ const SENSITIVE_KEY = /^(?:authorization|proxy-authorization|cookie|set-cookie|a
 export function redactSensitiveText(value: string): string {
   return value
     .replace(/-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----/g, REDACTED)
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, `$1 ${REDACTED}`)
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED}`)
     .replace(/\b((?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|password|passwd|secret|client[-_]?secret)\s*[=:]\s*)(["']?)[^\s,"';&]+\2/gi, `$1${REDACTED}`)
     .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+(@)/gi, `$1${REDACTED}$2`);
 }

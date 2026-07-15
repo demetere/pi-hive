@@ -1,4 +1,4 @@
-import type { AgentRuntime, Topology } from "../types";
+import type { AgentRuntime, Topology, TopologyNode } from "../types";
 
 export function buildAgents(snap: { agents?: AgentRuntime[] } | undefined): Map<string, AgentRuntime> {
   const m = new Map<string, AgentRuntime>();
@@ -9,7 +9,7 @@ export function buildAgents(snap: { agents?: AgentRuntime[] } | undefined): Map<
 // Flatten a topology into ordered nodes (for leaderboards / model mix).
 export function flattenTopology(topo?: Topology): Topology["agents"] {
   const out: NonNullable<Topology["agents"]> = [];
-  const walk = (n?: any) => { if (!n) return; out.push(n); (n.children || []).forEach(walk); };
+  const walk = (node?: TopologyNode) => { if (!node) return; out.push(node); (node.children || []).forEach(walk); };
   walk(topo?.orchestrator);
   (topo?.agents || []).forEach(walk);
   return out;

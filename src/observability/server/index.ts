@@ -3,13 +3,12 @@ import { createDashboardHttpHandler } from "./http-handler";
 import { sourcePaths, startTelemetryRuntime } from "./runtime";
 import { broadcastPing, subscribers } from "./sse";
 
-startTelemetryRuntime();
+void startTelemetryRuntime();
 
 // Keep idle EventSource connections alive through browsers and proxies.
 const heartbeatTimer = setInterval(broadcastPing, 15_000);
 let lastActivityAt = Date.now();
 let shuttingDown = false;
-let idleTimer: ReturnType<typeof setInterval>;
 
 function scheduleServerStop(): void {
   if (shuttingDown) return;
@@ -17,7 +16,7 @@ function scheduleServerStop(): void {
   setTimeout(() => {
     clearInterval(heartbeatTimer);
     clearInterval(idleTimer);
-    server.stop(true);
+    void server.stop(true);
     process.exit(0);
   }, 50);
 }
@@ -38,7 +37,7 @@ const server = Bun.serve({
 
 // The daemon is shared across Pi sessions, so a single session shutdown cannot
 // terminate it. Stop only after bounded inactivity with no browser stream.
-idleTimer = setInterval(() => {
+const idleTimer: ReturnType<typeof setInterval> = setInterval(() => {
   if (subscribers.size === 0 && Date.now() - lastActivityAt >= IDLE_TIMEOUT_MS) scheduleServerStop();
 }, Math.min(60_000, Math.max(1_000, Math.floor(IDLE_TIMEOUT_MS / 4))));
 

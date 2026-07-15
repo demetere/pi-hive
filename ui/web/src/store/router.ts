@@ -95,7 +95,7 @@ export function installRouter() {
   // If a project deep-link used a label that isn't resolvable yet (groups load
   // async), re-resolve once the project groups arrive, then stop.
   if (initialRoute.scope.level !== "fleet") {
-    const unresolvedSeg = (initialRoute.scope as any).project as string;
+    const unresolvedSeg = initialRoute.scope.project;
     const stop = store.subscribe((s) => s.projectGroups, (groups) => {
       if (!groups.length) return;
       const key = resolveProject(unresolvedSeg);
