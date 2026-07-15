@@ -251,7 +251,7 @@ export function registerHooks(pi: ExtensionAPI, state: HiveState) {
 
     const planBlock = planMode
       ? `# Plan mode — you are the main session of the PLANNING team
-You are running as the visible main session in PLAN mode. Your job is to produce a COMPLETE OpenSpec change for the requested work, not to implement it. You have NO file-writing tools in this mode — you delegate. Drive the planning team to author the change under \`openspec/changes/<change-id>/\` in dependency order: proposal → design/specs → tasks, using the /opsx-* commands OpenSpec installs. Spec deltas must follow OpenSpec's path convention: \`specs/<capability>/spec.md\` inside the change (use the capability name, not the change-id again; do not create a bare \`spec.md\` or \`specs/spec.md\`). Use plan_new to scaffold/select a change and delegate to planners (and reviewers, for plan-phase feedback) for each artifact. When scope or requirements are ambiguous, use ask_user to interrogate the human BEFORE writing artifacts — do not guess. Each finished artifact is reviewed in the dashboard's plan-review UI; approving the tasks artifact opens the execution gate. Do NOT write or modify any files yourself in this mode — that is execution, which happens in hive mode. The end result of plan mode is an approved, validated tasks.md; then the user switches to hive mode (or runs /hive-execute) to build it.
+You are running as the visible main session in PLAN mode. Your job is to produce a COMPLETE OpenSpec change for the requested work, not to implement it. You have NO file-writing tools in this mode — you delegate. Drive the planning team to author the change under \`openspec/changes/<change-id>/\` in dependency order: proposal → design/specs → tasks, using the /opsx-* commands OpenSpec installs. Spec deltas must follow OpenSpec's path convention: \`specs/<capability>/spec.md\` inside the change (use the capability name, not the change-id again; do not create a bare \`spec.md\` or \`specs/spec.md\`). Use plan_new to scaffold/select a change and delegate to planners (and reviewers, for plan-phase feedback) for each artifact. When scope or requirements are ambiguous, use ask_user to interrogate the human BEFORE writing artifacts — do not guess. Each finished artifact is reviewed in the dashboard's plan-review UI; approving the tasks artifact opens the execution gate. Do NOT write or modify any files yourself in this mode — that is execution, which happens in hive mode. The end result of plan mode is an approved, validated tasks.md; then the user switches to hive mode (or runs /hive:execute) to build it.
 
 `
       : "";
@@ -395,7 +395,7 @@ ${catalog}`,
           .map((ref) => `${runtime.config.name}: ${ref.path}`),
       );
       const missing = missingSkills.length ? `\nMissing configured skills: ${missingSkills.slice(0, 5).join(", ")}${missingSkills.length > 5 ? "..." : ""}` : "";
-      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nUse /hive-toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
+      if (ctx.hasUI) ctx.ui.notify(`Hive loaded: ${state.runtimes.size} agents in normal mode\nUse /hive:toggle or Ctrl+Alt+T to switch to orchestrator mode.${missing}`, missingSkills.length ? "warning" : "info");
     } catch (error: unknown) {
       // H5: on a config-load failure, force the session back to plain-Pi normal
       // mode so it is never left with hive tools registered but unconfigured.
@@ -446,7 +446,7 @@ ${catalog}`,
     state.distillQueues?.clear();
     // The telemetry dashboard is a SHARED global daemon — other sessions may be
     // using it — so we do NOT kill it here. Just drop this session's reference.
-    // Explicit teardown is /hive-observe-stop; the server also self-terminates
+    // Explicit teardown is /hive:observe-stop; the server also self-terminates
     // after its bounded idle timeout when no browser event stream remains.
     state.obsServer = undefined;
     if (state.dashboardActionTimer) clearInterval(state.dashboardActionTimer);

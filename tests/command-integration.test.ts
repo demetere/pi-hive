@@ -73,12 +73,12 @@ test("registered mode commands drive the real mode state machine and drain guard
   registerCommands(h.pi, state, commandDeps());
 
   assert.deepEqual(
-    ["hive-normal", "hive-plan-mode", "hive", "hive-toggle"].map((name) => h.commands.has(name)),
+    ["hive:normal", "hive:plan-mode", "hive", "hive:toggle"].map((name) => h.commands.has(name)),
     [true, true, true, true],
   );
   assert.equal(h.shortcuts.length, 1);
 
-  await h.commands.get("hive-plan-mode").handler("", ctx);
+  await h.commands.get("hive:plan-mode").handler("", ctx);
   assert.equal(state.mode, "plan");
   assert.ok(h.activeTools().includes("plan_new"));
 
@@ -88,17 +88,17 @@ test("registered mode commands drive the real mode state machine and drain guard
   assert.ok(!h.activeTools().includes("plan_new"));
 
   state.activeRuns = 1;
-  await h.commands.get("hive-normal").handler("", ctx);
+  await h.commands.get("hive:normal").handler("", ctx);
   assert.equal(state.mode, "hive");
   assert.match(notifications.at(-1)?.message || "", /Cannot switch mode while 1 agent is running/);
 
   state.activeRuns = 0;
-  await h.commands.get("hive-normal").handler("", ctx);
+  await h.commands.get("hive:normal").handler("", ctx);
   assert.equal(state.mode, "normal");
   assert.deepEqual(h.activeTools(), ["read", "bash"]);
 });
 
-test("hive-execute selects an approved change, enters hive mode, and sends the execution turn", async () => {
+test("hive:execute selects an approved change, enters hive mode, and sends the execution turn", async () => {
   const h = harness();
   const state = createState(h.pi);
   state.mode = "plan";
@@ -106,7 +106,7 @@ test("hive-execute selects an approved change, enters hive mode, and sends the e
   const { ctx, notifications } = context();
   registerCommands(h.pi, state, commandDeps());
 
-  await h.commands.get("hive-execute").handler("approved-change", ctx);
+  await h.commands.get("hive:execute").handler("approved-change", ctx);
 
   assert.equal(state.activeChangeId, "approved-change");
   assert.equal(state.mode, "hive");
@@ -116,7 +116,7 @@ test("hive-execute selects an approved change, enters hive mode, and sends the e
   assert.match(notifications.at(-1)?.message || "", /Executing plan "approved-change"/);
 });
 
-test("hive-execute does not send work when a running planner blocks the mode switch", async () => {
+test("hive:execute does not send work when a running planner blocks the mode switch", async () => {
   const h = harness();
   const state = createState(h.pi);
   state.mode = "plan";
@@ -124,7 +124,7 @@ test("hive-execute does not send work when a running planner blocks the mode swi
   const { ctx, notifications } = context();
   registerCommands(h.pi, state, commandDeps());
 
-  await h.commands.get("hive-execute").handler("approved-change", ctx);
+  await h.commands.get("hive:execute").handler("approved-change", ctx);
 
   assert.equal(state.mode, "plan");
   assert.equal(h.messages.length, 0);
@@ -151,24 +151,24 @@ test("dashboard commands cover uninitialized, restart, stop, and authenticated p
     },
   }));
 
-  await h.commands.get("hive-observe").handler("", ctx);
+  await h.commands.get("hive:observe").handler("", ctx);
   assert.equal(starts, 0);
   assert.match(notifications.at(-1)?.message || "", /not initialized/);
 
   state.session = { sessionId: "s1", sessionDir: ctx.cwd, conversationLog: join(ctx.cwd, "conversation.jsonl"), observabilityLog: join(ctx.cwd, "events.jsonl") };
-  await h.commands.get("hive-observe").handler("", ctx);
+  await h.commands.get("hive:observe").handler("", ctx);
   assert.equal(starts, 1);
   assert.match(notifications.at(-1)?.message || "", /telemetry restarted/);
 
-  await h.commands.get("hive-observe-stop").handler("", ctx);
+  await h.commands.get("hive:observe-stop").handler("", ctx);
   assert.equal(stops, 1);
   assert.match(notifications.at(-1)?.message || "", /43210/);
 
-  await h.commands.get("hive-observe-prune").handler("not-a-number", ctx);
+  await h.commands.get("hive:observe-prune").handler("not-a-number", ctx);
   assert.equal(requests.length, 0);
   assert.match(notifications.at(-1)?.message || "", /Usage/);
 
-  await h.commands.get("hive-observe-prune").handler("30", ctx);
+  await h.commands.get("hive:observe-prune").handler("30", ctx);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "http://127.0.0.1:43191/prune");
   assert.equal(new Headers(requests[0].init?.headers).get("authorization"), "Bearer test-token");
@@ -178,7 +178,7 @@ test("dashboard commands cover uninitialized, restart, stop, and authenticated p
 
 test("plan and execute commands report every fail-closed artifact state", async () => {
   const cases: Array<{ overrides: Partial<typeof openspec>; expected: RegExp }> = [
-    { overrides: {}, expected: /Usage: \/hive-execute/ },
+    { overrides: {}, expected: /Usage: \/hive:execute/ },
     { overrides: { changeExists: () => false }, expected: /No OpenSpec change/ },
     { overrides: { hasTasks: () => false }, expected: /has no tasks\.md/ },
     { overrides: { isReadyToExecute: () => false }, expected: /is not ready/ },
@@ -190,7 +190,7 @@ test("plan and execute commands report every fail-closed artifact state", async 
     const state = createState(h.pi);
     const { ctx, notifications } = context();
     registerCommands(h.pi, state, commandDeps({ openspec: fakeOpenSpec(entry.overrides) }));
-    await h.commands.get("hive-execute").handler(index === 0 ? "" : "candidate", ctx);
+    await h.commands.get("hive:execute").handler(index === 0 ? "" : "candidate", ctx);
     assert.match(notifications.at(-1)?.message || "", entry.expected);
     assert.equal(h.messages.length, 0);
   }
@@ -211,18 +211,18 @@ test("plan command selects, lists, and rejects changes", async () => {
     }),
   }));
 
-  const execute = h.commands.get("hive-execute");
+  const execute = h.commands.get("hive:execute");
   state.widgetCtx = { cwd: ctx.cwd } as any;
   assert.deepEqual(execute.getArgumentCompletions("re"), [{ value: "ready", label: "ready" }]);
 
-  await h.commands.get("hive-plan").handler("missing", ctx);
+  await h.commands.get("hive:plan").handler("missing", ctx);
   assert.match(notifications.at(-1)?.message || "", /No OpenSpec change/);
 
-  await h.commands.get("hive-plan").handler("ready", ctx);
+  await h.commands.get("hive:plan").handler("ready", ctx);
   assert.equal(state.activeChangeId, "ready");
   assert.match(notifications.at(-1)?.message || "", /Active plan change/);
 
-  await h.commands.get("hive-plan").handler("", ctx);
+  await h.commands.get("hive:plan").handler("", ctx);
   assert.match(notifications.at(-1)?.message || "", /ready \(active\).*tasks ready/s);
   assert.match(notifications.at(-1)?.message || "", /draft/);
 });
@@ -241,20 +241,20 @@ test("headless command handlers fail safely without attempting UI notifications"
     },
   }));
 
-  await h.commands.get("hive-doctor").handler("", ctx);
-  await h.commands.get("hive-execute").handler("", ctx);
-  await h.commands.get("hive-execute").handler("missing", ctx);
-  await h.commands.get("hive-plan").handler("missing", ctx);
-  await h.commands.get("hive-plan").handler("", ctx);
-  await h.commands.get("hive-observe").handler("", ctx);
+  await h.commands.get("hive:doctor").handler("", ctx);
+  await h.commands.get("hive:execute").handler("", ctx);
+  await h.commands.get("hive:execute").handler("missing", ctx);
+  await h.commands.get("hive:plan").handler("missing", ctx);
+  await h.commands.get("hive:plan").handler("", ctx);
+  await h.commands.get("hive:observe").handler("", ctx);
 
   state.session = { sessionId: "s1", sessionDir: ctx.cwd, conversationLog: "", observabilityLog: "" };
-  await h.commands.get("hive-observe").handler("", ctx);
-  await h.commands.get("hive-observe-stop").handler("", ctx);
-  await h.commands.get("hive-observe-prune").handler("bad", ctx);
-  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  await h.commands.get("hive:observe").handler("", ctx);
+  await h.commands.get("hive:observe-stop").handler("", ctx);
+  await h.commands.get("hive:observe-prune").handler("bad", ctx);
+  await h.commands.get("hive:observe-prune").handler("1", ctx);
   fetchMode = "throw";
-  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  await h.commands.get("hive:observe-prune").handler("1", ctx);
 
   const blocked = harness();
   const blockedState = createState(blocked.pi);
@@ -265,7 +265,7 @@ test("headless command handlers fail safely without attempting UI notifications"
   console.warn = (...args: any[]) => warnings.push(args.join(" "));
   try {
     registerCommands(blocked.pi, blockedState, commandDeps());
-    await blocked.commands.get("hive-execute").handler("approved-change", ctx);
+    await blocked.commands.get("hive:execute").handler("approved-change", ctx);
   } finally {
     console.warn = warning;
   }
@@ -288,18 +288,18 @@ test("dashboard command error paths stay visible and bounded", async () => {
     },
   }));
 
-  await h.commands.get("hive-observe").handler("", ctx);
+  await h.commands.get("hive:observe").handler("", ctx);
   assert.match(notifications.at(-1)?.message || "", /Bun is not installed/);
   observeResult = { running: false, url: "", adopted: false, spawned: false, error: "bind failed" };
-  await h.commands.get("hive-observe").handler("", ctx);
+  await h.commands.get("hive:observe").handler("", ctx);
   assert.match(notifications.at(-1)?.message || "", /bind failed/);
 
-  await h.commands.get("hive-observe-stop").handler("", ctx);
+  await h.commands.get("hive:observe-stop").handler("", ctx);
   assert.match(notifications.at(-1)?.message || "", /No pi-hive telemetry dashboard/);
 
-  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  await h.commands.get("hive:observe-prune").handler("1", ctx);
   assert.match(notifications.at(-1)?.message || "", /Prune failed \(503\)/);
   pruneMode = "throw";
-  await h.commands.get("hive-observe-prune").handler("1", ctx);
+  await h.commands.get("hive:observe-prune").handler("1", ctx);
   assert.match(notifications.at(-1)?.message || "", /connection refused/);
 });

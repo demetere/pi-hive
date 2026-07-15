@@ -219,7 +219,7 @@ export async function dispatchAgent(
   // matrix, so they are safe to run during planning. coder/tester remain blocked
   // (they mutate; that needs an approved plan + hive/execute mode).
   if (state.mode === "plan" && !["planner", "lead", "reviewer"].includes(runtime.config.agentType || "")) {
-    return { output: `Delegation blocked: plan mode may only delegate to planners, leads, or reviewers; ${runtime.config.name} is agent-type "${runtime.config.agentType || "unknown"}". Switch to hive mode or use /hive-execute after tasks approval for execution.`, exitCode: 1, elapsed: 0 };
+    return { output: `Delegation blocked: plan mode may only delegate to planners, leads, or reviewers; ${runtime.config.name} is agent-type "${runtime.config.agentType || "unknown"}". Switch to hive mode or use /hive:execute after tasks approval for execution.`, exitCode: 1, elapsed: 0 };
   }
   // Hard per-artifact planning stop: once a planner has authored an artifact and
   // it is awaiting the human's review, the pipeline HALTS — no planner may author
@@ -237,7 +237,7 @@ export async function dispatchAgent(
   if (state.mode === "hive" && (runtime.config.agentType === "coder" || runtime.config.agentType === "tester")) {
     const changeId = currentChangeId() || state.activeChangeId || "";
     if (!changeId || !isExecutionGateOpen(ctx.cwd, changeId)) {
-      return { output: `Delegation blocked: execution agents require an approved plan. Draft the OpenSpec change in plan mode (/opsx-propose), get the tasks artifact approved in the review UI, then run /hive-execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
+      return { output: `Delegation blocked: execution agents require an approved plan. Draft the OpenSpec change in plan mode (/opsx-propose), get the tasks artifact approved in the review UI, then run /hive:execute <change-id>. Active change: ${changeId || "none"}.`, exitCode: 1, elapsed: 0 };
     }
   }
   const permission = canDelegateTo(state, caller, agentSlug(runtime.config));

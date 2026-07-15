@@ -81,7 +81,7 @@ function startDashboardActionPoller(state: HiveState, ctx: ExtensionContext) {
         const action = JSON.parse(line);
         if (action.type === "plan_review_approved" && action.changeId) {
           const next = action.readyToExecute
-            ? `The plan-review UI approved the tasks artifact for change "${action.changeId}". The plan is validated and ready; summarize readiness and ask whether to run /hive-execute ${action.changeId}.`
+            ? `The plan-review UI approved the tasks artifact for change "${action.changeId}". The plan is validated and ready; summarize readiness and ask whether to run /hive:execute ${action.changeId}.`
             : action.nextArtifact
               ? `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Author the next artifact (${action.nextArtifact}) with the planning team, then submit it for review.`
               : `The plan-review UI approved the ${action.artifact || "artifact"} for change "${action.changeId}". Continue with the planning team.`;
@@ -121,8 +121,8 @@ export function modeLabel(mode: HiveMode): string {
 }
 
 export function modeStatusText(state: HiveState, mode: HiveMode = state.mode): string {
-  if (mode === "normal") return "NORMAL";
-  return `${modeLabel(mode)} (${state.runtimes.size})`;
+  if (mode === "normal") return "hive: NORMAL";
+  return `hive: ${modeLabel(mode)} (${state.runtimes.size})`;
 }
 
 // Apply a session mode. normal = plain Pi (no hive tools, no enforcement);
@@ -132,7 +132,7 @@ export function modeStatusText(state: HiveState, mode: HiveMode = state.mode): s
 // match the mode.
 // Returns true when the mode was applied, false when the drain guard refused the
 // switch (a worker is still running). Callers that drive follow-up work off a mode
-// change (e.g. /hive-execute) MUST check the result so they don't proceed while
+// change (e.g. /hive:execute) MUST check the result so they don't proceed while
 // stuck in the previous mode.
 export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMode, options: { notify?: boolean } = {}): boolean {
   const shouldNotify = options.notify ?? true;

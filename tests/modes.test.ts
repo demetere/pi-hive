@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { canonicalMode } from "../src/core/types.ts";
 import { loadConfig, teamForMode, allConfiguredAgents } from "../src/core/config.ts";
 import { auditAgentTypes } from "../src/core/agent-type-audit.ts";
-import { applyMode, nextMode, modeLabel } from "../src/ui/tui/widget.ts";
+import { applyMode, nextMode, modeLabel, modeStatusText } from "../src/ui/tui/widget.ts";
 
 // ── canonicalMode + cycle ────────────────────────────────────────────────────
 
@@ -24,10 +24,14 @@ test("nextMode cycles normal → plan → hive → normal", () => {
   assert.equal(nextMode("hive"), "normal");
 });
 
-test("modeLabel renders uppercase labels", () => {
+test("mode labels and statuses use the hive namespace", () => {
   assert.equal(modeLabel("normal"), "NORMAL");
   assert.equal(modeLabel("plan"), "PLAN");
   assert.equal(modeLabel("hive"), "HIVE");
+  const state = { mode: "normal", runtimes: new Map([["one", {}]]) } as any;
+  assert.equal(modeStatusText(state, "normal"), "hive: NORMAL");
+  assert.equal(modeStatusText(state, "plan"), "hive: PLAN (1)");
+  assert.equal(modeStatusText(state, "hive"), "hive: HIVE (1)");
 });
 
 test("applyMode blocks switching to normal while a worker run is reserved", () => {

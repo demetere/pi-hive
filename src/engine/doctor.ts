@@ -69,7 +69,7 @@ export function renderHiveDoctor(state: HiveState, cwd: string, extensionDir: st
   if (!existsSync(configPath)) lines.push(`remedy: create ${HIVE_ROOT}/hive-config.yaml to activate pi-hive in this project`);
   if (configError) lines.push("remedy: fix the path-aware hive-config.yaml validation error, then restart pi");
   if (audit.offenders.length) lines.push("remedy: add the suggested 'agent-type:' to each agent's frontmatter, then restart pi (validation hard-fails without it)");
-  if (!bunVersion) lines.push("remedy: install Bun or avoid /hive-observe dashboard commands");
+  if (!bunVersion) lines.push("remedy: install Bun or avoid /hive:observe dashboard commands");
   if (!existsSync(dashboardIndex) || !existsSync(dashboardStamp)) lines.push("remedy: run just dashboard-build before packaging");
 
   return {

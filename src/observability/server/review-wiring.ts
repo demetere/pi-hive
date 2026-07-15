@@ -71,7 +71,7 @@ const surface: ReviewSurface | null = registerReviewSurface({
       openspec.setArtifactApproval(ctx.cwd, ctx.change, ctx.artifact, "green", "dashboard-human", expectedArtifactHash);
       recordVerdict(ctx, "green", feedback);
       // Unblock the live session: the artifact's gate is satisfied; the planner
-      // proceeds to the next authorable artifact (or /hive-execute once tasks
+      // proceeds to the next authorable artifact (or /hive:execute once tasks
       // pass validation).
       const tasks = openspec.isArtifactApproved(ctx.cwd, ctx.change, "tasks");
       enqueueDashboardAction(ctx.cwd, {

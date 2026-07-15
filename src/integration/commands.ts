@@ -36,11 +36,11 @@ const defaultCommandDeps: CommandDeps = {
 export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: Partial<CommandDeps> = {}) {
   const deps: CommandDeps = { ...defaultCommandDeps, ...overrides };
   // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
-  pi.registerCommand("hive-normal", {
+  pi.registerCommand("hive:normal", {
     description: "Switch to normal Pi chat (no hive, no enforcement)",
     handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "normal"); },
   });
-  pi.registerCommand("hive-plan-mode", {
+  pi.registerCommand("hive:plan-mode", {
     description: "Switch to plan mode — planning team produces full specs",
     handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "plan"); },
   });
@@ -48,8 +48,8 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     description: "Switch to hive mode — execution team builds the specs",
     handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "hive"); },
   });
-  // Back-compat alias: /hive-toggle now cycles through the three modes.
-  pi.registerCommand("hive-toggle", {
+  // Namespaced cycle command for the three modes.
+  pi.registerCommand("hive:toggle", {
     description: "Cycle session mode: normal → plan → hive → normal",
     handler: async (_args: string, ctx: ExtensionContext) => cycleMode(state, ctx),
   });
@@ -59,7 +59,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     handler: async (ctx: ExtensionContext) => cycleMode(state, ctx),
   });
 
-  pi.registerCommand("hive-doctor", {
+  pi.registerCommand("hive:doctor", {
     description: "Run read-only pi-hive diagnostics for this workspace",
     handler: async (_args: string, ctx: ExtensionContext) => {
       const result = renderHiveDoctor(state, ctx.cwd, EXTENSION_ROOT);
@@ -67,8 +67,8 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive-execute", {
-    description: "Execute a plan change's tasks.md through the hive (usage: /hive-execute <change-id>)",
+  pi.registerCommand("hive:execute", {
+    description: "Execute a plan change's tasks.md through the hive (usage: /hive:execute <change-id>)",
     getArgumentCompletions: (prefix: string) => {
       const cwd = state.widgetCtx?.cwd || process.cwd();
       return listChangeIds(cwd, deps.openspec)
@@ -79,7 +79,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
       const changeId = args.trim().split(/\s+/)[0] || "";
       if (!changeId) {
         const available = listChangeIds(ctx.cwd, deps.openspec);
-        if (ctx.hasUI) ctx.ui.notify(`Usage: /hive-execute <change-id>. Available: ${available.join(", ") || "none (create one first)"}`, "warning");
+        if (ctx.hasUI) ctx.ui.notify(`Usage: /hive:execute <change-id>. Available: ${available.join(", ") || "none (create one first)"}`, "warning");
         return;
       }
       if (!deps.openspec.changeExists(ctx.cwd, changeId)) {
@@ -108,7 +108,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
       // confusing — the turn would be blocked by the plan-mode delegation guard).
       // Abort with a clear message instead, including on headless (no-UI) sessions.
       if (state.mode !== "hive" && !applyMode(state, ctx, "hive", { notify: false })) {
-        const msg = `Cannot execute "${changeId}": still in ${state.mode} mode because ${state.activeRuns} agent${state.activeRuns === 1 ? " is" : "s are"} running. Wait for the current work to finish, then re-run /hive-execute ${changeId}.`;
+        const msg = `Cannot execute "${changeId}": still in ${state.mode} mode because ${state.activeRuns} agent${state.activeRuns === 1 ? " is" : "s are"} running. Wait for the current work to finish, then re-run /hive:execute ${changeId}.`;
         if (ctx.hasUI) ctx.ui.notify(msg, "error");
         else console.warn(`[pi-hive] ${msg}`);
         return;
@@ -121,8 +121,8 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive-plan", {
-    description: "List plan changes, or show the active one (usage: /hive-plan [change-id])",
+  pi.registerCommand("hive:plan", {
+    description: "List plan changes, or show the active one (usage: /hive:plan [change-id])",
     handler: async (args: string, ctx: ExtensionContext) => {
       const requested = args.trim().split(/\s+/)[0] || "";
       const available = listChangeIds(ctx.cwd, deps.openspec);
@@ -142,7 +142,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive-observe", {
+  pi.registerCommand("hive:observe", {
     description: "Restart and open the global pi-hive telemetry dashboard",
     handler: async (_args: string, ctx: ExtensionContext) => {
       if (!state.session) {
@@ -157,7 +157,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive-observe-stop", {
+  pi.registerCommand("hive:observe-stop", {
     description: "Stop the global pi-hive telemetry dashboard",
     handler: async (_args: string, ctx: ExtensionContext) => {
       const killed = await deps.stopDashboard(state);
@@ -165,12 +165,12 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive-observe-prune", {
-    description: "Prune telemetry older than <days> from the global dashboard (e.g. /hive-observe-prune 30)",
+  pi.registerCommand("hive:observe-prune", {
+    description: "Prune telemetry older than <days> from the global dashboard (e.g. /hive:observe-prune 30)",
     handler: async (args: string, ctx: ExtensionContext) => {
       const days = Number(String(args || "").trim());
       if (!Number.isFinite(days) || days < 0) {
-        if (ctx.hasUI) ctx.ui.notify("Usage: /hive-observe-prune <days> (a non-negative number of days to retain).", "error");
+        if (ctx.hasUI) ctx.ui.notify("Usage: /hive:observe-prune <days> (a non-negative number of days to retain).", "error");
         return;
       }
       try {
@@ -182,7 +182,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
           body: JSON.stringify({ olderThanDays: days }),
         });
         if (!res.ok) {
-          if (ctx.hasUI) ctx.ui.notify(`Prune failed (${res.status}). Is the dashboard running? Try /hive-observe.`, "error");
+          if (ctx.hasUI) ctx.ui.notify(`Prune failed (${res.status}). Is the dashboard running? Try /hive:observe.`, "error");
           return;
         }
         const body = await res.json() as { events: number; sessions: number };

@@ -90,7 +90,7 @@ function contextAdvice(contextPct?: number): "resume-ok" | "consider-fresh" | "f
   return "resume-ok";
 }
 
-// Builds pi-hive's five custom tools as plain, reusable ToolDefinition objects
+// Builds pi-hive's shared and type-scoped custom tools as reusable ToolDefinition objects
 // (defineTool() does no registration — it's a pure identity/typing wrapper).
 // The SAME definitions are used for the orchestrator's own pi.registerTool()
 // call and for every worker AgentSession's customTools, so tool behavior never
