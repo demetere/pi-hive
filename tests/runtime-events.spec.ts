@@ -51,7 +51,9 @@ test("runtime materializes delegation, tool, and model event variants", () => {
       { provider: "provider", modelId: "catalog", name: "Catalog", api: "responses", reasoning: true, thinkingLevels: ["low", "high"], contextWindow: 100_000, maxTokens: 8_000, costRates: { input: 1, output: 2 } },
       { provider: "provider", modelId: "minimal", reasoning: false, thinkingLevels: "unknown", contextWindow: 0, maxTokens: 0 },
     ] }),
-    event(10, "delegation_progress", { from: "Builder", text: "ignored" }),
+    event(10, "review_verdict", { changeId: " add-runtime-coverage ", reviewer: "Reviewer", verdict: "green", summary: "ready", evidence: ["tests"], concerns: [], blockers: [] }),
+    event(11, "review_verdict", { changeId: "", verdict: "red" }),
+    event(12, "delegation_progress", { from: "Builder", text: "ignored" }),
   ];
   writeFileSync(log, `${rows.join("\n")}\n`);
   runtime.addSource(log, { session_id: "runtime-events", cwd: "/runtime-events" });
@@ -70,6 +72,24 @@ test("runtime materializes delegation, tool, and model event variants", () => {
   expect(models.some((model) => model.provider === "provider" && model.modelId === "catalog")).toBe(true);
   expect(models.some((model) => model.provider === "provider" && model.modelId === "model" && model.thinkingLevels?.includes("high"))).toBe(true);
   expect(runtime.queryEvents({ session: "runtime-events" }).some((row) => row.type === "delegation_progress")).toBe(false);
+});
+
+test("runtime prune removes stale sessions and source watchers through one path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-runtime-prune-"));
+  const log = join(dir, "hive-events.jsonl");
+  writeFileSync(log, `${JSON.stringify({
+    event_id: "runtime-prune-old", session_id: "runtime-prune", seq: 1,
+    ts: "2010-01-01T00:00:00.000Z", type: "user_message", actor: "User", pid: 1,
+    cwd: dir, payload: { text: "old" },
+  })}\n`);
+  runtime.addSource(log, { session_id: "runtime-prune", cwd: dir });
+  expect(runtime.sourcePaths()).toContain(log);
+  const pruned = runtime.pruneTelemetry("2015-01-01T00:00:00.000Z");
+  expect(pruned.events).toBeGreaterThanOrEqual(1);
+  expect(pruned.sessions).toBeGreaterThanOrEqual(1);
+  expect(runtime.sourcePaths()).not.toContain(log);
+  expect(runtime.deleteSessions([])).toBe(0);
+  expect(runtime.deleteProject("missing-project")).toBe(0);
 });
 
 test("snapshot topology fallback loads both configured teams and caches the result", () => {
