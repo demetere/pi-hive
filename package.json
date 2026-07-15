@@ -31,6 +31,7 @@
   },
   "files": [
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "index.ts",
     "src/",
     "ui/web/dist/",
@@ -40,6 +41,7 @@
     "scripts/build-review-bundle.mjs",
     "scripts/check-package-budgets.mjs",
     "scripts/check-review-vendor.mjs",
+    "scripts/check-licenses.mjs",
     "README.md",
     "SECURITY.md",
     "SETUP.md"
@@ -56,6 +58,7 @@
     "test": "just test",
     "verify:dashboard": "just dashboard-verify",
     "verify:package": "just verify-package",
+    "verify:licenses": "just verify-licenses",
     "ci": "just ci",
     "prepack": "just prepack",
     "prepublishOnly": "just prepublish"

@@ -340,14 +340,19 @@ verify-package:
 verify-budgets:
   node scripts/check-package-budgets.mjs
 
+# Scan locked dependency licenses and verify redistributed asset notices.
+[group('quality')]
+verify-licenses:
+  node scripts/check-licenses.mjs
+
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets
+verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets pack-dry-run
+ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets verify-licenses pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================
@@ -356,12 +361,12 @@ ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated
 
 # Rebuild committed UIs and run package verification, matching package prepack.
 [group('package')]
-prepack: dashboard-build review-build verify-package verify-budgets
+prepack: dashboard-build review-build verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}Prepack checks passed.{{NC}}\n"
 
 # Run publish-time checks.
 [group('package')]
-prepublish: test dashboard-verify verify-package verify-budgets
+prepublish: test dashboard-verify verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.

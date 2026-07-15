@@ -107,6 +107,9 @@ jobs:
           node-version: "lts/*"
           cache: "npm"
 
+      - name: Scan third-party licenses and notices
+        run: node scripts/check-licenses.mjs
+
       - name: Audit root dependencies
         run: npm audit --audit-level=high
 
