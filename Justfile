@@ -234,6 +234,7 @@ dashboard-test-unit:
 [group('dashboard')]
 dashboard-test-coverage:
   cd {{dashboard_dir}} && npm run test:coverage
+  node scripts/check-dashboard-coverage.mjs
 
 # Run dashboard browser workflows and axe accessibility checks.
 [group('dashboard')]
