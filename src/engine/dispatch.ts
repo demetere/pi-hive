@@ -682,7 +682,11 @@ export async function dispatchAgent(
     // Deliberate non-goal: distiller re-injection into resumed workers (P4).
     const isNewSession = fresh || !sessionFileExisted;
     await runAtDelegationDepth(delegationDepth, () => runAsAgent(runtime.config.name, () => runWithChange(scopedChangeId, () => session.prompt(isNewSession ? prompt : task))));
-    errorMessage = abortedByParent ? (timedOut ? `Worker timed out after ${governance.timeoutMs}ms` : "aborted") : session.state.errorMessage;
+    errorMessage = abortedByParent
+      ? (timedOut ? `Worker timed out after ${governance.timeoutMs}ms` : "aborted")
+      : state.shuttingDown
+        ? "aborted during session shutdown"
+        : session.state.errorMessage;
     // The 1s timer polls this too, but relying on it alone can miss the final,
     // most accurate reading if the last tick landed moments before completion.
     // Refresh the raw tokens/window alongside the percent (Phase 4.7) so the
