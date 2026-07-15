@@ -35,8 +35,10 @@ const requiredPaths = [
   "scripts/build-review-bundle.mjs",
   "scripts/check-package-budgets.mjs",
   "scripts/check-review-vendor.mjs",
+  "scripts/check-licenses.mjs",
   "README.md",
   "SETUP.md",
+  "THIRD_PARTY_NOTICES.md",
 ];
 
 const requiredPackageFileEntries = [
@@ -49,8 +51,10 @@ const requiredPackageFileEntries = [
   "scripts/build-review-bundle.mjs",
   "scripts/check-package-budgets.mjs",
   "scripts/check-review-vendor.mjs",
+  "scripts/check-licenses.mjs",
   "README.md",
   "SETUP.md",
+  "THIRD_PARTY_NOTICES.md",
 ];
 
 const requiredPeerDeps = [

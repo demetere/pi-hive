@@ -15,6 +15,7 @@ export const MAX_REGRESSION_RATIO = 0.1;
 
 const exactPackagePaths = new Set([
   "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
   "README.md",
   "SECURITY.md",
   "SETUP.md",
@@ -23,6 +24,7 @@ const exactPackagePaths = new Set([
   "scripts/build-review-bundle.mjs",
   "scripts/check-package-budgets.mjs",
   "scripts/check-review-vendor.mjs",
+  "scripts/check-licenses.mjs",
   "ui/review/dist/manifest.json",
   "ui/review/dist/review.css.gz",
   "ui/review/dist/review.html.gz",
