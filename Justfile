@@ -46,6 +46,8 @@ alias db := dashboard-build
 alias dd := dashboard-dev
 alias di := dashboard-install
 alias dt := dashboard-typecheck
+alias dtu := dashboard-test-unit
+alias de2e := dashboard-test-e2e
 alias dv := dashboard-verify
 alias ds := dashboard-serve
 alias rb := review-build
@@ -222,6 +224,16 @@ typecheck-core:
 dashboard-typecheck:
   cd {{dashboard_dir}} && npm run typecheck
 
+# Run dashboard component tests in jsdom.
+[group('dashboard')]
+dashboard-test-unit:
+  cd {{dashboard_dir}} && npm run test:unit
+
+# Run dashboard browser workflows and axe accessibility checks.
+[group('dashboard')]
+dashboard-test-e2e:
+  cd {{dashboard_dir}} && npm run test:e2e
+
 # Verify the committed dashboard bundle matches source.
 [group('dashboard')]
 dashboard-verify:
@@ -260,12 +272,12 @@ verify-budgets:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package verify-budgets
+verify: typecheck-core dashboard-typecheck dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
 [group('quality')]
-ci: typecheck-core dashboard-typecheck test test-db dashboard-verify verify-package verify-budgets pack-dry-run
+ci: typecheck-core dashboard-typecheck dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets pack-dry-run
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
 # =============================================================================

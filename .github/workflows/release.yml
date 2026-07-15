@@ -54,6 +54,9 @@ jobs:
       - name: Install dashboard dependencies
         run: cd ui/web && npm ci
 
+      - name: Install Playwright Chromium
+        run: cd ui/web && npx playwright install --with-deps chromium
+
       - name: Install just
         run: |
           mkdir -p "$HOME/.local/bin"
