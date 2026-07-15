@@ -7,6 +7,8 @@ ui/web/node_modules/
 *.log
 .DS_Store
 .vite/
+/ui/web/test-results/
+/ui/web/playwright-report/
 .env
 .env.*
 
