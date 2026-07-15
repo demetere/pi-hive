@@ -135,7 +135,7 @@ test("resolveProjectCwd rejects an unknown cwd and echoes a known one", () => {
 const REVIEW_ORIGIN = "http://127.0.0.1:43191";
 const REVIEW_HEADERS = { host: "127.0.0.1:43191", origin: REVIEW_ORIGIN };
 
-async function approveProposal(changeId: string, activeProject: string) {
+async function mintReview(changeId: string, activeProject: string) {
   const rid = `${changeId}#proposal.md`;
   const mint = new Request(`${REVIEW_ORIGIN}/review-sessions`, {
     method: "POST",
@@ -144,7 +144,11 @@ async function approveProposal(changeId: string, activeProject: string) {
   });
   const minted = await review.handlePlanReview(mint, new URL(mint.url));
   expect(minted?.status).toBe(201);
-  const { reviewUrl } = await minted!.json() as { reviewUrl: string };
+  return (await minted!.json() as { reviewUrl: string }).reviewUrl;
+}
+
+async function approveProposal(changeId: string, activeProject: string) {
+  const reviewUrl = await mintReview(changeId, activeProject);
   const req = new Request(`${REVIEW_ORIGIN}/api/approve`, {
     method: "POST",
     headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}${reviewUrl}` },
@@ -152,6 +156,29 @@ async function approveProposal(changeId: string, activeProject: string) {
   });
   return review.handlePlanReview(req, new URL(req.url));
 }
+
+test("review denial persists authority and routes structured feedback", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "human-denial";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Human denial\n\nNeeds revision.\n");
+
+  try {
+    expect(review.planReviewAvailable()).toBe(true);
+    const reviewUrl = await mintReview(changeId, activeProject);
+    const req = new Request(`${REVIEW_ORIGIN}/api/deny`, {
+      method: "POST",
+      headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}${reviewUrl}` },
+      body: JSON.stringify({ feedback: "Clarify the acceptance criteria.", annotations: [] }),
+    });
+    const response = await review.handlePlanReview(req, new URL(req.url));
+    expect(response?.status).toBe(200);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal")).toBe("red");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("review approval ignores legacy SQLite-only agent verdicts", async () => {
   const activeProject = bridge.resolveProjectCwd(null)!;
