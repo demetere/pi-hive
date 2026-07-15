@@ -76,7 +76,7 @@ test("core dashboard workflows have no serious or critical axe violations", asyn
   await expectNoSeriousA11yViolations(page);
 
   await page.getByRole("button", { name: "Plans" }).click();
-  await expect(page.getByText("OpenSpec changes")).toBeVisible();
+  await expect(page.getByText("OpenSpec changes", { exact: true })).toBeVisible();
   await expectNoSeriousA11yViolations(page);
 
   await page.getByRole("combobox", { name: "Project" }).selectOption(PROJECT_ID);
