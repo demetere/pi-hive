@@ -1,7 +1,7 @@
 {
   "name": "pi-hive",
   "version": "0.1.0",
-  "description": "Hierarchical multi-agent orchestration extension for the Pi coding agent, with a live Solid + Vite telemetry dashboard.",
+  "description": "Hierarchical multi-agent orchestration extension for the Pi coding agent, with a local React telemetry dashboard.",
   "type": "module",
   "author": "Demetre Dzmanashvili <demetredzmanashvili@gmail.com>",
   "repository": {

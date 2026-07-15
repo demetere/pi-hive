@@ -413,7 +413,7 @@ export async function validateAsync(cwd: string, name?: string, signal?: AbortSi
 // tasks.md exists and is materially authored. Prefer checkbox/task-list items
 // when present, but accept execution-ready sprint plans too: the planning gate
 // may produce dependency-ordered sprint sections with acceptance criteria rather
-// than Markdown checkboxes, and /hive-execute should not report that such a file
+// than Markdown checkboxes, and /hive:execute should not report that such a file
 // is missing.
 export function hasTasks(cwd: string, name: string): boolean {
   if (!isSafeChangeId(name)) return false;
@@ -429,7 +429,7 @@ export function hasTasks(cwd: string, name: string): boolean {
 
 // Artifact-side readiness: the artifacts are materially complete (tasks
 // authored) AND OpenSpec validation passes. This is what the dashboard and
-// /hive-plan surface show as "ready to approve". It does NOT include pi-hive's
+// /hive:plan surface show as "ready to approve". It does NOT include pi-hive's
 // human approval — see isExecutionGateOpen for the load-bearing dispatch gate.
 export function isReadyToExecuteWithValidation(cwd: string, name: string, validation: ValidateResult): boolean {
   return hasTasks(cwd, name) && validation.passed;

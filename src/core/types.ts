@@ -326,7 +326,7 @@ export interface HiveState {
   dashboardActionTimer?: ReturnType<typeof setInterval>;
   dashboardActionOffset?: number;
   // The currently-selected plan change-id (set by plan_new/plan_select and
-  // /hive-execute). Persists across turns; delegations are wrapped in
+  // /hive:execute). Persists across turns; delegations are wrapped in
   // runWithChange(activeChangeId) so workers' tools see it via currentChangeId().
   activeChangeId?: string;
   // Latest verdict per change-id, tracked in-memory as reviewers submit them.
