@@ -278,7 +278,20 @@ dashboard-dev:
 # Run the Node test suite.
 [group('quality')]
 test:
-  node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  node --import tsx --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+
+# Exercise Bun-independent utility and state modules on every supported Node.
+# Pi itself requires Node 22+, so the Node 20 lane intentionally excludes tests
+# that import the Pi runtime peer dependency.
+[group('quality')]
+test-node-compat:
+  node --import tsx --import ./tests/register-ts-loader.mjs --test \
+    tests/dashboard-event-ring.test.ts \
+    tests/governance.test.ts \
+    tests/limits.test.ts \
+    tests/project-identity.test.ts \
+    tests/safe-path.test.ts \
+    tests/yaml.test.ts
 
 # Separate from `test` because db.ts uses bun:sqlite and the core must load
 # without Bun (*.spec.ts so the Node runner never picks them up).
