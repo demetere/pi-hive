@@ -20,8 +20,9 @@ coverage/
 *.db-shm
 *.db-wal
 
-# Package tarball output
+# Package and release artifact output
 *.tgz
+/release-artifacts/
 
 # Local project notes and temporary planning documents
 /notes/

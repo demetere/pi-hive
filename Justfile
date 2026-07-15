@@ -364,9 +364,19 @@ ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated
 prepack: dashboard-build review-build verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}Prepack checks passed.{{NC}}\n"
 
-# Run publish-time checks.
+# Verify that the checkout is the clean, tagged, reproducible release commit.
 [group('package')]
-prepublish: test dashboard-verify verify-package verify-budgets verify-licenses
+release-verify:
+  node scripts/verify-release.mjs
+
+# Generate CycloneDX SBOMs, a dependency/build manifest, and checksums.
+[group('package')]
+release-artifacts:
+  node scripts/generate-release-artifacts.mjs
+
+# Run publish-time checks, including checks required for direct local publish.
+[group('package')]
+prepublish: typecheck test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses release-verify
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.

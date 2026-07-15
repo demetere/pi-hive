@@ -38,6 +38,7 @@ const requiredPaths = [
   "scripts/check-licenses.mjs",
   "README.md",
   "SETUP.md",
+  "CHANGELOG.md",
   "THIRD_PARTY_NOTICES.md",
 ];
 
@@ -54,6 +55,7 @@ const requiredPackageFileEntries = [
   "scripts/check-licenses.mjs",
   "README.md",
   "SETUP.md",
+  "CHANGELOG.md",
   "THIRD_PARTY_NOTICES.md",
 ];
 
