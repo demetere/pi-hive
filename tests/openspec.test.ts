@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import * as openspec from "../src/engine/openspec.ts";
 import { parseRid, renderReviewInput, ridFromReferer } from "../src/engine/review.ts";
-import { resolveHiveSddStatus } from "../src/engine/sdd.ts";
+import { renderHiveSddStatus, renderSddPromptBlock, resolveHiveSddStatus } from "../src/engine/sdd.ts";
 import type { HiveState } from "../src/core/types.ts";
 import { resolveProjectIdentity } from "../src/shared/project-identity.ts";
 
@@ -375,6 +375,57 @@ test("resolveHiveSddStatus degrades when OpenSpec is not initialized", () => {
   assert.equal(status.configured, false);
   assert.deepEqual(status.activeChanges, []);
   assert.ok(Array.isArray(status.suggestedRouting));
+});
+
+test("SDD status rendering covers configured, empty, active, and default prompt states", () => {
+  const unconfigured = {
+    configured: false,
+    configPath: "openspec CLI not installed",
+    activeChanges: [],
+    suggestedRouting: ["proposal → Planning"],
+  } as any;
+  assert.match(renderHiveSddStatus(unconfigured), /OpenSpec not initialized/);
+  assert.match(renderSddPromptBlock({ sddStatus: unconfigured } as any), /not initialized yet/);
+  assert.match(renderSddPromptBlock({ sddStatus: null } as any), /Planning lead/);
+
+  const configured = {
+    configured: true,
+    configPath: "openspec/",
+    suggestedRouting: ["apply → Engineering"],
+    activeChanges: [
+      { name: "with-summary", nextPhase: "tasks", files: ["proposal", "design"], path: "openspec/changes/with-summary", summary: "1/2 tasks complete" },
+      { name: "without-summary", nextPhase: "proposal", files: [], path: "openspec/changes/without-summary", summary: "" },
+    ],
+  } as any;
+  const rendered = renderHiveSddStatus(configured);
+  assert.match(rendered, /artifacts=proposal, design/);
+  assert.match(rendered, /artifacts=none/);
+  assert.match(rendered, /1\/2 tasks complete/);
+  assert.match(renderSddPromptBlock({ sddStatus: configured } as any), /with-summary/);
+
+  assert.match(renderHiveSddStatus({ ...configured, activeChanges: [] }), /No active changes/);
+});
+
+test("resolveHiveSddStatus detects configured phase specialists", { skip: openspec.isAvailable() ? false : "openspec CLI not installed" }, () => {
+  const cwd = scratch();
+  openspec.ensureInit(cwd);
+  openspec.newChange(cwd, "Status Branches");
+  const makeRuntime = (name: string, groupName: string, routingTags: string[]) => ({
+    config: { name, groupName, routingTags, role: "lead", path: `${name}.md`, domain: [] as any[] },
+  });
+  const state = emptyState();
+  state.runtimes = new Map([
+    ["orchestrator", { config: { name: "Orchestrator", role: "orchestrator" } } as any],
+    ["planner", makeRuntime("Planner", "Planning", ["requirements"]) as any],
+    ["engineer", makeRuntime("Engineer", "Engineering", ["implementation"]) as any],
+    ["reviewer", makeRuntime("Reviewer", "Validation", ["security", "verify"]) as any],
+  ]);
+  const status = resolveHiveSddStatus(state, cwd);
+  assert.equal(status.configured, true);
+  assert.equal(status.activeChanges.length, 1);
+  assert.match(status.suggestedRouting[0], /Planner/);
+  assert.match(status.suggestedRouting[1], /Engineer/);
+  assert.match(status.suggestedRouting[2], /Reviewer/);
 });
 
 // --- CLI-backed (skipped when the openspec binary is absent) ---

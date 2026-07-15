@@ -248,6 +248,29 @@ test("refuses to stop a daemon belonging to different storage", async () => {
   assert.equal(shutdownCalls, 0);
 });
 
+test("dashboard paths and loopback host normalization honor explicit environment values", () => {
+  const original = {
+    registry: process.env.HIVE_TELEMETRY_REGISTRY,
+    db: process.env.HIVE_TELEMETRY_DB,
+    host: process.env.HIVE_TELEMETRY_HOST,
+  };
+  const isolated = mkdtempSync(join(tmpdir(), "pi-hive-dashboard-paths-"));
+  try {
+    process.env.HIVE_TELEMETRY_REGISTRY = join(isolated, "custom-registry.jsonl");
+    process.env.HIVE_TELEMETRY_DB = join(isolated, "custom.db");
+    assert.equal(dashboardRegistryPath(), join(isolated, "custom-registry.jsonl"));
+    assert.equal(dashboardDbPath(), join(isolated, "custom.db"));
+    for (const [raw, expected] of [["localhost", "localhost"], ["[::1]", "::1"], ["::1", "::1"]]) {
+      process.env.HIVE_TELEMETRY_HOST = raw;
+      assert.equal(dashboardHost(), expected);
+    }
+  } finally {
+    if (original.registry === undefined) delete process.env.HIVE_TELEMETRY_REGISTRY; else process.env.HIVE_TELEMETRY_REGISTRY = original.registry;
+    if (original.db === undefined) delete process.env.HIVE_TELEMETRY_DB; else process.env.HIVE_TELEMETRY_DB = original.db;
+    if (original.host === undefined) delete process.env.HIVE_TELEMETRY_HOST; else process.env.HIVE_TELEMETRY_HOST = original.host;
+  }
+});
+
 test("health probing accepts migration fields and rejects unrelated listeners", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -259,6 +282,16 @@ test("health probing accepts migration fields and rejects unrelated listeners", 
       registryPath: dashboardRegistryPath(), dbPath: dashboardDbPath(),
     });
     assert.equal(await isHiveDashboard(), true);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      ok: true, mode: "global", registryPath: dashboardRegistryPath(), dbPath: dashboardDbPath(),
+      pid: 1, protocolVersion: 1, packageVersion: "x", buildHash: "x", startupNonce: "x",
+    })) as any;
+    assert.equal((await probeDashboard())?.registryPath, dashboardRegistryPath());
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, mode: "global", registry: dashboardRegistryPath() })) as any;
+    assert.equal(await probeDashboard(), null);
+    globalThis.fetch = async () => new Response("not json") as any;
+    assert.equal(await probeDashboard(), null);
 
     globalThis.fetch = async () => new Response("no", { status: 503 }) as any;
     assert.equal(await probeDashboard(), null);
@@ -335,6 +368,32 @@ test("stop falls back only to its live managed child handle", async () => {
   assert.deepEqual(stopped, [777]);
   assert.equal(kills, 1);
   assert.equal(s.obsServer, undefined);
+});
+
+test("managed child fallback requires exact live daemon identity", async () => {
+  const health = healthy(expectedIdentity("managed"), { pid: 888 });
+  const managed = { pid: 888, killed: false, kill() { this.killed = true; return true; }, on() {} } as any;
+  const s = state();
+  s.obsServer = { proc: managed, url: dashboardUrl(), port: dashboardPort(), host: dashboardHost(), adopted: false };
+  let kills = 0;
+  let running = true;
+  const stopped = await stopDashboard(s, dashboardHost(), dashboardPort(), {
+    probe: async () => running ? health : null,
+    requestShutdown: async () => false,
+    killManaged: () => { kills++; running = false; return 888; },
+    withLock: async (_path, fn) => fn(),
+  });
+  assert.deepEqual(stopped, [888]);
+  assert.equal(kills, 1);
+
+  const alreadyKilled = state();
+  alreadyKilled.obsServer = { proc: { ...managed, killed: true }, url: dashboardUrl(), port: dashboardPort(), host: dashboardHost(), adopted: false } as any;
+  const none = await stopDashboard(alreadyKilled, dashboardHost(), dashboardPort(), {
+    probe: async () => null,
+    killManaged: () => { throw new Error("must not kill twice"); },
+    withLock: async (_path, fn) => fn(),
+  });
+  assert.deepEqual(none, []);
 });
 
 test("token reads and IPv6 dashboard URLs fail safely", () => {

@@ -76,6 +76,56 @@ test("parseAgentLog bounds its initial response and pages older entries", () => 
   assert.ok(Number(older.entries.at(-1).ts) < Number(newest.entries[0].ts));
 });
 
+test("parseAgentLog handles metadata, sparse messages, and unmatched tool results", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-agent-log-variants-"));
+  const file = join(dir, "worker.jsonl");
+  writeFileSync(file, [
+    "{bad json",
+    JSON.stringify({ type: "ignored" }),
+    JSON.stringify({ type: "model_change", modelId: "m1", provider: "p", timestamp: 1 }),
+    JSON.stringify({ type: "model_change", model: "m2", timestamp: 2 }),
+    JSON.stringify({ type: "model_change", timestamp: 3 }),
+    JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high", timestamp: 4 }),
+    JSON.stringify({ type: "thinking_level_change", level: "low", timestamp: 5 }),
+    JSON.stringify({ type: "thinking_level_change", timestamp: 6 }),
+    JSON.stringify({ type: "message", timestamp: 7, message: { content: "plain" } }),
+    JSON.stringify({ type: "message", timestamp: 8, message: { role: "assistant", content: [
+      { type: "thinking", thinking: "reason" },
+      { type: "toolCall", id: "t1", name: "write", input: { path: "x" } },
+      { type: "toolCall", name: "read" },
+      { type: "unknown" },
+    ] } }),
+    JSON.stringify({ type: "message", timestamp: 9, message: { role: "toolResult", toolCallId: "t1", content: [{ text: "ok" }, "tail"], isError: true } }),
+    JSON.stringify({ type: "message", timestamp: 10, message: { role: "toolResult", toolName: "missing", content: [{ text: "no call" }] } }),
+    JSON.stringify({ type: "message", timestamp: 11, role: "user", content: null }),
+    JSON.stringify({ type: "message", timestamp: 12, message: { role: "assistant", content: [] } }),
+    "",
+  ].join("\n"));
+
+  const parsed = parseAgentLog(file, 0);
+  assert.equal(parsed.entries.filter((entry) => entry.kind === "meta").length, 4);
+  assert.ok(parsed.entries.some((entry) => entry.role === "assistant" && entry.parts[0]?.text === "plain"));
+  const call = parsed.entries.flatMap((entry) => entry.parts || []).find((part) => part.id === "t1");
+  assert.equal(call.result, "ok\ntail");
+  assert.equal(call.resultError, true);
+  assert.ok(parsed.entries.some((entry) => entry.role === "toolResult"));
+  assert.ok(parseAgentLog(file, 1).offset >= 1);
+});
+
+test("agentRuns tolerates missing directories and sorts multiple archives", () => {
+  const missing = join(tmpdir(), `pi-hive-missing-${Date.now()}`, "worker.jsonl");
+  assert.deepEqual(agentRuns(missing), []);
+
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-agent-runs-many-"));
+  const current = join(dir, "worker.jsonl");
+  writeFileSync(join(dir, "worker.run-10.jsonl"), "");
+  writeFileSync(join(dir, "worker.run-2.jsonl"), "");
+  writeFileSync(join(dir, "worker.run-x.jsonl"), "");
+  assert.deepEqual(agentRuns(current).map((run) => run.id), ["run-10", "run-2"]);
+  writeFileSync(current, "");
+  assert.deepEqual(agentRuns(current).map((run) => run.id), ["current", "run-10", "run-2"]);
+});
+
 test("agentRuns returns archived runs and current newest-first", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-agent-runs-"));
   const current = join(dir, "worker.jsonl");
