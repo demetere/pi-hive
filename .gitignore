@@ -15,6 +15,9 @@ coverage/
 
 # Runtime hive state / local telemetry
 .pi/
+# Workflow-v1 contract fixtures intentionally contain nested project manifests.
+!/tests/fixtures/workflow-v1/**/.pi/
+!/tests/fixtures/workflow-v1/**/.pi/**
 .atl/
 *.db
 *.db-shm
@@ -26,6 +29,7 @@ coverage/
 
 # Local project notes and temporary planning documents
 /notes/
+/.pi-subagents/
 
 # NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
 # extension needs no build step at install time. Rebuild it after editing

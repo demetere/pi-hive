@@ -1,0 +1,9 @@
+schema-version: 1
+
+agents:
+  debugger: agents/debugger.md
+
+workflows:
+  debug-chat: workflows/debug-chat.yaml
+
+mystery: true
