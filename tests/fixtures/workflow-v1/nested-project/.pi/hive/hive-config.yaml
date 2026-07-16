@@ -1,0 +1,7 @@
+schema-version: 1
+
+agents:
+  parent-root: agents/parent-root.md
+
+workflows:
+  parent-chat: workflows/parent-chat.yaml

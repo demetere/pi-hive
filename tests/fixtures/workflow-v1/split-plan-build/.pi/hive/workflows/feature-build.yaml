@@ -1,0 +1,33 @@
+name: Feature Build
+description: Implement and verify an approved OpenSpec workspace.
+use-when: An implementation-ready OpenSpec workspace already exists.
+avoid-when: Requirements or tasks still need authoring.
+tags: [implementation]
+
+artifact:
+  adapter: openspec
+  profile: execute
+  binding: existing
+  options: {}
+
+approvals:
+  tasks: required
+  implementation: required
+
+team:
+  id: root
+  agent: coding-lead
+  members:
+    - id: builder
+      agent: coder
+    - id: tester
+      agent: tester
+
+instructions:
+  shared: |
+    Treat the bound workspace and handoff as evidence, then revalidate both
+    against the current repository before changing code.
+  root: |
+    Implement the user request from the bound workspace. Do not redesign the
+    plan silently; ask or finish blocked when consequential revision is needed.
+    Require verification evidence before workflow_finish.

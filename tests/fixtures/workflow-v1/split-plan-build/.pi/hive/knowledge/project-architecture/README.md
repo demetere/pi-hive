@@ -1,0 +1,1 @@
+# Project architecture knowledge fixture

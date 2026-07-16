@@ -1,0 +1,7 @@
+schema-version: 1
+
+agents:
+  Bad_ID: agents/debugger.md
+
+workflows:
+  debug-chat: workflows/debug-chat.yaml
