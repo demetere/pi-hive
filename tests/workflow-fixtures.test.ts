@@ -42,7 +42,7 @@ test("copyWorkflowFixture rejects unsafe fixture names without temp leaks", () =
     "",
     "../artifact-free-debug",
     "invalid/../../artifact-free-debug",
-    resolve("tests/fixtures/workflow-v1/artifact-free-debug"),
+    resolve("tests/fixtures/workflow-configs/artifact-free-debug"),
   ]) {
     assert.throws(() => copyWorkflowFixture(name), /fixture name/i, name);
   }
@@ -291,7 +291,7 @@ function assertInvalidFixtureInventory(
   }
 }
 
-test("workflow-v1 fixture inventory and filesystem contracts are frozen", () => {
+test("workflow configuration fixture inventory and filesystem contracts are frozen", () => {
   for (const [name, expectedFiles] of Object.entries(validFixtureFiles)) {
     const fixture = copyWorkflowFixture(name);
     try {
@@ -383,7 +383,7 @@ test("empty-prompt fixture has an empty body without whitespace-only lines", () 
   }
 });
 
-test("workflow-v1 YAML contains no legacy planning or hive team schema", () => {
+test("workflow configuration YAML contains no legacy planning or hive team schema", () => {
   for (const name of [...Object.keys(validFixtureFiles), "invalid"]) {
     const fixture = copyWorkflowFixture(name);
     try {

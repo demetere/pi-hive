@@ -15,9 +15,9 @@ coverage/
 
 # Runtime hive state / local telemetry
 .pi/
-# Workflow-v1 contract fixtures intentionally contain nested project manifests.
-!/tests/fixtures/workflow-v1/**/.pi/
-!/tests/fixtures/workflow-v1/**/.pi/**
+# Workflow configuration fixtures intentionally contain nested project manifests.
+!/tests/fixtures/workflow-configs/**/.pi/
+!/tests/fixtures/workflow-configs/**/.pi/**
 .atl/
 *.db
 *.db-shm

@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const workflowFixtureRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../fixtures/workflow-v1",
+  "../fixtures/workflow-configs",
 );
 
 export interface WorkflowFixtureCopy {
