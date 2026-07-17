@@ -307,6 +307,8 @@ test:
 test-node-compat:
   node --import tsx --import ./tests/register-ts-loader.mjs --test \
     tests/config-diagnostics.test.ts \
+    tests/config-manifest.test.ts \
+    tests/config-registry-diagnostics.test.ts \
     tests/config-schema-generated.test.ts \
     tests/config-schema.test.ts \
     tests/config-yaml.test.ts \

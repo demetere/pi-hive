@@ -1,4 +1,9 @@
 export * from "./diagnostics";
+export * from "./discovery";
+export * from "./manifest";
+export * from "./paths";
+export * from "./registry";
+export * from "./render-diagnostics";
 export * from "./schema";
 export type * from "./types";
 export * from "./versions";
