@@ -12,7 +12,7 @@ test("Pi package manifest keeps a safe extension entrypoint", () => {
 });
 
 test("package includes runtime assets, prebuilt UIs, and review provenance", () => {
-  for (const entry of ["index.ts", "src/", "ui/web/dist/", "ui/review/dist/", "ui/review/vendor.json", "scripts/check-review-vendor.mjs", "CHANGELOG.md"]) {
+  for (const entry of ["index.ts", "src/", "schemas/", "ui/web/dist/", "ui/review/dist/", "ui/review/vendor.json", "scripts/check-review-vendor.mjs", "CHANGELOG.md"]) {
     assert.ok(pkg.files.includes(entry), `files[] should include ${entry}`);
   }
 });
@@ -23,6 +23,10 @@ test("Pi runtime dependencies stay peer dependencies with wildcard ranges", () =
   }
 });
 
+test("strict YAML is a pinned direct runtime dependency", () => {
+  assert.equal(pkg.dependencies.yaml, "2.9.0");
+});
+
 test("Plannotator is pinned only as a reproducibility dependency", () => {
   assert.equal(pkg.devDependencies["@plannotator/pi-extension"], reviewVendor.package.version);
   assert.equal(pkg.dependencies?.["@plannotator/pi-extension"], undefined);
@@ -31,6 +35,7 @@ test("Plannotator is pinned only as a reproducibility dependency", () => {
 test("package scripts delegate to Justfile commands", () => {
   assert.equal(pkg.scripts.test, "just test");
   assert.equal(pkg.scripts["verify:dashboard"], "just dashboard-verify");
+  assert.equal(pkg.scripts["verify:config-schemas"], "just config-schema-verify");
   assert.equal(pkg.scripts["verify:package"], "just verify-package");
   assert.equal(pkg.scripts.ci, "just ci");
   assert.equal(pkg.scripts.prepack, "just prepack");

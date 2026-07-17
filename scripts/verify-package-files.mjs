@@ -16,6 +16,10 @@ const requiredPaths = [
   "src/agents/tools.ts",
   "src/core/config.ts",
   "src/core/types.ts",
+  "src/config/index.ts",
+  "schemas/hive-manifest-v1.schema.json",
+  "schemas/hive-agent-frontmatter-v1.schema.json",
+  "schemas/hive-workflow-v1.schema.json",
   "src/engine/dispatch.ts",
   "src/engine/session.ts",
   "src/integration/commands.ts",
@@ -45,6 +49,7 @@ const requiredPaths = [
 const requiredPackageFileEntries = [
   "index.ts",
   "src/",
+  "schemas/",
   "ui/web/dist/",
   "ui/review/src/",
   "ui/review/dist/",
