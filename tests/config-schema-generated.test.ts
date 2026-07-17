@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import type { AnySchema } from "ajv";
+import Ajv2020 from "ajv/dist/2020.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -28,7 +30,8 @@ test("committed config schemas are deterministic and drift-free", () => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test("generated schemas preserve runtime TypeBox acceptance parity", () => {
+test("generated schemas preserve runtime and independent JSON Schema acceptance parity", () => {
+  const ajv = new Ajv2020({ strict: false });
   const workflow = {
     name: "Workflow",
     description: "Description",
@@ -75,8 +78,11 @@ test("generated schemas preserve runtime TypeBox acceptance parity", () => {
   for (const [runtime, generated, values] of cases) {
     assert.equal(generated.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.match(String(generated.$id), /^urn:pi-hive:schema:/);
+    const editorCheck = ajv.compile(generated as AnySchema);
     for (const value of values) {
-      assert.equal(Check(generated, value), Check(runtime, value));
+      const runtimeAccepted = Check(runtime, value);
+      assert.equal(Check(generated, value), runtimeAccepted);
+      assert.equal(editorCheck(value), runtimeAccepted, JSON.stringify(editorCheck.errors));
     }
   }
 });

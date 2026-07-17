@@ -50,17 +50,30 @@ test("diagnostic fields are independently bounded without splitting UTF-8", () =
   collector.add({
     ...diagnostic(0),
     message: "😀".repeat(600),
-    dependencyChain: Array.from({ length: 20 }, (_, index) => `resource-${index}`),
+    source: "s".repeat(CONFIG_LIMITS.messageBytes + 1),
+    resourceId: "r".repeat(CONFIG_LIMITS.messageBytes + 1),
+    dependencyChain: Array.from(
+      { length: 20 },
+      (_, index) => `${index}-${"d".repeat(CONFIG_LIMITS.messageBytes)}`,
+    ),
     related: Array.from({ length: 20 }, (_, index) => ({
       message: `related ${index}`,
-      source: "related.yaml",
+      source: "x".repeat(CONFIG_LIMITS.messageBytes + 1),
       range: sourceRange(index, 1, index + 1, index + 1, 1, index + 2),
     })),
   });
 
   const [bounded] = collector.result().diagnostics;
-  assert.ok(Buffer.byteLength(bounded.message, "utf8") <= CONFIG_LIMITS.messageBytes);
-  assert.equal(bounded.message.endsWith("…"), true);
+  for (const value of [
+    bounded.message,
+    bounded.source,
+    bounded.resourceId!,
+    bounded.dependencyChain![0],
+    bounded.related![0].source,
+  ]) {
+    assert.ok(Buffer.byteLength(value, "utf8") <= CONFIG_LIMITS.messageBytes);
+    assert.equal(value.endsWith("…"), true);
+  }
   assert.equal(bounded.dependencyChain?.length, CONFIG_LIMITS.dependencyChain);
   assert.equal(bounded.related?.length, CONFIG_LIMITS.related);
 });

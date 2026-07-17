@@ -101,10 +101,17 @@ function boundDiagnostic(diagnostic: ConfigDiagnostic): ConfigDiagnostic {
   return {
     ...diagnostic,
     message: truncateUtf8(diagnostic.message, CONFIG_LIMITS.messageBytes),
-    dependencyChain: diagnostic.dependencyChain?.slice(0, CONFIG_LIMITS.dependencyChain),
+    source: truncateUtf8(diagnostic.source, CONFIG_LIMITS.messageBytes),
+    resourceId: diagnostic.resourceId === undefined
+      ? undefined
+      : truncateUtf8(diagnostic.resourceId, CONFIG_LIMITS.messageBytes),
+    dependencyChain: diagnostic.dependencyChain
+      ?.slice(0, CONFIG_LIMITS.dependencyChain)
+      .map((entry) => truncateUtf8(entry, CONFIG_LIMITS.messageBytes)),
     related: diagnostic.related?.slice(0, CONFIG_LIMITS.related).map((related) => ({
       ...related,
       message: truncateUtf8(related.message, CONFIG_LIMITS.messageBytes),
+      source: truncateUtf8(related.source, CONFIG_LIMITS.messageBytes),
     })),
   };
 }

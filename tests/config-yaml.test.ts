@@ -5,7 +5,7 @@ import { parseConfigYaml } from "../src/config/yaml.ts";
 
 function firstDiagnostic(source: string) {
   const result = parseConfigYaml(source, "fixture.yaml");
-  assert.equal(result.value, undefined);
+  assert.ok(result.value === undefined, "expected YAML parsing to fail");
   assert.ok(result.diagnostics.length > 0);
   return result.diagnostics[0];
 }
@@ -57,6 +57,7 @@ test("duplicate keys fail at the duplicate key's exact UTF-16 half-open range", 
 test("strict YAML rejects unsafe or non-JSON constructs", () => {
   const cases: Array<[string, string]> = [
     ["a: &value 1\n", "YAML_ANCHOR_FORBIDDEN"],
+    ["&key foo: value\n", "YAML_ANCHOR_FORBIDDEN"],
     ["a: &value 1\nb: *value\n", "YAML_ANCHOR_FORBIDDEN"],
     ["a: *value\n", "YAML_ALIAS_FORBIDDEN"],
     ["<<: literal\n", "YAML_MERGE_KEY_FORBIDDEN"],
@@ -92,6 +93,10 @@ test("byte, depth, and node guards reject bounded inputs", () => {
     (_, index) => `key-${index}: value`,
   ).join("\n")}\n`;
   assert.equal(firstDiagnostic(wideMap).code, "YAML_MAX_NODES");
+
+  const wideComplexKey = `? [${Array.from({ length: CONFIG_LIMITS.maxNodes }, () => "x").join(",")} ]\n: value\n`;
+  const complexKeyResult = parseConfigYaml(wideComplexKey, "fixture.yaml");
+  assert.equal(complexKeyResult.diagnostics.some(({ code }) => code === "YAML_MAX_NODES"), true);
 });
 
 test("YAML diagnostic floods remain within the shared diagnostic limit", () => {
