@@ -55,11 +55,14 @@ test("generated schemas preserve runtime and independent JSON Schema acceptance 
       { "schema-version": 1, agents: {}, workflows: {} },
       { "schema-version": 1, agents: {}, workflows: {}, nested: true },
       { "schema-version": 1, agents: { bad_id: "a.md" }, workflows: {} },
+      { "schema-version": 1, agents: {}, workflows: {}, settings: { defaults: { agent: { model: "provider" } } } },
     ]],
     [AgentFrontmatterV1Schema, artifact("hive-agent-frontmatter-v1.schema.json"), [
       { name: "Agent", capabilities: {} },
       { name: "Agent", capabilities: { shell: ["inspect", "inspect"] } },
       { name: "Agent", capabilities: {}, budgets: { "active-wall-time": "0s" } },
+      { name: "Agent", capabilities: {}, model: "provider/model/variant" },
+      { name: "Agent", capabilities: {}, model: "provider" },
     ]],
     [WorkflowV1Schema, artifact("hive-workflow-v1.schema.json"), [
       workflow,
@@ -72,6 +75,7 @@ test("generated schemas preserve runtime and independent JSON Schema acceptance 
         },
       },
       { ...workflow, tags: ["same", "same"] },
+      { ...workflow, team: { ...workflow.team, overrides: { model: "provider" } } },
     ]],
   ];
 

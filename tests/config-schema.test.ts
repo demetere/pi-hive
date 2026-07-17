@@ -12,6 +12,7 @@ import {
   FilesystemOperationSchema,
   KnowledgeCapabilitySchema,
   ManifestV1Schema,
+  ModelReferenceSchema,
   PositiveSafeIntegerSchema,
   PublicIdSchema,
   RawCapabilitiesSchema,
@@ -73,6 +74,14 @@ test("closed enum schemas accept only their documented values", () => {
       assert.equal(Check(schema, value), false, String(value));
     }
   }
+});
+
+test("model references are inherit or exact portable provider/model IDs", () => {
+  for (const value of ["inherit", "anthropic/claude-opus", "openai/gpt-5/codex", "p/m.v_1-x"]) {
+    assert.equal(Check(ModelReferenceSchema, value), true, value);
+  }
+  for (const value of ["provider", "/model", "provider/", "provider//model", "provider/model?x", "provider/model#x", "provider/model:high", " provider/model"])
+    assert.equal(Check(ModelReferenceSchema, value), false, value);
 });
 
 test("manifest schema validates W00 manifests and specializes schema-version failures", () => {
