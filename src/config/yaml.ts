@@ -84,23 +84,22 @@ interface WalkEntry {
   recordSourceMap?: boolean;
 }
 
-function childrenOf(entry: WalkEntry, lineCounter: LineCounter): WalkEntry[] {
+function* childrenOf(entry: WalkEntry, lineCounter: LineCounter): Iterable<WalkEntry> {
   if (isMap(entry.node)) {
-    const children: WalkEntry[] = [];
     for (let index = entry.node.items.length - 1; index >= 0; index--) {
       const pair = entry.node.items[index] as Pair;
       const key = pair.key;
       const stringKey = isScalar(key) && typeof key.value === "string";
       if (isNode(key)) {
-        children.push({
+        yield {
           node: key,
           depth: entry.depth + 1,
           pointer: entry.pointer,
           recordSourceMap: false,
-        });
+        };
       }
       if (isNode(pair.value)) {
-        children.push({
+        yield {
           node: pair.value,
           depth: entry.depth + 1,
           pointer: stringKey
@@ -108,28 +107,24 @@ function childrenOf(entry: WalkEntry, lineCounter: LineCounter): WalkEntry[] {
             : entry.pointer,
           ...(stringKey ? { keyRange: nodeRange(key as Node, lineCounter) } : {}),
           recordSourceMap: stringKey,
-        });
+        };
       }
     }
-    return children;
+    return;
   }
 
   if (isSeq(entry.node)) {
-    const children: WalkEntry[] = [];
     for (let index = entry.node.items.length - 1; index >= 0; index--) {
       const child = entry.node.items[index];
       if (isNode(child)) {
-        children.push({
+        yield {
           node: child,
           depth: entry.depth + 1,
           pointer: `${entry.pointer}/${index}`,
-        });
+        };
       }
     }
-    return children;
   }
-
-  return [];
 }
 
 function inspectMappingKeys(
@@ -137,17 +132,24 @@ function inspectMappingKeys(
   lineCounter: LineCounter,
   add: (code: ConfigDiagnosticCode, message: string, range: SourceRange) => void,
 ): void {
+  const keys = new Set<string>();
   for (const pair of map.items) {
     if (!isScalar(pair.key) || typeof pair.key.value !== "string") {
       const range = isNode(pair.key) ? nodeRange(pair.key, lineCounter) : rangeAt(lineCounter, 0, 0);
       add("YAML_NON_STRING_KEY", "YAML mapping keys must be strings.", range);
       continue;
     }
+    const range = nodeRange(pair.key, lineCounter);
+    if (keys.has(pair.key.value)) {
+      add("YAML_DUPLICATE_KEY", `Map keys must be unique; ${JSON.stringify(pair.key.value)} is repeated.`, range);
+    } else {
+      keys.add(pair.key.value);
+    }
     if (pair.key.value === "<<" && pair.key.type === "PLAIN") {
       add(
         "YAML_MERGE_KEY_FORBIDDEN",
         "Plain YAML merge keys are not supported.",
-        nodeRange(pair.key, lineCounter),
+        range,
       );
     }
   }
@@ -177,7 +179,7 @@ export function parseConfigYaml(source: string, sourceName: string): DiagnosticR
       schema: "core",
       strict: true,
       stringKeys: false,
-      uniqueKeys: true,
+      uniqueKeys: false,
       merge: false,
       resolveKnownTags: false,
       customTags: [],
@@ -266,7 +268,22 @@ export function parseConfigYaml(source: string, sourceName: string): DiagnosticR
         inspectMappingKeys(entry.node, lineCounter, add);
       }
 
-      stack.push(...childrenOf(entry, lineCounter));
+      let overflow: Node | undefined;
+      for (const child of childrenOf(entry, lineCounter)) {
+        if (nodeCount + stack.length >= CONFIG_LIMITS.maxNodes) {
+          overflow = child.node;
+          break;
+        }
+        stack.push(child);
+      }
+      if (overflow) {
+        add(
+          "YAML_MAX_NODES",
+          `YAML contains more than ${CONFIG_LIMITS.maxNodes} AST nodes.`,
+          nodeRange(overflow, lineCounter),
+        );
+        break;
+      }
     }
   }
 

@@ -5,11 +5,18 @@ import { test } from "node:test";
 import { Check } from "typebox/value";
 import {
   AgentFrontmatterV1Schema,
+  ArtifactBindingSchema,
+  ArtifactCapabilitySchema,
+  CheckpointPolicySchema,
   DurationV1Schema,
+  FilesystemOperationSchema,
+  KnowledgeCapabilitySchema,
   ManifestV1Schema,
   PositiveSafeIntegerSchema,
   PublicIdSchema,
   RawCapabilitiesSchema,
+  ShellCapabilitySchema,
+  ThinkingLevelSchema,
   WorkflowV1Schema,
   validateManifestV1,
   validateSchemaValue,
@@ -49,6 +56,25 @@ test("shared schema primitives enforce IDs, durations, counters, and capabilitie
   assert.equal(Check(RawCapabilitiesSchema, { filesystem: [{ path: ".", operations: ["read"], mystery: true }] }), false);
 });
 
+test("closed enum schemas accept only their documented values", () => {
+  const cases = [
+    [ThinkingLevelSchema, ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"]],
+    [FilesystemOperationSchema, ["read", "create", "update", "delete"]],
+    [ShellCapabilitySchema, ["inspect", "test", "build", "package", "mutate", "execute-code"]],
+    [ArtifactCapabilitySchema, ["read", "write", "review"]],
+    [KnowledgeCapabilitySchema, ["read", "propose", "curate"]],
+    [ArtifactBindingSchema, ["none", "new", "existing", "either"]],
+    [CheckpointPolicySchema, ["required", "optional", "none"]],
+  ] as const;
+
+  for (const [schema, accepted] of cases) {
+    for (const value of accepted) assert.equal(Check(schema, value), true, value);
+    for (const value of ["", "unknown", accepted[0].toUpperCase(), 1, null]) {
+      assert.equal(Check(schema, value), false, String(value));
+    }
+  }
+});
+
 test("manifest schema validates W00 manifests and specializes schema-version failures", () => {
   for (const path of [
     "artifact-free-debug/.pi/hive/hive-config.yaml",
@@ -68,6 +94,18 @@ test("manifest schema validates W00 manifests and specializes schema-version fai
   assert.equal(validateManifestV1(missing.data, "manifest.yaml", missing.sourceMap).diagnostics[0].code, "SCHEMA_VERSION_MISSING");
   const unsupported = parseConfigYaml("schema-version: 2\nagents: {}\nworkflows: {}\n", "manifest.yaml").value!;
   assert.equal(validateManifestV1(unsupported.data, "manifest.yaml", unsupported.sourceMap).diagnostics[0].code, "SCHEMA_VERSION_UNSUPPORTED");
+});
+
+test("manifest schema closes every nested authority-bearing object", () => {
+  const manifests = [
+    { "schema-version": 1, agents: {}, workflows: {}, settings: { mystery: true } },
+    { "schema-version": 1, agents: {}, workflows: {}, settings: { telemetry: { mystery: true } } },
+    { "schema-version": 1, agents: {}, workflows: {}, settings: { defaults: { mystery: true } } },
+    { "schema-version": 1, agents: {}, workflows: {}, settings: { defaults: { agent: { mystery: true } } } },
+    { "schema-version": 1, agents: {}, workflows: {}, settings: { defaults: { workflow: { mystery: true } } } },
+    { "schema-version": 1, agents: {}, workflows: {}, knowledge: { docs: { provider: "okf", path: "docs", mystery: true } } },
+  ];
+  for (const manifest of manifests) assert.equal(Check(ManifestV1Schema, manifest), false);
 });
 
 test("agent frontmatter mappings are closed and validate W00 examples", () => {
@@ -104,6 +142,35 @@ test("workflow schema validates recursive W00 examples and closes authority obje
   assert.equal(Check(WorkflowV1Schema, { ...base, artifact: { ...base.artifact, options: { bad: undefined } } }), false);
   assert.equal(Check(WorkflowV1Schema, { ...base, team: { ...base.team, children: [] } }), false);
   assert.equal(Check(WorkflowV1Schema, { ...base, budgets: { "max-parallel": 2 }, team: { ...base.team, overrides: { budgets: { "max-parallel": 2 } } } }), false);
+
+  const invalidNestedValues = [
+    { ...base, artifact: { ...base.artifact, mystery: true } },
+    { ...base, instructions: { ...base.instructions, mystery: true } },
+    { ...base, team: { ...base.team, mystery: true } },
+    { ...base, team: { ...base.team, overrides: { mystery: true } } },
+    { ...base, team: { ...base.team, overrides: { capabilities: { mystery: true } } } },
+    { ...base, team: { ...base.team, overrides: { budgets: { mystery: true } } } },
+    { ...base, team: { ...base.team, overrides: { skills: { mystery: [] } } } },
+    { ...base, team: { ...base.team, overrides: { knowledge: { mystery: [] } } } },
+    { ...base, team: { ...base.team, members: [{ id: "child", agent: "debugger", mystery: true }] } },
+  ];
+  for (const value of invalidNestedValues) assert.equal(Check(WorkflowV1Schema, value), false);
+});
+
+test("W00 invalid fixtures fail at the schema-v1 syntactic boundary", () => {
+  for (const name of ["bad-registry-id", "unknown-manifest-key"]) {
+    const parsed = yaml(`invalid/${name}/.pi/hive/hive-config.yaml`);
+    assert.equal(Check(ManifestV1Schema, parsed.data), false, name);
+  }
+
+  const agent = agentFrontmatter("invalid/unknown-agent-key/.pi/hive/agents/debugger.md");
+  assert.deepEqual(agent.diagnostics, []);
+  assert.equal(Check(AgentFrontmatterV1Schema, agent.value?.data), false);
+
+  for (const name of ["unknown-workflow-key", "bad-team-node-id"]) {
+    const parsed = yaml(`invalid/${name}/.pi/hive/workflows/debug-chat.yaml`);
+    assert.equal(Check(WorkflowV1Schema, parsed.data), false, name);
+  }
 });
 
 test("schema diagnostics point unknown keys at exact key ranges and values at exact value ranges", () => {

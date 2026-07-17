@@ -46,12 +46,20 @@ test("strict YAML 1.2 parsing preserves literal and multiline data with a source
 });
 
 test("duplicate keys fail at the duplicate key's exact UTF-16 half-open range", () => {
-  const diagnostic = firstDiagnostic("a: 1\na: 2\n");
-  assert.equal(diagnostic.code, "YAML_DUPLICATE_KEY");
-  assert.deepEqual(diagnostic.range, {
-    start: { offset: 5, line: 2, column: 1 },
-    end: { offset: 6, line: 2, column: 2 },
-  });
+  for (const [source, expected] of [
+    ["abc: 1\nabc: 2\n", {
+      start: { offset: 7, line: 2, column: 1 },
+      end: { offset: 10, line: 2, column: 4 },
+    }],
+    ["😀: 1\n😀: 2\n", {
+      start: { offset: 6, line: 2, column: 1 },
+      end: { offset: 8, line: 2, column: 3 },
+    }],
+  ] as const) {
+    const diagnostic = firstDiagnostic(source);
+    assert.equal(diagnostic.code, "YAML_DUPLICATE_KEY");
+    assert.deepEqual(diagnostic.range, expected);
+  }
 });
 
 test("strict YAML rejects unsafe or non-JSON constructs", () => {
@@ -97,6 +105,10 @@ test("byte, depth, and node guards reject bounded inputs", () => {
   const wideComplexKey = `? [${Array.from({ length: CONFIG_LIMITS.maxNodes }, () => "x").join(",")} ]\n: value\n`;
   const complexKeyResult = parseConfigYaml(wideComplexKey, "fixture.yaml");
   assert.equal(complexKeyResult.diagnostics.some(({ code }) => code === "YAML_MAX_NODES"), true);
+
+  const maximumByteFanout = "-\n".repeat(CONFIG_LIMITS.inputBytes / 2);
+  assert.equal(Buffer.byteLength(maximumByteFanout), CONFIG_LIMITS.inputBytes);
+  assert.equal(firstDiagnostic(maximumByteFanout).code, "YAML_MAX_NODES");
 });
 
 test("YAML diagnostic floods remain within the shared diagnostic limit", () => {
