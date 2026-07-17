@@ -81,6 +81,7 @@ interface WalkEntry {
   depth: number;
   pointer: string;
   keyRange?: SourceRange;
+  recordSourceMap?: boolean;
 }
 
 function childrenOf(entry: WalkEntry, lineCounter: LineCounter): WalkEntry[] {
@@ -88,14 +89,27 @@ function childrenOf(entry: WalkEntry, lineCounter: LineCounter): WalkEntry[] {
     const children: WalkEntry[] = [];
     for (let index = entry.node.items.length - 1; index >= 0; index--) {
       const pair = entry.node.items[index] as Pair;
-      if (!isScalar(pair.key) || typeof pair.key.value !== "string" || !isNode(pair.value)) continue;
-      const pointer = `${entry.pointer}/${pointerSegment(pair.key.value)}`;
-      children.push({
-        node: pair.value,
-        depth: entry.depth + 1,
-        pointer,
-        keyRange: nodeRange(pair.key, lineCounter),
-      });
+      const key = pair.key;
+      const stringKey = isScalar(key) && typeof key.value === "string";
+      if (isNode(key)) {
+        children.push({
+          node: key,
+          depth: entry.depth + 1,
+          pointer: entry.pointer,
+          recordSourceMap: false,
+        });
+      }
+      if (isNode(pair.value)) {
+        children.push({
+          node: pair.value,
+          depth: entry.depth + 1,
+          pointer: stringKey
+            ? `${entry.pointer}/${pointerSegment(key.value as string)}`
+            : entry.pointer,
+          ...(stringKey ? { keyRange: nodeRange(key as Node, lineCounter) } : {}),
+          recordSourceMap: stringKey,
+        });
+      }
     }
     return children;
   }
@@ -226,10 +240,12 @@ export function parseConfigYaml(source: string, sourceName: string): DiagnosticR
         break;
       }
 
-      sourceMap[entry.pointer] = {
-        ...(entry.keyRange ? { key: entry.keyRange } : {}),
-        value: nodeRange(entry.node, lineCounter),
-      };
+      if (entry.recordSourceMap !== false) {
+        sourceMap[entry.pointer] = {
+          ...(entry.keyRange ? { key: entry.keyRange } : {}),
+          value: nodeRange(entry.node, lineCounter),
+        };
+      }
 
       if (entry.node.anchor) {
         add("YAML_ANCHOR_FORBIDDEN", "YAML anchors are not supported.", nodeRange(entry.node, lineCounter));

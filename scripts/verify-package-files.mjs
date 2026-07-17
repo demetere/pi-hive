@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { gzipSync } from "node:zlib";
+import { gzipSync } from "fflate";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dashboardSourceHash, STAMP_PATH } from "./dashboard-hash.mjs";

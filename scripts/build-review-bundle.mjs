@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { gzipSync } from "fflate";
 import { readVerifiedReviewVendor } from "./check-review-vendor.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -23,6 +23,7 @@ for (const name of files) {
   const source = join(sourceDir, name);
   if (!existsSync(source)) throw new Error(`Missing review bundle source: ${source}`);
   const raw = readFileSync(source);
+  // fflate keeps committed gzip bytes stable across supported Node/zlib versions.
   const compressed = gzipSync(raw, { level: 9, mtime: 0 });
   const output = `${name}.gz`;
   writeFileSync(join(distDir, output), compressed);

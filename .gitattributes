@@ -1,3 +1,0 @@
-# Workflow task metadata uses Markdown hard-break spaces intentionally.
-notes/workflow-rewrite/*.md whitespace=-blank-at-eol
-docs/WORKFLOW_ARCHITECTURE_DESIGN.md whitespace=-blank-at-eol

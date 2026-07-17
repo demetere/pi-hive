@@ -306,6 +306,10 @@ test:
 [group('quality')]
 test-node-compat:
   node --import tsx --import ./tests/register-ts-loader.mjs --test \
+    tests/config-diagnostics.test.ts \
+    tests/config-schema-generated.test.ts \
+    tests/config-schema.test.ts \
+    tests/config-yaml.test.ts \
     tests/dashboard-event-ring.test.ts \
     tests/governance.test.ts \
     tests/limits.test.ts \
