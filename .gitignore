@@ -5,6 +5,7 @@ ui/web/node_modules/
 
 # Build caches / logs
 *.log
+*.swp
 coverage/
 .DS_Store
 .vite/
@@ -27,8 +28,10 @@ coverage/
 *.tgz
 /release-artifacts/
 
-# Local project notes and temporary planning documents
-/notes/
+# Local project notes, except the committed workflow rewrite plan.
+/notes/*
+!/notes/workflow-rewrite/
+!/notes/workflow-rewrite/**
 /.pi-subagents/
 
 # NOTE: ui/web/dist/ is intentionally NOT ignored — it ships prebuilt so the
