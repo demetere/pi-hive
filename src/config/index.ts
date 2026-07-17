@@ -1,10 +1,16 @@
+export * from "./agents";
+export * from "./catalog-hash";
+export * from "./catalog-types";
+export * from "./catalogs";
 export * from "./diagnostics";
 export * from "./discovery";
+export * from "./knowledge";
 export * from "./manifest";
 export * from "./paths";
 export * from "./registry";
 export * from "./render-diagnostics";
 export * from "./schema";
+export * from "./skills";
 export type * from "./types";
 export * from "./versions";
 export * from "./yaml";

@@ -11,6 +11,7 @@ import { SCHEMA_VERSION } from "./versions";
 
 export const PUBLIC_ID_PATTERN = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 export const DURATION_V1_PATTERN = "^[1-9][0-9]*(ms|s|m|h)$";
+export const MODEL_REFERENCE_PATTERN = "^(?:inherit|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)$";
 
 const closed = { additionalProperties: false } as const;
 const unique = { uniqueItems: true } as const;
@@ -22,6 +23,7 @@ function literals<const Values extends readonly [string, ...string[]]>(values: V
 export const NonEmptyStringSchema = Type.String({ pattern: "\\S" });
 export const PublicIdSchema = Type.String({ pattern: PUBLIC_ID_PATTERN });
 export const DurationV1Schema = Type.String({ pattern: DURATION_V1_PATTERN });
+export const ModelReferenceSchema = Type.String({ pattern: MODEL_REFERENCE_PATTERN });
 export const PositiveSafeIntegerSchema = Type.Integer({
   minimum: 1,
   maximum: Number.MAX_SAFE_INTEGER,
@@ -76,7 +78,7 @@ export const RawWorkflowBudgetsSchema = Type.Object({
 }, closed);
 
 const AgentDefaultsSchema = Type.Object({
-  model: Type.Optional(NonEmptyStringSchema),
+  model: Type.Optional(ModelReferenceSchema),
   thinking: Type.Optional(ThinkingLevelSchema),
 }, closed);
 
@@ -116,7 +118,7 @@ export const AgentFrontmatterV1Schema = Type.Object({
   name: NonEmptyStringSchema,
   capabilities: RawCapabilitiesSchema,
   description: Type.Optional(NonEmptyStringSchema),
-  model: Type.Optional(NonEmptyStringSchema),
+  model: Type.Optional(ModelReferenceSchema),
   thinking: Type.Optional(ThinkingLevelSchema),
   tags: Type.Optional(UniquePublicIdsSchema),
   skills: Type.Optional(UniquePublicIdsSchema),
@@ -130,7 +132,7 @@ const AddRemoveIdsSchema = Type.Object({
 }, closed);
 
 const TeamOverridesSchema = Type.Object({
-  model: Type.Optional(NonEmptyStringSchema),
+  model: Type.Optional(ModelReferenceSchema),
   thinking: Type.Optional(ThinkingLevelSchema),
   capabilities: Type.Optional(RawCapabilitiesSchema),
   budgets: Type.Optional(RawAgentBudgetsSchema),
