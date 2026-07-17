@@ -220,6 +220,16 @@ review-vendor-verify:
 review-build: review-vendor-verify
   node scripts/build-review-bundle.mjs
 
+# Regenerate the committed schema-v1 editor artifacts from TypeBox.
+[group('quality')]
+config-schema-build:
+  node --import tsx scripts/generate-config-schemas.mjs
+
+# Reject committed schema-v1 artifacts that drift from TypeBox.
+[group('quality')]
+config-schema-verify:
+  node --import tsx scripts/generate-config-schemas.mjs --check
+
 # Run every strict TypeScript project checker.
 [group('quality')]
 typecheck: typecheck-core typecheck-bun typecheck-tests dashboard-typecheck
@@ -273,8 +283,8 @@ dashboard-verify:
 
 # Rebuild every committed UI artifact and reject any uncommitted output.
 [group('quality')]
-generated-verify: dashboard-build review-build
-  git diff --exit-code -- ui/web/dist ui/review/dist
+generated-verify: dashboard-build review-build config-schema-verify
+  git diff --exit-code -- ui/web/dist ui/review/dist schemas
 
 # Start the dashboard Vite dev server.
 [group('dashboard')]
@@ -332,7 +342,7 @@ coverage: coverage-core coverage-db dashboard-test-coverage
 
 # Verify package manifest, required files, peer deps, and committed build stamps.
 [group('quality')]
-verify-package:
+verify-package: config-schema-verify
   node scripts/verify-package-files.mjs
 
 # Enforce packed/unpacked package and review-bundle byte budgets.

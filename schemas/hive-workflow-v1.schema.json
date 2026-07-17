@@ -1,0 +1,515 @@
+{
+  "$id": "urn:pi-hive:schema:hive-workflow:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "approvals": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": {
+          "anyOf": [
+            {
+              "const": "required",
+              "type": "string"
+            },
+            {
+              "const": "optional",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "const": "none",
+              "type": "string"
+            },
+            {
+              "const": "new",
+              "type": "string"
+            },
+            {
+              "const": "existing",
+              "type": "string"
+            },
+            {
+              "const": "either",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^.*$": {
+              "$defs": {
+                "JsonValue": {
+                  "$id": "urn:pi-hive:schema:definition:JsonValue:1",
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "items": {
+                        "$ref": "urn:pi-hive:schema:definition:JsonValue:1"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "patternProperties": {
+                        "^.*$": {
+                          "$ref": "urn:pi-hive:schema:definition:JsonValue:1"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "$ref": "urn:pi-hive:schema:definition:JsonValue:1"
+            }
+          },
+          "type": "object"
+        },
+        "profile": {
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter",
+        "profile",
+        "binding"
+      ],
+      "type": "object"
+    },
+    "avoid-when": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "budgets": {
+      "additionalProperties": false,
+      "properties": {
+        "active-wall-time": {
+          "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+          "type": "string"
+        },
+        "max-agent-turns": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max-delegations": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max-parallel": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max-tool-calls": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token-budget": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "description": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "examples": {
+      "items": {
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "instructions": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "shared": {
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
+    "name": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "suggested-next": {
+      "items": {
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "tags": {
+      "items": {
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "team": {
+      "$defs": {
+        "RawTeamNodeV1": {
+          "$id": "urn:pi-hive:schema:definition:RawTeamNodeV1:1",
+          "additionalProperties": false,
+          "properties": {
+            "agent": {
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "type": "string"
+            },
+            "consult-when": {
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "id": {
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "type": "string"
+            },
+            "members": {
+              "items": {
+                "$ref": "urn:pi-hive:schema:definition:RawTeamNodeV1:1"
+              },
+              "type": "array"
+            },
+            "overrides": {
+              "additionalProperties": false,
+              "properties": {
+                "budgets": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "active-wall-time": {
+                      "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+                      "type": "string"
+                    },
+                    "max-agent-turns": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "max-tool-calls": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "token-budget": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "capabilities": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "artifact": {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "const": "read",
+                            "type": "string"
+                          },
+                          {
+                            "const": "write",
+                            "type": "string"
+                          },
+                          {
+                            "const": "review",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    },
+                    "external-network": {
+                      "type": "boolean"
+                    },
+                    "filesystem": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "exclude": {
+                            "items": {
+                              "pattern": "\\S",
+                              "type": "string"
+                            },
+                            "type": "array",
+                            "uniqueItems": true
+                          },
+                          "include": {
+                            "items": {
+                              "pattern": "\\S",
+                              "type": "string"
+                            },
+                            "type": "array",
+                            "uniqueItems": true
+                          },
+                          "operations": {
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "const": "read",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "create",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "update",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "delete",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "minItems": 1,
+                            "type": "array",
+                            "uniqueItems": true
+                          },
+                          "path": {
+                            "pattern": "\\S",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "operations"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "git": {
+                      "type": "boolean"
+                    },
+                    "human-input": {
+                      "type": "boolean"
+                    },
+                    "knowledge": {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "const": "read",
+                            "type": "string"
+                          },
+                          {
+                            "const": "propose",
+                            "type": "string"
+                          },
+                          {
+                            "const": "curate",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    },
+                    "shell": {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "const": "inspect",
+                            "type": "string"
+                          },
+                          {
+                            "const": "test",
+                            "type": "string"
+                          },
+                          {
+                            "const": "build",
+                            "type": "string"
+                          },
+                          {
+                            "const": "package",
+                            "type": "string"
+                          },
+                          {
+                            "const": "mutate",
+                            "type": "string"
+                          },
+                          {
+                            "const": "execute-code",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    }
+                  },
+                  "type": "object"
+                },
+                "knowledge": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "add": {
+                      "items": {
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    },
+                    "remove": {
+                      "items": {
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    }
+                  },
+                  "type": "object"
+                },
+                "model": {
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "skills": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "add": {
+                      "items": {
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    },
+                    "remove": {
+                      "items": {
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "uniqueItems": true
+                    }
+                  },
+                  "type": "object"
+                },
+                "thinking": {
+                  "anyOf": [
+                    {
+                      "const": "inherit",
+                      "type": "string"
+                    },
+                    {
+                      "const": "off",
+                      "type": "string"
+                    },
+                    {
+                      "const": "minimal",
+                      "type": "string"
+                    },
+                    {
+                      "const": "low",
+                      "type": "string"
+                    },
+                    {
+                      "const": "medium",
+                      "type": "string"
+                    },
+                    {
+                      "const": "high",
+                      "type": "string"
+                    },
+                    {
+                      "const": "xhigh",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "responsibilities": {
+              "items": {
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "role": {
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "agent"
+          ],
+          "type": "object"
+        }
+      },
+      "$ref": "urn:pi-hive:schema:definition:RawTeamNodeV1:1"
+    },
+    "use-when": {
+      "pattern": "\\S",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "description",
+    "use-when",
+    "artifact",
+    "team",
+    "instructions"
+  ],
+  "title": "pi-hive Workflow Schema v1",
+  "type": "object"
+}
