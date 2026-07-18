@@ -306,6 +306,8 @@ test:
 [group('quality')]
 test-node-compat:
   node --import tsx --import ./tests/register-ts-loader.mjs --test \
+    tests/artifact-contracts.test.ts \
+    tests/config-budgets.test.ts \
     tests/config-catalog-agents.test.ts \
     tests/config-catalog-hash.test.ts \
     tests/config-catalog-knowledge.test.ts \
@@ -316,6 +318,8 @@ test-node-compat:
     tests/config-registry-diagnostics.test.ts \
     tests/config-schema-generated.test.ts \
     tests/config-schema.test.ts \
+    tests/config-team.test.ts \
+    tests/config-workflows.test.ts \
     tests/config-yaml.test.ts \
     tests/dashboard-event-ring.test.ts \
     tests/governance.test.ts \
