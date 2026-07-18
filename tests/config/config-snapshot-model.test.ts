@@ -35,6 +35,17 @@ test("model preflight rejects unavailable models, unsupported thinking, and cont
   assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: `${exact}x` }], registry).codes, ["SNAPSHOT_CONTEXT_INSUFFICIENT"]);
 });
 
+test("model preflight records and enforces a deterministic worst-case dynamic token reserve", () => {
+  let estimatedText = "";
+  const compressible = { ...registry, estimateTokens(text: string) { estimatedText = text; return text === "static" ? 6 : 1; } };
+  const result = validateSnapshotModels([{ nodeId: "root", model: "provider/default", thinking: "off", staticText: "static", dynamicTokenReserve: 12_000 }], compressible);
+  assert.equal(result.ok, true);
+  assert.equal(result.nodes[0].dynamicReserve, 12_000);
+  assert.equal(estimatedText, "static", "dynamic reserve must not tokenize a compressible sample");
+  assert.equal(result.nodes[0].staticTokens + result.nodes[0].dynamicReserve <= result.nodes[0].contextWindow, true);
+  assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: "", dynamicTokenReserve: 12_000 }], registry).codes, ["SNAPSHOT_CONTEXT_INSUFFICIENT"]);
+});
+
 test("model preflight rejects invalid numeric model metadata", () => {
   for (const invalid of [NaN, Infinity, -1, 1.5]) {
     const adapter = { ...registry, find: () => ({ id: "provider/default", contextWindow: 50_000, maxTokens: invalid, thinking: ["off", "high"] }) };

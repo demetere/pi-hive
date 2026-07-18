@@ -21,7 +21,7 @@ function fixture() {
   const project = { status: "configured", projectRoot: "/tmp/project", manifestPath: "/tmp/project/.pi/hive/hive-config.yaml", manifestSource: ".pi/hive/hive-config.yaml", rawSource: "manifest\n", manifest: { "schema-version": 1, agents: {}, workflows: {} }, sourceMap: {}, diagnostics: [], truncated: false, registries: { agents: [{ id: "agent", kind: "agents", status: "available", declaredPath: "agents/agent.md", projectPath: ".pi/hive/agents/agent.md", sourceRange: {} as never, diagnosticCodes: [], declaredData: "agents/agent.md", canonicalPath: "/tmp/project/.pi/hive/agents/agent.md" }], workflows: [{ id: "debug", kind: "workflows", status: "available", declaredPath: "workflows/debug.yaml", projectPath: ".pi/hive/workflows/debug.yaml", sourceRange: {} as never, diagnosticCodes: [], declaredData: "workflows/debug.yaml", canonicalPath: "/tmp/project/.pi/hive/workflows/debug.yaml" }], skills: [{ id: "skill", kind: "skills", status: "available", declaredPath: "skills/skill/", projectPath: ".pi/hive/skills/skill", sourceRange: {} as never, diagnosticCodes: [], declaredData: "skills/skill/", canonicalPath: "/tmp/project/.pi/hive/skills/skill" }], knowledge: [{ id: "knowledge", kind: "knowledge", status: "available", declaredPath: "knowledge/k/", projectPath: ".pi/hive/knowledge/k", sourceRange: {} as never, diagnosticCodes: [], declaredData: { provider: "okf", path: "knowledge/k/" }, canonicalPath: "/tmp/project/.pi/hive/knowledge/k" }] } } as unknown as ConfiguredProject;
   return { workflow, catalogs, project };
 }
-const models = { defaultModel: "provider/model", defaultThinking: "off", find: (id: string) => id === "provider/model" ? { id, contextWindow: 100_000, maxTokens: 8_000, thinking: ["off"] } : undefined, canActivate: () => true, estimateTokens: (text: string) => Buffer.byteLength(text) };
+const models = { defaultModel: "provider/model", defaultThinking: "off", find: (id: string) => id === "provider/model" ? { id, contextWindow: 1_000_000, maxTokens: 8_000, thinking: ["off"] } : undefined, canActivate: () => true, estimateTokens: (text: string) => Buffer.byteLength(text) };
 function authorityNode(nodeId = "root", model = "provider/model", thinking = "off") {
   return {
     nodeId,
@@ -43,6 +43,7 @@ test("builder requires branded complete matching authority and produces stable r
   const first = buildActivationSnapshot(input);
   const second = buildActivationSnapshot({ ...input, createdAt: "2027-01-01T00:00:00.000Z" });
   assert.equal(first.snapshotHash, second.snapshotHash);
+  assert.equal(first.payload.models[0].dynamicReserve >= 266_240, true, "activation records the complete bounded dynamic prompt reserve");
   assert.notEqual(first.createdAt, second.createdAt);
   assert.equal(first.payload.project.rootRef, ".");
   assert.equal(JSON.stringify(first).includes("/tmp/project"), false);
@@ -163,7 +164,7 @@ test("literal inherit walks node, agent, and project precedence before adapter d
     ...models,
     defaultModel: "provider/adapter",
     defaultThinking: "off",
-    find: (id: string) => ({ id, contextWindow: 100_000, maxTokens: 8_000, thinking: ["off", "low"] }),
+    find: (id: string) => ({ id, contextWindow: 1_000_000, maxTokens: 8_000, thinking: ["off", "low"] }),
   };
   const snapshot = buildActivationSnapshot({ ...base, authority: testAuthority("debug", [authorityNode("root", "provider/project", "low")]), models: inheritedModels, packageVersion: "0.1.0" });
   assert.equal(snapshot.payload.models[0].modelId, "provider/project");

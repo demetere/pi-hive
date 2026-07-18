@@ -116,6 +116,23 @@ test("worker prompt invocation exposes full immutable snapshot and task context 
   assert.equal(JSON.stringify(promptContext).includes("root-only transcript policy"), false);
 });
 
+test("worker compaction boundary is installed for each prompt and rejects rewritten immutable markers", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-workers-compaction-"));
+  let preservation = "";
+  let validate!: (value: string) => void;
+  const pool = new WorkerSessionPool({ projectRoot, sessionId: "session-1", runId: "run-1", snapshot: snapshot(), factory: async () => ({
+    linkedSessionId: "linked-alpha",
+    installCompactionBoundary(boundary) { preservation = boundary.preservation; validate = boundary.validate; },
+    async prompt() { return { output: "ok", compactionSummary: preservation.replace(/"contractHash":"[0-9a-f]{64}"/, `"contractHash":"${"0".repeat(64)}"`) }; },
+    dispose() {},
+  }) });
+  const result = await pool.execute(task("task-1", "alpha", "immutable objective"));
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /compaction\/resume rejected/i);
+  assert.doesNotThrow(() => validate(preservation));
+  assert.throws(() => validate(preservation.replace("run_id=run-1", "run_id=spoof")), /missing or rewritten/i);
+});
+
 test("sequential tasks reuse one node/run session and boundaries project only committed journal state", async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-workers-reuse-"));
   let creations = 0;

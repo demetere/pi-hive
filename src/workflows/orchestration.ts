@@ -50,6 +50,17 @@ import {
 } from "./attempts";
 import { ChangeAccountingRuntime, type ChangeAccountingOptions } from "./change-accounting";
 import { recoverUnknownSideEffects, type UnknownSideEffectRecoveryOptions, type UnknownSideEffectRecoveryReport } from "./recovery";
+import {
+  assertCompactionPreservation,
+  assembleRootWorkflowPrompt,
+  buildCompactionPreservationBlock,
+  type WorkflowPromptAssembly,
+} from "./prompts";
+import {
+  buildWorkflowStatusPage,
+  issueWorkflowToolRuntimeBinding,
+  runWithWorkflowToolRuntime,
+} from "./tools";
 
 export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
@@ -72,6 +83,7 @@ export interface RunOrchestrationServiceOptions {
 }
 export interface RootModelDispatchRequest {
   readonly correlationId: string; readonly operation: string; readonly input: unknown; readonly finalization?: boolean;
+  readonly installCompactionBoundary?: (boundary: Readonly<{ preservation: string; validate(value: string): void }>) => void;
   readonly dispatch: () => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
 }
 export interface TrustedWorkflowDispatch extends WorkerTrustedDispatch {
@@ -86,6 +98,8 @@ export interface BoundDelegationServices {
   preparedResultDelivery(): ResultDeliveryBatch | undefined;
   prepareResultDelivery(deliveryId: string, options?: { limit?: number }): ResultDeliveryBatch;
   acceptResultDelivery(deliveryId: string): void;
+  deliverResults(deliveryId: string, options?: { limit?: number }): ResultDeliveryBatch;
+  runWithToolRuntime<T>(callback: () => T): T;
 }
 interface RunResources {
   readonly runId: string; readonly runtime: DelegationRuntime;
@@ -145,8 +159,11 @@ export class RunOrchestrationService {
         if (!run) return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze(["project state: no workflow run is active"]) });
         const accounting = this.changeAccountingFor(run.runId);
         const derived = accounting.reconcile();
-        const attempts = new AttemptRuntime({ projectRoot: options.projectRoot, projectId: options.projectId, sessionId: options.sessionId, runId: run.runId, now: options.now }).restore();
-        const unresolvedAttempts = Object.values(attempts.attempts).filter((attempt) => !attempt.result);
+        const attemptRuntime = this.current?.runId === run.runId
+          ? this.current.attempts
+          : new AttemptRuntime({ projectRoot: options.projectRoot, projectId: options.projectId, sessionId: options.sessionId, runId: run.runId, now: options.now });
+        const attempts = attemptRuntime.restore();
+        const unresolvedAttempts = Object.values(attempts.attempts).filter((attempt) => !attempt.result && !attemptRuntime.isDispatching(attempt.attemptId));
         const attemptIssues = unresolvedAttempts.length ? [`${unresolvedAttempts.length} attempt intent(s) remain unresolved and require recovery`] : [];
         const upstream = options.completion?.projectState ? await options.completion.projectState() : undefined;
         const upstreamIssues = upstream?.state === "unsatisfied" ? [...(upstream.issues ?? ["upstream project-state gate is unsatisfied"])] : [];
@@ -221,6 +238,31 @@ export class RunOrchestrationService {
     });
   }
 
+  private rootPromptAssembly(runId?: string): WorkflowPromptAssembly {
+    const run = this.lifecycle.restore().latestRun;
+    if (!run || (runId !== undefined && run.runId !== runId)) throw new Error("Root prompt requires the current workflow run");
+    return assembleRootWorkflowPrompt({
+      snapshot: this.options.snapshot,
+      nodeId: rootNodeId(this.options.snapshot),
+      sessionId: this.options.sessionId,
+      runId: run.runId,
+      runInputs: run.inputs.map((entry) => ({
+        source: "user" as const,
+        provenance: `run-input:${entry.sequence}:${entry.source}`,
+        content: entry.text,
+        ref: `run:${run.runId}/input:${entry.sequence}`,
+      })),
+    });
+  }
+
+  private rootCompactionBoundary(runId?: string): Readonly<{ preservation: string; validate(value: string): void }> {
+    const prompt = this.rootPromptAssembly(runId);
+    return Object.freeze({
+      preservation: buildCompactionPreservationBlock(prompt),
+      validate: (value: string) => assertCompactionPreservation(value, prompt),
+    });
+  }
+
   private modelInputText(input: unknown): string {
     try { return JSON.stringify(input) ?? String(input); } catch { return String(input); }
   }
@@ -273,6 +315,8 @@ export class RunOrchestrationService {
     inputText = this.modelInputText(request.input),
   ): Promise<string | WorkerPromptResponse> {
     resources.assertAdmission();
+    const rootBoundary = nodeId === rootNodeId(this.options.snapshot) ? this.rootCompactionBoundary() : undefined;
+    if (rootBoundary) request.installCompactionBoundary?.(rootBoundary);
     try {
       const value = await executeWithConservativeRetry(resources.attempts, {
         correlationId: request.correlationId, nodeId, operation: request.operation, input: request.input,
@@ -287,6 +331,10 @@ export class RunOrchestrationService {
           let response: string | WorkerPromptResponse;
           try {
             response = await request.dispatch();
+            if (rootBoundary && record(response) && response.compactionSummary !== undefined) {
+              if (typeof response.compactionSummary !== "string") throw Object.assign(new Error("Root compaction summary is invalid"), { assistantOutputObserved: true, effectNotApplied: true });
+              rootBoundary.validate(response.compactionSummary);
+            }
             const recovery = this.recoveryErrorAfterDispatch(resources, "Model response rejected after a recovery barrier appeared");
             if (recovery) throw recovery;
             resources.budgets.recordModelUsage(admitted.attemptId, responseUsage(response, inputText));
@@ -583,7 +631,7 @@ export class RunOrchestrationService {
       model: (input: RootModelDispatchRequest) => { assertAdmission(); return this.dispatchModel(resources.dispatchRuntime, context.nodeId, input); },
       tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => { assertAdmission(); return this.dispatchTool(resources.dispatchRuntime, context.nodeId, input); },
     });
-    return Object.freeze({
+    const bound: BoundDelegationServices = Object.freeze({
       context,
       dispatch,
       route: (input: RouteDirectMembersInput) => { assertCurrent(); return routeDirectMembers(this.options.snapshot, context.nodeId, input); },
@@ -600,7 +648,29 @@ export class RunOrchestrationService {
       preparedResultDelivery: () => { assertCurrent(); return resources.runtime.preparedResultDelivery(context); },
       prepareResultDelivery: (deliveryId: string, options: { limit?: number } = {}) => { assertCurrent(); return resources.runtime.prepareResultDelivery(context, deliveryId, options); },
       acceptResultDelivery: (deliveryId: string) => { assertCurrent(); resources.runtime.acceptResultDelivery(context, deliveryId); },
+      deliverResults: (deliveryId: string, options: { limit?: number } = {}) => { assertCurrent(); return resources.runtime.deliverResultDelivery(context, deliveryId, options); },
+      runWithToolRuntime: <T>(callback: () => T): T => {
+        assertCurrent();
+        const binding = issueWorkflowToolRuntimeBinding({
+          snapshot: this.options.snapshot,
+          nodeId: context.nodeId,
+          dispatch,
+          team: bound,
+          workflowStatus: (input) => {
+            assertCurrent();
+            return buildWorkflowStatusPage({
+              snapshot: this.options.snapshot,
+              lifecycle: this.lifecycle.restore(),
+              budget: resources.budgets.restore(),
+              delegation: resources.runtime.restore(),
+            }, input);
+          },
+          finish: (input, batch) => this.lifecycle.finish(input, { callerNodeId: context.nodeId, toolBatch: batch }),
+        });
+        return runWithWorkflowToolRuntime(binding, callback);
+      },
     });
+    return bound;
   }
 
   rootServices(): BoundDelegationServices {
@@ -714,8 +784,13 @@ export class RunOrchestrationService {
   }
 
   async pause(reason: string): Promise<boolean> {
+    const boundary = this.rootCompactionBoundary();
     return this.lifecycle.pause(reason, {
       ...this.options.pauseAuthority,
+      captureState: async () => {
+        const base = await this.options.pauseAuthority.captureState?.() ?? {};
+        return { ...base, rootPromptCompactionPreservation: boundary.preservation } as Readonly<Record<string, JsonValue>>;
+      },
       suspendOwnedWork: async () => {
         await this.suspendResources(reason);
         await this.options.pauseAuthority.suspendOwnedWork?.();
@@ -724,6 +799,10 @@ export class RunOrchestrationService {
   }
 
   async resume(): Promise<boolean> {
+    const paused = this.lifecycle.restore().latestRun;
+    const preservation = paused?.pauseState?.rootPromptCompactionPreservation;
+    if (!paused || typeof preservation !== "string") throw new Error("Resume rejected: root immutable prompt preservation markers are missing");
+    this.rootCompactionBoundary(paused.runId).validate(preservation);
     const resumed = await this.lifecycle.resume(this.options.resumeAuthority);
     if (!resumed) return false;
     const run = this.lifecycle.restore().latestRun;

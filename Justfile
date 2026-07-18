@@ -301,8 +301,8 @@ test:
   node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test tests/**/*.test.ts
 
 # Exercise Bun-independent utility and state modules on every supported Node.
-# Pi itself requires Node 22+, so the Node 20 lane intentionally excludes tests
-# that import the Pi runtime peer dependency.
+# Core workflow tool contracts/handlers remain in this lane via workflow-tools;
+# only their src/integration Pi adapter test is excluded because Pi requires 22+.
 [group('quality')]
 test-node-compat:
   node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test \
@@ -344,6 +344,8 @@ test-node-compat:
     tests/workflows/workflow-journal.test.ts \
     tests/workflows/workflow-ownership.test.ts \
     tests/workflows/workflow-navigation.test.ts \
+    tests/workflows/workflow-prompts.test.ts \
+    tests/workflows/workflow-tools.test.ts \
     tests/workflows/workflow-selector.test.ts \
     tests/workflows/workflow-sessions.test.ts \
     tests/config/yaml.test.ts
