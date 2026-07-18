@@ -310,6 +310,9 @@ test-node-compat:
     tests/capability-filesystem-glob.test.ts \
     tests/capability-filesystem-policy.test.ts \
     tests/capability-filesystem-race.test.ts \
+    tests/capability-command-policy.test.ts \
+    tests/capability-network-policy.test.ts \
+    tests/capability-process-ownership.test.ts \
     tests/capability-resolution.test.ts \
     tests/capability-tools.test.ts \
     tests/config-budgets.test.ts \
