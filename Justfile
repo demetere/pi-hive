@@ -339,9 +339,13 @@ test-node-compat:
     tests/limits.test.ts \
     tests/project-identity.test.ts \
     tests/safe-path.test.ts \
+    tests/session-links.test.ts \
     tests/workflow-checkpoint.test.ts \
     tests/workflow-journal.test.ts \
     tests/workflow-ownership.test.ts \
+    tests/workflow-navigation.test.ts \
+    tests/workflow-selector.test.ts \
+    tests/workflow-sessions.test.ts \
     tests/yaml.test.ts
 
 # Separate from `test` because db.ts uses bun:sqlite and the core must load
