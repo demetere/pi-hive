@@ -20,6 +20,16 @@ export type WorkflowEventType =
   | "run.cancel.settlement.failed"
   | "run.pause.release.confirmed"
   | "run.terminal.prepared"
+  | "task.accepted"
+  | "task.started"
+  | "task.suspended"
+  | "task.interrupted"
+  | "task.result.recorded"
+  | "task.result.delivery.prepared"
+  | "task.result.delivery.accepted"
+  | "scheduler.paused"
+  | "scheduler.resumed"
+  | "scheduler.closed"
   | "task.transition"
   | "question.transition"
   | "approval.recorded"
@@ -30,7 +40,11 @@ export type WorkflowEventType =
 const EVENT_TYPES = new Set<WorkflowEventType>([
   "session.created", "session.linked", "session.selected", "session.orphaned", "control.requested",
   "run.started", "run.input.recorded", "run.input.delivery.prepared", "run.input.delivered",
-  "run.transition", "run.cancel.requested", "run.cancel.settlement.failed", "run.pause.release.confirmed", "run.terminal.prepared", "task.transition", "question.transition", "approval.recorded",
+  "run.transition", "run.cancel.requested", "run.cancel.settlement.failed", "run.pause.release.confirmed", "run.terminal.prepared",
+  "task.accepted", "task.started", "task.suspended", "task.interrupted", "task.result.recorded",
+  "task.result.delivery.prepared", "task.result.delivery.accepted",
+  "scheduler.paused", "scheduler.resumed", "scheduler.closed",
+  "task.transition", "question.transition", "approval.recorded",
   "artifact.recorded", "handoff.recorded", "knowledge.transition", "terminal.recorded",
 ]);
 const PRODUCERS = new Set<WorkflowEventProducer>(["runtime", "dashboard", "recovery", "harness"]);
