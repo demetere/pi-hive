@@ -1,4 +1,7 @@
 import { validateArtifactDeclaration, ARTIFACT_CONTRACT_VERSION, type ArtifactProfileContract } from "../artifacts/contracts";
+import { resolveWorkflowCapabilities } from "../capabilities/resolve";
+import type { EffectiveNodePolicy } from "../capabilities/types";
+import type { EffectiveAuthoritySnapshotV1 } from "./snapshot-authority";
 import type { ConfigCatalogResult } from "./catalogs";
 import type { CatalogDependencyEdge } from "./catalog-types";
 import { createDiagnosticCollector, sourceRange, type ConfigDiagnostic, type ConfigDiagnosticCode } from "./diagnostics";
@@ -16,13 +19,14 @@ export interface ValidWorkflowDefinition extends WorkflowBase, Required<Pick<Saf
   artifact: RawWorkflowV1["artifact"] & { contractVersion: typeof ARTIFACT_CONTRACT_VERSION; contract: ArtifactProfileContract };
   approvals: Readonly<Record<string, "required" | "optional" | "none">>;
   instructions: RawWorkflowV1["instructions"]; team: ResolvedTeam;
-  budgets: ResolvedBudgetDeclarations; source: string; sourceMap: YamlSourceMap; rawSource: string;
+  budgets: ResolvedBudgetDeclarations; authority: EffectiveAuthoritySnapshotV1; policies: readonly EffectiveNodePolicy[]; source: string; sourceMap: YamlSourceMap; rawSource: string;
 }
 export interface InvalidWorkflowDefinition extends WorkflowBase, SafeWorkflowMetadata { status: "invalid" }
 export type WorkflowDefinition = ValidWorkflowDefinition | InvalidWorkflowDefinition;
 export interface WorkflowSelectorSummaryItem extends SafeWorkflowMetadata { id: string; status: "valid" | "invalid"; diagnosticCodes: readonly ConfigDiagnosticCode[] }
 export interface WorkflowSelectorSummaryV1 { version: 1; items: WorkflowSelectorSummaryItem[]; truncated: boolean; bytes: number }
 export interface ConfigWorkflowResolution { workflows: WorkflowDefinition[]; edges: CatalogDependencyEdge[]; diagnostics: ConfigDiagnostic[]; truncated: boolean; summary: WorkflowSelectorSummaryV1; artifactContractVersion: typeof ARTIFACT_CONTRACT_VERSION }
+export interface PersistedRootSelection { readonly workflowId: string; readonly model?: string; readonly thinking?: string }
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function range(map: YamlSourceMap, pointer: string) { return map[pointer]?.value ?? map[pointer]?.key ?? map[""]?.value ?? sourceRange(0, 1, 1, 0, 1, 1); }
 function issue(code: ConfigDiagnosticCode, id: string, source: string, map: YamlSourceMap, pointer: string, chain?: string[]): ConfigDiagnostic { return { code, severity: "error", message: "Workflow resolution failed.", source, range: range(map, pointer), resourceId: id, ...(chain ? { dependencyChain: chain } : {}) }; }
@@ -83,7 +87,7 @@ function budgetCode(raw: RawWorkflowV1["budgets"], field: BudgetField): ConfigDi
   const parsed = typeof declared === "string" ? parseDurationV1(declared) : declared;
   return parsed === undefined ? "WORKFLOW_BUDGET_INVALID" : parsed > PACKAGE_BUDGET_CAPS[field] ? "WORKFLOW_BUDGET_WIDENING" : "WORKFLOW_BUDGET_INVALID";
 }
-export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: ConfigCatalogResult, operations: WorkflowLoadOperations = {}): ConfigWorkflowResolution {
+export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: ConfigCatalogResult, operations: WorkflowLoadOperations = {}, persistedRootSelection?: PersistedRootSelection): ConfigWorkflowResolution {
   const resources = loadWorkflowResources(project, operations), definitions: WorkflowDefinition[] = [], edges: CatalogDependencyEdge[] = [];
   const collector = createDiagnosticCollector(), registered = new Set(project.registries.workflows.map((x) => x.id));
   const projectBudgets = project.manifest.settings?.defaults?.workflow?.budgets;
@@ -118,13 +122,38 @@ export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: Con
     const team = resolveTeam(raw.team, resource.sourceMap, resource.source, resource.id, catalogs, projectBudgets, raw.budgets);
     for (const diagnostic of team.diagnostics) local.add(diagnostic);
     edges.push(...team.edges);
+    const capabilities = team.team ? resolveWorkflowCapabilities({
+      workflowId: resource.id,
+      team: team.team,
+      catalogs,
+      // Subsystem descriptors are reserved now, but their trusted implementations
+      // are introduced by later tasks. Configuration alone cannot activate them.
+      artifactAvailable: false,
+      knowledgeAvailable: false,
+      questionsAvailable: false,
+      projectModel: project.manifest.settings?.defaults?.agent?.model,
+      projectThinking: project.manifest.settings?.defaults?.agent?.thinking,
+      ...(persistedRootSelection?.workflowId === resource.id ? {
+        persistedRootModel: persistedRootSelection.model,
+        persistedRootThinking: persistedRootSelection.thinking,
+      } : {}),
+    }) : undefined;
+    for (const finding of capabilities?.issues ?? []) local.add({
+      code: finding.issue.code === "CAPABILITY_CLAUSE_LIMIT_EXCEEDED" ? "WORKFLOW_CAPABILITY_LIMIT_EXCEEDED" : "WORKFLOW_CAPABILITY_WIDENING",
+      severity: "error",
+      message: finding.issue.message,
+      source: resource.source,
+      range: team.team?.nodes.find((node) => node.id === finding.nodeId)?.range ?? range(resource.sourceMap, "/team"),
+      resourceId: resource.id,
+      dependencyChain: [`workflow:${resource.id}`, `node:${finding.nodeId}`],
+    });
     (raw["suggested-next"] ?? []).forEach((target, index) => { if (!registered.has(target)) local.add(issue("WORKFLOW_SUGGESTED_NEXT_UNKNOWN", resource.id, resource.source, resource.sourceMap, `/suggested-next/${index}`, [`workflow:${resource.id}`, `workflow:${target}`])); });
     const result = local.result();
     for (const diagnostic of result.diagnostics) collector.add(diagnostic);
-    if (result.diagnostics.length || !team.team || !artifact.contract) {
+    if (result.diagnostics.length || !team.team || !artifact.contract || !capabilities?.authority) {
       definitions.push({ id: resource.id, status: "invalid", diagnostics: result.diagnostics, diagnosticCodes: result.diagnostics.map((x) => x.code), ...metadata });
     } else {
-      definitions.push({ id: resource.id, status: "valid", diagnostics: [], diagnosticCodes: [], ...metadata as Required<Pick<SafeWorkflowMetadata, "name" | "description" | "useWhen" | "tags" | "examples" | "suggestedNext" | "adapter" | "profile">>, artifact: { ...raw.artifact, contractVersion: ARTIFACT_CONTRACT_VERSION, contract: artifact.contract }, approvals: raw.approvals ?? {}, instructions: raw.instructions, team: team.team, budgets: resolveBudgetDeclarations({ project: projectBudgets, workflow: raw.budgets }), source: resource.source, sourceMap: resource.sourceMap, rawSource: resource.rawSource });
+      definitions.push({ id: resource.id, status: "valid", diagnostics: [], diagnosticCodes: [], ...metadata as Required<Pick<SafeWorkflowMetadata, "name" | "description" | "useWhen" | "tags" | "examples" | "suggestedNext" | "adapter" | "profile">>, artifact: { ...raw.artifact, contractVersion: ARTIFACT_CONTRACT_VERSION, contract: artifact.contract }, approvals: raw.approvals ?? {}, instructions: raw.instructions, team: team.team, budgets: resolveBudgetDeclarations({ project: projectBudgets, workflow: raw.budgets }), authority: capabilities.authority, policies: capabilities.policies, source: resource.source, sourceMap: resource.sourceMap, rawSource: resource.rawSource });
     }
   }
   definitions.sort((a, b) => compare(a.id, b.id));

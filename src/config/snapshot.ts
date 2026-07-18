@@ -64,9 +64,6 @@ function deepFreeze<T>(value: T): T {
   }
   return value;
 }
-function explicitSetting(...values: Array<string | undefined>): string | undefined {
-  return values.find((value) => value !== undefined && value !== "inherit");
-}
 export function verifyActivationSnapshotHash(snapshot: ActivationSnapshotFileV1): boolean {
   try { return hashActivationPayload(identityPayload(snapshot.payload)) === snapshot.snapshotHash; }
   catch { return false; }
@@ -76,10 +73,12 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
   const { workflow, catalogs, project } = input;
   const createdAt = input.createdAt ?? new Date().toISOString();
   if (!Number.isFinite(Date.parse(createdAt))) throw new Error("Snapshot creation time is invalid.");
-  if (!isEffectiveAuthoritySnapshotV1(input.authority)) throw new Error("Activation snapshot requires branded effective authority.");
-  if (input.authority.workflowId !== workflow.id) throw new Error("Effective authority workflow does not match.");
+  const authority = workflow.authority ?? input.authority;
+  if (!isEffectiveAuthoritySnapshotV1(authority)) throw new Error("Activation snapshot requires branded effective authority.");
+  if (workflow.authority && input.authority !== workflow.authority) throw new Error("Activation snapshot authority must be the exact resolved workflow authority.");
+  if (authority.workflowId !== workflow.id) throw new Error("Effective authority workflow does not match.");
   const expectedNodeIds = workflow.team.nodes.map((node) => node.id).sort(compare);
-  const authorityNodeIds = input.authority.nodes.map((node) => node.nodeId).sort(compare);
+  const authorityNodeIds = authority.nodes.map((node) => node.nodeId).sort(compare);
   if (canonicalJson(expectedNodeIds) !== canonicalJson(authorityNodeIds)) throw new Error("Effective authority node coverage is incomplete or contains extras.");
   const agentById = new Map(catalogs.agents.filter((node): node is AvailableAgentCatalogNode => node.status === "available").map((node) => [node.id, node]));
   const skillById = new Map(catalogs.skills.filter((node) => node.status === "available").map((node) => [node.id, node]));
@@ -126,8 +125,8 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
   const staticByNode = workflow.team.nodes.map((node) => {
     const agent = agentById.get(node.agentId); if (!agent) throw new Error(`Snapshot agent ${node.agentId} is unavailable.`);
     const skillText = node.skills.resolved.map((id) => { const skill = skillById.get(id); if (!skill || skill.status !== "available") throw new Error(`Snapshot skill ${id} is unavailable.`); return skill.files.map((file) => file.content).join("\n"); }).join("\n");
-    const authority = input.authority.nodes.find((item) => item.nodeId === node.id)!;
-    return { nodeId: node.id, model: explicitSetting(node.model, agent.frontmatter.model, project.manifest.settings?.defaults?.agent?.model), thinking: explicitSetting(node.thinking, agent.frontmatter.thinking, project.manifest.settings?.defaults?.agent?.thinking), staticText: [agent.prompt, workflow.instructions.shared ?? "", node.id === workflow.team.rootId ? workflow.instructions.root : "", node.role ?? "", ...node.responsibilities, skillText, canonicalJson({ artifact: workflow.artifact, budgets: node.budgets, capabilities: authority.capabilities, tools: authority.tools })].join("\n") };
+    const nodeAuthority = authority.nodes.find((item) => item.nodeId === node.id)!;
+    return { nodeId: node.id, model: nodeAuthority.model, thinking: nodeAuthority.thinking, staticText: [agent.prompt, workflow.instructions.shared ?? "", node.id === workflow.team.rootId ? workflow.instructions.root : "", node.role ?? "", ...node.responsibilities, skillText, canonicalJson({ artifact: workflow.artifact, budgets: node.budgets, capabilities: nodeAuthority.capabilities, tools: nodeAuthority.tools })].join("\n") };
   });
   const modelResult = validateSnapshotModels(staticByNode, input.models);
   if (!modelResult.ok) throw new Error(`Snapshot model preflight failed: ${modelResult.codes.join(",")}`);
@@ -136,7 +135,7 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
     project: { projectId: projectIdFromCanonicalRoot(project.projectRoot), rootRef: "." },
     workflow: { id: workflow.id, name: workflow.name, description: workflow.description, useWhen: workflow.useWhen, ...(workflow.avoidWhen ? { avoidWhen: workflow.avoidWhen } : {}), tags: sorted(workflow.tags), examples: [...workflow.examples], suggestedNext: sorted(workflow.suggestedNext), artifact: { adapter: workflow.artifact.adapter, profile: workflow.artifact.profile, binding: workflow.artifact.binding, options: workflow.artifact.options ?? {}, contractVersion: workflow.artifact.contractVersion, checkpoints: [...workflow.artifact.contract.checkpoints], approvals: workflow.approvals }, instructions: workflow.instructions, budgets: workflow.budgets, team: { rootId: workflow.team.rootId, nodes: workflow.team.nodes.map((node) => ({ id: node.id, agentId: node.agentId, ...(node.parentId ? { parentId: node.parentId } : {}), memberIds: [...node.memberIds], depth: node.depth, ...(node.role ? { role: node.role } : {}), responsibilities: [...node.responsibilities], ...(node.consultWhen ? { consultWhen: node.consultWhen } : {}), ...(node.model ? { model: node.model } : {}), ...(node.thinking ? { thinking: node.thinking } : {}), ...(node.capabilities ? { capabilities: node.capabilities } : {}), skills: node.skills, knowledge: node.knowledge, budgets: node.budgets })) } },
     agents, skills, knowledge,
-    authority: { capabilityContractVersion: input.authority.capabilityContractVersion, nodes: input.authority.nodes.map((node) => ({ nodeId: node.nodeId, capabilities: node.capabilities, tools: [...node.tools] })) },
+    authority: { capabilityContractVersion: authority.capabilityContractVersion, nodes: authority.nodes.map((node) => ({ nodeId: node.nodeId, capabilities: node.capabilities, tools: [...node.tools], ...(node.model ? { model: node.model } : {}), ...(node.thinking ? { thinking: node.thinking } : {}) })) },
     models: modelResult.nodes,
     sources,
   };
