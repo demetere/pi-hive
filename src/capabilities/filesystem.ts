@@ -1,4 +1,3 @@
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
@@ -219,7 +218,12 @@ export interface QueuedMutationResult<T> {
   readonly decision: FilesystemAuthorizationDecision;
 }
 
-const defaultMutationQueue: FilesystemMutationQueue = (targetPath, task) => withFileMutationQueue(targetPath, task);
+const defaultMutationQueue: FilesystemMutationQueue = async (targetPath, task) => {
+  // Keep the Pi runtime dependency lazy so the core policy graph remains
+  // loadable on every supported Node line.
+  const { withFileMutationQueue } = await import("@earendil-works/pi-coding-agent");
+  return withFileMutationQueue(targetPath, task);
+};
 
 /**
  * Custom generic mutations must use this boundary. Authorization is performed
