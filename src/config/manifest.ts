@@ -24,6 +24,7 @@ export interface ConfiguredProject {
   projectRoot: string;
   manifestPath: string;
   manifestSource: string;
+  rawSource: string;
   manifest: RawManifestV1;
   sourceMap: YamlSourceMap;
   registries: ConfigRegistries;
@@ -132,6 +133,7 @@ export function loadConfigProject(cwd: string, operations: ManifestLoadOperation
     projectRoot: discovery.projectRoot,
     manifestPath: discovery.manifestPath,
     manifestSource: discovery.manifestSource,
+    rawSource: source,
     manifest: validated.value,
     sourceMap: parsed.value.sourceMap,
     registries: registry.registries,
