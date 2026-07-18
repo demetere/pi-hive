@@ -85,6 +85,7 @@ test("package allowlist rejects build inputs, maps, and unrelated files", () => 
   `;
   const paths = [
     "src/engine/session.ts",
+    "src/artifacts/contracts.ts",
     "ui/web/dist/assets/index-AbC_123.js",
     "ui/review/vendor.json",
     "ui/web/src/App.tsx",
@@ -94,6 +95,6 @@ test("package allowlist rejects build inputs, maps, and unrelated files", () => 
   const result = spawnSync(process.execPath, ["--input-type=module", "--eval", expression, ...paths], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
-  assert.deepEqual(output.allowed, [true, true, true, false, false, false]);
+  assert.deepEqual(output.allowed, [true, true, true, true, false, false, false]);
   assert.equal(output.limit, 1100);
 });

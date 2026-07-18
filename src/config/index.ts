@@ -1,4 +1,5 @@
 export * from "./agents";
+export * from "./budgets";
 export * from "./catalog-hash";
 export * from "./catalog-types";
 export * from "./catalogs";
@@ -9,8 +10,11 @@ export * from "./manifest";
 export * from "./paths";
 export * from "./registry";
 export * from "./render-diagnostics";
+export * from "./resolver";
 export * from "./schema";
 export * from "./skills";
+export * from "./team";
 export type * from "./types";
 export * from "./versions";
+export * from "./workflows";
 export * from "./yaml";
