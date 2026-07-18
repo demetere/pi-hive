@@ -8,6 +8,8 @@ import { renderHiveDoctor } from "../engine/doctor";
 import { dashboardUrl, ensureDashboard, readDaemonToken, stopDashboard } from "../engine/dashboard";
 import * as openspec from "../engine/openspec";
 import { truncateMiddle } from "../core/utils";
+export { createWorkflowLifecycleServiceHandlers } from "./workflow-lifecycle-handlers";
+export type { WorkflowLifecycleServiceHandlers, WorkflowLifecycleServiceHandlerOptions } from "./workflow-lifecycle-handlers";
 
 function listChangeIds(cwd: string, api: typeof openspec): string[] {
   return api.listChanges(cwd).map((c) => c.name);

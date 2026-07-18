@@ -56,6 +56,8 @@ import {
   buildCompactionPreservationBlock,
   type WorkflowPromptAssembly,
 } from "./prompts";
+import { readWorkflowJournal } from "./journal";
+import { handoffForRun, handoffPromptInput } from "./handoff";
 import {
   buildWorkflowStatusPage,
   issueWorkflowToolRuntimeBinding,
@@ -241,11 +243,14 @@ export class RunOrchestrationService {
   private rootPromptAssembly(runId?: string): WorkflowPromptAssembly {
     const run = this.lifecycle.restore().latestRun;
     if (!run || (runId !== undefined && run.runId !== runId)) throw new Error("Root prompt requires the current workflow run");
+    const handoff = run.handoffPacketHash ? handoffForRun(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), run.runId) : undefined;
+    if (run.handoffPacketHash && handoff?.packetHash !== run.handoffPacketHash) throw new Error("Consumed handoff packet is missing or does not match the run marker");
     return assembleRootWorkflowPrompt({
       snapshot: this.options.snapshot,
       nodeId: rootNodeId(this.options.snapshot),
       sessionId: this.options.sessionId,
       runId: run.runId,
+      ...(handoff ? { handoff: handoffPromptInput(handoff) } : {}),
       runInputs: run.inputs.map((entry) => ({
         source: "user" as const,
         provenance: `run-input:${entry.sequence}:${entry.source}`,
@@ -658,11 +663,16 @@ export class RunOrchestrationService {
           team: bound,
           workflowStatus: (input) => {
             assertCurrent();
+            const lifecycle = this.lifecycle.restore();
+            const run = lifecycle.latestRun;
+            const handoff = run?.handoffPacketHash ? handoffForRun(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), run.runId) : undefined;
+            if (run?.handoffPacketHash && handoff?.packetHash !== run.handoffPacketHash) throw new Error("Consumed handoff packet is missing or does not match the run marker");
             return buildWorkflowStatusPage({
               snapshot: this.options.snapshot,
-              lifecycle: this.lifecycle.restore(),
+              lifecycle,
               budget: resources.budgets.restore(),
               delegation: resources.runtime.restore(),
+              ...(handoff ? { handoff } : {}),
             }, input);
           },
           finish: (input, batch) => this.lifecycle.finish(input, { callerNodeId: context.nodeId, toolBatch: batch }),

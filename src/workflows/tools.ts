@@ -9,6 +9,7 @@ import { classifyTrustedTool, classifyTrustedToolRegistration } from "../capabil
 import type { BudgetState } from "./budgets";
 import type { DelegationState, DelegationStatusPage } from "./delegation";
 import type { RunLifecycleState } from "./runs";
+import type { HandoffPacket } from "./handoff";
 import type { WorkerTrustedDispatch } from "./workers";
 import { boundedJson } from "./values";
 
@@ -83,7 +84,8 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     }, strict),
   ]),
   workflow_status: Type.Object({
-    section: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("inputs"), Type.Literal("file-changes"), Type.Literal("artifact-refs"), Type.Literal("evidence-refs")])),
+    section: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("inputs"), Type.Literal("handoff"), Type.Literal("file-changes"), Type.Literal("artifact-refs"), Type.Literal("evidence-refs")])),
+    packetHash: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$", maxLength: 64 })),
     ...CursorPage,
   }, strict),
   workflow_finish: Type.Object({
@@ -96,7 +98,7 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
 });
 
 export type GenericWorkflowToolName = keyof typeof GENERIC_WORKFLOW_TOOL_SCHEMAS;
-export interface WorkflowStatusRequest { readonly section?: "summary" | "inputs" | "file-changes" | "artifact-refs" | "evidence-refs"; readonly limit?: number; readonly cursor?: string }
+export interface WorkflowStatusRequest { readonly section?: "summary" | "inputs" | "handoff" | "file-changes" | "artifact-refs" | "evidence-refs"; readonly packetHash?: string; readonly limit?: number; readonly cursor?: string }
 export interface WorkflowStatusPage { readonly section: string; readonly total: number; readonly items: readonly unknown[]; readonly nextCursor?: string; readonly summary?: Readonly<Record<string, unknown>> }
 
 interface TeamRuntime {
@@ -382,10 +384,40 @@ export function buildWorkflowStatusPage(input: {
   readonly lifecycle: RunLifecycleState;
   readonly budget?: BudgetState;
   readonly delegation?: DelegationState;
+  readonly handoff?: HandoffPacket;
 }, request: WorkflowStatusRequest): WorkflowStatusPage {
   const section = request.section ?? "summary";
   const run = input.lifecycle.latestRun;
   const terminal = run?.terminal;
+  if (section === "handoff") {
+    if (!request.packetHash) throw new Error("Workflow handoff status requires an exact packet hash");
+    if (!input.handoff || input.handoff.packetHash !== request.packetHash || run?.handoffPacketHash !== request.packetHash) throw new Error("Workflow handoff packet hash is not bound to the current run");
+    const encoded = canonicalJson(input.handoff);
+    const chunks: string[] = [];
+    let remaining = encoded;
+    while (remaining) {
+      const chunk = utf8Prefix(remaining, 8_192);
+      if (!chunk) throw new Error("Workflow handoff pagination could not make progress");
+      chunks.push(chunk);
+      remaining = remaining.slice(chunk.length);
+    }
+    const items = chunks.map((content, index) => Object.freeze({
+      packetHash: request.packetHash,
+      chunk: index,
+      bytes: Buffer.byteLength(content, "utf8"),
+      contentHash: hashText(content),
+      content,
+      readRef: `workflow_status:handoff?packetHash=${request.packetHash}&cursor=${index}`,
+    }));
+    const page = paginate(section, items, { ...request, limit: Math.min(3, request.limit ?? 3) }, Object.freeze({
+      packetHash: request.packetHash,
+      totalBytes: Buffer.byteLength(encoded, "utf8"),
+      contentHash: hashText(encoded),
+      chunks: chunks.length,
+    }));
+    return page.nextCursor === undefined ? page : Object.freeze({ ...page, summary: Object.freeze({ ...page.summary, nextRef: `workflow_status:handoff?packetHash=${request.packetHash}&cursor=${page.nextCursor}` }) });
+  }
+  if (request.packetHash !== undefined) throw new Error("Workflow packetHash is only valid for handoff status reads");
   if (section === "inputs") {
     const items = (run?.inputs ?? []).map((entry) => {
       const preview = utf8Prefix(entry.text, TOOL_CONTRACT_LIMITS.previewBytes);
@@ -410,7 +442,7 @@ export function buildWorkflowStatusPage(input: {
     } : null,
     team: { tasks: tasks.length, queued: tasks.filter((task) => task.queueState === "queued").length, active: tasks.filter((task) => task.queueState === "active").length, suspended: tasks.filter((task) => task.queueState === "suspended").length, terminal: tasks.filter((task) => task.queueState === "terminal").length },
     budget: input.budget ? { run: input.budget.run, limits: input.budget.limits.run, paused: input.budget.paused, activeBatches: input.budget.activeBatches.length } : null,
-    readback: ["inputs", "file-changes", "artifact-refs", "evidence-refs"],
+    readback: [...(input.handoff ? ["handoff"] : []), "inputs", "file-changes", "artifact-refs", "evidence-refs"],
   });
   return paginate(section, [summary], request, summary);
 }
