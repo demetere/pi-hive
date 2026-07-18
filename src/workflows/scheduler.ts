@@ -223,13 +223,28 @@ export class DurableDelegationScheduler {
     this.options.runtime.closeAdmission(this.reason);
   }
 
+  settlePending(reason = this.reason): void {
+    const summary = utf8Prefix(reason.trim() || this.reason, DELEGATION_LIMITS.resultSummaryBytes);
+    const temporarilyPaused = this.options.runtime.restore().schedulerStatus === "running";
+    if (temporarilyPaused) this.options.runtime.pauseAdmission(summary);
+    try {
+      for (const task of Object.values(this.options.runtime.restore().tasks)
+        .filter((candidate) => candidate.queueState === "queued" || candidate.queueState === "suspended")
+        .sort((left, right) => left.creationSequence - right.creationSequence || compare(left.taskId, right.taskId))) {
+        this.options.runtime.recordResult(task.taskId, { status: "cancelled", summary, outputRefs: [], evidenceRefs: [], data: { budgetExhausted: true } });
+      }
+    } finally {
+      if (temporarilyPaused) this.options.runtime.resumeAdmission();
+    }
+  }
+
   cancelPending(reason = this.reason): void {
     this.options.runtime.cancelPending(utf8Prefix(reason.trim() || this.reason, DELEGATION_LIMITS.resultSummaryBytes));
   }
 
-  abortOwnedWork(reason = this.reason): void {
+  abortOwnedWork(reason = this.reason, exceptNodeId?: string): void {
     this.reason = utf8Prefix(reason.trim() || this.reason, DELEGATION_LIMITS.resultSummaryBytes);
-    for (const execution of this.active.values()) execution.controller.abort(this.reason);
+    for (const execution of this.active.values()) if (execution.nodeId !== exceptNodeId) execution.controller.abort(this.reason);
   }
 
   async waitForSettlement(timeoutMs: number): Promise<boolean> {

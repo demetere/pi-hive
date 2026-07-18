@@ -5,6 +5,8 @@ import { isPathInside, resolveCanonicalPath, resolveProjectPath } from "../core/
 import { compileFilesystemGlobList, matchFilesystemGlob, normalizeFilesystemRelativePath, type CompiledFilesystemGlob } from "./glob";
 import { checkProtectedPath, type ProtectedPathRoot } from "./reserved-paths";
 import type { EffectiveNodePolicy, FilesystemOperation, NormalizedFilesystemGrant } from "./types";
+import type { MutationAccountingRecorder, MutationIntent } from "../workflows/change-accounting";
+import type { AttemptRuntime } from "../workflows/attempts";
 
 const MAX_TOOL_PATHS = 32;
 const MAX_DIAGNOSTIC_BYTES = 2_048;
@@ -217,6 +219,43 @@ export interface QueuedMutationResult<T> {
   readonly value?: T;
   readonly decision: FilesystemAuthorizationDecision;
 }
+export interface QueuedMutationAttemptAccounting {
+  readonly runtime: AttemptRuntime; readonly correlationId: string; readonly nodeId: string; readonly operation: string;
+  readonly input: unknown;
+}
+export interface QueuedMutationAccounting {
+  readonly attemptId: string;
+  readonly recorder: MutationAccountingRecorder;
+  readonly attempts?: QueuedMutationAttemptAccounting;
+}
+
+function beginQueuedAttemptAccounting(accounting: QueuedMutationAccounting | undefined): void {
+  if (!accounting?.attempts) return;
+  const begun = accounting.attempts.runtime.begin({
+    attemptId: accounting.attemptId, correlationId: accounting.attempts.correlationId, nodeId: accounting.attempts.nodeId,
+    operation: accounting.attempts.operation, input: accounting.attempts.input,
+    descriptor: { effect: "filesystem", readOnly: false, idempotent: false },
+  });
+  if (begun.state !== "started") throw new Error(`Queued mutation attempt ${accounting.attemptId} is already unresolved or completed`);
+}
+function beginImmediateMutationIntent(accounting: QueuedMutationAccounting | undefined, path: string): MutationIntent | undefined {
+  if (!accounting) return undefined;
+  try { return accounting.recorder.begin(accounting.attemptId, path); }
+  catch (error) {
+    accounting.attempts?.runtime.fail(accounting.attemptId, Object.assign(error instanceof Error ? error : new Error(String(error)), { effectNotApplied: true }));
+    throw error;
+  }
+}
+function resolveQueuedMutationNotApplied(accounting: QueuedMutationAccounting | undefined, path: string, reason: unknown): void {
+  accounting?.recorder.notApplied?.(accounting.attemptId, path, String(reason instanceof Error ? reason.message : reason).slice(0, 2_048));
+}
+function failQueuedMutationAccounting(accounting: QueuedMutationAccounting | undefined, mutationMayHaveRun: boolean, error: unknown): void {
+  if (!accounting?.attempts) return;
+  const existing = accounting.attempts.runtime.restore().attempts[accounting.attemptId];
+  if (existing?.result) return;
+  if (mutationMayHaveRun) accounting.attempts.runtime.markUnknown(accounting.attemptId, String(error instanceof Error ? error.message : error).slice(0, 8_192));
+  else accounting.attempts.runtime.fail(accounting.attemptId, Object.assign(error instanceof Error ? error : new Error(String(error)), { effectNotApplied: true }));
+}
 
 const defaultMutationQueue: FilesystemMutationQueue = async (targetPath, task) => {
   // Keep the Pi runtime dependency lazy so the core policy graph remains
@@ -236,17 +275,33 @@ export async function runQueuedFilesystemMutation<T>(
   request: FilesystemAuthorizationRequest,
   mutate: (canonicalTarget: string) => Promise<T>,
   queue: FilesystemMutationQueue = defaultMutationQueue,
+  accounting?: QueuedMutationAccounting,
 ): Promise<QueuedMutationResult<T>> {
   const admitted = authorizeFilesystemOperation(policy, request);
   if (!admitted.ok || !admitted.mutationPath) return Object.freeze({ ok: false, decision: admitted });
+  beginQueuedAttemptAccounting(accounting);
+  let mutationEntered = false;
+  let recorderFailure: unknown;
   try {
     return await queue(admitted.mutationPath, async () => {
       const immediate = authorizeFilesystemOperation(policy, request);
-      if (!immediate.ok || !immediate.mutationPath) return Object.freeze({ ok: false, decision: immediate });
+      if (!immediate.ok || !immediate.mutationPath) {
+        resolveQueuedMutationNotApplied(accounting, request.path, immediate.reason);
+        accounting?.attempts?.runtime.fail(accounting.attemptId, Object.assign(new Error(immediate.reason), { policyDenied: true, effectNotApplied: true }));
+        return Object.freeze({ ok: false, decision: immediate });
+      }
+      const intent = beginImmediateMutationIntent(accounting, request.path);
+      mutationEntered = true;
       const value = await mutate(immediate.mutationPath);
+      try { if (accounting && intent) accounting.recorder.complete(intent, request.path); }
+      catch (error) { recorderFailure = error; failQueuedMutationAccounting(accounting, true, error); throw error; }
+      accounting?.attempts?.runtime.complete(accounting.attemptId, { ok: true });
       return Object.freeze({ ok: true, value, decision: immediate });
     });
-  } catch {
+  } catch (error) {
+    if (recorderFailure !== undefined) throw recorderFailure;
+    if (!mutationEntered) resolveQueuedMutationNotApplied(accounting, request.path, error);
+    failQueuedMutationAccounting(accounting, mutationEntered, error);
     return Object.freeze({ ok: false, decision: deny(policy, request, "FILESYSTEM_TARGET_INVALID", "queued mutation failed closed") });
   }
 }
@@ -257,6 +312,7 @@ export interface QueuedSubsystemMutationInput<T> {
   readonly request: Readonly<{ operation: "create" | "update" | "delete"; path: string }>;
   readonly mutate: (canonicalTarget: string) => Promise<T>;
   readonly queue?: FilesystemMutationQueue;
+  readonly accounting?: QueuedMutationAccounting;
   readonly additionalRoots?: readonly ProtectedPathRoot[];
 }
 
@@ -291,14 +347,29 @@ export async function runQueuedSubsystemMutation<T>(input: QueuedSubsystemMutati
   const admitted = authorizeSubsystemMutation(input);
   if (!admitted.ok || !admitted.mutationPath) return Object.freeze({ ok: false, decision: admitted });
   const queue = input.queue ?? defaultMutationQueue;
+  beginQueuedAttemptAccounting(input.accounting);
+  let mutationEntered = false;
+  let recorderFailure: unknown;
   try {
     return await queue(admitted.mutationPath, async () => {
       const immediate = authorizeSubsystemMutation(input);
-      if (!immediate.ok || !immediate.mutationPath) return Object.freeze({ ok: false, decision: immediate });
+      if (!immediate.ok || !immediate.mutationPath) {
+        resolveQueuedMutationNotApplied(input.accounting, input.request.path, immediate.reason);
+        input.accounting?.attempts?.runtime.fail(input.accounting.attemptId, Object.assign(new Error(immediate.reason), { policyDenied: true, effectNotApplied: true }));
+        return Object.freeze({ ok: false, decision: immediate });
+      }
+      const intent = beginImmediateMutationIntent(input.accounting, input.request.path);
+      mutationEntered = true;
       const value = await input.mutate(immediate.mutationPath);
+      try { if (input.accounting && intent) input.accounting.recorder.complete(intent, input.request.path); }
+      catch (error) { recorderFailure = error; failQueuedMutationAccounting(input.accounting, true, error); throw error; }
+      input.accounting?.attempts?.runtime.complete(input.accounting.attemptId, { ok: true });
       return Object.freeze({ ok: true, value, decision: immediate });
     });
-  } catch {
+  } catch (error) {
+    if (recorderFailure !== undefined) throw recorderFailure;
+    if (!mutationEntered) resolveQueuedMutationNotApplied(input.accounting, input.request.path, error);
+    failQueuedMutationAccounting(input.accounting, mutationEntered, error);
     const pseudo = compileSubsystemFailurePolicy(input.projectRoot, input.subsystem, input.additionalRoots);
     return Object.freeze({ ok: false, decision: deny(pseudo, input.request, "FILESYSTEM_TARGET_INVALID", "queued subsystem mutation failed closed") });
   }

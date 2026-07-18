@@ -86,10 +86,16 @@ export interface AcceptDelegationInput {
   readonly contextRefs?: readonly DelegationContextReference[]; readonly deliverables: readonly string[];
   readonly provenance?: Readonly<{ correlationId?: string }>;
 }
+export interface DelegationAcceptanceAuthority {
+  /** Evaluated under the workflow journal append lock immediately before task acceptance publication. */
+  admit(events: readonly WorkflowEventEnvelope[], parentNodeId: string): Readonly<{ ok: true }> | Readonly<{
+    ok: false; reason: string; exhausted: readonly string[]; budgetExhausted: boolean; scope: "node" | "run";
+  }>;
+}
 export interface DelegationRuntimeOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string; readonly runId: string;
   readonly snapshot: ActivationSnapshotFileV1; readonly createTaskId?: () => string; readonly now?: () => string;
-  readonly referenceAuthorizer?: ReferenceAuthorizer;
+  readonly referenceAuthorizer?: ReferenceAuthorizer; readonly acceptanceAuthority?: DelegationAcceptanceAuthority;
   /** Fault-injection seam for durable delegation publication recovery tests. */
   readonly journalFault?: (eventType: WorkflowEventEnvelope["type"], stage: JournalFaultStage) => void;
 }
@@ -515,6 +521,7 @@ export class DelegationRuntime {
     type: "task.accepted" | "task.started" | "task.suspended" | "task.interrupted" | "task.result.recorded" | "task.result.delivery.prepared" | "task.result.delivery.accepted" | "scheduler.paused" | "scheduler.resumed" | "scheduler.closed",
     payload: Record<string, JsonValue>,
     producer: "runtime" | "harness" | "recovery",
+    validateLocked?: (events: readonly WorkflowEventEnvelope[]) => void,
   ): WorkflowEventEnvelope {
     const draft = createWorkflowEvent({
       projectId: this.options.projectId,
@@ -528,6 +535,7 @@ export class DelegationRuntime {
     return appendWorkflowEventChecked(this.options.projectRoot, draft, (events) => {
       const replayed = replayWorkflowJournal(events, this.zero, reduceDelegationState);
       const prospective = sealWorkflowEvent(draft, replayed.lastSequence + 1, replayed.lastHash);
+      validateLocked?.(events);
       reduceDelegationState(replayed.state, prospective);
     }, { fault: (stage) => this.options.journalFault?.(type, stage) });
   }
@@ -559,7 +567,16 @@ export class DelegationRuntime {
       contextRefs: contextRefs as unknown as JsonValue,
       deliverables: [...stringArray(input.deliverables, "Delegation deliverables", LIMITS.deliverables, LIMITS.deliverableBytes)],
       provenance: provenance as unknown as JsonValue,
-    }, "runtime");
+    }, "runtime", (events) => {
+      const admission = this.options.acceptanceAuthority?.admit(events, caller.nodeId);
+      if (admission && !admission.ok) {
+        throw Object.assign(new Error(admission.reason), {
+          policyDenied: true,
+          effectNotApplied: true,
+          ...(admission.budgetExhausted ? { budgetExhausted: [...admission.exhausted], budgetScope: admission.scope } : {}),
+        });
+      }
+    });
     return Object.freeze({ accepted: true, queued: true, taskId });
   }
 

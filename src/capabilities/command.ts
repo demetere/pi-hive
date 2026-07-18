@@ -24,6 +24,16 @@ export interface CommandAttemptMetadata {
   readonly valid: boolean;
   readonly reason?: string;
 }
+const TRUSTED_COMMAND_METADATA = new WeakSet<object>();
+function trustCommandMetadata(value: CommandAttemptMetadata): CommandAttemptMetadata {
+  TRUSTED_COMMAND_METADATA.add(value);
+  return value;
+}
+/** Only metadata objects emitted by this module are trusted for retry/effect classification. */
+export function isTrustedCommandAttemptMetadata(value: unknown): value is CommandAttemptMetadata {
+  return typeof value === "object" && value !== null && TRUSTED_COMMAND_METADATA.has(value);
+}
+
 export interface CommandAuthorization {
   readonly ok: boolean;
   readonly reason: string;
@@ -75,7 +85,7 @@ function networkTargets(tokens: readonly string[], executable: string, gitRemote
 
 export function analyzeCommand(command: string): CommandAttemptMetadata {
   const parsed = tokenize(command);
-  const invalid = (reason: string): CommandAttemptMetadata => Object.freeze({ version: COMMAND_POLICY_VERSION, command: String(command).slice(0, MAX_COMMAND_BYTES), classes: Object.freeze([]), effects: Object.freeze([]), networkTargets: Object.freeze([]), git: false, mutating: false, idempotency: "unknown", processTreeOwned: true, acceptedRisks: Object.freeze([]), valid: false, reason });
+  const invalid = (reason: string): CommandAttemptMetadata => trustCommandMetadata(Object.freeze({ version: COMMAND_POLICY_VERSION, command: String(command).slice(0, MAX_COMMAND_BYTES), classes: Object.freeze([]), effects: Object.freeze([]), networkTargets: Object.freeze([]), git: false, mutating: false, idempotency: "unknown", processTreeOwned: true, acceptedRisks: Object.freeze([]), valid: false, reason }));
   if (!parsed) return invalid("command is malformed or exceeds policy bounds");
   const { tokens, compound } = parsed; const executable = tokens[0];
   const classes: ShellCapability[] = []; const effects: CommandEffect[] = []; const risks: Array<"bare-filename-read" | "interpreter-hidden-write"> = [];
@@ -106,7 +116,7 @@ export function analyzeCommand(command: string): CommandAttemptMetadata {
   const targets = networkTargets(tokens, executable, gitRemote);
   const pathlessMutation = mutating && effects.length === 0 && !(git && !["checkout", "switch", "reset", "restore", "merge", "rebase", "pull", "submodule"].includes(gitSubcommand(tokens)));
   const valid = known && !compound && !forbiddenAlias && !ambiguousEffects && !pathlessMutation && effects.length <= MAX_EFFECTS;
-  return Object.freeze({ version: COMMAND_POLICY_VERSION, command, executable, classes: orderedClasses(classes), effects: Object.freeze(effects), networkTargets: Object.freeze(targets), git, mutating, idempotency: mutating ? "non-idempotent" : "idempotent", processTreeOwned: true, acceptedRisks: uniqueSorted(risks), valid, ...(valid ? {} : { reason: compound || forbiddenAlias ? "compound/ambiguous shell syntax" : ambiguousEffects ? "mutation effect set cannot be proven before execution" : pathlessMutation ? "pathless mutation" : "unknown or excessive command effects" }) });
+  return trustCommandMetadata(Object.freeze({ version: COMMAND_POLICY_VERSION, command, executable, classes: orderedClasses(classes), effects: Object.freeze(effects), networkTargets: Object.freeze(targets), git, mutating, idempotency: mutating ? "non-idempotent" : "idempotent", processTreeOwned: true, acceptedRisks: uniqueSorted(risks), valid, ...(valid ? {} : { reason: compound || forbiddenAlias ? "compound/ambiguous shell syntax" : ambiguousEffects ? "mutation effect set cannot be proven before execution" : pathlessMutation ? "pathless mutation" : "unknown or excessive command effects" }) }));
 }
 
 export function authorizeCommand(command: string, capabilities: NormalizedCapabilities, filesystemPolicy?: CompiledFilesystemPolicy): CommandAuthorization {

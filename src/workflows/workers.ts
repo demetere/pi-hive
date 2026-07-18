@@ -27,6 +27,7 @@ import {
 } from "./delegation";
 import type { RouteDirectMembersInput, RouteRecommendation } from "./routing";
 import { NO_DLP_PROSE_LIMITATION } from "./references";
+import type { MutationAccountingRecorder } from "./change-accounting";
 import { deepFreeze, utf8Prefix } from "./values";
 
 export interface WorkerSessionFactoryInput {
@@ -58,19 +59,47 @@ export interface WorkerDelegationServices {
   prepareResultDelivery(deliveryId: string, options?: { limit?: number }): ResultDeliveryBatch;
   acceptResultDelivery(deliveryId: string): void;
 }
+export interface WorkerDirectMutationAccounting {
+  readonly schemaVersion: 1; readonly attemptId: string; readonly recorder: MutationAccountingRecorder;
+}
+export interface WorkerTrustedToolExecutionContext {
+  readonly schemaVersion: 1; readonly attemptId: string; readonly mutationAccounting?: WorkerDirectMutationAccounting;
+}
+export interface WorkerTrustedToolDispatchRequest<T> {
+  readonly correlationId: string; readonly toolName: string; readonly operation: string; readonly input: unknown;
+  readonly policyOutcome: "allowed" | "denied"; readonly denialReason?: string; readonly finalization?: boolean;
+  readonly commandMetadata?: unknown; readonly dispatch: (context: WorkerTrustedToolExecutionContext) => T | Promise<T>;
+}
+export interface WorkerTrustedDispatch {
+  readonly schemaVersion: 1;
+  tool<T>(input: WorkerTrustedToolDispatchRequest<T>): Promise<T>;
+}
 export interface WorkerPromptInvocation {
+  readonly schemaVersion: 1;
   readonly promptContext: WorkerPromptContext;
   readonly delegation?: WorkerDelegationServices;
+  readonly dispatch?: WorkerTrustedDispatch;
 }
+export interface WorkerProviderUsage {
+  readonly inputTokens: number; readonly outputTokens: number; readonly precision: "estimated" | "provider-confirmed";
+}
+export interface WorkerPromptResponse { readonly output: string; readonly usage?: WorkerProviderUsage }
 export interface WorkerSessionHandle {
   readonly linkedSessionId: string;
-  prompt(text: string, signal?: AbortSignal, invocation?: WorkerPromptInvocation): string | Promise<string>;
+  prompt(text: string, signal?: AbortSignal, invocation?: WorkerPromptInvocation): string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
   abort?(): void | Promise<void>; dispose(): void | Promise<void>;
 }
 export type WorkerSessionFactory = (input: WorkerSessionFactoryInput) => WorkerSessionHandle | Promise<WorkerSessionHandle>;
+export interface WorkerModelDispatchInput {
+  readonly task: PersistedDelegationTask; readonly text: string; readonly signal?: AbortSignal; readonly invocation: WorkerPromptInvocation;
+  readonly invoke: () => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
+}
+export type WorkerModelDispatcher = (input: WorkerModelDispatchInput) => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
 export interface WorkerSessionPoolOptions {
   readonly projectRoot: string; readonly sessionId: string; readonly runId: string;
   readonly snapshot: ActivationSnapshotFileV1; readonly factory: WorkerSessionFactory; readonly resultSummaryBytes?: number;
+  readonly dispatchModel?: WorkerModelDispatcher;
+  readonly dispatchTool?: <T>(task: PersistedDelegationTask, input: WorkerTrustedToolDispatchRequest<T>) => Promise<T>;
 }
 export type WorkerExecutionResult = WorkerResultInput | Readonly<{ status: "suspended"; dependencyTaskIds: readonly string[] }>;
 
@@ -352,18 +381,33 @@ export class WorkerSessionPool {
       acceptResultDelivery: (deliveryId: string) => services.acceptResultDelivery(deliveryId),
     }) satisfies WorkerDelegationServices : undefined;
     const promptContext = deriveWorkerPromptContext(this.options.snapshot, task, deliveredResults);
-    const invocation: WorkerPromptInvocation = Object.freeze({ promptContext, ...(delegation ? { delegation } : {}) });
+    const dispatch: WorkerTrustedDispatch | undefined = this.options.dispatchTool ? Object.freeze({
+      schemaVersion: 1 as const,
+      tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => this.options.dispatchTool!(task, input),
+    }) : undefined;
+    const invocation: WorkerPromptInvocation = Object.freeze({ schemaVersion: 1 as const, promptContext, ...(delegation ? { delegation } : {}), ...(dispatch ? { dispatch } : {}) });
     const execution = (async (): Promise<WorkerExecutionResult> => {
       try {
         const pooled = await this.get(task);
         if (signal?.aborted) throw new Error("Worker task cancelled before model execution");
-        const output = await pooled.session.prompt(renderTask(task, deliveredResults), signal, invocation);
+        const text = renderTask(task, deliveredResults);
+        const response = await (this.options.dispatchModel
+          ? this.options.dispatchModel({ task, text, signal, invocation, invoke: () => pooled.session.prompt(text, signal, invocation) })
+          : pooled.session.prompt(text, signal, invocation));
+        let output: string;
+        if (plainRecord(response)) {
+          if (typeof response.output !== "string") throw new Error("Worker prompt response output is invalid");
+          output = response.output;
+          if (response.usage !== undefined && (!plainRecord(response.usage) || !Number.isSafeInteger(response.usage.inputTokens) || Number(response.usage.inputTokens) < 0
+            || !Number.isSafeInteger(response.usage.outputTokens) || Number(response.usage.outputTokens) < 0
+            || (response.usage.precision !== "estimated" && response.usage.precision !== "provider-confirmed"))) throw new Error("Worker provider usage is invalid");
+        } else output = String(response ?? "");
         if (delegatedTaskIds.length && !signal?.aborted && !this.closed) {
           return Object.freeze({ status: "suspended" as const, dependencyTaskIds: Object.freeze([...new Set(delegatedTaskIds)]) });
         }
         return {
           status: signal?.aborted || this.closed ? "cancelled" : "completed",
-          summary: utf8Prefix(String(output || "[no worker output]"), this.options.resultSummaryBytes ?? DELEGATION_LIMITS.resultSummaryBytes),
+          summary: utf8Prefix(output || "[no worker output]", this.options.resultSummaryBytes ?? DELEGATION_LIMITS.resultSummaryBytes),
           outputRefs: [],
           evidenceRefs: [],
           data: { linkedSessionId: pooled.session.linkedSessionId },
@@ -372,12 +416,14 @@ export class WorkerSessionPool {
         if (delegatedTaskIds.length && !signal?.aborted && !this.closed) {
           return Object.freeze({ status: "suspended" as const, dependencyTaskIds: Object.freeze([...new Set(delegatedTaskIds)]) });
         }
+        const detail = error && typeof error === "object" ? error as Record<string, unknown> : {};
+        const budgetExhausted = Array.isArray(detail.budgetExhausted) ? detail.budgetExhausted.filter((item): item is string => typeof item === "string").slice(0, 32) : [];
         return {
-          status: signal?.aborted || this.closed ? "cancelled" : "failed",
+          status: signal?.aborted || this.closed ? "cancelled" : budgetExhausted.length ? "blocked" : "failed",
           summary: utf8Prefix(String(error instanceof Error ? error.message : error), this.options.resultSummaryBytes ?? DELEGATION_LIMITS.resultSummaryBytes),
           outputRefs: [],
           evidenceRefs: [],
-          data: {},
+          data: budgetExhausted.length ? { budgetExhausted } : {},
         };
       }
     })();
@@ -405,6 +451,14 @@ export class WorkerSessionPool {
       }
       if (task.result) writeBoundary(base, task, "result", task.result);
     }
+  }
+
+  async abortSessionsExcept(nodeId: string): Promise<void> {
+    const sessions = [...this.sessions.values()].filter((pooled) => pooled.nodeId !== nodeId);
+    for (const pooled of sessions) this.sessions.delete(pooled.nodeId);
+    await Promise.allSettled(sessions.map(async ({ session }) => {
+      try { await session.abort?.(); } finally { await session.dispose(); }
+    }));
   }
 
   async closeSessions(): Promise<void> {
