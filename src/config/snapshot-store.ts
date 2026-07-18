@@ -1,6 +1,9 @@
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { resolveCapabilityOverlay } from "../capabilities/policy";
+import type { CapabilityDeclaration, NormalizedCapabilities } from "../capabilities/types";
 import { resolveContainedPath } from "../core/safe-path";
+import { validateSerializedEffectiveAuthorityNodeV1 } from "./snapshot-authority";
 import { canonicalJson } from "./snapshot-canonical";
 import { SNAPSHOT_CONTEXT_POLICY } from "./snapshot-model";
 import { SNAPSHOT_LIMITS, validateSnapshotRelativePath, validateSnapshotSha256, verifyActivationSnapshotHash, type ActivationSnapshotFileV1, type SnapshotSourceV1 } from "./snapshot";
@@ -66,7 +69,24 @@ function uniqueIds(values: readonly string[], label: string): Set<string> {
 function sameIds(actual: Set<string>, expected: Set<string>, label: string): void {
   if (actual.size !== expected.size || [...actual].some((id) => !expected.has(id))) throw new Error(`Snapshot ${label} coverage does not match workflow team nodes.`);
 }
-function validateWorkflow(value: unknown): { nodeIds: Set<string>; agentIds: Set<string> } {
+interface SnapshotWorkflowNodeSource {
+  readonly agentId: string;
+  readonly parentId?: string;
+  readonly memberIds: readonly string[];
+  readonly depth?: number;
+  readonly capabilities?: CapabilityDeclaration;
+  readonly budgets: Readonly<Record<string, unknown>>;
+  readonly skills: readonly string[];
+  readonly knowledge: readonly string[];
+}
+interface SnapshotWorkflowCoverage {
+  readonly nodeIds: Set<string>;
+  readonly agentIds: Set<string>;
+  readonly rootNodeId: string;
+  readonly directMembers: Map<string, readonly string[]>;
+  readonly nodes: Map<string, SnapshotWorkflowNodeSource>;
+}
+function validateWorkflow(value: unknown): SnapshotWorkflowCoverage {
   const workflow = record(value, "workflow");
   exactKeys(workflow, ["id", "team"], ["name", "description", "useWhen", "avoidWhen", "tags", "examples", "suggestedNext", "artifact", "instructions", "budgets"], "workflow");
   string(workflow.id, "workflow.id");
@@ -90,21 +110,105 @@ function validateWorkflow(value: unknown): { nodeIds: Set<string>; agentIds: Set
   if (workflow.budgets !== undefined) record(workflow.budgets, "workflow.budgets");
   const team = record(workflow.team, "workflow.team");
   exactKeys(team, ["nodes"], ["rootId"], "workflow.team");
-  if (team.rootId !== undefined) string(team.rootId, "workflow.team.rootId");
+  const declaredRootId = team.rootId !== undefined ? string(team.rootId, "workflow.team.rootId") : undefined;
   if (!Array.isArray(team.nodes)) throw new Error("Snapshot workflow.team.nodes must be an array.");
   const nodeIds: string[] = [];
   const agentIds = new Set<string>();
+  const directMembers = new Map<string, readonly string[]>();
+  const nodes = new Map<string, SnapshotWorkflowNodeSource>();
+  const inferredRoots: string[] = [];
   for (const [index, entry] of team.nodes.entries()) {
     const node = record(entry, `workflow.team.nodes[${index}]`);
     exactKeys(node, ["id", "agentId"], ["parentId", "memberIds", "depth", "role", "responsibilities", "consultWhen", "model", "thinking", "capabilities", "skills", "knowledge", "budgets"], `workflow.team.nodes[${index}]`);
-    nodeIds.push(string(node.id, `workflow.team.nodes[${index}].id`));
-    agentIds.add(string(node.agentId, `workflow.team.nodes[${index}].agentId`));
-    for (const key of ["agentId", "parentId", "role", "consultWhen", "model", "thinking"] as const) if (key in node) string(node[key], `workflow.team.nodes[${index}].${key}`);
+    const nodeId = string(node.id, `workflow.team.nodes[${index}].id`);
+    nodeIds.push(nodeId);
+    const agentId = string(node.agentId, `workflow.team.nodes[${index}].agentId`);
+    agentIds.add(agentId);
+    if (!nodeId || !agentId) throw new Error("Snapshot workflow team node and agent IDs must be non-empty.");
+    const members = node.memberIds === undefined ? [] : stringArray(node.memberIds, `workflow.team.nodes[${index}].memberIds`);
+    if (new Set(members).size !== members.length) throw new Error(`Snapshot workflow.team.nodes[${index}].memberIds contains duplicates.`);
+    const sortedMembers = Object.freeze([...members].sort());
+    directMembers.set(nodeId, sortedMembers);
+    const parentId = node.parentId === undefined ? undefined : string(node.parentId, `workflow.team.nodes[${index}].parentId`);
+    if (parentId === "") throw new Error("Snapshot workflow team parent ID must be non-empty.");
+    if (parentId === undefined) inferredRoots.push(nodeId);
+    for (const key of ["role", "consultWhen", "model", "thinking"] as const) if (key in node) string(node[key], `workflow.team.nodes[${index}].${key}`);
     for (const key of ["memberIds", "responsibilities"] as const) if (key in node) stringArray(node[key], `workflow.team.nodes[${index}].${key}`);
-    if (node.depth !== undefined) safeInteger(node.depth, `workflow.team.nodes[${index}].depth`, true);
-    for (const key of ["capabilities", "skills", "knowledge", "budgets"] as const) if (key in node) record(node[key], `workflow.team.nodes[${index}].${key}`);
+    const depth = node.depth === undefined ? undefined : safeInteger(node.depth, `workflow.team.nodes[${index}].depth`);
+    const budgets = node.budgets === undefined ? {} : record(node.budgets, `workflow.team.nodes[${index}].budgets`);
+    const skillsRecord = node.skills === undefined ? {} : record(node.skills, `workflow.team.nodes[${index}].skills`);
+    const knowledgeRecord = node.knowledge === undefined ? {} : record(node.knowledge, `workflow.team.nodes[${index}].knowledge`);
+    const skills = skillsRecord.resolved === undefined ? [] : stringArray(skillsRecord.resolved, `workflow.team.nodes[${index}].skills.resolved`);
+    const knowledge = knowledgeRecord.resolved === undefined ? [] : stringArray(knowledgeRecord.resolved, `workflow.team.nodes[${index}].knowledge.resolved`);
+    if (new Set(skills).size !== skills.length || new Set(knowledge).size !== knowledge.length) throw new Error("Snapshot workflow team resolved attachments contain duplicates.");
+    if (node.capabilities !== undefined) record(node.capabilities, `workflow.team.nodes[${index}].capabilities`);
+    nodes.set(nodeId, {
+      agentId,
+      ...(parentId !== undefined ? { parentId } : {}),
+      memberIds: sortedMembers,
+      ...(depth !== undefined ? { depth } : {}),
+      ...(node.capabilities !== undefined ? { capabilities: node.capabilities as CapabilityDeclaration } : {}),
+      budgets,
+      skills: Object.freeze([...skills]),
+      knowledge: Object.freeze([...knowledge]),
+    });
   }
-  return { nodeIds: uniqueIds(nodeIds, "workflow team nodes"), agentIds };
+  const uniqueNodeIds = uniqueIds(nodeIds, "workflow team nodes");
+  if (nodes.size !== uniqueNodeIds.size) throw new Error("Snapshot workflow team graph contains duplicate nodes.");
+  if (uniqueNodeIds.size === 0 || inferredRoots.length !== 1) throw new Error("Snapshot workflow team graph must contain exactly one root.");
+  const rootNodeId = declaredRootId ?? inferredRoots[0];
+  if (!uniqueNodeIds.has(rootNodeId) || inferredRoots[0] !== rootNodeId) throw new Error("Snapshot workflow team root must exist and have no parent.");
+
+  const childrenByParent = new Map<string, string[]>();
+  for (const id of uniqueNodeIds) childrenByParent.set(id, []);
+  for (const [nodeId, node] of nodes) {
+    if (nodeId === rootNodeId) {
+      if (node.parentId !== undefined) throw new Error("Snapshot workflow team root must not have a parent.");
+    } else {
+      if (node.parentId === undefined || !uniqueNodeIds.has(node.parentId) || node.parentId === nodeId) throw new Error("Snapshot workflow team graph contains a missing or invalid parent.");
+      childrenByParent.get(node.parentId)!.push(nodeId);
+    }
+    for (const memberId of node.memberIds) {
+      if (!uniqueNodeIds.has(memberId) || memberId === nodeId) throw new Error("Snapshot workflow team graph contains a missing or invalid member.");
+    }
+  }
+  for (const [nodeId, node] of nodes) {
+    const expected = childrenByParent.get(nodeId)!.sort();
+    if (expected.length !== node.memberIds.length || expected.some((id, index) => id !== node.memberIds[index])) throw new Error("Snapshot workflow team member lists do not match parent ownership.");
+  }
+
+  const seen = new Set<string>();
+  const stack: Array<{ nodeId: string; depth: number }> = [{ nodeId: rootNodeId, depth: 1 }];
+  while (stack.length) {
+    const current = stack.pop()!;
+    if (seen.has(current.nodeId)) throw new Error("Snapshot workflow team graph contains a cycle or duplicate parent.");
+    seen.add(current.nodeId);
+    const node = nodes.get(current.nodeId)!;
+    if (node.depth !== undefined && node.depth !== current.depth) throw new Error("Snapshot workflow team depth is inconsistent with its parent graph.");
+    for (const child of [...childrenByParent.get(current.nodeId)!].reverse()) stack.push({ nodeId: child, depth: current.depth + 1 });
+  }
+  if (seen.size !== uniqueNodeIds.size) throw new Error("Snapshot workflow team graph contains a cycle or disconnected nodes.");
+  return { nodeIds: uniqueNodeIds, agentIds, rootNodeId, directMembers, nodes };
+}
+function serializeNormalizedCapabilities(capabilities: NormalizedCapabilities): Record<string, unknown> {
+  return {
+    filesystem: capabilities.filesystem.map((grant) => ({
+      path: grant.path,
+      operations: [...grant.operations],
+      include: [...grant.include],
+      exclude: [...grant.exclude],
+      ceilingClause: grant.ceilingClause,
+    })),
+    shell: [...capabilities.shell],
+    git: capabilities.git,
+    "external-network": capabilities.externalNetwork,
+    "human-input": capabilities.humanInput,
+    artifact: [...capabilities.artifact],
+    knowledge: [...capabilities.knowledge],
+  };
+}
+function requireCanonicalEquality(actual: unknown, expected: unknown, label: string): void {
+  if (canonicalJson(actual) !== canonicalJson(expected)) throw new Error(`Snapshot authority ${label} diverges from its persisted capability source semantics.`);
 }
 function validatePayload(value: unknown): void {
   const payload = record(value, "payload");
@@ -124,13 +228,18 @@ function validatePayload(value: unknown): void {
 
   if (!Array.isArray(payload.agents)) throw new Error("Snapshot agents must be an array.");
   const agentIds: string[] = [];
+  const agentCapabilityCeilings = new Map<string, CapabilityDeclaration>();
   for (const [index, entry] of payload.agents.entries()) {
     const agent = record(entry, `agents[${index}]`);
     exactKeys(agent, ["id", "name", "tags", "frontmatter", "prompt", "sourceHash", "canonicalSourceHash", "promptHash"], [], `agents[${index}]`);
     for (const key of ["id", "name", "prompt", "sourceHash", "canonicalSourceHash", "promptHash"] as const) string(agent[key], `agents[${index}].${key}`);
-    agentIds.push(agent.id as string);
+    const agentId = agent.id as string;
+    agentIds.push(agentId);
     for (const key of ["sourceHash", "canonicalSourceHash", "promptHash"] as const) validateSnapshotSha256(agent[key] as string, `Snapshot agents[${index}].${key}`);
-    stringArray(agent.tags, `agents[${index}].tags`); record(agent.frontmatter, `agents[${index}].frontmatter`);
+    stringArray(agent.tags, `agents[${index}].tags`);
+    const frontmatter = record(agent.frontmatter, `agents[${index}].frontmatter`);
+    const ceiling = frontmatter.capabilities === undefined ? {} : record(frontmatter.capabilities, `agents[${index}].frontmatter.capabilities`);
+    agentCapabilityCeilings.set(agentId, ceiling as CapabilityDeclaration);
   }
   sameIds(uniqueIds(agentIds, "agents"), workflowCoverage.agentIds, "agent");
   if (!Array.isArray(payload.skills)) throw new Error("Snapshot skills must be an array.");
@@ -166,10 +275,31 @@ function validatePayload(value: unknown): void {
   if (authority.capabilityContractVersion !== versions.capability) throw new Error("Snapshot capability contract invariant is invalid.");
   if (!Array.isArray(authority.nodes)) throw new Error("Snapshot authority.nodes must be an array.");
   const authorityNodeIds: string[] = [];
-  for (const [index, entry] of authority.nodes.entries()) {
-    const node = record(entry, `authority.nodes[${index}]`);
-    exactKeys(node, ["nodeId", "capabilities", "tools"], [], `authority.nodes[${index}]`);
-    authorityNodeIds.push(string(node.nodeId, `authority.nodes[${index}].nodeId`)); record(node.capabilities, `authority.nodes[${index}].capabilities`); stringArray(node.tools, `authority.nodes[${index}].tools`);
+  const authoritySettings = new Map<string, { model?: string; thinking?: string }>();
+  for (const entry of authority.nodes) {
+    const authorityEntry = record(entry, "authority node");
+    const nodeIdForContext = string(authorityEntry.nodeId, "authority node.nodeId");
+    validateSerializedEffectiveAuthorityNodeV1(entry, {
+      rootNodeId: workflowCoverage.rootNodeId,
+      directMemberIds: workflowCoverage.directMembers.get(nodeIdForContext) ?? [],
+      subsystems: { artifact: false, knowledge: false, questions: false },
+    });
+    const workflowNode = workflowCoverage.nodes.get(nodeIdForContext);
+    const ceiling = workflowNode ? agentCapabilityCeilings.get(workflowNode.agentId) : undefined;
+    if (!workflowNode || !ceiling) throw new Error("Snapshot authority node has no persisted workflow/agent capability source.");
+    const resolved = resolveCapabilityOverlay(ceiling, workflowNode.capabilities);
+    if (!resolved.ok || !resolved.policy || !resolved.provenance) throw new Error("Snapshot authority capability source overlay is invalid.");
+    const serializedPolicy = record(authorityEntry.capabilities, "authority node.capabilities");
+    requireCanonicalEquality(serializedPolicy.effective, serializeNormalizedCapabilities(resolved.policy), "effective capability");
+    requireCanonicalEquality(serializedPolicy.provenance, resolved.provenance, "provenance");
+    requireCanonicalEquality(serializedPolicy.budgets, workflowNode.budgets, "budgets");
+    requireCanonicalEquality(serializedPolicy.attachments, { skills: workflowNode.skills, knowledge: workflowNode.knowledge }, "attachments");
+    const nodeId = entry.nodeId;
+    authorityNodeIds.push(nodeId);
+    authoritySettings.set(nodeId, {
+      ...(entry.model !== undefined ? { model: entry.model } : {}),
+      ...(entry.thinking !== undefined ? { thinking: entry.thinking } : {}),
+    });
   }
   sameIds(uniqueIds(authorityNodeIds, "authority nodes"), workflowCoverage.nodeIds, "authority node");
   if (!Array.isArray(payload.models)) throw new Error("Snapshot models must be an array.");
@@ -177,7 +307,13 @@ function validatePayload(value: unknown): void {
   for (const [index, entry] of payload.models.entries()) {
     const model = record(entry, `models[${index}]`);
     exactKeys(model, ["nodeId", "modelId", "thinking", "staticTokens", "dynamicReserve", "contextWindow"], [], `models[${index}]`);
-    modelNodeIds.push(string(model.nodeId, `models[${index}].nodeId`)); string(model.modelId, `models[${index}].modelId`); string(model.thinking, `models[${index}].thinking`);
+    const nodeId = string(model.nodeId, `models[${index}].nodeId`);
+    const modelId = string(model.modelId, `models[${index}].modelId`);
+    const thinking = string(model.thinking, `models[${index}].thinking`);
+    modelNodeIds.push(nodeId);
+    const effective = authoritySettings.get(nodeId);
+    if (effective?.model !== undefined && effective.model !== modelId) throw new Error(`Snapshot models[${index}] diverges from frozen authority model.`);
+    if (effective?.thinking !== undefined && effective.thinking !== thinking) throw new Error(`Snapshot models[${index}] diverges from frozen authority thinking.`);
     const staticTokens = safeInteger(model.staticTokens, `models[${index}].staticTokens`);
     const dynamicReserve = safeInteger(model.dynamicReserve, `models[${index}].dynamicReserve`);
     const contextWindow = safeInteger(model.contextWindow, `models[${index}].contextWindow`, true);

@@ -307,6 +307,8 @@ test:
 test-node-compat:
   node --import tsx --import ./tests/register-ts-loader.mjs --test \
     tests/artifact-contracts.test.ts \
+    tests/capability-resolution.test.ts \
+    tests/capability-tools.test.ts \
     tests/config-budgets.test.ts \
     tests/config-catalog-agents.test.ts \
     tests/config-catalog-hash.test.ts \

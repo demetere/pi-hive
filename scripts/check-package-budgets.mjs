@@ -39,7 +39,7 @@ const exactPackagePaths = new Set([
 ]);
 
 const allowedPackagePatterns = [
-  /^src\/(?:agents|artifacts|config|core|engine|integration|observability|shared|ui\/tui)\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.ts$/,
+  /^src\/(?:agents|artifacts|capabilities|config|core|engine|integration|observability|shared|ui\/tui)\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.ts$/,
   /^schemas\/hive-(?:manifest|agent-frontmatter|workflow)-v1\.schema\.json$/,
   /^ui\/web\/dist\/assets\/[A-Za-z0-9_-]+\.(?:css|js)$/,
   /^ui\/web\/dist\/fonts\/[a-z0-9-]+\.woff2$/,
