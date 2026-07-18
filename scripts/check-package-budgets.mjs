@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 export const PACKAGE_BASELINES = Object.freeze({
-  packedBytes: 421_000,
-  unpackedBytes: 1_378_000,
+  packedBytes: 455_000,
+  unpackedBytes: 1_525_000,
   reviewRawBytes: 12_625,
   reviewCompressedBytes: 4_304,
 });
@@ -39,7 +39,7 @@ const exactPackagePaths = new Set([
 ]);
 
 const allowedPackagePatterns = [
-  /^src\/(?:agents|artifacts|capabilities|config|core|engine|integration|observability|shared|ui\/tui)\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.ts$/,
+  /^src\/(?:agents|artifacts|capabilities|config|core|engine|integration|observability|shared|ui\/tui|workflows)\/(?:[a-z0-9-]+\/)*[a-z0-9-]+\.ts$/,
   /^schemas\/hive-(?:manifest|agent-frontmatter|workflow)-v1\.schema\.json$/,
   /^ui\/web\/dist\/assets\/[A-Za-z0-9_-]+\.(?:css|js)$/,
   /^ui\/web\/dist\/fonts\/[a-z0-9-]+\.woff2$/,
