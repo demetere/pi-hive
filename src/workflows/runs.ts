@@ -1212,7 +1212,7 @@ export class WorkflowRunLifecycle {
         if (!lockedRun || lockedRun.runId !== run.runId || !isOpenRunStatus(lockedRun.status)) throw new Error("run changed during finish validation");
         if (lockedRun.cancellationRequested || lockedRun.pendingTerminal) throw new Error("cancellation or terminal settlement started during finish validation");
         if (lockedRun.pendingDelivery || lockedRun.deliveredThrough !== lockedRun.inputs.length) throw new Error("input arrived during finish validation and must be delivered");
-      });
+      }, { fault: (stage) => this.options.journalFault?.("run.terminal.prepared", stage) });
     } catch (error) {
       return Object.freeze({ ok: false, issues: Object.freeze([String(error instanceof Error ? error.message : error)]) });
     }
