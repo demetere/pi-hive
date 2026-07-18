@@ -30,6 +30,23 @@ export type WorkflowEventType =
   | "scheduler.paused"
   | "scheduler.resumed"
   | "scheduler.closed"
+  | "budget.model.attempted"
+  | "budget.model.usage.recorded"
+  | "budget.tool.attempted"
+  | "budget.clock.started"
+  | "budget.clock.stopped"
+  | "budget.clock.paused"
+  | "budget.clock.resumed"
+  | "budget.warning.recorded"
+  | "attempt.intent.recorded"
+  | "attempt.result.recorded"
+  | "attempt.reconciliation.recorded"
+  | "change.baseline.recorded"
+  | "change.mutation.started"
+  | "change.mutation.recorded"
+  | "change.mutation.not-applied"
+  | "change.command.started"
+  | "change.command.recorded"
   | "task.transition"
   | "question.transition"
   | "approval.recorded"
@@ -44,6 +61,10 @@ const EVENT_TYPES = new Set<WorkflowEventType>([
   "task.accepted", "task.started", "task.suspended", "task.interrupted", "task.result.recorded",
   "task.result.delivery.prepared", "task.result.delivery.accepted",
   "scheduler.paused", "scheduler.resumed", "scheduler.closed",
+  "budget.model.attempted", "budget.model.usage.recorded", "budget.tool.attempted",
+  "budget.clock.started", "budget.clock.stopped", "budget.clock.paused", "budget.clock.resumed", "budget.warning.recorded",
+  "attempt.intent.recorded", "attempt.result.recorded", "attempt.reconciliation.recorded",
+  "change.baseline.recorded", "change.mutation.started", "change.mutation.recorded", "change.mutation.not-applied", "change.command.started", "change.command.recorded",
   "task.transition", "question.transition", "approval.recorded",
   "artifact.recorded", "handoff.recorded", "knowledge.transition", "terminal.recorded",
 ]);

@@ -15,6 +15,7 @@ test("fresh runtime ownership is exclusive and only verified dead stale owner ca
   assert.equal(acquireRuntimeOwnership(project, "s1", { pid: 222, processMarker: "b", now: now + 1000, nonce: "n2", verifyDead: () => true }).ok, false);
   assert.equal(acquireRuntimeOwnership(project, "s1", { pid: 222, processMarker: "b", now: now + 120_000, nonce: "n2", verifyDead: () => false }).ok, false);
   const takeover = acquireRuntimeOwnership(project, "s1", { pid: 222, processMarker: "b", now: now + 120_000, nonce: "n2", verifyDead: () => true }); assert.equal(takeover.ok, true);
+  assert.equal(takeover.previousOwner?.heartbeatAt, new Date(now).toISOString(), "takeover exposes the verified dead owner's heartbeat for active-clock reconciliation");
   assert.equal(heartbeatRuntimeOwnership(project, "s1", "n1", now + 121_000), false); assert.equal(heartbeatRuntimeOwnership(project, "s1", "n2", now + 121_000), true);
   assert.equal(releaseRuntimeOwnership(project, "s1", "n1"), false); assert.equal(releaseRuntimeOwnership(project, "s1", "n2"), true);
 });

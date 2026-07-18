@@ -59,10 +59,11 @@ export interface EvidenceReference {
 
 export interface FileChangeRecord {
   readonly path: string;
-  readonly operation: "create" | "update" | "delete";
+  readonly previousPath?: string;
+  readonly operation: "create" | "update" | "delete" | "rename";
   readonly beforeHash?: string;
   readonly afterHash?: string;
-  readonly attribution: "recorded" | "reconciled" | "unknown";
+  readonly attribution: "recorded" | "reconciled" | "unknown" | "git-reconciled" | "scoped-reconciled" | "conflicted" | "unattributed";
 }
 
 export interface PersistedTerminalEnvelope {
@@ -154,6 +155,10 @@ export interface WorkflowRunLifecycleOptions {
   readonly createRunId?: () => string;
   readonly now?: () => string;
   readonly completion?: CompletionValidationHooks;
+  /** Synchronous harness initialization after a durable run start (for baseline/counter services). */
+  readonly onRunStarted?: (runId: string, startedAt: string) => void;
+  /** Synchronous projection hook after durable open-state transitions. */
+  readonly onRunStatusChanged?: (runId: string, status: OpenRunStatus, timestamp: string) => void;
   /** Fault-injection seam used to verify durable journal publication recovery. */
   readonly journalFault?: (eventType: WorkflowEventType, stage: JournalFaultStage) => void;
 }
@@ -359,9 +364,10 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
   if (event.type === "run.terminal.prepared") {
     const run = requireCurrentRun(state, event);
     if (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Run cannot prepare terminal settlement");
-    if (run.pendingDelivery || run.deliveredThrough !== run.inputs.length) throw new Error("Terminal settlement requires every input to be delivered");
     const operationId = requiredString(payload, "operationId", RUN_LIFECYCLE_LIMITS.requestIdBytes);
     const terminal = validateTerminalPayload(payload.terminal, { runId: run.runId, timestamp: event.timestamp });
+    const budgetFailure = terminal.status === "failed" && isPlainRecord(terminal.data) && terminal.data.failureCode === "budget_exhausted";
+    if (!budgetFailure && (run.pendingDelivery || run.deliveredThrough !== run.inputs.length)) throw new Error("Terminal settlement requires every input to be delivered");
     if (terminal.status === "cancelled") throw new Error("Cancelled terminal outcomes do not use root settlement");
     return freezeRun(state, { ...run, pendingTerminal: Object.freeze({ ...terminal, operationId }) });
   }
@@ -390,7 +396,8 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     const run = requireCurrentRun(state, event);
     if (!isOpenRunStatus(run.status)) throw new Error("Terminal run state is immutable");
     const terminal = terminalEnvelopeFromEvent(event);
-    if (terminal.status !== "cancelled" && (run.pendingDelivery || run.deliveredThrough !== run.inputs.length)) throw new Error("Terminal outcome requires every input to be delivered");
+    const budgetFailure = terminal.status === "failed" && isPlainRecord(terminal.data) && terminal.data.failureCode === "budget_exhausted";
+    if (terminal.status !== "cancelled" && !budgetFailure && (run.pendingDelivery || run.deliveredThrough !== run.inputs.length)) throw new Error("Terminal outcome requires every input to be delivered");
     if (terminal.runId !== run.runId) throw new Error("Terminal envelope run identity mismatch");
     if (terminal.status === "cancelled" && !run.cancellationRequested) throw new Error("Cancelled terminal requires a cancellation request");
     if (terminal.status !== "cancelled" && run.cancellationRequested) throw new Error("Cancellation in progress blocks a non-cancelled terminal outcome");
@@ -518,18 +525,21 @@ function validateTerminalPayload(value: unknown, authority?: Readonly<{ runId: s
   const seenPaths = new Set<string>();
   const fileChanges = Object.freeze(value.fileChanges.map((entry, index): FileChangeRecord => {
     if (!isPlainRecord(entry)) throw new Error(`Terminal fileChanges[${index}] is invalid`);
-    exactKeys(entry, ["path", "operation", "beforeHash", "afterHash", "attribution"], `Terminal fileChanges[${index}]`);
-    if (entry.operation !== "create" && entry.operation !== "update" && entry.operation !== "delete") throw new Error(`Terminal fileChanges[${index}] operation is invalid`);
-    if (entry.attribution !== "recorded" && entry.attribution !== "reconciled" && entry.attribution !== "unknown") throw new Error(`Terminal fileChanges[${index}] attribution is invalid`);
+    exactKeys(entry, ["path", "operation", "beforeHash", "afterHash", "attribution", "previousPath"], `Terminal fileChanges[${index}]`);
+    if (entry.operation !== "create" && entry.operation !== "update" && entry.operation !== "delete" && entry.operation !== "rename") throw new Error(`Terminal fileChanges[${index}] operation is invalid`);
+    if (!["recorded", "reconciled", "unknown", "git-reconciled", "scoped-reconciled", "conflicted", "unattributed"].includes(String(entry.attribution))) throw new Error(`Terminal fileChanges[${index}] attribution is invalid`);
     const path = projectRelativePath(entry.path, `Terminal fileChanges[${index}].path`);
-    if (seenPaths.has(path)) throw new Error(`Terminal fileChanges[${index}].path is duplicated`);
+    const previousPath = entry.previousPath === undefined ? undefined : projectRelativePath(entry.previousPath, `Terminal fileChanges[${index}].previousPath`);
+    if (seenPaths.has(path) || (previousPath !== undefined && seenPaths.has(previousPath))) throw new Error(`Terminal fileChanges[${index}] path is duplicated`);
     seenPaths.add(path);
+    if (previousPath !== undefined) seenPaths.add(previousPath);
     const beforeHash = entry.beforeHash === undefined ? undefined : digestField(entry.beforeHash, `Terminal fileChanges[${index}].beforeHash`);
     const afterHash = entry.afterHash === undefined ? undefined : digestField(entry.afterHash, `Terminal fileChanges[${index}].afterHash`);
-    if (entry.operation === "create" && (beforeHash !== undefined || afterHash === undefined)) throw new Error(`Terminal fileChanges[${index}] create requires only afterHash`);
-    if (entry.operation === "update" && (beforeHash === undefined || afterHash === undefined)) throw new Error(`Terminal fileChanges[${index}] update requires beforeHash and afterHash`);
-    if (entry.operation === "delete" && (beforeHash === undefined || afterHash !== undefined)) throw new Error(`Terminal fileChanges[${index}] delete requires only beforeHash`);
-    return Object.freeze({ path, operation: entry.operation, ...(beforeHash === undefined ? {} : { beforeHash }), ...(afterHash === undefined ? {} : { afterHash }), attribution: entry.attribution });
+    if (entry.operation === "create" && (previousPath !== undefined || beforeHash !== undefined || afterHash === undefined)) throw new Error(`Terminal fileChanges[${index}] create requires only afterHash`);
+    if (entry.operation === "update" && (previousPath !== undefined || beforeHash === undefined || afterHash === undefined)) throw new Error(`Terminal fileChanges[${index}] update requires beforeHash and afterHash`);
+    if (entry.operation === "delete" && (previousPath !== undefined || beforeHash === undefined || afterHash !== undefined)) throw new Error(`Terminal fileChanges[${index}] delete requires only beforeHash`);
+    if (entry.operation === "rename" && (previousPath === undefined || previousPath === path || beforeHash === undefined || afterHash === undefined)) throw new Error(`Terminal fileChanges[${index}] rename requires distinct previousPath and both hashes`);
+    return Object.freeze({ path, ...(previousPath === undefined ? {} : { previousPath }), operation: entry.operation, ...(beforeHash === undefined ? {} : { beforeHash }), ...(afterHash === undefined ? {} : { afterHash }), attribution: entry.attribution as FileChangeRecord["attribution"] });
   }));
   const parseArtifacts = (raw: unknown): readonly ArtifactReference[] => {
     if (!Array.isArray(raw) || raw.length > RUN_LIFECYCLE_LIMITS.referenceItems) throw new Error("Terminal artifact references are invalid");
@@ -715,6 +725,7 @@ export class WorkflowRunLifecycle {
         if (concurrent) return duplicateInputResult(input, concurrent);
         throw error;
       }
+      this.options.onRunStarted?.(runId, now);
       return Object.freeze({ runId, input: record, created: true, duplicate: false });
     }
     if (current.cancellationRequested || current.pendingTerminal) throw new Error("Run cancellation or terminal settlement is in progress; new input is rejected");
@@ -802,6 +813,7 @@ export class WorkflowRunLifecycle {
     if (!reason.trim()) throw new Error("Waiting reason is required");
     const run = this.restore().latestRun;
     if (!run || run.status !== "running" || run.cancellationRequested || run.pendingTerminal) throw new Error("Only a running non-finalizing run can wait for human input");
+    const timestamp = this.options.now?.() ?? new Date().toISOString();
     appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
       projectId: this.options.projectId,
       sessionId: this.options.sessionId,
@@ -809,11 +821,12 @@ export class WorkflowRunLifecycle {
       type: "run.transition",
       payload: { formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, from: "running", to: "waiting_for_human", reason: reason.slice(0, 2_048) },
       producer: "runtime",
-      timestamp: this.options.now?.() ?? new Date().toISOString(),
+      timestamp,
     }), (existing) => {
       const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
       if (!locked || locked.runId !== run.runId || locked.status !== "running" || locked.cancellationRequested || locked.pendingTerminal) throw new Error("Run changed before waiting state persistence");
     });
+    this.options.onRunStatusChanged?.(run.runId, "waiting_for_human", timestamp);
   }
 
   private async releasePausedAuthority(run: WorkflowRunRecord, coordinator: PauseCoordinator): Promise<boolean> {
@@ -868,6 +881,7 @@ export class WorkflowRunLifecycle {
     }, { fault: (stage) => this.options.journalFault?.("run.transition", stage) });
     const paused = this.restore().latestRun;
     if (!paused || paused.runId !== run.runId || paused.status !== "paused" || paused.pauseReleasePending !== true) throw new Error("Persisted pause release state could not be restored");
+    this.options.onRunStatusChanged?.(run.runId, "paused", timestamp);
     return this.releasePausedAuthority(paused, coordinator);
   }
 
@@ -897,6 +911,7 @@ export class WorkflowRunLifecycle {
         const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
         if (!locked || locked.runId !== run.runId || locked.status !== "paused" || locked.resumeStatus !== run.resumeStatus || locked.cancellationRequested) throw new Error("Run changed before resume persistence");
       }, { fault: (stage) => this.options.journalFault?.("run.transition", stage) });
+      this.options.onRunStatusChanged?.(run.runId, resumeStatus, timestamp);
       return true;
     } catch (error) {
       if (transitionEventId) {
@@ -1020,6 +1035,21 @@ export class WorkflowRunLifecycle {
     requireStep(capture);
     const captured = capture.value;
     const partialState = validateJsonData(captured ?? {});
+    let cancellationFileChanges: readonly FileChangeRecord[] = [];
+    let cancellationCoverage = "partial";
+    if (this.options.completion?.projectState) {
+      try {
+        const projectState = await this.options.completion.projectState();
+        if (projectState.fileChanges) {
+          if (!Array.isArray(projectState.fileChanges) || projectState.fileChanges.length > 4_096) throw new Error("project state returned too many file changes");
+          cancellationFileChanges = Object.freeze(projectState.fileChanges.map((change) => Object.freeze(structuredClone(change))));
+        }
+        cancellationCoverage = projectState.changeCoverage ?? "partial";
+      } catch (error) {
+        diagnostics.push(`capture cancellation project state: ${String(error instanceof Error ? error.message : error).slice(0, 2_048)}`);
+        this.persistCancellationSettlementFailure(run.runId, diagnostics);
+      }
+    }
     const released = await cancellationCoordinatorStep("release leases", coordinator.releaseLeases, diagnostics);
     requireStep(released);
     this.assertCurrentRuntimeOwner();
@@ -1028,8 +1058,8 @@ export class WorkflowRunLifecycle {
       formatVersion: RUN_LIFECYCLE_FORMAT_VERSION,
       status: "cancelled" as const,
       summary: terminalSummary,
-      fileChanges: [],
-      changeCoverage: "partial",
+      fileChanges: cancellationFileChanges,
+      changeCoverage: cancellationCoverage,
       artifactRefs: [],
       evidenceRefs: [],
       data: {},
@@ -1097,6 +1127,75 @@ export class WorkflowRunLifecycle {
     }
     const envelope = terminalEnvelopeFromEvent(terminalEvent);
     return Object.freeze({ ok: true, envelope, rendered: canonicalJson(envelope) });
+  }
+
+  /** Harness-only, replay-safe terminal failure for an exhausted run-wide budget. */
+  async failBudgetExhaustion(reason: string): Promise<FinishResult> {
+    const summary = truncateUtf8(`budget_exhausted: ${reason}`, RUN_LIFECYCLE_LIMITS.summaryBytes);
+    if (!summary) return Object.freeze({ ok: false, issues: Object.freeze(["Budget exhaustion reason is invalid"]) });
+    const restored = this.restore().latestRun;
+    if (restored?.terminal) {
+      return restored.status === "failed" && restored.terminal.data.failureCode === "budget_exhausted"
+        ? Object.freeze({ ok: true, envelope: restored.terminal, rendered: canonicalJson(restored.terminal) })
+        : Object.freeze({ ok: false, issues: Object.freeze(["Run already has a different terminal outcome"]) });
+    }
+    if (!restored || !isOpenRunStatus(restored.status) || restored.cancellationRequested) return Object.freeze({ ok: false, issues: Object.freeze(["Budget exhaustion requires a current open non-cancelling run"]) });
+    if (restored.pendingTerminal) {
+      return restored.pendingTerminal.status === "failed" && restored.pendingTerminal.data.failureCode === "budget_exhausted"
+        ? this.commitPreparedTerminal(restored, restored.pendingTerminal)
+        : Object.freeze({ ok: false, issues: Object.freeze(["A different terminal settlement is already prepared for this run"]) });
+    }
+
+    let fileChanges: readonly FileChangeRecord[] = [];
+    let changeCoverage = "partial";
+    let partialState: Readonly<Record<string, JsonValue>> = Object.freeze({});
+    try {
+      const projectState = await this.options.completion?.projectState?.();
+      if (projectState?.fileChanges) fileChanges = Object.freeze(projectState.fileChanges.map((change) => Object.freeze(structuredClone(change))));
+      changeCoverage = projectState?.changeCoverage ?? changeCoverage;
+      if (projectState?.partialState) partialState = validateJsonData(projectState.partialState);
+    } catch {
+      // The fatal budget outcome remains authoritative; project-state capture is best effort.
+    }
+    const finishedAt = this.options.now?.() ?? new Date().toISOString();
+    const payload = {
+      formatVersion: RUN_LIFECYCLE_FORMAT_VERSION,
+      status: "failed" as const,
+      summary,
+      fileChanges,
+      changeCoverage,
+      artifactRefs: [],
+      evidenceRefs: [],
+      data: { failureCode: "budget_exhausted" },
+      unsatisfiedGates: ["budget_exhausted"],
+      closedQuestionIds: [],
+      partialState,
+      finishedByNodeId: this.options.rootNodeId,
+      finishedAt,
+      snapshotId: this.options.snapshotId,
+      runId: restored.runId,
+    } as const;
+    try { validateTerminalPayload(payload, { runId: restored.runId, timestamp: finishedAt }); }
+    catch (error) { return Object.freeze({ ok: false, issues: Object.freeze([String(error instanceof Error ? error.message : error)]) }); }
+    const operationId = `terminal-budget-${randomUUID()}`;
+    try {
+      appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
+        projectId: this.options.projectId, sessionId: this.options.sessionId, runId: restored.runId,
+        type: "run.terminal.prepared", payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, operationId, terminal: payload }),
+        producer: "harness", timestamp: finishedAt,
+      }), (existing) => {
+        const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
+        if (!locked || locked.runId !== restored.runId || !isOpenRunStatus(locked.status) || locked.cancellationRequested || locked.pendingTerminal) throw new Error("Run changed before budget failure preparation");
+      }, { fault: (stage) => this.options.journalFault?.("run.terminal.prepared", stage) });
+    } catch (error) {
+      const concurrent = this.restore().latestRun;
+      if (concurrent?.terminal?.data.failureCode === "budget_exhausted") return Object.freeze({ ok: true, envelope: concurrent.terminal, rendered: canonicalJson(concurrent.terminal) });
+      if (concurrent?.pendingTerminal?.data.failureCode === "budget_exhausted") return this.commitPreparedTerminal(concurrent, concurrent.pendingTerminal);
+      return Object.freeze({ ok: false, issues: Object.freeze([String(error instanceof Error ? error.message : error)]) });
+    }
+    const prepared = this.restore().latestRun?.pendingTerminal;
+    if (!prepared || prepared.operationId !== operationId) return Object.freeze({ ok: false, issues: Object.freeze(["Budget failure preparation could not be restored"]) });
+    return this.commitPreparedTerminal(restored, prepared);
   }
 
   async finish(rawRequest: unknown, context: FinishCallContext): Promise<FinishResult> {
