@@ -5,8 +5,34 @@ import type { JsonValue } from "../config/types";
 export const WORKFLOW_EVENT_FORMAT_VERSION = 1 as const;
 export const WORKFLOW_EVENT_LIMITS = Object.freeze({ payloadBytes: 262_144, eventBytes: 524_288, idBytes: 256, diagnosticsBytes: 4_096 });
 export type WorkflowEventProducer = "runtime" | "dashboard" | "recovery" | "harness";
-export type WorkflowEventType = "session.created" | "session.linked" | "session.selected" | "session.orphaned" | "control.requested" | "run.transition" | "task.transition" | "question.transition" | "approval.recorded" | "artifact.recorded" | "handoff.recorded" | "knowledge.transition" | "terminal.recorded";
-const EVENT_TYPES = new Set<WorkflowEventType>(["session.created", "session.linked", "session.selected", "session.orphaned", "control.requested", "run.transition", "task.transition", "question.transition", "approval.recorded", "artifact.recorded", "handoff.recorded", "knowledge.transition", "terminal.recorded"]);
+export type WorkflowEventType =
+  | "session.created"
+  | "session.linked"
+  | "session.selected"
+  | "session.orphaned"
+  | "control.requested"
+  | "run.started"
+  | "run.input.recorded"
+  | "run.input.delivery.prepared"
+  | "run.input.delivered"
+  | "run.transition"
+  | "run.cancel.requested"
+  | "run.cancel.settlement.failed"
+  | "run.pause.release.confirmed"
+  | "run.terminal.prepared"
+  | "task.transition"
+  | "question.transition"
+  | "approval.recorded"
+  | "artifact.recorded"
+  | "handoff.recorded"
+  | "knowledge.transition"
+  | "terminal.recorded";
+const EVENT_TYPES = new Set<WorkflowEventType>([
+  "session.created", "session.linked", "session.selected", "session.orphaned", "control.requested",
+  "run.started", "run.input.recorded", "run.input.delivery.prepared", "run.input.delivered",
+  "run.transition", "run.cancel.requested", "run.cancel.settlement.failed", "run.pause.release.confirmed", "run.terminal.prepared", "task.transition", "question.transition", "approval.recorded",
+  "artifact.recorded", "handoff.recorded", "knowledge.transition", "terminal.recorded",
+]);
 const PRODUCERS = new Set<WorkflowEventProducer>(["runtime", "dashboard", "recovery", "harness"]);
 export interface WorkflowEventDraft { readonly eventId: string; readonly projectId: string; readonly sessionId: string; readonly runId?: string; readonly type: WorkflowEventType; readonly payload: JsonValue; readonly timestamp: string; readonly producer: WorkflowEventProducer; readonly correlationId?: string; readonly attemptId?: string }
 export interface WorkflowEventEnvelope extends WorkflowEventDraft { readonly formatVersion: 1; readonly sequence: number; readonly previousHash: string | null; readonly payloadHash: string; readonly eventHash: string }
