@@ -3,6 +3,30 @@ import { test } from "node:test";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createPiSessionNavigationAdapter, WORKFLOW_SESSION_MARKER_TYPE } from "../../src/integration/session-links.ts";
 
+test("Pi navigation adapter compensates a created replacement back to its restore session", async () => {
+  const switched: string[] = [];
+  let cancelRestore = false;
+  const context = {
+    async newSession(options: { setup?: (manager: unknown) => Promise<void>; withSession?: (ctx: unknown) => Promise<void> }) {
+      await options.setup?.({ appendSessionInfo() {}, appendCustomEntry() {} });
+      await options.withSession?.({ sessionManager: { getSessionId: () => "replacement", getSessionFile: () => "/pi/replacement.jsonl" } });
+      return { cancelled: false };
+    },
+    async switchSession(path: string, options: { withSession?: (ctx: unknown) => Promise<void> }) {
+      switched.push(path);
+      await options.withSession?.({});
+      return { cancelled: cancelRestore };
+    },
+  } as unknown as ExtensionCommandContext;
+  const adapter = createPiSessionNavigationAdapter(context);
+  const created = await adapter.create({ parentSession: "/pi/normal", restoreSession: "/pi/current.jsonl", name: "hive:build:aaaaaaaa", workflowId: "build", activationHash: "a".repeat(64) });
+  assert.equal(typeof created.compensate, "function");
+  await created.compensate?.();
+  assert.deepEqual(switched, ["/pi/current.jsonl"]);
+  cancelRestore = true;
+  await assert.rejects(async () => { await created.compensate!(); }, /restoration was cancelled/i);
+});
+
 test("Pi navigation adapter initializes markers and uses only replacement context", async () => {
   const setupCalls: unknown[] = [];
   const freshManager = { getSessionId: () => "fresh-id", getSessionFile: () => "/pi/fresh.jsonl" };

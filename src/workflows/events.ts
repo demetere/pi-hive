@@ -10,6 +10,9 @@ export type WorkflowEventType =
   | "session.linked"
   | "session.selected"
   | "session.orphaned"
+  | "session.recovery.blocked"
+  | "session.recovery.prepared"
+  | "session.recovered"
   | "control.requested"
   | "run.started"
   | "run.input.recorded"
@@ -55,7 +58,7 @@ export type WorkflowEventType =
   | "knowledge.transition"
   | "terminal.recorded";
 const EVENT_TYPES = new Set<WorkflowEventType>([
-  "session.created", "session.linked", "session.selected", "session.orphaned", "control.requested",
+  "session.created", "session.linked", "session.selected", "session.orphaned", "session.recovery.blocked", "session.recovery.prepared", "session.recovered", "control.requested",
   "run.started", "run.input.recorded", "run.input.delivery.prepared", "run.input.delivered",
   "run.transition", "run.cancel.requested", "run.cancel.settlement.failed", "run.pause.release.confirmed", "run.terminal.prepared",
   "task.accepted", "task.started", "task.suspended", "task.interrupted", "task.result.recorded",

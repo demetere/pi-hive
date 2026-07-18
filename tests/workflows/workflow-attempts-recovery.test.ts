@@ -134,6 +134,8 @@ test("hash recovery proves applied/not-applied and otherwise remains unknown", (
   assert.deepEqual(reconcileExpectedHashes({ expectedAfterHash: "after", currentHash: "after", appliedResult: { custom: true } }), {
     state: "applied", result: { ok: true, value: { custom: true } },
   });
+  assert.equal(reconcileExpectedHashes({ currentHash: "untracked" }).state, "unknown");
+  assert.equal(reconcileExpectedHashes({}).state, "not-applied");
 });
 
 test("recovery with no pending effects is a no-op and never pauses", async () => {

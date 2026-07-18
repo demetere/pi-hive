@@ -6,6 +6,7 @@ import { createWorkflowEvent, type WorkflowEventEnvelope, type WorkflowEventType
 import { appendWorkflowEventChecked, readWorkflowJournal, workflowJournalIdentity, type JournalFaultStage } from "./journal";
 import { heartbeatCurrentRuntimeOwnership } from "./ownership";
 import { replayWorkflowJournal } from "./replay";
+import { restoreHandoffState } from "./handoff";
 
 export const RUN_LIFECYCLE_FORMAT_VERSION = 1 as const;
 export const CANCELLATION_TIMING = Object.freeze({ settleGraceMs: 2_000, killSettleMs: 1_000, coordinatorStepMs: 2_000 });
@@ -92,6 +93,8 @@ export interface WorkflowRunRecord {
   readonly runId: string;
   readonly status: RunStatus;
   readonly startedAt: string;
+  /** Content-addressed, authority-free context consumed atomically by run.started. */
+  readonly handoffPacketHash?: string;
   readonly inputs: readonly RunInputRecord[];
   readonly deliveredThrough: number;
   readonly pendingDelivery?: PendingInputDelivery;
@@ -302,10 +305,13 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     if (state.latestRun && isOpenRunStatus(state.latestRun.status)) throw new Error("Workflow session already has an open run");
     const input = parseInput(payload.input, "initial");
     if (input.sequence !== 1 || state.inputAssignments?.[input.inputId]) throw new Error("Run initial input is invalid or duplicated");
+    const handoffPacketHash = payload.handoffPacketHash;
+    if (handoffPacketHash !== undefined && (typeof handoffPacketHash !== "string" || !/^[0-9a-f]{64}$/u.test(handoffPacketHash))) throw new Error("Run handoff packet hash is invalid");
     const run: WorkflowRunRecord = {
       runId: event.runId,
       status: "running",
       startedAt: event.timestamp,
+      ...(handoffPacketHash === undefined ? {} : { handoffPacketHash }),
       inputs: [input],
       deliveredThrough: 0,
       cancellationRequested: false,
@@ -698,7 +704,8 @@ export class WorkflowRunLifecycle {
 
   recordUserInput(input: RecordRunInput): RecordRunInputResult {
     validateInput(input);
-    const state = this.restore();
+    const eventsAtInput = readWorkflowJournal(this.options.projectRoot, this.options.sessionId);
+    const state = replayWorkflowJournal(eventsAtInput, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state;
     const assigned = state.inputAssignments?.[input.inputId];
     if (assigned) return duplicateInputResult(input, assigned);
     const now = this.options.now?.() ?? new Date().toISOString();
@@ -706,19 +713,22 @@ export class WorkflowRunLifecycle {
     if (!current || !isOpenRunStatus(current.status)) {
       const runId = this.options.createRunId?.() ?? `run-${randomUUID()}`;
       const record = freezeInput({ ...input, sequence: 1, kind: "initial", receivedAt: now });
+      const stagedHandoff = restoreHandoffState(eventsAtInput).staged;
       try {
         appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
           projectId: this.options.projectId,
           sessionId: this.options.sessionId,
           runId,
           type: "run.started",
-          payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, input: record }),
+          payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, input: record, ...(stagedHandoff ? { handoffPacketHash: stagedHandoff.packetHash } : {}) }),
           producer: "runtime",
           timestamp: now,
         }), (existing) => {
           const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state;
           if (locked.inputAssignments?.[input.inputId]) throw new Error("Run input callback was recorded concurrently");
           if (locked.latestRun && isOpenRunStatus(locked.latestRun.status)) throw new Error("Workflow session already has an open run");
+          const lockedHandoff = restoreHandoffState(existing).staged;
+          if (lockedHandoff?.packetHash !== stagedHandoff?.packetHash) throw new Error("Staged handoff changed before atomic run creation");
         });
       } catch (error) {
         const concurrent = this.restore().inputAssignments?.[input.inputId];
