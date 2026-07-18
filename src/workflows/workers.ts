@@ -26,9 +26,14 @@ import {
   type WorkerResultInput,
 } from "./delegation";
 import type { RouteDirectMembersInput, RouteRecommendation } from "./routing";
-import { NO_DLP_PROSE_LIMITATION } from "./references";
 import type { MutationAccountingRecorder } from "./change-accounting";
 import { deepFreeze, utf8Prefix } from "./values";
+import {
+  assembleWorkerWorkflowPrompt,
+  assertCompactionPreservation,
+  buildCompactionPreservationBlock,
+  type DynamicPromptInput,
+} from "./prompts";
 
 export interface WorkerSessionFactoryInput {
   readonly sessionId: string; readonly runId: string; readonly nodeId: string; readonly agentId: string;
@@ -50,6 +55,10 @@ export interface WorkerPromptContext {
   readonly adapterContract: Readonly<Record<string, unknown>>;
   readonly effectivePolicy: Readonly<Record<string, unknown>>;
   readonly taskContract: WorkerPromptTaskContract;
+  readonly assembledPrompt: string;
+  readonly operatingContractHash: string;
+  readonly compactionPreservation: string;
+  validateCompactionPreservation(value: string): void;
 }
 export interface WorkerDelegationServices {
   route(input: RouteDirectMembersInput): readonly RouteRecommendation[];
@@ -58,6 +67,8 @@ export interface WorkerDelegationServices {
   preparedResultDelivery(): ResultDeliveryBatch | undefined;
   prepareResultDelivery(deliveryId: string, options?: { limit?: number }): ResultDeliveryBatch;
   acceptResultDelivery(deliveryId: string): void;
+  deliverResults(deliveryId: string, options?: { limit?: number }): ResultDeliveryBatch;
+  runWithToolRuntime<T>(callback: () => T): T;
 }
 export interface WorkerDirectMutationAccounting {
   readonly schemaVersion: 1; readonly attemptId: string; readonly recorder: MutationAccountingRecorder;
@@ -79,13 +90,16 @@ export interface WorkerPromptInvocation {
   readonly promptContext: WorkerPromptContext;
   readonly delegation?: WorkerDelegationServices;
   readonly dispatch?: WorkerTrustedDispatch;
+  readonly runWithToolRuntime?: <T>(callback: () => T) => T;
 }
 export interface WorkerProviderUsage {
   readonly inputTokens: number; readonly outputTokens: number; readonly precision: "estimated" | "provider-confirmed";
 }
-export interface WorkerPromptResponse { readonly output: string; readonly usage?: WorkerProviderUsage }
+export interface WorkerPromptResponse { readonly output: string; readonly usage?: WorkerProviderUsage; readonly compactionSummary?: string }
+export interface WorkerCompactionBoundary { readonly preservation: string; validate(value: string): void }
 export interface WorkerSessionHandle {
   readonly linkedSessionId: string;
+  installCompactionBoundary?(boundary: WorkerCompactionBoundary): void;
   prompt(text: string, signal?: AbortSignal, invocation?: WorkerPromptInvocation): string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
   abort?(): void | Promise<void>; dispose(): void | Promise<void>;
 }
@@ -183,31 +197,6 @@ function writeBoundary(base: string, task: PersistedDelegationTask, kind: "start
   }
 }
 
-function renderTask(task: PersistedDelegationTask, deliveredResults: WorkerPromptTaskContract["deliveredResults"]): string {
-  const references = task.contextRefs.map((entry) => entry.authorization === "authorized"
-    ? { ref: entry.ref, authorization: entry.authorization, ...(entry.resolved === undefined ? {} : { resolved: entry.resolved }) }
-    : { ref: entry.ref, authorization: entry.authorization, diagnostic: entry.diagnostic });
-  return [
-    "## Delegation task boundary",
-    `task_id: ${task.taskId}`,
-    `run_id: ${task.runId}`,
-    `node_id: ${task.targetNodeId}`,
-    "",
-    "### Objective",
-    task.objective,
-    "",
-    "### Authorized structured context",
-    canonicalJson(references),
-    "",
-    "### Deliverables",
-    ...task.deliverables.map((deliverable) => `- ${deliverable}`),
-    ...(deliveredResults.length ? ["", "### Durably delivered child results", canonicalJson(deliveredResults)] : []),
-    "",
-    `Safety limitation: ${NO_DLP_PROSE_LIMITATION}`,
-    "Return a concise bounded result. Do not attempt to finish or close the workflow run.",
-  ].join("\n");
-}
-
 function snapshotExecutionConfig(snapshot: ActivationSnapshotFileV1, nodeId: string): WorkerExecutionConfig {
   const team = snapshot.payload.workflow.team as { nodes?: unknown } | undefined;
   const nodes = Array.isArray(team?.nodes) ? team.nodes : [];
@@ -241,6 +230,7 @@ export function deriveWorkerPromptContext(
   snapshot: ActivationSnapshotFileV1,
   task: PersistedDelegationTask,
   deliveredResults: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[] = [],
+  sessionId = task.runId,
 ): WorkerPromptContext {
   const workflow = snapshot.payload.workflow;
   const team = plainRecord(workflow.team) ? workflow.team : undefined;
@@ -280,6 +270,30 @@ export function deriveWorkerPromptContext(
     createdAt: task.createdAt,
     deliveredResults: structuredClone(deliveredResults),
   });
+  const promptRefs: DynamicPromptInput[] = task.contextRefs.map((entry) => {
+    const source = entry.ref.kind === "artifact" || entry.ref.kind === "knowledge" || entry.ref.kind === "repository"
+      ? entry.ref.kind
+      : "external";
+    return {
+      source,
+      provenance: `${entry.ref.kind}:${entry.ref.id}`,
+      content: entry.authorization === "authorized" ? (entry.resolved ?? { ref: entry.ref, authorization: "authorized" }) : { ref: entry.ref, authorization: "denied", diagnostic: entry.diagnostic },
+      ref: `${entry.ref.kind}:${entry.ref.id}`,
+    };
+  });
+  for (const delivered of deliveredResults) promptRefs.push({
+    source: "tool-output",
+    provenance: `worker-result:${delivered.taskId}@${delivered.result.recordedSequence}`,
+    content: delivered.result,
+    ref: `run:${task.runId}/task:${delivered.taskId}/result`,
+  });
+  const assembled = assembleWorkerWorkflowPrompt({
+    snapshot,
+    nodeId: task.targetNodeId,
+    sessionId,
+    runId: task.runId,
+    task: { taskId: task.taskId, parentNodeId: task.parentNodeId, objective: task.objective, deliverables: task.deliverables, refs: promptRefs },
+  });
   return deepFreeze({
     snapshotHash: snapshot.snapshotHash,
     workflowId: typeof workflow.id === "string" ? workflow.id : "",
@@ -295,6 +309,10 @@ export function deriveWorkerPromptContext(
     adapterContract: frozenRecord(adapter),
     effectivePolicy: frozenRecord(authority.capabilities),
     taskContract,
+    assembledPrompt: assembled.text,
+    operatingContractHash: assembled.contractHash,
+    compactionPreservation: buildCompactionPreservationBlock(assembled),
+    validateCompactionPreservation: (value: string) => assertCompactionPreservation(value, assembled),
   });
 }
 
@@ -379,24 +397,39 @@ export class WorkerSessionPool {
       preparedResultDelivery: () => services.preparedResultDelivery(),
       prepareResultDelivery: (deliveryId: string, options: { limit?: number } = {}) => services.prepareResultDelivery(deliveryId, options),
       acceptResultDelivery: (deliveryId: string) => services.acceptResultDelivery(deliveryId),
+      deliverResults: (deliveryId: string, options: { limit?: number } = {}) => services.deliverResults(deliveryId, options),
+      runWithToolRuntime: <T>(callback: () => T): T => services.runWithToolRuntime(callback),
     }) satisfies WorkerDelegationServices : undefined;
-    const promptContext = deriveWorkerPromptContext(this.options.snapshot, task, deliveredResults);
+    const promptContext = deriveWorkerPromptContext(this.options.snapshot, task, deliveredResults, this.options.sessionId);
     const dispatch: WorkerTrustedDispatch | undefined = this.options.dispatchTool ? Object.freeze({
       schemaVersion: 1 as const,
       tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => this.options.dispatchTool!(task, input),
     }) : undefined;
-    const invocation: WorkerPromptInvocation = Object.freeze({ schemaVersion: 1 as const, promptContext, ...(delegation ? { delegation } : {}), ...(dispatch ? { dispatch } : {}) });
+    const invocation: WorkerPromptInvocation = Object.freeze({
+      schemaVersion: 1 as const,
+      promptContext,
+      ...(delegation ? { delegation, runWithToolRuntime: delegation.runWithToolRuntime } : {}),
+      ...(dispatch ? { dispatch } : {}),
+    });
     const execution = (async (): Promise<WorkerExecutionResult> => {
       try {
         const pooled = await this.get(task);
         if (signal?.aborted) throw new Error("Worker task cancelled before model execution");
-        const text = renderTask(task, deliveredResults);
+        const text = promptContext.assembledPrompt;
+        pooled.session.installCompactionBoundary?.(Object.freeze({
+          preservation: promptContext.compactionPreservation,
+          validate: promptContext.validateCompactionPreservation,
+        }));
         const response = await (this.options.dispatchModel
           ? this.options.dispatchModel({ task, text, signal, invocation, invoke: () => pooled.session.prompt(text, signal, invocation) })
           : pooled.session.prompt(text, signal, invocation));
         let output: string;
         if (plainRecord(response)) {
           if (typeof response.output !== "string") throw new Error("Worker prompt response output is invalid");
+          if (response.compactionSummary !== undefined) {
+            if (typeof response.compactionSummary !== "string") throw new Error("Worker compaction summary is invalid");
+            promptContext.validateCompactionPreservation(response.compactionSummary);
+          }
           output = response.output;
           if (response.usage !== undefined && (!plainRecord(response.usage) || !Number.isSafeInteger(response.usage.inputTokens) || Number(response.usage.inputTokens) < 0
             || !Number.isSafeInteger(response.usage.outputTokens) || Number(response.usage.outputTokens) < 0

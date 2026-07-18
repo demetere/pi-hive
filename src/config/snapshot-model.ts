@@ -14,7 +14,7 @@ export interface SnapshotModelAdapter {
   canActivate(modelId: string): boolean;
   estimateTokens(text: string): number;
 }
-export interface SnapshotNodeModelInput { nodeId: string; model?: string; thinking?: string; staticText: string }
+export interface SnapshotNodeModelInput { nodeId: string; model?: string; thinking?: string; staticText: string; dynamicTokenReserve?: number }
 export interface SnapshotNodeModelValidation { nodeId: string; modelId: string; thinking: string; staticTokens: number; dynamicReserve: number; contextWindow: number }
 export type SnapshotModelValidationResult = { ok: true; nodes: SnapshotNodeModelValidation[]; codes: [] } | { ok: false; nodes: SnapshotNodeModelValidation[]; codes: SnapshotModelDiagnosticCode[] };
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
@@ -32,8 +32,9 @@ export function validateSnapshotModels(inputs: readonly SnapshotNodeModelInput[]
     if (typeof thinking !== "string" || !thinking) { codes.push("SNAPSHOT_THINKING_UNSUPPORTED"); continue; }
     if (!model.thinking.includes(thinking)) { codes.push("SNAPSHOT_THINKING_UNSUPPORTED"); continue; }
     const staticTokens = adapter.estimateTokens(input.staticText) + SNAPSHOT_CONTEXT_POLICY.harnessReserve;
-    if (!Number.isSafeInteger(staticTokens) || staticTokens < 0) { codes.push("SNAPSHOT_CONTEXT_INVALID"); continue; }
-    const dynamicReserve = Math.max(SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve, model.maxTokens ?? 0, Math.ceil(model.contextWindow * SNAPSHOT_CONTEXT_POLICY.contextFraction));
+    const dynamicPromptTokens = input.dynamicTokenReserve ?? 0;
+    if (!Number.isSafeInteger(staticTokens) || staticTokens < 0 || !Number.isSafeInteger(dynamicPromptTokens) || dynamicPromptTokens < 0) { codes.push("SNAPSHOT_CONTEXT_INVALID"); continue; }
+    const dynamicReserve = Math.max(dynamicPromptTokens, SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve, model.maxTokens ?? 0, Math.ceil(model.contextWindow * SNAPSHOT_CONTEXT_POLICY.contextFraction));
     if (staticTokens + dynamicReserve > model.contextWindow) { codes.push("SNAPSHOT_CONTEXT_INSUFFICIENT"); continue; }
     nodes.push({ nodeId: input.nodeId, modelId, thinking, staticTokens, dynamicReserve, contextWindow: model.contextWindow });
   }

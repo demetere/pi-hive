@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
 import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
@@ -104,7 +104,8 @@ export interface DelegationExecutionContext {
 }
 export interface DelegationStatusItem {
   readonly taskId: string; readonly parentNodeId: string; readonly targetNodeId: string;
-  readonly objectivePreview: string; readonly creationSequence: number; readonly queueState: DelegationQueueState;
+  readonly objectivePreview: string; readonly objectiveHash: string; readonly objectiveTruncated: boolean; readonly readRef: string;
+  readonly creationSequence: number; readonly queueState: DelegationQueueState;
   readonly attempts: number; readonly terminalStatus?: WorkerTerminalStatus; readonly resultAccepted: boolean;
 }
 export interface DelegationStatusPage {
@@ -657,6 +658,18 @@ export class DelegationRuntime {
     return this.preparedForRecipient(this.assertContext(context).nodeId);
   }
 
+  private deliveryBatch(deliveryId: string, recipientNodeId: string): ResultDeliveryBatch | undefined {
+    const state = this.restore();
+    const delivery = state.deliveries[deliveryId];
+    if (!delivery || delivery.recipientNodeId !== recipientNodeId) return undefined;
+    const items = delivery.taskIds.map((taskId) => {
+      const result = state.tasks[taskId]?.result;
+      if (!result) throw new Error("Result delivery references a missing durable result");
+      return Object.freeze({ taskId, result });
+    });
+    return deepFreeze({ deliveryId, recipientNodeId, items });
+  }
+
   private prepareForRecipient(recipientNodeId: string, deliveryId: string, options: { limit?: number } = {}): ResultDeliveryBatch {
     const existing = this.preparedForRecipient(recipientNodeId);
     if (existing) {
@@ -693,6 +706,22 @@ export class DelegationRuntime {
     this.acceptForRecipient(this.assertContext(context).nodeId, deliveryId);
   }
 
+  /** Public tool bridge: idempotently prepare, read, and durably accept one authorized result page. */
+  deliverResultDelivery(context: DelegationExecutionContext, deliveryId: string, options: { limit?: number } = {}): ResultDeliveryBatch {
+    const recipientNodeId = this.assertContext(context).nodeId;
+    const id = boundedId(deliveryId, "Result delivery ID");
+    const prior = this.restore().deliveries[id];
+    if (prior) {
+      if (prior.recipientNodeId !== recipientNodeId) throw new Error("Result delivery belongs to another recipient");
+      const batch = this.deliveryBatch(id, recipientNodeId)!;
+      if (prior.acceptedSequence === undefined) this.acceptForRecipient(recipientNodeId, id);
+      return batch;
+    }
+    const batch = this.prepareForRecipient(recipientNodeId, id, options);
+    this.acceptForRecipient(recipientNodeId, id);
+    return batch;
+  }
+
   prepareResultDeliveryForSuspendedTask(taskId: string, deliveryId: string, options: { limit?: number } = {}): ResultDeliveryBatch {
     const task = this.restore().tasks[boundedId(taskId, "Suspended parent task ID")];
     if (!task || task.queueState !== "suspended" || !task.attempts.at(-1)?.attemptId) throw new Error("Result delivery bridge requires the current suspended parent task");
@@ -726,17 +755,23 @@ export class DelegationRuntime {
       if (task.result) summary[task.result.status]++;
     }
     const page = visible.filter((task) => task.creationSequence > after).slice(0, limit);
-    const items = page.map((task): DelegationStatusItem => Object.freeze({
+    const items = page.map((task): DelegationStatusItem => {
+      const objectivePreview = utf8Prefix(task.objective, LIMITS.statusObjectivePreviewBytes);
+      return Object.freeze({
       taskId: task.taskId,
       parentNodeId: task.parentNodeId,
       targetNodeId: task.targetNodeId,
-      objectivePreview: utf8Prefix(task.objective, LIMITS.statusObjectivePreviewBytes),
+      objectivePreview,
+      objectiveHash: createHash("sha256").update("pi-hive-delegation-objective-v1\0").update(task.objective, "utf8").digest("hex"),
+      objectiveTruncated: objectivePreview !== task.objective,
+      readRef: `run:${state.runId}/task:${task.taskId}`,
       creationSequence: task.creationSequence,
       queueState: task.queueState,
       attempts: task.attempts.length,
       ...(task.result ? { terminalStatus: task.result.status } : {}),
       resultAccepted: task.resultAcceptedSequence !== undefined,
-    }));
+    });
+    });
     const hasMore = visible.some((task) => task.creationSequence > (page.at(-1)?.creationSequence ?? after));
     return deepFreeze({ summary, items, ...(hasMore && page.length ? { nextCursor: String(page.at(-1)!.creationSequence) } : {}) });
   }

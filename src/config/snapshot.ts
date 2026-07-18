@@ -10,6 +10,7 @@ import { canonicalCatalogText } from "./catalog-hash";
 import { canonicalJson, hashActivationPayload } from "./snapshot-canonical";
 import { SNAPSHOT_CONTEXT_POLICY, validateSnapshotModels, type SnapshotModelAdapter, type SnapshotNodeModelValidation } from "./snapshot-model";
 import { CAPABILITY_CONTRACT_VERSION, SCHEMA_VERSION } from "./versions";
+import { buildDynamicPromptReserveForActivation, buildStaticPromptForActivation } from "../workflows/prompts";
 
 export const SNAPSHOT_FORMAT_VERSION = 1 as const;
 export const SNAPSHOT_PACKAGE_CONTRACT_VERSION = "pi-hive-package-contract-v1" as const;
@@ -124,9 +125,43 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
   });
   const staticByNode = workflow.team.nodes.map((node) => {
     const agent = agentById.get(node.agentId); if (!agent) throw new Error(`Snapshot agent ${node.agentId} is unavailable.`);
-    const skillText = node.skills.resolved.map((id) => { const skill = skillById.get(id); if (!skill || skill.status !== "available") throw new Error(`Snapshot skill ${id} is unavailable.`); return skill.files.map((file) => file.content).join("\n"); }).join("\n");
+    const nodeSkills = node.skills.resolved.map((id) => {
+      const skill = skillById.get(id);
+      if (!skill || skill.status !== "available") throw new Error(`Snapshot skill ${id} is unavailable.`);
+      return { id, treeHash: skill.treeHash, files: skill.files.map((file) => ({ ...file })) } as Readonly<Record<string, unknown>>;
+    });
     const nodeAuthority = authority.nodes.find((item) => item.nodeId === node.id)!;
-    return { nodeId: node.id, model: nodeAuthority.model, thinking: nodeAuthority.thinking, staticText: [agent.prompt, workflow.instructions.shared ?? "", node.id === workflow.team.rootId ? workflow.instructions.root : "", node.role ?? "", ...node.responsibilities, skillText, canonicalJson({ artifact: workflow.artifact, budgets: node.budgets, capabilities: nodeAuthority.capabilities, tools: nodeAuthority.tools })].join("\n") };
+    const adapterContract = {
+      adapter: workflow.artifact.adapter,
+      profile: workflow.artifact.profile,
+      binding: workflow.artifact.binding,
+      options: workflow.artifact.options ?? {},
+      contractVersion: workflow.artifact.contractVersion,
+      checkpoints: [...workflow.artifact.contract.checkpoints],
+      approvals: workflow.approvals,
+    };
+    const staticText = buildStaticPromptForActivation({
+      kind: node.id === workflow.team.rootId ? "root" : "worker",
+      workflowId: workflow.id,
+      nodeId: node.id,
+      identity: agent.prompt,
+      sharedInstructions: workflow.instructions.shared ?? "",
+      ...(node.id === workflow.team.rootId ? { rootInstructions: workflow.instructions.root } : {}),
+      node: {
+        id: node.id,
+        agentId: node.agentId,
+        memberIds: [...node.memberIds],
+        ...(node.role ? { role: node.role } : {}),
+        responsibilities: [...node.responsibilities],
+        ...(node.consultWhen ? { consultWhen: node.consultWhen } : {}),
+        skills: node.skills,
+        knowledge: node.knowledge,
+      },
+      authority: { nodeId: nodeAuthority.nodeId, capabilities: nodeAuthority.capabilities, tools: nodeAuthority.tools },
+      adapterContract,
+      skills: nodeSkills,
+    });
+    return { nodeId: node.id, model: nodeAuthority.model, thinking: nodeAuthority.thinking, staticText, dynamicTokenReserve: buildDynamicPromptReserveForActivation() };
   });
   const modelResult = validateSnapshotModels(staticByNode, input.models);
   if (!modelResult.ok) throw new Error(`Snapshot model preflight failed: ${modelResult.codes.join(",")}`);

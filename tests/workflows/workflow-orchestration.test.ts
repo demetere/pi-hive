@@ -72,6 +72,22 @@ function deliverInitial(service: RunOrchestrationService, inputId: string) {
   return recorded.runId;
 }
 
+test("root model and pause/resume boundaries preserve exact immutable compaction markers", async () => {
+  const { service } = fixture();
+  deliverInitial(service, "first");
+  const root = service.rootServices();
+  let preservation = "";
+  const response = await root.dispatch.model({
+    correlationId: "root-compaction-valid", operation: "root.prompt", input: {},
+    installCompactionBoundary(boundary) { preservation = boundary.preservation; },
+    dispatch: () => ({ output: "ok", compactionSummary: preservation }),
+  });
+  assert.equal(typeof response === "string" ? response : response.output, "ok");
+  assert.match(preservation, /run_id=run-1/);
+  assert.equal(await service.pause("switch"), true);
+  assert.equal(await service.resume(), true);
+});
+
 test("run orchestration integrates descendants, route/delegate, durable delivery, and sequential runs", async () => {
   const { service } = fixture();
   assert.equal((await service.lifecycle.failBudgetExhaustion("no run")).ok, false);
