@@ -1,0 +1,274 @@
+// Bun-only test for the dashboard plan endpoints' data layer, now OpenSpec-backed
+// (server/plan-routes.ts + server/plan-bridge.ts + bun:sqlite).
+// Run: bun test ./tests/observability/plan-server.spec.ts
+import { expect, test, beforeAll } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const PROJECT = mkdtempSync(join(tmpdir(), "pi-hive-plansrv-"));
+// server/config.ts reads these at import; point them at throwaway locations.
+process.env.HIVE_PROJECT_CWD = PROJECT;
+process.env.HIVE_TELEMETRY_DB = join(mkdtempSync(join(tmpdir(), "pi-hive-plansrv-db-")), "telemetry.db");
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-hive-plansrv-agent-"));
+
+// Resolve the OpenSpec binary the same way src/engine/openspec.ts does; skip the
+// CLI-dependent assertions when it is absent.
+const OSX_BIN = join(process.cwd(), "node_modules", ".bin", "openspec");
+const OSX = existsSync(OSX_BIN);
+const OSX_CALL_LOG = join(PROJECT, "openspec-calls.log");
+if (OSX) {
+  const wrapper = join(PROJECT, "openspec-test-wrapper.sh");
+  writeFileSync(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${OSX_CALL_LOG}"\ncase "$*" in *slow-command*) exec sleep 10 ;; esac\nexec "${OSX_BIN}" "$@"\n`);
+  chmodSync(wrapper, 0o755);
+  process.env.HIVE_OPENSPEC_BIN = wrapper;
+}
+function osx(args: string[]) {
+  execFileSync(OSX_BIN, args, { cwd: PROJECT, stdio: "ignore", env: { ...process.env, OPENSPEC_TELEMETRY: "0", DO_NOT_TRACK: "1" } });
+}
+
+let routes: typeof import("../../src/observability/server/plan-routes");
+let bridge: typeof import("../../src/observability/server/plan-bridge");
+let review: typeof import("../../src/observability/server/review-wiring");
+let db: typeof import("../../src/observability/server/db");
+let openspec: typeof import("../../src/engine/openspec");
+
+beforeAll(async () => {
+  if (OSX) {
+    osx(["init", "--tools", "pi"]);
+    osx(["new", "change", "add-auth"]);
+    const dir = join(PROJECT, "openspec", "changes", "add-auth");
+    writeFileSync(join(dir, "proposal.md"), "# Add auth\n\nWe need login.\n");
+    writeFileSync(join(dir, "tasks.md"), "# Tasks\n\n- [x] one\n- [ ] two\n");
+  } else {
+    // Minimal on-disk change so the non-CLI path guards still exercise.
+    mkdirSync(join(PROJECT, "openspec", "changes", "add-auth"), { recursive: true });
+    writeFileSync(join(PROJECT, "openspec", "changes", "add-auth", "proposal.md"), "# Add auth\n\nWe need login.\n");
+  }
+  routes = await import("../../src/observability/server/plan-routes");
+  bridge = await import("../../src/observability/server/plan-bridge");
+  review = await import("../../src/observability/server/review-wiring");
+  db = await import("../../src/observability/server/db");
+  openspec = await import("../../src/engine/openspec");
+  if (OSX) writeFileSync(OSX_CALL_LOG, "");
+});
+
+test.if(OSX)("listPlans returns OpenSpec change summaries", async () => {
+  const list = await routes.listPlans(PROJECT);
+  expect(list.length).toBe(1);
+  expect(list[0].changeId).toBe("add-auth");
+  expect(list[0].totalTasks).toBe(2);
+  expect(list[0].completedTasks).toBe(1);
+  expect(list[0].status).toBe("in-progress");
+});
+
+test.if(OSX)("planDetail includes artifact graph + validation + empty verdicts", async () => {
+  const detail = (await routes.planDetail(PROJECT, "add-auth"))!;
+  expect(detail).not.toBeNull();
+  expect(detail.artifacts.find((a) => a.id === "proposal")?.status).toBe("done");
+  expect(detail.files).toContain("proposal.md");
+  expect(detail.verdicts).toEqual([]);
+  expect(typeof detail.validation.passed).toBe("boolean");
+  expect(await routes.planDetail(PROJECT, "nope")).toBeNull();
+});
+
+test.if(OSX)("plan detail caches by artifact metadata and coalesces concurrent CLI work", async () => {
+  const changeId = "cache-coalesce";
+  osx(["new", "change", changeId]);
+  const dir = join(PROJECT, "openspec", "changes", changeId);
+  writeFileSync(join(dir, "proposal.md"), "# Cache coalesce\n\nFirst version.\n");
+  routes.clearPlanRouteCaches();
+  writeFileSync(OSX_CALL_LOG, "");
+  const commandCounts = () => {
+    const lines = readFileSync(OSX_CALL_LOG, "utf8").trim().split("\n").filter(Boolean);
+    return {
+      status: lines.filter((line) => line.includes(`status --json --change ${changeId}`)).length,
+      validate: lines.filter((line) => line.includes(`validate ${changeId} --json`)).length,
+    };
+  };
+
+  await Promise.all([routes.planDetail(PROJECT, changeId), routes.planDetail(PROJECT, changeId)]);
+  expect(commandCounts()).toEqual({ status: 1, validate: 1 });
+  await routes.planDetail(PROJECT, changeId);
+  expect(commandCounts()).toEqual({ status: 1, validate: 1 });
+
+  writeFileSync(join(dir, "proposal.md"), "# Cache coalesce\n\nSecond version with a different size.\n");
+  await routes.planDetail(PROJECT, changeId);
+  expect(commandCounts()).toEqual({ status: 2, validate: 2 });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test.if(OSX)("plan detail enforces subprocess timeout and request cancellation", async () => {
+  const changeId = "slow-command";
+  osx(["new", "change", changeId]);
+  const dir = join(PROJECT, "openspec", "changes", changeId);
+  writeFileSync(join(dir, "proposal.md"), "# Slow command\n");
+  routes.clearPlanRouteCaches();
+  process.env.HIVE_OPENSPEC_TIMEOUT_MS = "60";
+  try {
+    await expect(routes.planDetail(PROJECT, changeId)).rejects.toMatchObject({ code: "timeout" });
+  } finally { delete process.env.HIVE_OPENSPEC_TIMEOUT_MS; }
+
+  routes.clearPlanRouteCaches();
+  const controller = new AbortController();
+  const pending = routes.planDetail(PROJECT, changeId, { signal: controller.signal });
+  setTimeout(() => controller.abort(), 30);
+  await expect(pending).rejects.toMatchObject({ code: "cancelled" });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("planFile reads an artifact and guards against traversal", async () => {
+  expect(routes.planFile(PROJECT, "add-auth", "proposal.md")?.content).toContain("We need login.");
+  expect(routes.planFile(PROJECT, "add-auth", "../../../../etc/passwd")).toBeNull();
+  expect(routes.planFile(PROJECT, "../escape", "proposal.md")).toBeNull();
+  expect(await routes.planDetail(PROJECT, "../escape")).toBeNull();
+});
+
+test("resolveProjectCwd rejects an unknown cwd and echoes a known one", () => {
+  expect(bridge.resolveProjectCwd("/some/other/path")).toBeNull();
+  const fallback = bridge.resolveProjectCwd(null);
+  expect(typeof fallback).toBe("string");
+  expect(bridge.resolveProjectCwd(fallback)).toBe(fallback);
+});
+
+const REVIEW_ORIGIN = "http://127.0.0.1:43191";
+const REVIEW_HEADERS = { host: "127.0.0.1:43191", origin: REVIEW_ORIGIN };
+
+async function mintReview(changeId: string, activeProject: string) {
+  const rid = `${changeId}#proposal.md`;
+  const mint = new Request(`${REVIEW_ORIGIN}/review-sessions`, {
+    method: "POST",
+    headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}/` },
+    body: JSON.stringify({ rid, cwd: activeProject }),
+  });
+  const minted = await review.handlePlanReview(mint, new URL(mint.url));
+  expect(minted?.status).toBe(201);
+  return (await minted!.json() as { reviewUrl: string }).reviewUrl;
+}
+
+async function approveProposal(changeId: string, activeProject: string) {
+  const reviewUrl = await mintReview(changeId, activeProject);
+  const req = new Request(`${REVIEW_ORIGIN}/api/approve`, {
+    method: "POST",
+    headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}${reviewUrl}` },
+    body: JSON.stringify({ feedback: "looks good" }),
+  });
+  return review.handlePlanReview(req, new URL(req.url));
+}
+
+test("review denial persists authority and routes structured feedback", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "human-denial";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Human denial\n\nNeeds revision.\n");
+
+  try {
+    expect(review.planReviewAvailable()).toBe(true);
+    const reviewUrl = await mintReview(changeId, activeProject);
+    const req = new Request(`${REVIEW_ORIGIN}/api/deny`, {
+      method: "POST",
+      headers: { ...REVIEW_HEADERS, "content-type": "application/json", referer: `${REVIEW_ORIGIN}${reviewUrl}` },
+      body: JSON.stringify({ feedback: "Clarify the acceptance criteria.", annotations: [] }),
+    });
+    const response = await review.handlePlanReview(req, new URL(req.url));
+    expect(response?.status).toBe(200);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal")).toBe("red");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review approval ignores legacy SQLite-only agent verdicts", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "legacy-agent-green";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Legacy agent green\n\nReady.\n");
+  db.insertPlanVerdict({
+    id: "legacy-agent-green-verdict",
+    changeId,
+    reviewer: "Plan Reviewer",
+    verdict: "green",
+    summary: "ready for human review",
+    cwd: activeProject,
+    createdAt: new Date().toISOString(),
+  });
+
+  try {
+    const res = await approveProposal(changeId, activeProject);
+    expect(res?.status).toBe(409);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBeNull();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review approval accepts a current content-bound automated verdict", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "current-agent-green";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Current agent green\n\nReady.\n");
+  openspec.setAgentReviewVerdict(activeProject, changeId, "proposal", "green", "Plan Reviewer");
+
+  try {
+    const res = await approveProposal(changeId, activeProject);
+    expect(res?.status).toBe(200);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal")).toBe("green");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review approval does not borrow SQLite verdicts for another artifact", async () => {
+  const activeProject = bridge.resolveProjectCwd(null)!;
+  const changeId = "sidecar-mismatch";
+  const dir = join(activeProject, "openspec", "changes", changeId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proposal.md"), "# Sidecar mismatch\n\nReady.\n");
+  db.insertPlanVerdict({
+    id: "sidecar-mismatch-green-verdict",
+    changeId,
+    reviewer: "Plan Reviewer",
+    verdict: "green",
+    summary: "change-level green should not clear proposal when sidecar exists for tasks",
+    cwd: activeProject,
+    createdAt: new Date().toISOString(),
+  });
+
+  try {
+    const res = await approveProposal(changeId, activeProject);
+    expect(res?.status).toBe(409);
+    expect(openspec.artifactVerdict(activeProject, changeId, "proposal.md")).toBeNull();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test.if(OSX)("planDetail does not show review-now for artifacts missing authoritative verdicts", async () => {
+  const changeId = "sidecar-mismatch-detail";
+  osx(["new", "change", changeId]);
+  const dir = join(PROJECT, "openspec", "changes", changeId);
+  writeFileSync(join(dir, "proposal.md"), "# Sidecar mismatch detail\n\nReady.\n");
+  db.insertPlanVerdict({
+    id: "sidecar-mismatch-detail-green-verdict",
+    changeId,
+    reviewer: "Plan Reviewer",
+    verdict: "green",
+    summary: "legacy change-level green",
+    cwd: PROJECT,
+    createdAt: new Date().toISOString(),
+  });
+
+  try {
+    const detail = (await routes.planDetail(PROJECT, changeId))!;
+    const proposal = detail.artifactReview.find((a) => a.id === "proposal")!;
+    expect(proposal.authored).toBe(true);
+    expect(proposal.agentCleared).toBe(false);
+    expect(proposal.humanReviewReady).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
