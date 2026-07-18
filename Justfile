@@ -298,68 +298,68 @@ dashboard-dev:
 # Run the Node test suite.
 [group('quality')]
 test:
-  node --import tsx --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test tests/**/*.test.ts
 
 # Exercise Bun-independent utility and state modules on every supported Node.
 # Pi itself requires Node 22+, so the Node 20 lane intentionally excludes tests
 # that import the Pi runtime peer dependency.
 [group('quality')]
 test-node-compat:
-  node --import tsx --import ./tests/register-ts-loader.mjs --test \
-    tests/artifact-contracts.test.ts \
-    tests/capability-filesystem-glob.test.ts \
-    tests/capability-filesystem-policy.test.ts \
-    tests/capability-filesystem-race.test.ts \
-    tests/capability-command-policy.test.ts \
-    tests/capability-network-policy.test.ts \
-    tests/capability-process-ownership.test.ts \
-    tests/capability-resolution.test.ts \
-    tests/capability-tools.test.ts \
-    tests/config-budgets.test.ts \
-    tests/config-catalog-agents.test.ts \
-    tests/config-catalog-hash.test.ts \
-    tests/config-catalog-knowledge.test.ts \
-    tests/config-catalog-skills.test.ts \
-    tests/config-catalog.test.ts \
-    tests/config-diagnostics.test.ts \
-    tests/config-manifest.test.ts \
-    tests/config-registry-diagnostics.test.ts \
-    tests/config-schema-generated.test.ts \
-    tests/config-schema.test.ts \
-    tests/config-snapshot-builder.test.ts \
-    tests/config-snapshot-canonical.test.ts \
-    tests/config-snapshot-compat.test.ts \
-    tests/config-snapshot-model.test.ts \
-    tests/config-snapshot-store.test.ts \
-    tests/config-team.test.ts \
-    tests/config-workflows.test.ts \
-    tests/config-yaml.test.ts \
-    tests/dashboard-event-ring.test.ts \
-    tests/governance.test.ts \
-    tests/limits.test.ts \
-    tests/project-identity.test.ts \
-    tests/safe-path.test.ts \
-    tests/session-links.test.ts \
-    tests/workflow-checkpoint.test.ts \
-    tests/workflow-journal.test.ts \
-    tests/workflow-ownership.test.ts \
-    tests/workflow-navigation.test.ts \
-    tests/workflow-selector.test.ts \
-    tests/workflow-sessions.test.ts \
-    tests/yaml.test.ts
+  node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test \
+    tests/policy/artifact-contracts.test.ts \
+    tests/capabilities/capability-filesystem-glob.test.ts \
+    tests/capabilities/capability-filesystem-policy.test.ts \
+    tests/capabilities/capability-filesystem-race.test.ts \
+    tests/capabilities/capability-command-policy.test.ts \
+    tests/capabilities/capability-network-policy.test.ts \
+    tests/capabilities/capability-process-ownership.test.ts \
+    tests/capabilities/capability-resolution.test.ts \
+    tests/capabilities/capability-tools.test.ts \
+    tests/config/config-budgets.test.ts \
+    tests/config/config-catalog-agents.test.ts \
+    tests/config/config-catalog-hash.test.ts \
+    tests/config/config-catalog-knowledge.test.ts \
+    tests/config/config-catalog-skills.test.ts \
+    tests/config/config-catalog.test.ts \
+    tests/config/config-diagnostics.test.ts \
+    tests/config/config-manifest.test.ts \
+    tests/config/config-registry-diagnostics.test.ts \
+    tests/config/config-schema-generated.test.ts \
+    tests/config/config-schema.test.ts \
+    tests/config/config-snapshot-builder.test.ts \
+    tests/config/config-snapshot-canonical.test.ts \
+    tests/config/config-snapshot-compat.test.ts \
+    tests/config/config-snapshot-model.test.ts \
+    tests/config/config-snapshot-store.test.ts \
+    tests/config/config-team.test.ts \
+    tests/config/config-workflows.test.ts \
+    tests/config/config-yaml.test.ts \
+    tests/dashboard/dashboard-event-ring.test.ts \
+    tests/orchestration/governance.test.ts \
+    tests/core/limits.test.ts \
+    tests/core/project-identity.test.ts \
+    tests/core/safe-path.test.ts \
+    tests/workflows/session-links.test.ts \
+    tests/workflows/workflow-checkpoint.test.ts \
+    tests/workflows/workflow-journal.test.ts \
+    tests/workflows/workflow-ownership.test.ts \
+    tests/workflows/workflow-navigation.test.ts \
+    tests/workflows/workflow-selector.test.ts \
+    tests/workflows/workflow-sessions.test.ts \
+    tests/config/yaml.test.ts
 
 # Separate from `test` because db.ts uses bun:sqlite and the core must load
 # without Bun (*.spec.ts so the Node runner never picks them up).
 # Run the Bun-only test suite (SQLite layer, dashboard security).
 [group('quality')]
 test-db:
-  bun test ./tests/*.spec.ts
+  bun test ./tests/**/*.spec.ts
 
 # Generate Node coverage for the Bun-independent extension modules.
 [group('quality')]
 coverage-core:
   rm -rf coverage/core
-  npx c8 --all --check-coverage --lines=85 --branches=80 --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=json --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  npx c8 --all --check-coverage --lines=85 --branches=80 --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=json --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/helpers/register-ts-loader.mjs --test tests/**/*.test.ts
   node scripts/check-critical-coverage.mjs
   rm -rf coverage/.tmp
 
@@ -367,7 +367,7 @@ coverage-core:
 [group('quality')]
 coverage-db:
   rm -rf coverage/bun
-  bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage/bun ./tests/*.spec.ts
+  bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage/bun ./tests/**/*.spec.ts
   node scripts/check-bun-coverage.mjs
 
 # Produce all machine-readable coverage reports consumed by CI.
