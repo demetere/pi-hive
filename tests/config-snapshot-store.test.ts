@@ -8,7 +8,27 @@ import type { ActivationSnapshotFileV1 } from "../src/config/snapshot.ts";
 import { hashActivationPayload } from "../src/config/snapshot-canonical.ts";
 
 function snapshot(): ActivationSnapshotFileV1 {
-  const payload = { versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" }, project: { projectId: "id", rootRef: "." }, workflow: { id: "w", artifact: { adapter: "none", profile: "default", binding: "none", options: {}, contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], approvals: {} }, team: { nodes: [] } }, agents: [], skills: [], knowledge: [{ id: "k", provider: "okf", path: ".pi/hive/knowledge/k", updates: "reviewed", metadataFingerprint: "f".repeat(64), attachedNodeIds: [] }], authority: { capabilityContractVersion: 1, nodes: [] }, models: [], sources: [] } as any;
+  const emptyEffective = { filesystem: [], shell: [], git: false, "external-network": false, "human-input": false, artifact: [], knowledge: [] };
+  const inheritedProvenance = {
+    filesystem: ["agent-ceiling", "inherited"], shell: ["agent-ceiling", "inherited"], git: ["agent-ceiling", "inherited"],
+    "external-network": ["agent-ceiling", "inherited"], "human-input": ["agent-ceiling", "inherited"],
+    artifact: ["agent-ceiling", "inherited"], knowledge: ["agent-ceiling", "inherited"],
+  };
+  const payload = {
+    versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" },
+    project: { projectId: "id", rootRef: "." },
+    workflow: {
+      id: "w",
+      artifact: { adapter: "none", profile: "default", binding: "none", options: {}, contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], approvals: {} },
+      team: { rootId: "root", nodes: [{ id: "root", agentId: "a", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: ["k"] }, budgets: {} }] },
+    },
+    agents: [{ id: "a", name: "A", tags: [], frontmatter: {}, prompt: "p", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) }],
+    skills: [],
+    knowledge: [{ id: "k", provider: "okf", path: ".pi/hive/knowledge/k", updates: "reviewed", metadataFingerprint: "f".repeat(64), attachedNodeIds: ["root"] }],
+    authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective: emptyEffective, provenance: inheritedProvenance, budgets: {}, attachments: { skills: [], knowledge: ["k"] }, directMemberIds: [] }, tools: ["workflow_finish", "workflow_status"] }] },
+    models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 }],
+    sources: [],
+  } as any;
   const identity = {
     ...payload,
     knowledge: payload.knowledge.map((item: { metadataFingerprint: string } & Record<string, unknown>) => {
@@ -101,17 +121,121 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
   };
   const agent = { id: "a", name: "A", tags: [], frontmatter: {}, prompt: "p", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) };
   const node = { id: "root", agentId: "a", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: [] }, budgets: {} };
-  const authority = { nodeId: "root", capabilities: {}, tools: [] };
+  const authority = {
+    nodeId: "root",
+    capabilities: {
+      effective: { filesystem: [], shell: [], git: false, "external-network": false, "human-input": false, artifact: [], knowledge: [] },
+      provenance: {
+        filesystem: ["agent-ceiling", "inherited"], shell: ["agent-ceiling", "inherited"], git: ["agent-ceiling", "inherited"],
+        "external-network": ["agent-ceiling", "inherited"], "human-input": ["agent-ceiling", "inherited"],
+        artifact: ["agent-ceiling", "inherited"], knowledge: ["agent-ceiling", "inherited"],
+      },
+      budgets: {}, attachments: { skills: [], knowledge: [] }, directMemberIds: [],
+    },
+    tools: ["workflow_finish", "workflow_status"],
+  };
   const model = { nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 };
   assertRejected((payload) => { payload.workflow.team.nodes = [node, node]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [model]; }, /duplicate.*node|node.*duplicate/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = [agent, agent]; payload.authority.nodes = [authority]; payload.models = [model]; }, /duplicate.*agent|agent.*duplicate/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = []; payload.authority.nodes = [authority]; payload.models = [model]; }, /agent.*coverage|coverage.*agent/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = []; payload.models = [model]; }, /authority.*coverage|coverage.*authority/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = []; }, /model.*coverage|coverage.*model/i);
+  assertRejected((payload) => { payload.workflow.team.nodes = []; payload.agents = []; payload.authority.nodes = []; payload.models = []; }, /workflow.*(?:root|graph)|exactly one root/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [{ ...node, budgets: { maxTurns: 3 } }]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [model];
+  }, /authority.*budget|budget.*persisted/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [{ ...node, skills: { resolved: ["skill-a"] } }]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [model];
+  }, /authority.*attachment|attachment.*persisted/i);
   assertRejected((payload) => { payload.authority.capabilityContractVersion = 2; }, /capability.*contract/i);
   assertRejected((payload) => { delete payload.versions.contextPolicy; }, /context.*policy|missing/i);
   assertRejected((payload) => { payload.workflow.artifact.contractVersion = "other"; }, /artifact.*contract/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [{ ...model, dynamicReserve: 1 }]; }, /context.*policy|reserve/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, effective: { ...authority.capabilities.effective, shell: ["root-shell"] } } }]; payload.models = [model];
+  }, /authority|capabilit|normalized/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, tools: ["foreign_mcp_tool"] }]; payload.models = [model];
+  }, /authority|tool|unknown/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, secret: "rehash-does-not-authorize" } }]; payload.models = [model];
+  }, /authority|closed|shape|unknown/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, provenance: { ...authority.capabilities.provenance, shell: [] } } }]; payload.models = [model];
+  }, /authority|provenance/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, tools: ["write", "workflow_finish", "workflow_status"] }]; payload.models = [model];
+  }, /authority|tool|deriv/i);
+  assertRejected((payload) => {
+    const rootNode = { ...node, memberIds: ["leaf"] };
+    const leafNode = { ...node, id: "leaf", parentId: "root" };
+    const rootAuthority = { ...authority, capabilities: { ...authority.capabilities, directMemberIds: ["leaf"] }, tools: ["delegate_agent", "route_agent", "team_status", "workflow_finish", "workflow_status"] };
+    payload.workflow.team.rootId = "root"; payload.workflow.team.nodes = [rootNode, leafNode]; payload.agents = [agent]; payload.authority.nodes = [rootAuthority, { ...authority, nodeId: "leaf", tools: ["workflow_finish"] }]; payload.models = [model, { ...model, nodeId: "leaf" }];
+  }, /authority|tool|deriv/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, directMemberIds: Array.from({ length: 1_025 }, (_, index) => `child-${index}`) } }]; payload.models = [model];
+  }, /authority|member|limit/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, effective: { ...authority.capabilities.effective, shell: ["test", "inspect"] } } }]; payload.models = [model];
+  }, /authority|normalized|order/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, effective: { ...authority.capabilities.effective, filesystem: [{ path: "../escape", operations: ["read"], include: [], exclude: [], ceilingClause: 0 }] } } }]; payload.models = [model];
+  }, /authority|normalized|path/i);
+  assertRejected((payload) => {
+    payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, attachments: { skills: Array.from({ length: 129 }, (_, index) => `skill-${index}`), knowledge: [] } } }]; payload.models = [model];
+  }, /authority|attachment|limit/i);
+
+  for (const [effective, tools] of [
+    [{ ...authority.capabilities.effective, git: true }, ["bash", "workflow_finish", "workflow_status"]],
+    [{ ...authority.capabilities.effective, shell: ["inspect"] }, ["bash", "workflow_finish", "workflow_status"]],
+    [{ ...authority.capabilities.effective, filesystem: [{ path: ".", operations: ["read"], include: [], exclude: [], ceilingClause: 0 }] }, ["read", "workflow_finish", "workflow_status"]],
+  ] as const) {
+    assertRejected((payload) => {
+      payload.workflow.team.nodes = [node];
+      payload.agents = [agent];
+      payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, effective }, tools }];
+      payload.models = [model];
+    }, /authority.*(?:source|ceiling|overlay|semantic)|capabilit.*(?:source|ceiling|overlay|semantic)/i);
+  }
+
+  const graphNode = { ...node, memberIds: ["leaf"] };
+  const graphLeaf = { ...node, id: "leaf", parentId: "root" };
+  const graphRootAuthority = {
+    ...authority,
+    capabilities: { ...authority.capabilities, directMemberIds: ["leaf"] },
+    tools: ["delegate_agent", "route_agent", "team_status", "workflow_finish", "workflow_status"],
+  };
+  const graphLeafAuthority = { ...authority, nodeId: "leaf", tools: [] };
+  const configureGraph = (payload: any) => {
+    payload.workflow.team.rootId = "root";
+    payload.workflow.team.nodes = [graphNode, graphLeaf];
+    payload.agents = [agent];
+    payload.authority.nodes = [graphRootAuthority, graphLeafAuthority];
+    payload.models = [model, { ...model, nodeId: "leaf" }];
+  };
+  assertRejected((payload) => {
+    configureGraph(payload);
+    payload.workflow.team.nodes = [{ ...graphNode, parentId: "leaf" }, { ...graphLeaf, memberIds: ["root"] }];
+    payload.authority.nodes = [graphRootAuthority, { ...graphLeafAuthority, capabilities: { ...authority.capabilities, directMemberIds: ["root"] }, tools: ["delegate_agent", "route_agent", "team_status"] }];
+  }, /workflow.*(?:graph|root|parent|cycle)/i);
+  assertRejected((payload) => {
+    configureGraph(payload);
+    payload.workflow.team.nodes[1].parentId = "missing";
+  }, /workflow.*(?:graph|parent|missing)/i);
+  assertRejected((payload) => {
+    configureGraph(payload);
+    payload.workflow.team.nodes[0].memberIds = ["missing"];
+    payload.authority.nodes[0] = { ...graphRootAuthority, capabilities: { ...authority.capabilities, directMemberIds: ["missing"] } };
+  }, /workflow.*(?:graph|member|missing)/i);
+  assertRejected((payload) => {
+    configureGraph(payload);
+    payload.workflow.team.nodes[0].memberIds = [];
+    payload.authority.nodes[0] = authority;
+  }, /workflow.*(?:graph|member|parent)/i);
+  assertRejected((payload) => {
+    configureGraph(payload);
+    payload.workflow.team.nodes = [{ ...graphNode, depth: 1 }, { ...graphLeaf, depth: 1 }];
+  }, /workflow.*(?:graph|depth|root)/i);
 });
 
 test("snapshot reads strictly validate nested v1 records and deeply freeze results", () => {

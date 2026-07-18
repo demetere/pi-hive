@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { buildActivationSnapshot, buildActivationSummary } from "../src/config/snapshot.ts";
-import { issueEffectiveAuthoritySnapshotV1 } from "../src/config/snapshot-authority.ts";
+import { issueEffectiveAuthoritySnapshotForTest } from "../src/config/snapshot-authority.ts";
+import { resolveWorkflowCapabilities } from "../src/capabilities/resolve.ts";
+import { readActivationSnapshot, writeActivationSnapshot } from "../src/config/snapshot-store.ts";
 import type { ValidWorkflowDefinition } from "../src/config/resolver.ts";
 import type { ConfigCatalogResult } from "../src/config/catalogs.ts";
 import type { ConfiguredProject } from "../src/config/manifest.ts";
@@ -17,9 +22,23 @@ function fixture() {
   return { workflow, catalogs, project };
 }
 const models = { defaultModel: "provider/model", defaultThinking: "off", find: (id: string) => id === "provider/model" ? { id, contextWindow: 100_000, maxTokens: 8_000, thinking: ["off"] } : undefined, canActivate: () => true, estimateTokens: (text: string) => Buffer.byteLength(text) };
+function authorityNode(nodeId = "root", model = "provider/model", thinking = "off") {
+  return {
+    nodeId,
+    capabilities: {
+      effective: { filesystem: [], shell: [], git: false, "external-network": false, "human-input": false, artifact: [], knowledge: [] },
+      provenance: { filesystem: ["agent-ceiling", "inherited"], shell: ["agent-ceiling", "inherited"], git: ["agent-ceiling", "inherited"], "external-network": ["agent-ceiling", "inherited"], "human-input": ["agent-ceiling", "inherited"], artifact: ["agent-ceiling", "inherited"], knowledge: ["agent-ceiling", "inherited"] },
+      budgets: {}, attachments: { skills: [], knowledge: [] }, directMemberIds: [],
+    },
+    tools: [] as string[], model, thinking,
+  };
+}
+function testAuthority(workflowId = "debug", nodes = [authorityNode()]) {
+  return issueEffectiveAuthoritySnapshotForTest(workflowId, nodes);
+}
 test("builder requires branded complete matching authority and produces stable reachable-only identity", () => {
   const { workflow, catalogs, project } = fixture();
-  const authority = issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: ["read"] }]);
+  const authority = testAuthority();
   const input = { project, workflow, catalogs, authority, models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" } as const;
   const first = buildActivationSnapshot(input);
   const second = buildActivationSnapshot({ ...input, createdAt: "2027-01-01T00:00:00.000Z" });
@@ -30,13 +49,23 @@ test("builder requires branded complete matching authority and produces stable r
   assert.equal(first.payload.knowledge[0].metadataFingerprint, "f".repeat(64));
   assert.equal(JSON.stringify(first).includes("Skill"), true);
   assert.throws(() => buildActivationSnapshot({ ...input, authority: {} as never }), /authority/i);
-  assert.throws(() => buildActivationSnapshot({ ...input, authority: issueEffectiveAuthoritySnapshotV1("other", [{ nodeId: "root", capabilities: {}, tools: [] }]) }), /workflow/i);
-  assert.throws(() => buildActivationSnapshot({ ...input, authority: issueEffectiveAuthoritySnapshotV1("debug", []) }), /node coverage/i);
+  assert.throws(() => buildActivationSnapshot({ ...input, authority: testAuthority("other") }), /workflow/i);
+  assert.throws(() => buildActivationSnapshot({ ...input, authority: testAuthority("debug", []) }), /node coverage/i);
+});
+
+test("snapshot model preflight consumes frozen authority instead of re-resolving mutable source defaults", () => {
+  const base = fixture();
+  const authority = testAuthority();
+  (base.workflow.team.nodes[0] as any).model = "provider/changed-after-resolution";
+  (base.catalogs.agents[0] as any).frontmatter.model = "provider/also-changed";
+  const snapshot = buildActivationSnapshot({ ...base, authority, models, packageVersion: "0.1.0" });
+  assert.equal(snapshot.payload.authority.nodes[0].model, "provider/model");
+  assert.equal(snapshot.payload.models[0].modelId, "provider/model");
 });
 
 test("builder identity is invariant to unordered catalog, registry, and skill enumeration", () => {
   const base = fixture();
-  const authority = issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: [] }]);
+  const authority = testAuthority();
   const input = { ...base, authority, models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" };
   const first = buildActivationSnapshot(input);
   base.catalogs.agents.reverse();
@@ -53,21 +82,62 @@ test("builder identity is invariant to unordered catalog, registry, and skill en
 test("prompt, team, capability, adapter, and config source changes alter identity", () => {
   const build = (mutate: (value: ReturnType<typeof fixture>, authority: any) => void) => {
     const value = fixture();
-    const authorityNode = { nodeId: "root", capabilities: {}, tools: [] as string[] };
-    mutate(value, authorityNode);
-    return buildActivationSnapshot({ ...value, authority: issueEffectiveAuthoritySnapshotV1("debug", [authorityNode]), models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" }).snapshotHash;
+    const authority = authorityNode();
+    mutate(value, authority);
+    return buildActivationSnapshot({ ...value, authority: testAuthority("debug", [authority]), models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" }).snapshotHash;
   };
   const base = build(() => undefined);
   assert.notEqual(build((value) => { (value.catalogs.agents[0] as any).prompt = "Changed prompt"; }), base);
   assert.notEqual(build((value) => { (value.workflow.team.nodes[0] as any).responsibilities = ["Changed team role"]; }), base);
-  assert.notEqual(build((_value, authority) => { authority.capabilities = { shell: ["inspect"] }; }), base);
+  assert.notEqual(build((_value, authority) => { authority.capabilities.effective.shell = ["inspect"]; }), base);
   assert.notEqual(build((value) => { (value.workflow.artifact as any).options = { mode: "strict" }; }), base);
   assert.notEqual(build((value) => { value.project.rawSource = "changed manifest\n"; }), base);
 });
 
+test("snapshot identity consumes the exact resolver-issued effective authority", () => {
+  const resolve = (narrow: boolean) => {
+    const base = fixture();
+    (base.catalogs.agents[0] as any).frontmatter.capabilities = { shell: ["inspect"] };
+    if (narrow) (base.workflow.team.nodes[0] as any).capabilities = {};
+    const result = resolveWorkflowCapabilities({ workflowId: base.workflow.id, team: base.workflow.team, catalogs: base.catalogs, artifactAvailable: false, knowledgeAvailable: false, questionsAvailable: false });
+    assert.equal(result.ok, true);
+    assert.ok(result.authority);
+    (base.workflow as any).authority = result.authority;
+    (base.workflow as any).policies = result.policies;
+    return { base, authority: result.authority! };
+  };
+  const full = resolve(false);
+  const narrow = resolve(true);
+  const fullSnapshot = buildActivationSnapshot({ ...full.base, authority: full.authority, models, packageVersion: "0.1.0" });
+  const narrowSnapshot = buildActivationSnapshot({ ...narrow.base, authority: narrow.authority, models, packageVersion: "0.1.0" });
+  assert.notDeepEqual(fullSnapshot.payload.authority, narrowSnapshot.payload.authority);
+  assert.notEqual(fullSnapshot.snapshotHash, narrowSnapshot.snapshotHash);
+  assert.throws(() => buildActivationSnapshot({ ...full.base, authority: narrow.authority, models, packageVersion: "0.1.0" }), /exact resolved workflow authority/i);
+});
+
+test("resolver-produced activation snapshots round-trip through persistence with resolved team depths", () => {
+  const base = fixture();
+  const resolution = resolveWorkflowCapabilities({
+    workflowId: base.workflow.id,
+    team: base.workflow.team,
+    catalogs: base.catalogs,
+    artifactAvailable: false,
+    knowledgeAvailable: false,
+    questionsAvailable: false,
+  });
+  assert.equal(resolution.ok, true);
+  assert.ok(resolution.authority);
+  (base.workflow as any).authority = resolution.authority;
+  (base.workflow as any).policies = resolution.policies;
+  const snapshot = buildActivationSnapshot({ ...base, authority: resolution.authority!, models, packageVersion: "0.1.0" });
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-resolved-snapshot-"));
+  writeActivationSnapshot(projectRoot, snapshot);
+  assert.deepEqual(readActivationSnapshot(projectRoot, snapshot.snapshotHash), snapshot);
+});
+
 test("snapshot source provenance is derived from exact loaded registry associations", () => {
   const base = fixture();
-  const input = { ...base, authority: issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: [] }]), models, packageVersion: "0.1.0" };
+  const input = { ...base, authority: testAuthority(), models, packageVersion: "0.1.0" };
   const snapshot = buildActivationSnapshot(input);
   assert.deepEqual(snapshot.payload.sources.map(({ path, kind, id }) => ({ path, kind, id })), [
     { path: ".pi/hive/agents/agent.md", kind: "agent", id: "agent" },
@@ -95,7 +165,7 @@ test("literal inherit walks node, agent, and project precedence before adapter d
     defaultThinking: "off",
     find: (id: string) => ({ id, contextWindow: 100_000, maxTokens: 8_000, thinking: ["off", "low"] }),
   };
-  const snapshot = buildActivationSnapshot({ ...base, authority: issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: [] }]), models: inheritedModels, packageVersion: "0.1.0" });
+  const snapshot = buildActivationSnapshot({ ...base, authority: testAuthority("debug", [authorityNode("root", "provider/project", "low")]), models: inheritedModels, packageVersion: "0.1.0" });
   assert.equal(snapshot.payload.models[0].modelId, "provider/project");
   assert.equal(snapshot.payload.models[0].thinking, "low");
 });
@@ -104,7 +174,7 @@ test("builder recursively freezes mutable children beneath shallow-frozen inputs
   const base = fixture();
   const options = { nested: { enabled: true } };
   (base.workflow.artifact as any).options = Object.freeze(options);
-  const snapshot = buildActivationSnapshot({ ...base, authority: issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: [] }]), models, packageVersion: "0.1.0" });
+  const snapshot = buildActivationSnapshot({ ...base, authority: testAuthority(), models, packageVersion: "0.1.0" });
   const storedOptions = (snapshot.payload.workflow.artifact as any).options;
   assert.equal(Object.isFrozen(storedOptions), true);
   assert.equal(Object.isFrozen(storedOptions.nested), true);
@@ -112,7 +182,7 @@ test("builder recursively freezes mutable children beneath shallow-frozen inputs
 
 test("live knowledge fingerprint and creation time do not affect identity while frozen content does", () => {
   const base = fixture();
-  const authority = issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: [] }]);
+  const authority = testAuthority();
   const input = { ...base, authority, models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" };
   const first = buildActivationSnapshot(input);
   (base.catalogs.knowledge[0] as any).fingerprint = "9".repeat(64);
@@ -124,7 +194,7 @@ test("live knowledge fingerprint and creation time do not affect identity while 
 test("snapshot summary is bounded and content-free", () => {
   const base = fixture();
   (base.catalogs.agents[0] as any).prompt = "TOP-SECRET-PROMPT";
-  const snapshot = buildActivationSnapshot({ ...base, authority: issueEffectiveAuthoritySnapshotV1("debug", [{ nodeId: "root", capabilities: {}, tools: [] }]), models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" });
+  const snapshot = buildActivationSnapshot({ ...base, authority: testAuthority(), models, packageVersion: "0.1.0", createdAt: "2026-01-01T00:00:00.000Z" });
   const hostile = structuredClone(snapshot) as any;
   hostile.payload.workflow.id = `TOP-SECRET-${"x".repeat(300_000)}`;
   hostile.payload.versions.package = `PRIVATE-${"y".repeat(300_000)}`;

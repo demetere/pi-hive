@@ -112,12 +112,57 @@ test("suggested-next self and mutual cycles are non-executable valid hints", () 
   } finally { fixture.cleanup(); }
 });
 
-test("capability overlays remain unresolved for W06 while invalid attachment deltas fail", () => {
+test("persisted root model and thinking selection freezes only into the selected workflow authority", () => {
+  const fixture = copyWorkflowFixture("artifact-free-debug");
+  try {
+    const project = loadConfigProject(fixture.projectRoot); assert.equal(project.status, "configured");
+    const catalogs = loadConfigCatalogs(project);
+    const selected = resolveConfigWorkflows(project, catalogs, {}, { workflowId: "debug-chat", model: "provider/session", thinking: "high" });
+    assert.equal(selected.workflows[0].status, "valid");
+    if (selected.workflows[0].status === "valid") {
+      assert.equal(selected.workflows[0].policies[0].model, "provider/session");
+      assert.equal(selected.workflows[0].authority.nodes[0].model, "provider/session");
+      assert.equal(selected.workflows[0].authority.nodes[0].thinking, "high");
+    }
+    const unrelated = resolveConfigWorkflows(project, catalogs, {}, { workflowId: "other", model: "provider/session", thinking: "high" });
+    assert.equal(unrelated.workflows[0].status, "valid");
+    if (unrelated.workflows[0].status === "valid") {
+      assert.equal(unrelated.workflows[0].authority.nodes[0].model, undefined);
+      assert.equal(unrelated.workflows[0].authority.nodes[0].thinking, "medium");
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test("capability widening quarantines only its workflow while valid definitions carry branded authority", () => {
   const widening = resolveFixture("invalid/widening-filesystem-override");
   try {
-    assert.equal(widening.result.workflows[0].status, "valid");
-    if (widening.result.workflows[0].status === "valid") assert.equal(widening.result.workflows[0].team.nodes[0].capabilityStatus, "requires-w06-subset-validation");
+    assert.equal(widening.result.workflows[0].status, "invalid");
+    assert.ok(widening.result.workflows[0].diagnosticCodes.includes("WORKFLOW_CAPABILITY_WIDENING"));
   } finally { widening.fixture.cleanup(); }
+
+  const valid = resolveFixture("artifact-free-debug");
+  try {
+    assert.equal(valid.result.workflows[0].status, "valid");
+    if (valid.result.workflows[0].status === "valid") {
+      assert.equal(valid.result.workflows[0].authority.workflowId, "debug-chat");
+      assert.deepEqual(valid.result.workflows[0].authority.nodes.map((node) => node.nodeId), valid.result.workflows[0].team.nodes.map((node) => node.id).sort());
+      assert.equal(valid.result.workflows[0].policies.every((policy) => policy.tools.every((tool) => typeof tool === "string")), true);
+      assert.equal(valid.result.workflows[0].policies[0].tools.includes("human_question"), false, "later subsystem tools remain reserved but inactive");
+    }
+  } finally { valid.fixture.cleanup(); }
+
+  const isolated = copyWorkflowFixture("artifact-free-debug");
+  try {
+    const manifestPath = join(isolated.projectRoot, ".pi/hive/hive-config.yaml");
+    writeFileSync(manifestPath, readFileSync(manifestPath, "utf8").replace("  debug-chat: workflows/debug-chat.yaml", "  debug-chat: workflows/debug-chat.yaml\n  clean-chat: workflows/clean-chat.yaml"));
+    const workflowPath = join(isolated.projectRoot, ".pi/hive/workflows/debug-chat.yaml");
+    const original = readFileSync(workflowPath, "utf8");
+    writeFileSync(join(isolated.projectRoot, ".pi/hive/workflows/clean-chat.yaml"), original);
+    writeFileSync(workflowPath, original.replace("  agent: debugger", "  agent: debugger\n  overrides:\n    capabilities:\n      git: true"));
+    const project = loadConfigProject(isolated.projectRoot); assert.equal(project.status, "configured");
+    const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
+    assert.deepEqual(result.workflows.map((workflow) => [workflow.id, workflow.status]), [["clean-chat", "valid"], ["debug-chat", "invalid"]]);
+  } finally { isolated.cleanup(); }
 
   const fixture = copyWorkflowFixture("combined-delivery");
   try {
