@@ -307,6 +307,9 @@ test:
 test-node-compat:
   node --import tsx --import ./tests/register-ts-loader.mjs --test \
     tests/artifact-contracts.test.ts \
+    tests/capability-filesystem-glob.test.ts \
+    tests/capability-filesystem-policy.test.ts \
+    tests/capability-filesystem-race.test.ts \
     tests/capability-resolution.test.ts \
     tests/capability-tools.test.ts \
     tests/config-budgets.test.ts \
