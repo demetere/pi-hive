@@ -318,6 +318,11 @@ test-node-compat:
     tests/config-registry-diagnostics.test.ts \
     tests/config-schema-generated.test.ts \
     tests/config-schema.test.ts \
+    tests/config-snapshot-builder.test.ts \
+    tests/config-snapshot-canonical.test.ts \
+    tests/config-snapshot-compat.test.ts \
+    tests/config-snapshot-model.test.ts \
+    tests/config-snapshot-store.test.ts \
     tests/config-team.test.ts \
     tests/config-workflows.test.ts \
     tests/config-yaml.test.ts \
