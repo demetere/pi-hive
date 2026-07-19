@@ -5,7 +5,7 @@ import { hashActivationPayload, canonicalJson } from "../../src/config/snapshot-
 import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
 
 function snapshot(): ActivationSnapshotFileV1 {
-  const payload = { versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" }, project: { projectId: "id", rootRef: "." }, workflow: { id: "w", artifact: { adapter: "none", profile: "default", binding: "none", options: {}, contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], approvals: {} }, team: { nodes: [{ id: "root" }] } }, agents: [], skills: [], knowledge: [{ id: "k", provider: "okf", path: ".pi/hive/knowledge/k", updates: "reviewed", metadataFingerprint: "f".repeat(64), attachedNodeIds: ["root"] }], authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: {}, tools: [] }] }, models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 }], sources: [{ path: ".pi/hive/hive-config.yaml", kind: "manifest", id: "root", hash: "1".repeat(64), canonicalHash: "2".repeat(64) }] } as any;
+  const payload = { versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" }, project: { projectId: "id", rootRef: "." }, workflow: { id: "w", artifact: { adapter: "none", adapterVersion: "1", profile: "default", profileVersion: "1", binding: "none", options: {}, optionsSchemaVersion: "1", contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], actionIds: [], viewVersion: 1, approvals: {} }, team: { nodes: [{ id: "root" }] } }, agents: [], skills: [], knowledge: [{ id: "k", provider: "okf", path: ".pi/hive/knowledge/k", updates: "reviewed", metadataFingerprint: "f".repeat(64), attachedNodeIds: ["root"] }], authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: {}, tools: [] }] }, models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 }], sources: [{ path: ".pi/hive/hive-config.yaml", kind: "manifest", id: "root", hash: "1".repeat(64), canonicalHash: "2".repeat(64) }] } as any;
   const knowledgeIdentity = payload.knowledge.map((entry: Record<string, unknown>) => {
     const copy = { ...entry };
     delete copy.metadataFingerprint;
@@ -79,6 +79,17 @@ test("integrity, contract, model, knowledge, and artifact incompatibilities fail
   assert.equal(validateSnapshotResumeCompatibility(value, { ...runtime, sourceState: "current", model: { ...runtime.model, find: () => undefined } }).codes.includes("SNAPSHOT_MODEL_UNAVAILABLE"), true);
   assert.equal(validateSnapshotResumeCompatibility(value, { ...runtime, sourceState: "current", knowledgeAvailable: () => false }).codes.includes("SNAPSHOT_KNOWLEDGE_UNAVAILABLE"), true);
   assert.equal(validateSnapshotResumeCompatibility(value, { ...runtime, sourceState: "current", artifactProfileAvailable: () => false }).codes.includes("SNAPSHOT_ARTIFACT_CONTRACT_UNSUPPORTED"), true);
+  for (const mutate of [
+    (artifact: any) => { delete artifact.optionsSchemaVersion; },
+    (artifact: any) => { artifact.viewVersion = 2; },
+    (artifact: any) => { artifact.checkpoints = ["foreign"]; },
+    (artifact: any) => { artifact.actionIds = ["foreign"]; },
+    (artifact: any) => { artifact.extra = true; },
+  ]) {
+    const malformed = structuredClone(value);
+    mutate(malformed.payload.workflow.artifact);
+    assert.ok(validateSnapshotResumeCompatibility(malformed, { ...runtime, sourceState: "current" }).codes.includes("SNAPSHOT_ARTIFACT_CONTRACT_UNSUPPORTED"));
+  }
 
   const invalidStoredModel = structuredClone(value);
   invalidStoredModel.payload.models[0].staticTokens = Number.NaN;

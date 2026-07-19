@@ -27,7 +27,7 @@ function recoverySnapshot(identity: { projectId?: string; workflowId?: string } 
   const payload = {
     versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" },
     project: { projectId: identity.projectId ?? "project-1", rootRef: "." },
-    workflow: { id: identity.workflowId ?? "build", artifact: { adapter: "none", profile: "default", binding: "none", options: {}, contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], approvals: {} }, team: { rootId: "root", nodes: [{ id: "root", agentId: "agent", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: [] }, budgets: {} }] } },
+    workflow: { id: identity.workflowId ?? "build", artifact: { adapter: "none", adapterVersion: "1", profile: "default", profileVersion: "1", binding: "none", options: {}, optionsSchemaVersion: "1", contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], actionIds: [], viewVersion: 1, approvals: {} }, team: { rootId: "root", nodes: [{ id: "root", agentId: "agent", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: [] }, budgets: {} }] } },
     agents: [{ id: "agent", name: "Agent", tags: [], frontmatter: {}, prompt: "recover", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) }],
     skills: [], knowledge: [],
     authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective, provenance, budgets: {}, attachments: { skills: [], knowledge: [] }, directMemberIds: [] }, tools: ["workflow_finish", "workflow_status"] }] },

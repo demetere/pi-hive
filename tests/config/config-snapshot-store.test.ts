@@ -19,13 +19,13 @@ function snapshot(): ActivationSnapshotFileV1 {
     project: { projectId: "id", rootRef: "." },
     workflow: {
       id: "w",
-      artifact: { adapter: "none", profile: "default", binding: "none", options: {}, contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], approvals: {} },
+      artifact: { adapter: "none", adapterVersion: "1", profile: "default", profileVersion: "1", binding: "none", options: {}, optionsSchemaVersion: "1", contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], actionIds: [], viewVersion: 1, approvals: {} },
       team: { rootId: "root", nodes: [{ id: "root", agentId: "a", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: ["k"] }, budgets: {} }] },
     },
-    agents: [{ id: "a", name: "A", tags: [], frontmatter: {}, prompt: "p", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) }],
+    agents: [{ id: "a", name: "A", tags: [], frontmatter: { capabilities: { artifact: ["read"] } }, prompt: "p", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) }],
     skills: [],
     knowledge: [{ id: "k", provider: "okf", path: ".pi/hive/knowledge/k", updates: "reviewed", metadataFingerprint: "f".repeat(64), attachedNodeIds: ["root"] }],
-    authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective: emptyEffective, provenance: inheritedProvenance, budgets: {}, attachments: { skills: [], knowledge: ["k"] }, directMemberIds: [] }, tools: ["workflow_finish", "workflow_status"] }] },
+    authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective: { ...emptyEffective, artifact: ["read"] }, provenance: inheritedProvenance, budgets: {}, attachments: { skills: [], knowledge: ["k"] }, directMemberIds: [] }, tools: ["artifact_status", "workflow_finish", "workflow_status"] }] },
     models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 }],
     sources: [],
   } as any;
@@ -150,6 +150,11 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
   assertRejected((payload) => { payload.authority.capabilityContractVersion = 2; }, /capability.*contract/i);
   assertRejected((payload) => { delete payload.versions.contextPolicy; }, /context.*policy|missing/i);
   assertRejected((payload) => { payload.workflow.artifact.contractVersion = "other"; }, /artifact.*contract/i);
+  for (const field of ["adapterVersion", "profileVersion", "optionsSchemaVersion", "actionIds", "viewVersion"] as const) {
+    assertRejected((payload) => { delete payload.workflow.artifact[field]; }, /artifact|missing|field/i);
+  }
+  assertRejected((payload) => { payload.workflow.artifact.checkpoints = ["foreign"]; }, /artifact|profile|checkpoint/i);
+  assertRejected((payload) => { payload.workflow.artifact.actionIds = ["foreign"]; }, /artifact|profile|action/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [{ ...model, dynamicReserve: 1 }]; }, /context.*policy|reserve/i);
   assertRejected((payload) => {
     payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, effective: { ...authority.capabilities.effective, shell: ["root-shell"] } } }]; payload.models = [model];

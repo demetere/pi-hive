@@ -18,7 +18,7 @@ import { acquireRuntimeOwnership } from "../../src/workflows/ownership.ts";
 function snapshot(): ActivationSnapshotFileV1 {
   return { snapshotHash: "b".repeat(64), createdAt: "2026-01-01T00:00:00.000Z", payload: {
     project: { projectId: "project-1", rootRef: "." },
-    workflow: { id: "delivery", instructions: { shared: "shared", root: "root" }, artifact: { adapter: "none", profile: "default", binding: "none", options: {} }, team: { rootId: "root", nodes: [
+    workflow: { id: "delivery", instructions: { shared: "shared", root: "root" }, artifact: { adapter: "none", adapterVersion: "1", profile: "default", profileVersion: "1", binding: "none", options: {}, optionsSchemaVersion: "1", contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], actionIds: [], viewVersion: 1, approvals: {} }, team: { rootId: "root", nodes: [
       { id: "root", agentId: "lead", memberIds: ["worker"], depth: 1, responsibilities: [] },
       { id: "worker", agentId: "builder", parentId: "root", memberIds: ["leaf"], depth: 2, role: "Builder", responsibilities: ["implementation"] },
       { id: "leaf", agentId: "tester", parentId: "worker", memberIds: [], depth: 3, role: "Tester", responsibilities: ["verification"] },
@@ -55,7 +55,7 @@ async function call(name: string, input: unknown, batch: readonly string[] = [na
   return tool(name).execute(toolCallId, input as never, undefined, undefined, ctx as never);
 }
 
-function fixture(factoryOverride?: WorkerSessionFactory) {
+function fixture(factoryOverride?: WorkerSessionFactory, snapshotOverride: ActivationSnapshotFileV1 = snapshot()) {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-tools-"));
   const ownerNonce = "owner-1";
   assert.equal(acquireRuntimeOwnership(projectRoot, "session-1", { nonce: ownerNonce }).ok, true);
@@ -64,7 +64,7 @@ function fixture(factoryOverride?: WorkerSessionFactory) {
     linkedSessionId: `linked-${input.nodeId}`, prompt: async () => "ok", dispose() {},
   }));
   const service = new RunOrchestrationService({
-    projectRoot, projectId: "project-1", sessionId: "session-1", snapshot: snapshot(), runtimeOwnerNonce: ownerNonce,
+    projectRoot, projectId: "project-1", sessionId: "session-1", snapshot: snapshotOverride, runtimeOwnerNonce: ownerNonce,
     maxParallel: 1, workerFactory: factory, createRunId: () => "run-1", createTaskId: () => `task-${++task}`, createAttemptId: () => `attempt-${task}`,
     pauseAuthority: { captureState: () => ({}), releaseLeases: () => {}, releaseOwnership: () => {} },
     resumeAuthority: { acquireOwnership: () => {}, acquireLeases: () => {}, revalidateHashes: () => true, rollbackAuthority: () => {} },
@@ -83,6 +83,8 @@ test("generic TypeBox schemas are exact and reject unknown or oversized fields",
   }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.team_status, { limit: 1, extra: true }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.workflow_status, { section: "unknown" }), false);
+  assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.artifact_status, { limit: 1, workspaceId: "spoof" }), false);
+  assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.artifact_action, { actionId: "x", arguments: {}, operationId: "spoof" }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.workflow_finish, { status: "cancelled", summary: "no" }), false);
 });
 
@@ -94,9 +96,29 @@ test("generic tool exposure follows frozen topology and reserves inactive subsys
     "delegate_agent", "route_agent", "team_status",
   ]);
   assert.deepEqual(genericWorkflowToolContractsForNode(snapshot(), "leaf"), []);
-  assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_status"), false);
+  assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_status"), true);
+  assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_action"), true);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "knowledge_read"), false);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "human_question"), false);
+});
+
+test("artifact tools remain profile/capability gated and none exposes only bounded status", async () => {
+  const active = snapshot();
+  const rootAuthority = active.payload.authority.nodes.find((node) => node.nodeId === "root") as any;
+  rootAuthority.capabilities.effective.artifact = ["read"];
+  rootAuthority.tools = [...rootAuthority.tools, "artifact_status"].sort();
+  const { service } = fixture(undefined, active);
+  const root = service.rootServices();
+  assert.deepEqual(genericWorkflowToolContractsForNode(active, "root").map((entry) => entry.name).sort(), [
+    "artifact_status", "delegate_agent", "route_agent", "team_status", "workflow_finish", "workflow_status",
+  ]);
+  assert.equal(genericWorkflowToolContractsForNode(active, "root").some((entry) => entry.name === "artifact_action"), false);
+  const status = await root.runWithToolRuntime(() => call("artifact_status", { limit: 5 }));
+  const details = status.details as { status: string; workspace: { id: string; kind: string }; actions: unknown[]; checkpoints: unknown[] };
+  assert.equal(details.status, "complete");
+  assert.deepEqual(details.workspace, { id: "none", kind: "logical-empty", binding: "none" });
+  assert.deepEqual(details.actions, []);
+  assert.deepEqual(details.checkpoints, []);
 });
 
 test("tools require trusted async runtime identity and route/delegate only through direct-member authority", async () => {

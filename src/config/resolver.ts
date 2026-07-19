@@ -1,4 +1,5 @@
-import { validateArtifactDeclaration, ARTIFACT_CONTRACT_VERSION, type ArtifactProfileContract } from "../artifacts/contracts";
+import { validateArtifactDeclaration, ARTIFACT_CONTRACT_VERSION, ARTIFACT_PROFILE_VERSION, type ArtifactProfileContract } from "../artifacts/contracts";
+import { ArtifactRegistryError, BUILTIN_ARTIFACT_REGISTRY, type ResolvedArtifactProfile } from "../artifacts/registry";
 import { resolveWorkflowCapabilities } from "../capabilities/resolve";
 import type { EffectiveNodePolicy } from "../capabilities/types";
 import type { EffectiveAuthoritySnapshotV1 } from "./snapshot-authority";
@@ -109,6 +110,21 @@ export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: Con
       });
     }
     const artifact = validateArtifactDeclaration(raw.artifact, raw.approvals);
+    let resolvedArtifact: ResolvedArtifactProfile | undefined;
+    if (artifact.contract) {
+      try {
+        resolvedArtifact = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
+          contractVersion: ARTIFACT_CONTRACT_VERSION,
+          adapterId: artifact.contract.adapter,
+          adapterVersion: artifact.contract.adapterVersion ?? ARTIFACT_PROFILE_VERSION,
+          profileId: artifact.contract.profile,
+          profileVersion: artifact.contract.profileVersion ?? ARTIFACT_PROFILE_VERSION,
+        });
+      } catch (error) {
+        if (!(error instanceof ArtifactRegistryError) || error.code !== "ADAPTER_UNAVAILABLE") throw error;
+        local.add(issue("ARTIFACT_ADAPTER_UNAVAILABLE", resource.id, resource.source, resource.sourceMap, "/artifact/adapter"));
+      }
+    }
     const unknownCheckpoints = Object.keys(raw.approvals ?? {}).filter((id) => !artifact.contract?.checkpoints.includes(id));
     for (const code of artifact.codes) {
       const pointer = code === "ARTIFACT_BINDING_INVALID" ? "/artifact/binding"
@@ -126,9 +142,8 @@ export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: Con
       workflowId: resource.id,
       team: team.team,
       catalogs,
-      // Subsystem descriptors are reserved now, but their trusted implementations
-      // are introduced by later tasks. Configuration alone cannot activate them.
-      artifactAvailable: false,
+      artifactAvailable: resolvedArtifact !== undefined,
+      artifactActionsAvailable: Boolean(resolvedArtifact?.adapter.executeAction && resolvedArtifact.profile.actions.length),
       knowledgeAvailable: false,
       questionsAvailable: false,
       projectModel: project.manifest.settings?.defaults?.agent?.model,

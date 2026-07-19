@@ -17,7 +17,7 @@ export const TRUSTED_TOOL_DESCRIPTORS: readonly TrustedToolDescriptor[] = Object
   { name: "team_status", topology: "members", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
   { name: "workflow_status", topology: "root", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
   { name: "workflow_finish", topology: "root", mutability: "mutating", idempotency: "operation-bound", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
-  { name: "artifact_status", capability: { group: "artifact", any: ["read", "write", "review"] }, topology: "any", subsystem: "artifact", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
+  { name: "artifact_status", capability: { group: "artifact", any: ["read"] }, topology: "any", subsystem: "artifact", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
   { name: "artifact_action", capability: { group: "artifact", any: ["write", "review"] }, topology: "any", subsystem: "artifact", mutability: "mutating", idempotency: "operation-bound", maxOutputBytes: OUTPUT, requiresMutationQueue: true },
   { name: "knowledge_search", capability: { group: "knowledge", any: ["read"] }, topology: "any", subsystem: "knowledge", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
   { name: "knowledge_read", capability: { group: "knowledge", any: ["read"] }, topology: "any", subsystem: "knowledge", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
@@ -54,6 +54,7 @@ export interface ToolDerivationInput {
   root: boolean;
   directMemberIds: readonly string[];
   artifactAvailable: boolean;
+  artifactActionsAvailable?: boolean;
   knowledgeAvailable: boolean;
   knowledgeAttached: boolean;
   questionsAvailable: boolean;
@@ -64,6 +65,7 @@ export function deriveNodeTools(input: ToolDerivationInput): readonly string[] {
     if (descriptor.topology === "root" && !input.root) return false;
     if (descriptor.topology === "members" && !members) return false;
     if (descriptor.subsystem === "artifact" && !input.artifactAvailable) return false;
+    if (descriptor.name === "artifact_action" && !(input.artifactActionsAvailable ?? input.artifactAvailable)) return false;
     if (descriptor.subsystem === "knowledge" && (!input.knowledgeAvailable || !input.knowledgeAttached)) return false;
     if (descriptor.subsystem === "questions" && !input.questionsAvailable) return false;
     return capabilitySatisfied(descriptor, input.capabilities);

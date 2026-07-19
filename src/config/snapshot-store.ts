@@ -1,5 +1,7 @@
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ARTIFACT_VIEW_VERSION } from "../artifacts/contracts";
+import { BUILTIN_ARTIFACT_REGISTRY } from "../artifacts/registry";
 import { resolveCapabilityOverlay } from "../capabilities/policy";
 import type { CapabilityDeclaration, NormalizedCapabilities } from "../capabilities/types";
 import { resolveContainedPath } from "../core/safe-path";
@@ -85,6 +87,8 @@ interface SnapshotWorkflowCoverage {
   readonly rootNodeId: string;
   readonly directMembers: Map<string, readonly string[]>;
   readonly nodes: Map<string, SnapshotWorkflowNodeSource>;
+  readonly artifactAvailable: boolean;
+  readonly artifactActionsAvailable: boolean;
 }
 function validateWorkflow(value: unknown): SnapshotWorkflowCoverage {
   const workflow = record(value, "workflow");
@@ -92,15 +96,32 @@ function validateWorkflow(value: unknown): SnapshotWorkflowCoverage {
   string(workflow.id, "workflow.id");
   for (const key of ["name", "description", "useWhen", "avoidWhen"] as const) if (key in workflow) string(workflow[key], `workflow.${key}`);
   for (const key of ["tags", "examples", "suggestedNext"] as const) if (key in workflow) stringArray(workflow[key], `workflow.${key}`);
+  let artifactAvailable = false;
+  let artifactActionsAvailable = false;
   if (workflow.artifact !== undefined) {
     const artifact = record(workflow.artifact, "workflow.artifact");
-    exactKeys(artifact, ["adapter", "profile", "binding", "options", "contractVersion", "checkpoints", "approvals"], [], "workflow.artifact");
-    string(artifact.adapter, "workflow.artifact.adapter"); string(artifact.profile, "workflow.artifact.profile");
-    string(artifact.binding, "workflow.artifact.binding");
-    string(artifact.contractVersion, "workflow.artifact.contractVersion");
-    stringArray(artifact.checkpoints, "workflow.artifact.checkpoints");
-    record(artifact.options, "workflow.artifact.options");
+    exactKeys(artifact, ["adapter", "adapterVersion", "profile", "profileVersion", "binding", "options", "optionsSchemaVersion", "contractVersion", "checkpoints", "actionIds", "viewVersion", "approvals"], [], "workflow.artifact");
+    const adapterId = string(artifact.adapter, "workflow.artifact.adapter");
+    const adapterVersion = string(artifact.adapterVersion, "workflow.artifact.adapterVersion");
+    const profileId = string(artifact.profile, "workflow.artifact.profile");
+    const profileVersion = string(artifact.profileVersion, "workflow.artifact.profileVersion");
+    const binding = string(artifact.binding, "workflow.artifact.binding");
+    const contractVersion = string(artifact.contractVersion, "workflow.artifact.contractVersion");
+    const optionsSchemaVersion = string(artifact.optionsSchemaVersion, "workflow.artifact.optionsSchemaVersion");
+    const checkpoints = stringArray(artifact.checkpoints, "workflow.artifact.checkpoints");
+    const actionIds = stringArray(artifact.actionIds, "workflow.artifact.actionIds");
+    if (new Set(checkpoints).size !== checkpoints.length || new Set(actionIds).size !== actionIds.length) throw new Error("Snapshot workflow artifact IDs must be unique.");
+    if (artifact.viewVersion !== ARTIFACT_VIEW_VERSION) throw new Error("Snapshot workflow.artifact.viewVersion is invalid.");
+    const options = record(artifact.options, "workflow.artifact.options");
     record(artifact.approvals, "workflow.artifact.approvals");
+    const resolved = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({ contractVersion, adapterId, adapterVersion, profileId, profileVersion });
+    if (resolved.profile.optionsSchemaVersion !== optionsSchemaVersion || resolved.profile.viewVersion !== artifact.viewVersion
+      || canonicalJson(resolved.profile.checkpointIds) !== canonicalJson(checkpoints)
+      || canonicalJson(resolved.profile.actions.map((action) => action.id)) !== canonicalJson(actionIds)
+      || !resolved.profile.bindings.some((candidate) => candidate === binding)) throw new Error("Snapshot workflow artifact profile contract does not match the active package implementation.");
+    BUILTIN_ARTIFACT_REGISTRY.validateOptions(resolved.profile, options);
+    artifactAvailable = true;
+    artifactActionsAvailable = Boolean(resolved.adapter.executeAction && resolved.profile.actions.length);
   }
   if (workflow.instructions !== undefined) {
     const instructions = record(workflow.instructions, "workflow.instructions");
@@ -188,7 +209,7 @@ function validateWorkflow(value: unknown): SnapshotWorkflowCoverage {
     for (const child of [...childrenByParent.get(current.nodeId)!].reverse()) stack.push({ nodeId: child, depth: current.depth + 1 });
   }
   if (seen.size !== uniqueNodeIds.size) throw new Error("Snapshot workflow team graph contains a cycle or disconnected nodes.");
-  return { nodeIds: uniqueNodeIds, agentIds, rootNodeId, directMembers, nodes };
+  return { nodeIds: uniqueNodeIds, agentIds, rootNodeId, directMembers, nodes, artifactAvailable, artifactActionsAvailable };
 }
 function serializeNormalizedCapabilities(capabilities: NormalizedCapabilities): Record<string, unknown> {
   return {
@@ -282,7 +303,7 @@ function validatePayload(value: unknown): void {
     validateSerializedEffectiveAuthorityNodeV1(entry, {
       rootNodeId: workflowCoverage.rootNodeId,
       directMemberIds: workflowCoverage.directMembers.get(nodeIdForContext) ?? [],
-      subsystems: { artifact: false, knowledge: false, questions: false },
+      subsystems: { artifact: workflowCoverage.artifactAvailable, artifactActions: workflowCoverage.artifactActionsAvailable, knowledge: false, questions: false },
     });
     const workflowNode = workflowCoverage.nodes.get(nodeIdForContext);
     const ceiling = workflowNode ? agentCapabilityCeilings.get(workflowNode.agentId) : undefined;

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ARTIFACT_CONTRACT_VERSION } from "../artifacts/contracts";
+import { ARTIFACT_CONTRACT_VERSION, ARTIFACT_PROFILE_VERSION, ARTIFACT_VIEW_VERSION } from "../artifacts/contracts";
 import { projectIdFromCanonicalRoot } from "../shared/project-identity";
 import type { ConfigCatalogResult } from "./catalogs";
 import type { AvailableAgentCatalogNode } from "./catalog-types";
@@ -137,7 +137,12 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
       binding: workflow.artifact.binding,
       options: workflow.artifact.options ?? {},
       contractVersion: workflow.artifact.contractVersion,
+      adapterVersion: workflow.artifact.contract.adapterVersion ?? ARTIFACT_PROFILE_VERSION,
+      profileVersion: workflow.artifact.contract.profileVersion ?? ARTIFACT_PROFILE_VERSION,
+      optionsSchemaVersion: workflow.artifact.contract.optionsSchemaVersion ?? ARTIFACT_PROFILE_VERSION,
       checkpoints: [...workflow.artifact.contract.checkpoints],
+      actionIds: [...(workflow.artifact.contract.actionIds ?? [])],
+      viewVersion: workflow.artifact.contract.viewVersion ?? ARTIFACT_VIEW_VERSION,
       approvals: workflow.approvals,
     };
     const staticText = buildStaticPromptForActivation({
@@ -168,7 +173,7 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
   const payload: ActivationSnapshotPayloadV1 = {
     versions: { snapshot: SNAPSHOT_FORMAT_VERSION, packageContract: SNAPSHOT_PACKAGE_CONTRACT_VERSION, schema: SCHEMA_VERSION, capability: CAPABILITY_CONTRACT_VERSION, catalogHash: SNAPSHOT_CATALOG_HASH_VERSION, artifact: ARTIFACT_CONTRACT_VERSION, contextPolicy: SNAPSHOT_CONTEXT_POLICY.version, package: input.packageVersion },
     project: { projectId: projectIdFromCanonicalRoot(project.projectRoot), rootRef: "." },
-    workflow: { id: workflow.id, name: workflow.name, description: workflow.description, useWhen: workflow.useWhen, ...(workflow.avoidWhen ? { avoidWhen: workflow.avoidWhen } : {}), tags: sorted(workflow.tags), examples: [...workflow.examples], suggestedNext: sorted(workflow.suggestedNext), artifact: { adapter: workflow.artifact.adapter, profile: workflow.artifact.profile, binding: workflow.artifact.binding, options: workflow.artifact.options ?? {}, contractVersion: workflow.artifact.contractVersion, checkpoints: [...workflow.artifact.contract.checkpoints], approvals: workflow.approvals }, instructions: workflow.instructions, budgets: workflow.budgets, team: { rootId: workflow.team.rootId, nodes: workflow.team.nodes.map((node) => ({ id: node.id, agentId: node.agentId, ...(node.parentId ? { parentId: node.parentId } : {}), memberIds: [...node.memberIds], depth: node.depth, ...(node.role ? { role: node.role } : {}), responsibilities: [...node.responsibilities], ...(node.consultWhen ? { consultWhen: node.consultWhen } : {}), ...(node.model ? { model: node.model } : {}), ...(node.thinking ? { thinking: node.thinking } : {}), ...(node.capabilities ? { capabilities: node.capabilities } : {}), skills: node.skills, knowledge: node.knowledge, budgets: node.budgets })) } },
+    workflow: { id: workflow.id, name: workflow.name, description: workflow.description, useWhen: workflow.useWhen, ...(workflow.avoidWhen ? { avoidWhen: workflow.avoidWhen } : {}), tags: sorted(workflow.tags), examples: [...workflow.examples], suggestedNext: sorted(workflow.suggestedNext), artifact: { adapter: workflow.artifact.adapter, adapterVersion: workflow.artifact.contract.adapterVersion ?? ARTIFACT_PROFILE_VERSION, profile: workflow.artifact.profile, profileVersion: workflow.artifact.contract.profileVersion ?? ARTIFACT_PROFILE_VERSION, binding: workflow.artifact.binding, options: workflow.artifact.options ?? {}, optionsSchemaVersion: workflow.artifact.contract.optionsSchemaVersion ?? ARTIFACT_PROFILE_VERSION, contractVersion: workflow.artifact.contractVersion, checkpoints: [...workflow.artifact.contract.checkpoints], actionIds: [...(workflow.artifact.contract.actionIds ?? [])], viewVersion: workflow.artifact.contract.viewVersion ?? ARTIFACT_VIEW_VERSION, approvals: workflow.approvals }, instructions: workflow.instructions, budgets: workflow.budgets, team: { rootId: workflow.team.rootId, nodes: workflow.team.nodes.map((node) => ({ id: node.id, agentId: node.agentId, ...(node.parentId ? { parentId: node.parentId } : {}), memberIds: [...node.memberIds], depth: node.depth, ...(node.role ? { role: node.role } : {}), responsibilities: [...node.responsibilities], ...(node.consultWhen ? { consultWhen: node.consultWhen } : {}), ...(node.model ? { model: node.model } : {}), ...(node.thinking ? { thinking: node.thinking } : {}), ...(node.capabilities ? { capabilities: node.capabilities } : {}), skills: node.skills, knowledge: node.knowledge, budgets: node.budgets })) } },
     agents, skills, knowledge,
     authority: { capabilityContractVersion: authority.capabilityContractVersion, nodes: authority.nodes.map((node) => ({ nodeId: node.nodeId, capabilities: node.capabilities, tools: [...node.tools], ...(node.model ? { model: node.model } : {}), ...(node.thinking ? { thinking: node.thinking } : {}) })) },
     models: modelResult.nodes,
