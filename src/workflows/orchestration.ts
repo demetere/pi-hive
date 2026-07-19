@@ -17,6 +17,7 @@ import {
   CANCELLATION_TIMING,
   WorkflowRunLifecycle,
   isOpenRunStatus,
+  type ArtifactReference,
   type CancellationCoordinator,
   type CancellationResult,
   type CompletionValidationHooks,
@@ -57,7 +58,8 @@ import {
   buildCompactionPreservationBlock,
   type WorkflowPromptAssembly,
 } from "./prompts";
-import { readWorkflowJournal } from "./journal";
+import { appendWorkflowEvent, readWorkflowJournal } from "./journal";
+import { createWorkflowEvent } from "./events";
 import { handoffForRun, handoffPromptInput } from "./handoff";
 import {
   buildWorkflowStatusPage,
@@ -65,8 +67,14 @@ import {
   runWithWorkflowToolRuntime,
 } from "./tools";
 import { BUILTIN_ARTIFACT_REGISTRY, type ResolvedArtifactProfile } from "../artifacts/registry";
-import { ArtifactFacade, type ArtifactMutationQueue } from "../artifacts/facade";
+import { ArtifactFacade, type ArtifactMutationQueue, type ArtifactOperationRecoveryReport, type ArtifactWorkspaceAuthority } from "../artifacts/facade";
+import { hashArtifactWorkspace } from "../artifacts/hashes";
+import { WorkspaceLeaseRuntime, type WorkspaceLeaseRuntimeOptions } from "../artifacts/leases";
+import { ArtifactOperationRuntime, type ArtifactOperationRuntimeOptions } from "../artifacts/operations";
+import { bindPhysicalArtifactWorkspace, listPhysicalArtifactWorkspaces, type PhysicalWorkspaceSelection } from "../artifacts/workspaces";
 import { createRunOrchestrationArtifactCallerIssuer, type RunOrchestrationArtifactCallerIssuer } from "../artifacts/internal/caller";
+import type { ArtifactWorkspaceBinding } from "../artifacts/types";
+import { heartbeatCurrentRuntimeOwnership } from "./ownership";
 
 export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
@@ -82,6 +90,12 @@ export interface RunOrchestrationServiceOptions {
   readonly now?: () => string; readonly referenceAuthorizer?: DelegationRuntime["options"]["referenceAuthorizer"];
   /** Integration seam backed by Pi's withFileMutationQueue; required before any physical adapter mutation. */
   readonly artifactMutationQueue?: ArtifactMutationQueue;
+  /** Package-internal dependency seam used to exercise physical adapters before their built-in implementation ships. */
+  readonly artifactRuntime?: ResolvedArtifactProfile;
+  /** Package-internal lease construction seam for deterministic lifecycle fault tests. */
+  readonly artifactLeaseFactory?: (options: WorkspaceLeaseRuntimeOptions) => WorkspaceLeaseRuntime;
+  /** Fault-injection seam for artifact/W13 restart-settlement tests. */
+  readonly artifactOperationFault?: ArtifactOperationRuntimeOptions["fault"];
   readonly verifiedTakeover?: () => boolean | Promise<boolean>;
   readonly completion?: Omit<CompletionValidationHooks, "descendants">;
   /** Fault-injection seam for workflow lifecycle crash-recovery tests. */
@@ -123,20 +137,26 @@ interface DispatchResources extends Pick<RunResources, "budgets" | "attempts" | 
   readonly canTerminalizeRunBudget: () => boolean;
 }
 
-function runtimeArtifact(snapshot: ActivationSnapshotFileV1): ResolvedArtifactProfile | undefined {
+function runtimeArtifact(snapshot: ActivationSnapshotFileV1, injected?: ResolvedArtifactProfile): ResolvedArtifactProfile | undefined {
   const workflow = snapshot.payload.workflow as { artifact?: unknown };
   if (!record(workflow.artifact)) return undefined;
   const artifact = workflow.artifact;
   if (typeof artifact.contractVersion !== "string" || typeof artifact.adapter !== "string" || typeof artifact.adapterVersion !== "string"
     || typeof artifact.profile !== "string" || typeof artifact.profileVersion !== "string" || typeof artifact.optionsSchemaVersion !== "string"
     || artifact.viewVersion !== 1 || !Array.isArray(artifact.checkpoints) || !Array.isArray(artifact.actionIds)) throw new Error("Activation snapshot artifact selection is invalid");
-  const resolved = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
+  const selection = {
     contractVersion: artifact.contractVersion,
     adapterId: artifact.adapter,
     adapterVersion: artifact.adapterVersion,
     profileId: artifact.profile,
     profileVersion: artifact.profileVersion,
-  });
+  };
+  const resolved = injected ?? BUILTIN_ARTIFACT_REGISTRY.resolveProfile(selection);
+  if (resolved.profile.contractVersion !== selection.contractVersion || resolved.profile.adapterId !== selection.adapterId
+    || resolved.profile.adapterVersion !== selection.adapterVersion || resolved.profile.id !== selection.profileId
+    || resolved.profile.version !== selection.profileVersion || resolved.adapter.contractVersion !== selection.contractVersion
+    || resolved.adapter.id !== selection.adapterId || resolved.adapter.version !== selection.adapterVersion
+    || !resolved.adapter.profiles.includes(resolved.profile)) throw new Error("Injected artifact adapter/profile identity is incompatible with the activation snapshot");
   if (resolved.profile.optionsSchemaVersion !== artifact.optionsSchemaVersion || resolved.profile.viewVersion !== artifact.viewVersion
     || canonicalJson(resolved.profile.checkpointIds) !== canonicalJson(artifact.checkpoints)
     || canonicalJson(resolved.profile.actions.map((action) => action.id)) !== canonicalJson(artifact.actionIds)) throw new Error("Activation snapshot artifact profile identity is incompatible");
@@ -177,11 +197,12 @@ export class RunOrchestrationService {
   private readonly selectedArtifact?: ResolvedArtifactProfile;
   private readonly artifactCallerIssuer?: RunOrchestrationArtifactCallerIssuer;
   private current?: RunResources;
+  private artifactAuthority?: Readonly<{ runId: string; authority: ArtifactWorkspaceAuthority }>;
   private readonly cleanup = new Set<Promise<void>>();
 
   constructor(options: RunOrchestrationServiceOptions) {
     this.options = options;
-    const selectedArtifact = runtimeArtifact(options.snapshot);
+    const selectedArtifact = runtimeArtifact(options.snapshot, options.artifactRuntime);
     this.selectedArtifact = selectedArtifact;
     this.artifactCallerIssuer = selectedArtifact ? createRunOrchestrationArtifactCallerIssuer(options.snapshot) : undefined;
     const completion: CompletionValidationHooks = {
@@ -219,6 +240,7 @@ export class RunOrchestrationService {
       },
       settleTerminal: async (settlement) => {
         await this.settleTerminalResources(settlement.runId);
+        this.releaseArtifactLease("finish");
         await options.completion?.settleTerminal?.(settlement);
       },
     };
@@ -232,9 +254,9 @@ export class RunOrchestrationService {
       createRunId: options.createRunId,
       now: options.now,
       completion,
-      createArtifactWorkspace: selectedArtifact ? (runId) => BUILTIN_ARTIFACT_REGISTRY.bind(selectedArtifact, {
+      createArtifactWorkspace: selectedArtifact?.profile.adapterId === "none" ? (runId) => BUILTIN_ARTIFACT_REGISTRY.bind(selectedArtifact, {
         runId,
-        binding: String((options.snapshot.payload.workflow.artifact as { binding?: unknown }).binding ?? ""),
+        binding: "none",
         options: (options.snapshot.payload.workflow.artifact as { options?: unknown }).options ?? {},
       }) : undefined,
       onRunStarted: (runId) => { this.changeAccountingFor(runId).captureBaseline(); },
@@ -245,6 +267,132 @@ export class RunOrchestrationService {
       },
       journalFault: options.journalFault,
     });
+  }
+
+  private artifactSelection(): Readonly<{ binding: string; options: Readonly<Record<string, JsonValue>> }> {
+    const artifact = this.options.snapshot.payload.workflow.artifact as { binding?: unknown; options?: unknown };
+    const options = record(artifact.options) ? artifact.options as Readonly<Record<string, JsonValue>> : Object.freeze({});
+    return Object.freeze({ binding: String(artifact.binding ?? ""), options });
+  }
+
+  listArtifactWorkspaces(input: Readonly<{ limit: number; cursor?: string }>) {
+    if (!this.selectedArtifact?.adapter || this.selectedArtifact.profile.adapterId === "none") throw new Error("Active artifact profile has no physical workspace listing");
+    return listPhysicalArtifactWorkspaces({
+      projectRoot: this.options.projectRoot, adapter: this.selectedArtifact.adapter, profile: this.selectedArtifact.profile,
+      options: this.artifactSelection().options, limit: input.limit, ...(input.cursor ? { cursor: input.cursor } : {}),
+    });
+  }
+
+  bindArtifactWorkspace(selection: PhysicalWorkspaceSelection, handoffWorkspaceId?: string) {
+    if (!this.selectedArtifact?.adapter || this.selectedArtifact.profile.adapterId === "none") throw new Error("Active artifact profile has no physical workspace binding");
+    const run = this.lifecycle.restore().latestRun;
+    if (!run || !isOpenRunStatus(run.status)) throw new Error("Artifact workspace binding requires a current open run");
+    if (run.artifactWorkspace) throw new Error("Artifact workspace is already bound; rebinding is denied");
+    const handoff = run.handoffPacketHash ? handoffForRun(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), run.runId) : undefined;
+    let handoffReference: ArtifactReference | undefined;
+    if (handoffWorkspaceId !== undefined) {
+      if (!handoff || handoffWorkspaceId !== selection.workspaceId) throw new Error("Requested handoff artifact reference is not attached to this run");
+      const matches = handoff.artifactRefs.filter((reference) => reference.workspaceId === handoffWorkspaceId);
+      if (matches.length !== 1) throw new Error("Handoff artifact reference is missing or ambiguous");
+      handoffReference = matches[0];
+    }
+    const configured = this.artifactSelection();
+    const binding = bindPhysicalArtifactWorkspace({
+      projectRoot: this.options.projectRoot, adapter: this.selectedArtifact.adapter, profile: this.selectedArtifact.profile,
+      runId: run.runId, configuredBinding: configured.binding as never, options: configured.options, selection,
+      ...(handoffReference ? { handoffReference } : {}),
+    });
+    return this.lifecycle.bindArtifactWorkspace(binding);
+  }
+
+  private workspaceAuthority(binding: ArtifactWorkspaceBinding | undefined, runId: string): ArtifactWorkspaceAuthority | undefined {
+    if (!binding || binding.workspace.kind !== "physical" || !binding.path) return undefined;
+    if (this.artifactAuthority?.runId === runId) return this.artifactAuthority.authority;
+    this.artifactAuthority?.authority.lease.stopHeartbeat();
+    const authority: ArtifactWorkspaceAuthority = Object.freeze({
+      readHashes: () => hashArtifactWorkspace(binding.path!),
+      lease: (this.options.artifactLeaseFactory ?? ((options) => new WorkspaceLeaseRuntime(options)))({
+        projectRoot: this.options.projectRoot, adapterId: binding.adapterId, workspaceId: binding.workspace.id,
+        sessionId: this.options.sessionId, runId,
+        onHeartbeatLost: (error) => { void this.pause(`artifact writer lease lost: ${error.message}`).catch(() => undefined); },
+      }),
+      operations: new ArtifactOperationRuntime({
+        projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId, now: this.options.now,
+        fault: this.options.artifactOperationFault,
+      }),
+    });
+    this.artifactAuthority = Object.freeze({ runId, authority });
+    return authority;
+  }
+
+  private unresolvedArtifactOperationIds(binding: ArtifactWorkspaceBinding, runId: string): readonly string[] {
+    const authority = this.workspaceAuthority(binding, runId);
+    if (!authority) return Object.freeze([]);
+    return Object.freeze(Object.values(authority.operations.restore().operations)
+      .filter((operation) => !operation.result)
+      .map((operation) => operation.operationId));
+  }
+
+  private reconcileArtifactAttemptResults(attempts: AttemptRuntime, authority: ArtifactWorkspaceAuthority): readonly string[] {
+    const issues: string[] = [];
+    const operations = Object.values(authority.operations.restore().operations)
+      .filter((operation) => operation.result)
+      .sort((a, b) => a.intentSequence - b.intentSequence || a.operationId.localeCompare(b.operationId));
+    for (const operation of operations) {
+      const attempt = attempts.restore().attempts[operation.operationId];
+      if (!attempt) continue;
+      const identityMatches = attempt.operation === "workflow.tool.artifact_action"
+        && attempt.descriptor.effect === "artifact" && !attempt.descriptor.readOnly && !attempt.descriptor.idempotent
+        && operation.attemptInputHash !== undefined && operation.attemptInputHash === attempt.inputHash;
+      if (!identityMatches) {
+        issues.push(`artifact operation ${operation.operationId} does not match its enclosing W13 attempt identity or input`);
+        continue;
+      }
+      const result = Object.freeze({ ok: true as const, value: operation.result! as unknown as JsonValue });
+      try {
+        if (attempt.result) {
+          if (canonicalJson(attempt.result) !== canonicalJson(result)) issues.push(`artifact operation ${operation.operationId} conflicts with its completed W13 attempt result`);
+          continue;
+        }
+        attempts.reconcile(operation.operationId, operation.reconciliation === "not-applied" ? "not-applied" : "applied", result);
+      } catch (error) {
+        issues.push(`artifact operation ${operation.operationId} could not settle its enclosing W13 attempt: ${String(error instanceof Error ? error.message : error)}`);
+      }
+    }
+    return Object.freeze(issues);
+  }
+
+  private recoverArtifactOperations(binding: ArtifactWorkspaceBinding, runId: string): ArtifactOperationRecoveryReport {
+    if (!this.selectedArtifact?.adapter) throw new Error("Physical artifact adapter is unavailable during operation recovery");
+    if (!heartbeatCurrentRuntimeOwnership(this.options.projectRoot, this.options.sessionId, this.options.runtimeOwnerNonce)) {
+      throw new Error("Current runtime ownership is required during artifact operation recovery");
+    }
+    const authority = this.workspaceAuthority(binding, runId);
+    if (!authority) throw new Error("Physical workspace authority is unavailable during operation recovery");
+    authority.lease.assertOwned();
+    return new ArtifactFacade({
+      adapter: this.selectedArtifact.adapter, profile: this.selectedArtifact.profile, binding,
+      mutationQueue: this.options.artifactMutationQueue, workspaceAuthority: authority,
+    }).recoverUnresolvedOperations();
+  }
+
+  private releaseArtifactLease(reason: "pause" | "cancel" | "finish"): Readonly<{ released: boolean; finalWorkspaceHash?: string }> {
+    const run = this.lifecycle.restore().latestRun;
+    const binding = run?.artifactWorkspace;
+    if (!run || !binding || binding.workspace.kind !== "physical") return Object.freeze({ released: false });
+    const authority = this.workspaceAuthority(binding, run.runId);
+    if (!authority) throw new Error("Bound physical artifact workspace authority is unavailable during lifecycle finalization");
+    let leaseOwned = false;
+    try { authority.lease.assertOwned(); leaseOwned = true; } catch { /* reader/no-action run */ }
+    const finalWorkspaceHash = authority.readHashes().workspaceHash;
+    appendWorkflowEvent(this.options.projectRoot, createWorkflowEvent({
+      projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, type: "artifact.recorded", producer: "harness",
+      payload: { formatVersion: 1, subsystem: "workspace", operation: "final-hash", reason, finalWorkspaceHash, leaseOwned },
+      timestamp: this.options.now?.() ?? new Date().toISOString(),
+    }));
+    const evidence = authority.lease.releaseForLifecycle(reason, finalWorkspaceHash);
+    this.artifactAuthority = undefined;
+    return Object.freeze({ released: evidence.released, finalWorkspaceHash });
   }
 
   private trackCleanup(promise: Promise<void>): void {
@@ -496,17 +644,35 @@ export class RunOrchestrationService {
     const changes = this.changeAccountingFor(runId);
     const attempts = new AttemptRuntime({ projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId, now: this.options.now });
     const recoveryIssues: string[] = [];
-    for (const attempt of Object.values(attempts.restore().attempts)) {
-      if (!attempt.result && attempt.recovery === "reconcile-required" && attempt.status === "pending") {
-        attempts.markUnknown(attempt.attemptId, "interrupted non-idempotent dispatch requires trusted reconciliation before admission");
-      }
-    }
     if (budgets.restore().activeBatches.length) {
       const boundary = this.options.recoveredOwnerHeartbeatAt === undefined ? Number.NaN : Date.parse(this.options.recoveredOwnerHeartbeatAt);
       if (!Number.isFinite(boundary)) recoveryIssues.push("abandoned active budget clock has no verified previous-owner heartbeat boundary");
       else {
         budgets.reconcileAbandonedActiveTime(boundary, "reconciled at verified previous-owner heartbeat");
         budgets.resumeActive();
+      }
+    }
+    const recoveryRun = this.lifecycle.restore().latestRun;
+    if (recoveryRun?.runId === runId && recoveryRun.artifactWorkspace?.workspace.kind === "physical" && this.selectedArtifact?.adapter) {
+      try {
+        const authority = this.workspaceAuthority(recoveryRun.artifactWorkspace, runId)!;
+        if (this.unresolvedArtifactOperationIds(recoveryRun.artifactWorkspace, runId).length) {
+          if (!heartbeatCurrentRuntimeOwnership(this.options.projectRoot, this.options.sessionId, this.options.runtimeOwnerNonce)) {
+            throw new Error("current runtime ownership is required before artifact operation recovery");
+          }
+          const acquired = authority.lease.acquire();
+          if (!acquired.ok) throw new Error(`artifact writer lease conflict during recovery: ${acquired.reason}`);
+          const report = this.recoverArtifactOperations(recoveryRun.artifactWorkspace, runId);
+          if (report.unknown.length) recoveryIssues.push(`artifact operations paused unknown_side_effect: ${report.diagnostics.join("; ")}`);
+        }
+        recoveryIssues.push(...this.reconcileArtifactAttemptResults(attempts, authority));
+      } catch (error) {
+        recoveryIssues.push(`artifact operation restart recovery failed closed: ${String(error instanceof Error ? error.message : error)}`);
+      }
+    }
+    for (const attempt of Object.values(attempts.restore().attempts)) {
+      if (!attempt.result && attempt.recovery === "reconcile-required" && attempt.status === "pending") {
+        attempts.markUnknown(attempt.attemptId, "interrupted non-idempotent dispatch requires trusted reconciliation before admission");
       }
     }
     const runtime = new DelegationRuntime({
@@ -726,7 +892,8 @@ export class RunOrchestrationService {
             assertCurrent();
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
             if (!workspace) throw new Error("Artifact status requires a trusted run workspace binding");
-            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue });
+            const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
+            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
             return facade.status(caller, input);
           } : undefined,
@@ -734,7 +901,8 @@ export class RunOrchestrationService {
             assertCurrent();
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
             if (!workspace) throw new Error("Artifact action requires a trusted run workspace binding");
-            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue });
+            const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
+            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
             return facade.action(caller, input, { attemptId });
           } : undefined,
@@ -825,7 +993,11 @@ export class RunOrchestrationService {
       this.reconcileRecoveredCommandAccounting(resources.attempts, resources.changes);
       if (report.paused) throw new Error(`Worker admission paused for unresolved unknown side effects: ${report.diagnostics.join("; ")}`);
     }
-    this.assertRecoveredForAdmission(resources);
+    const admissionIssues = this.recoveryAdmissionIssues(resources);
+    if (admissionIssues.length) {
+      if (this.lifecycle.restore().latestRun?.status === "running") await this.pause(`unknown_side_effect: ${admissionIssues.join("; ").slice(0, 2_048)}`);
+      throw new Error(`Worker admission paused for unresolved unknown side effects: ${admissionIssues.join("; ")}`);
+    }
     const run = this.lifecycle.restore().latestRun;
     if (!run || run.runId !== resources.runId || !isOpenRunStatus(run.status) || run.status === "paused" || run.cancellationRequested) {
       throw new Error("Workers can run only for the current running workflow run");
@@ -862,11 +1034,24 @@ export class RunOrchestrationService {
       ...this.options.pauseAuthority,
       captureState: async () => {
         const base = await this.options.pauseAuthority.captureState?.() ?? {};
-        return { ...base, rootPromptCompactionPreservation: boundary.preservation } as Readonly<Record<string, JsonValue>>;
+        const run = this.lifecycle.restore().latestRun;
+        const binding = run?.artifactWorkspace;
+        const authority = run && binding ? this.workspaceAuthority(binding, run.runId) : undefined;
+        let artifactLeaseOwned = false;
+        if (authority) { try { authority.lease.assertOwned(); artifactLeaseOwned = true; } catch { /* reader-only run */ } }
+        return {
+          ...base,
+          rootPromptCompactionPreservation: boundary.preservation,
+          ...(authority ? { artifactWorkspaceHash: authority.readHashes().workspaceHash, artifactLeaseOwned } : {}),
+        } as Readonly<Record<string, JsonValue>>;
       },
       suspendOwnedWork: async () => {
         await this.suspendResources(reason);
         await this.options.pauseAuthority.suspendOwnedWork?.();
+      },
+      releaseLeases: async () => {
+        this.releaseArtifactLease("pause");
+        await this.options.pauseAuthority.releaseLeases?.();
       },
     });
   }
@@ -876,7 +1061,41 @@ export class RunOrchestrationService {
     const preservation = paused?.pauseState?.rootPromptCompactionPreservation;
     if (!paused || typeof preservation !== "string") throw new Error("Resume rejected: root immutable prompt preservation markers are missing");
     this.rootCompactionBoundary(paused.runId).validate(preservation);
-    const resumed = await this.lifecycle.resume(this.options.resumeAuthority);
+    const physicalBinding = paused.artifactWorkspace?.workspace.kind === "physical" ? paused.artifactWorkspace : undefined;
+    const unresolvedArtifactOperations = physicalBinding ? this.unresolvedArtifactOperationIds(physicalBinding, paused.runId) : Object.freeze([]);
+    const resumeAuthority: ResumeCoordinator = {
+      acquireOwnership: this.options.resumeAuthority.acquireOwnership,
+      acquireLeases: async () => {
+        const run = this.lifecycle.restore().latestRun;
+        if (run?.artifactWorkspace && (run.pauseState?.artifactLeaseOwned === true || unresolvedArtifactOperations.length > 0)) {
+          const authority = this.workspaceAuthority(run.artifactWorkspace, run.runId)!;
+          const acquired = authority.lease.acquire();
+          if (!acquired.ok) throw new Error(`Artifact writer lease conflict on resume: ${acquired.reason}`);
+        }
+        await this.options.resumeAuthority.acquireLeases();
+      },
+      revalidateHashes: async (pauseState) => {
+        const run = this.lifecycle.restore().latestRun;
+        if (run?.artifactWorkspace?.workspace.kind === "physical") {
+          const expected = pauseState.artifactWorkspaceHash;
+          if (typeof expected !== "string" || this.workspaceAuthority(run.artifactWorkspace, run.runId)!.readHashes().workspaceHash !== expected) return false;
+          if (!await this.options.resumeAuthority.revalidateHashes(pauseState)) return false;
+          if (unresolvedArtifactOperations.length) {
+            const report = this.recoverArtifactOperations(run.artifactWorkspace, run.runId);
+            if (report.unknown.length) throw new Error(`Resume remains paused for unknown_side_effect artifact operations: ${report.diagnostics.join("; ")}`);
+          }
+          return true;
+        }
+        return this.options.resumeAuthority.revalidateHashes(pauseState);
+      },
+      rollbackAuthority: async () => {
+        this.artifactAuthority?.authority.lease.stopHeartbeat();
+        this.artifactAuthority?.authority.lease.release();
+        this.artifactAuthority = undefined;
+        await this.options.resumeAuthority.rollbackAuthority();
+      },
+    };
+    const resumed = await this.lifecycle.resume(resumeAuthority);
     if (!resumed) return false;
     const run = this.lifecycle.restore().latestRun;
     if (!run) throw new Error("Resumed workflow run disappeared");
@@ -914,7 +1133,10 @@ export class RunOrchestrationService {
           },
         } as Readonly<Record<string, JsonValue>>;
       },
-      releaseLeases: this.options.cancellationAuthority.releaseLeases,
+      releaseLeases: async () => {
+        this.releaseArtifactLease("cancel");
+        await this.options.cancellationAuthority.releaseLeases?.();
+      },
     };
   }
 

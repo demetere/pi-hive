@@ -1,6 +1,8 @@
 import type { TSchema } from "typebox";
 import type { JsonValue } from "../config/types";
 import type { ArtifactCapability } from "../capabilities/types";
+import type { ArtifactReference } from "../workflows/runs";
+import type { ArtifactWorkspaceHashesV1 } from "./hashes";
 import type {
   ARTIFACT_ACTION_VERSION,
   ARTIFACT_CONTRACT_VERSION,
@@ -10,6 +12,7 @@ import type {
 } from "./contracts";
 
 export type ArtifactWorkspaceKind = "logical-empty" | "physical";
+export type ArtifactWorkspaceSelection = "new" | "existing";
 export type ArtifactActionMutability = "read-only" | "mutating";
 export type ArtifactActionIdempotency = "idempotent" | "operation-bound";
 
@@ -46,6 +49,8 @@ export interface ArtifactWorkspaceBinding {
   readonly profileId: string;
   readonly profileVersion: typeof ARTIFACT_PROFILE_VERSION;
   readonly binding: ArtifactBinding;
+  /** Explicit choice made for new/existing/either; absent only for logical none. */
+  readonly selection?: ArtifactWorkspaceSelection;
   readonly workspace: Readonly<{ id: string; kind: ArtifactWorkspaceKind }>;
   readonly path?: string;
   readonly workspaceHash?: string;
@@ -58,6 +63,36 @@ export interface ArtifactBindRequest {
   readonly runId: string;
   readonly binding: ArtifactBinding;
   readonly options: Readonly<Record<string, JsonValue>>;
+}
+
+export interface ArtifactWorkspaceResolution {
+  readonly id: string;
+  /** Adapter-resolved canonical candidate. The common binder rechecks containment. */
+  readonly path: string;
+}
+export interface ArtifactWorkspaceListItem {
+  readonly id: string;
+  readonly label: string;
+  readonly summary?: string;
+}
+export interface ArtifactWorkspaceListPage {
+  readonly items: readonly ArtifactWorkspaceListItem[];
+  readonly nextCursor?: string;
+}
+export type ArtifactHandoffValidation =
+  | Readonly<{ state: "valid" }>
+  | Readonly<{ state: "stale" | "incompatible"; reason: string }>;
+/** Physical adapter identity/path hooks. They expose no model or run-state authority. */
+export interface ArtifactWorkspaceLifecycle {
+  create(input: Readonly<{ profileId: string; workspaceId: string; options: Readonly<Record<string, JsonValue>> }>): ArtifactWorkspaceResolution;
+  resolve(input: Readonly<{ profileId: string; workspaceId: string; options: Readonly<Record<string, JsonValue>> }>): ArtifactWorkspaceResolution | undefined;
+  list(input: Readonly<{ profileId: string; options: Readonly<Record<string, JsonValue>>; limit: number; cursor?: string }>): ArtifactWorkspaceListPage;
+  validateHandoffReference?(input: Readonly<{
+    profileId: string;
+    reference: ArtifactReference;
+    workspace: ArtifactWorkspaceResolution;
+    hashes: ArtifactWorkspaceHashesV1;
+  }>): ArtifactHandoffValidation;
 }
 
 export interface ArtifactStatusPageRequest {
@@ -98,6 +133,21 @@ export interface ArtifactActionResultV1 {
   readonly refs: readonly ArtifactViewRefV1[];
 }
 
+export interface ArtifactOperationRecoveryContext {
+  readonly binding: ArtifactWorkspaceBinding;
+  readonly hashes: ArtifactWorkspaceHashesV1;
+  readonly operation: Readonly<{
+    operationId: string;
+    actionId: string;
+    inputHash: string;
+    expectedWorkspaceHash: string;
+    intentAt: string;
+  }>;
+}
+export type ArtifactActionRecoveryResult =
+  | Readonly<{ state: "applied"; result: ArtifactActionResultV1 }>
+  | Readonly<{ state: "unknown"; diagnostic: string }>;
+
 export interface ArtifactCompletionResult {
   readonly state: "satisfied" | "unsatisfied" | "not-present";
   readonly issues?: readonly string[];
@@ -106,6 +156,8 @@ export interface ArtifactCompletionResult {
 export interface ArtifactStatusContext {
   readonly binding: ArtifactWorkspaceBinding;
   readonly capabilities: readonly ArtifactCapability[];
+  /** Fresh reader evidence; physical adapters must return this hash in their view. */
+  readonly hashes?: ArtifactWorkspaceHashesV1;
 }
 export interface ArtifactActionContext extends ArtifactStatusContext {
   /** Harness-minted W13 attempt ID, also used as the artifact operation ID. */
@@ -120,8 +172,11 @@ export interface ArtifactAdapter {
   readonly id: string;
   readonly version: string;
   readonly profiles: readonly ArtifactRuntimeProfile[];
+  readonly workspaceLifecycle?: ArtifactWorkspaceLifecycle;
   bind(profile: ArtifactRuntimeProfile, request: ArtifactBindRequest): ArtifactWorkspaceBinding;
   status(context: ArtifactStatusContext, page: ArtifactStatusPageRequest): ArtifactStatusViewV1 | Promise<ArtifactStatusViewV1>;
   executeAction?(context: ArtifactActionContext, action: ArtifactActionContract, argumentsValue: Readonly<Record<string, JsonValue>>): ArtifactActionResultV1 | Promise<ArtifactActionResultV1>;
+  /** Read adapter-owned state to prove an interrupted physical mutation applied, or return unknown. Never redispatches. */
+  reconcileAction(context: ArtifactOperationRecoveryContext, action: ArtifactActionContract): ArtifactActionRecoveryResult;
   validateCompletion(binding: ArtifactWorkspaceBinding): ArtifactCompletionResult | Promise<ArtifactCompletionResult>;
 }

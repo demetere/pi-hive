@@ -92,6 +92,7 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
   artifact_action: Type.Object({
     actionId: Id,
     arguments: Type.Record(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters }), Type.Unknown()),
+    expectedWorkspaceHash: Type.Optional(Type.String({ pattern: "^sha256:[0-9a-f]{64}$", maxLength: 71 })),
   }, strict),
   workflow_finish: Type.Object({
     status: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("failed")]),
@@ -119,7 +120,7 @@ export interface WorkflowToolRuntimeBindingInput {
   readonly team: TeamRuntime;
   readonly workflowStatus: (input: WorkflowStatusRequest) => WorkflowStatusPage;
   readonly artifactStatus?: (input: { readonly limit?: number; readonly cursor?: string }) => Promise<unknown>;
-  readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>> }, attemptId: string) => Promise<unknown>;
+  readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expectedWorkspaceHash?: string }, attemptId: string) => Promise<unknown>;
   readonly finish: (input: unknown, toolBatch: readonly string[]) => Promise<unknown>;
 }
 export interface WorkflowToolRuntimeBinding {
@@ -185,6 +186,7 @@ function assertByteBounds(name: GenericWorkflowToolName, input: Record<string, u
   if (name === "artifact_action") {
     assertUtf8(input.actionId, "artifact_action actionId", TOOL_CONTRACT_LIMITS.idBytes);
     boundedJson(input.arguments, "artifact_action arguments", { bytes: 65_536, depth: 16, nodes: 4_096, rootRecord: true });
+    if (input.expectedWorkspaceHash !== undefined) assertUtf8(input.expectedWorkspaceHash, "artifact_action expectedWorkspaceHash", 71);
   }
   if (name === "workflow_finish") {
     assertUtf8(input.summary, "workflow_finish summary", 8_192);
@@ -327,7 +329,7 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
       }
       if (name === "artifact_action") {
         if (!runtime.binding.artifactAction) throw Object.assign(new Error("Artifact action subsystem is not bound for this run"), { effectNotApplied: true });
-        return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>> }, attemptContext.attemptId);
+        return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }, attemptContext.attemptId);
       }
       return runtime.binding.finish(input, toolBatch);
     },

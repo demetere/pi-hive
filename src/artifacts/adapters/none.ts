@@ -81,6 +81,9 @@ export const NONE_ARTIFACT_ADAPTER: ArtifactAdapter = Object.freeze({
       refs: Object.freeze([]),
     });
   },
+  reconcileAction() {
+    return Object.freeze({ state: "unknown" as const, diagnostic: "none adapter has no mutating actions" });
+  },
   validateCompletion(binding: ArtifactWorkspaceBinding) {
     requireNoneBinding(binding);
     return Object.freeze({ state: "satisfied" as const });

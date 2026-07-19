@@ -327,6 +327,16 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     return freezeRun(state, run, { inputId: input.inputId, runId: event.runId, input });
   }
 
+  if (event.type === "artifact.recorded" && payload.subsystem === "workspace" && payload.operation === "bind") {
+    if (event.producer !== "harness") throw new Error("Artifact workspace binding lacks harness authority");
+    const run = requireCurrentRun(state, event);
+    if (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Artifact workspace cannot bind to a terminal, cancelling, or finalizing run");
+    if (run.artifactWorkspace) throw new Error("Artifact workspace is already bound; rebinding is denied");
+    const artifactWorkspace = validateArtifactWorkspaceBinding(payload.workspace);
+    if (artifactWorkspace.workspace.kind !== "physical" || artifactWorkspace.binding === "none") throw new Error("Artifact workspace bind event requires a physical workspace");
+    return freezeRun(state, { ...run, artifactWorkspace });
+  }
+
   if (event.type === "run.input.recorded") {
     const run = requireCurrentRun(state, event);
     if (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Run does not accept new input");
@@ -770,6 +780,25 @@ export class WorkflowRunLifecycle {
       throw error;
     }
     return Object.freeze({ runId: current.runId, input: record, created: false, duplicate: false });
+  }
+
+  bindArtifactWorkspace(binding: ArtifactWorkspaceBinding): ArtifactWorkspaceBinding {
+    const validated = validateArtifactWorkspaceBinding(binding);
+    if (validated.workspace.kind !== "physical") throw new Error("Only a physical artifact workspace can bind after run creation");
+    const run = this.restore().latestRun;
+    if (!run || !isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Artifact workspace requires a current open run");
+    if (run.artifactWorkspace) throw new Error("Artifact workspace is already bound; rebinding is denied");
+    appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
+      projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, type: "artifact.recorded",
+      payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, subsystem: "workspace", operation: "bind", workspace: validated }),
+      producer: "harness", timestamp: this.options.now?.() ?? new Date().toISOString(),
+    }), (events) => {
+      const locked = replayWorkflowJournal(events, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
+      if (!locked || locked.runId !== run.runId || !isOpenRunStatus(locked.status) || locked.cancellationRequested || locked.pendingTerminal || locked.artifactWorkspace) {
+        throw new Error("Run changed before artifact workspace binding; rebinding is denied");
+      }
+    });
+    return this.restore().latestRun!.artifactWorkspace!;
   }
 
   preparedInputDelivery(): Readonly<{ requestId: string; runId: string; inputs: readonly RunInputRecord[] }> | undefined {
