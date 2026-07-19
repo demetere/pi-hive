@@ -26,6 +26,16 @@ test("the artifact registry is immutable, built-in-only, and version exact", () 
   assert.equal(resolved.profile.id, "default");
   assert.equal(resolved.profile.optionsSchemaVersion, "1");
 
+  const markdown = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
+    contractVersion: ARTIFACT_CONTRACT_VERSION,
+    adapterId: "markdown-plan",
+    adapterVersion: ARTIFACT_PROFILE_VERSION,
+    profileId: "author",
+    profileVersion: ARTIFACT_PROFILE_VERSION,
+  });
+  assert.equal(markdown.adapter.id, "markdown-plan");
+  assert.deepEqual(BUILTIN_ARTIFACT_REGISTRY.validateOptions(markdown.profile, { root: "docs/plans" }), { root: "docs/plans" });
+
   const openspec = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
     contractVersion: ARTIFACT_CONTRACT_VERSION,
     adapterId: "openspec",

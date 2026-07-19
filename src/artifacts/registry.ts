@@ -10,7 +10,9 @@ import {
   type ArtifactBinding,
 } from "./contracts";
 import { NONE_ARTIFACT_ADAPTER, NONE_PROFILE } from "./adapters/none";
+import { MARKDOWN_PLAN_ARTIFACT_ADAPTER, MARKDOWN_PLAN_PROFILES } from "./adapters/markdown-plan";
 import { OPEN_SPEC_ARTIFACT_ADAPTER, OPEN_SPEC_PROFILES } from "./adapters/openspec";
+import type { JsonValue } from "../config/types";
 import type {
   ArtifactAdapter,
   ArtifactBindRequest,
@@ -53,6 +55,7 @@ const strict = { additionalProperties: false } as const;
 const EMPTY_OPTIONS = Type.Object({}, strict);
 const runtimeProfiles: readonly ArtifactRuntimeProfile[] = Object.freeze(BUILTIN_ARTIFACT_PROFILES.map((metadata) => {
   if (metadata.adapter === "none" && metadata.profile === "default") return NONE_PROFILE;
+  if (metadata.adapter === "markdown-plan") return MARKDOWN_PLAN_PROFILES[metadata.profile as keyof typeof MARKDOWN_PLAN_PROFILES];
   if (metadata.adapter === "openspec") return OPEN_SPEC_PROFILES[metadata.profile as keyof typeof OPEN_SPEC_PROFILES];
   return Object.freeze({
     contractVersion: ARTIFACT_CONTRACT_VERSION,
@@ -75,6 +78,7 @@ class BuiltinArtifactRegistry {
 
   private implementation(adapterId: string): ArtifactAdapter | undefined {
     if (adapterId === "none") return NONE_ARTIFACT_ADAPTER;
+    if (adapterId === "markdown-plan") return MARKDOWN_PLAN_ARTIFACT_ADAPTER;
     if (adapterId === "openspec") return OPEN_SPEC_ARTIFACT_ADAPTER;
     return undefined;
   }
@@ -96,7 +100,7 @@ class BuiltinArtifactRegistry {
     return Object.freeze({ profile, adapter });
   }
 
-  validateOptions(profile: ArtifactRuntimeProfile, raw: unknown): Readonly<Record<string, never>> {
+  validateOptions(profile: ArtifactRuntimeProfile, raw: unknown): Readonly<Record<string, JsonValue>> {
     try {
       boundedJson(raw, "Artifact options", {
         bytes: ARTIFACT_CONTRACT_LIMITS.optionsBytes,
@@ -108,7 +112,7 @@ class BuiltinArtifactRegistry {
       throw new ArtifactRegistryError("OPTIONS_INVALID", String(error instanceof Error ? error.message : error));
     }
     if (!Value.Check(profile.optionsSchema, raw)) throw new ArtifactRegistryError("OPTIONS_INVALID", `Artifact options for ${profile.adapterId}/${profile.id} contain unknown or invalid fields`);
-    return Object.freeze({});
+    return Object.freeze(structuredClone(raw)) as Readonly<Record<string, JsonValue>>;
   }
 
   bind(resolved: ResolvedArtifactProfile, request: { readonly runId: string; readonly binding: string; readonly options: unknown }): ArtifactWorkspaceBinding {

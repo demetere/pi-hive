@@ -50,14 +50,16 @@ const contract = (adapter: string, profile: string, bindings: readonly ArtifactB
   actionIds: Object.freeze([...actionIds]),
   viewVersion: ARTIFACT_VIEW_VERSION,
 });
+const markdownRead = "markdown-plan.plan.read", markdownAuthor = "markdown-plan.plan.author", markdownUpdate = "markdown-plan.plan.update", markdownValidate = "markdown-plan.validate";
+const markdownTaskList = "markdown-plan.tasks.list", markdownTaskComplete = "markdown-plan.tasks.complete", markdownReviewInspect = "markdown-plan.review.inspect";
 const openspecRead = "openspec.artifact.read", openspecWrite = "openspec.artifact.write", openspecValidate = "openspec.validate";
 const openspecTaskList = "openspec.tasks.list", openspecTaskComplete = "openspec.tasks.complete", openspecReviewInspect = "openspec.review.inspect";
 export const BUILTIN_ARTIFACT_PROFILES: readonly ArtifactProfileContract[] = Object.freeze([
   contract("none", "default", ["none"], []),
-  contract("markdown-plan", "author", author, ["plan"]),
-  contract("markdown-plan", "execute", existing, ["plan", "execution"]),
-  contract("markdown-plan", "review", existing, ["execution", "review"]),
-  contract("markdown-plan", "lifecycle", author, ["plan", "execution", "review"]),
+  contract("markdown-plan", "author", author, ["plan"], [markdownRead, markdownAuthor, markdownUpdate, markdownValidate]),
+  contract("markdown-plan", "execute", existing, ["plan", "execution"], [markdownRead, markdownValidate, markdownTaskList, markdownTaskComplete]),
+  contract("markdown-plan", "review", existing, ["execution", "review"], [markdownRead, markdownValidate, markdownTaskList, markdownReviewInspect]),
+  contract("markdown-plan", "lifecycle", author, ["plan", "execution", "review"], [markdownRead, markdownAuthor, markdownUpdate, markdownValidate, markdownTaskList, markdownTaskComplete, markdownReviewInspect]),
   contract("openspec", "author", author, ["proposal", "design", "specs", "tasks"], [openspecRead, openspecWrite, openspecValidate]),
   contract("openspec", "execute", existing, ["tasks", "implementation"], [openspecRead, openspecValidate, openspecTaskList, openspecTaskComplete]),
   contract("openspec", "review", existing, ["implementation", "review"], [openspecRead, openspecValidate, openspecTaskList, openspecReviewInspect]),
@@ -126,7 +128,15 @@ export function validateArtifactDeclaration(
   const selected = artifactProfileContract(artifact.adapter, artifact.profile);
   if (!selected) return { codes: ["ARTIFACT_PROFILE_UNKNOWN"] };
   if (!selected.bindings.includes(artifact.binding as ArtifactBinding)) codes.push("ARTIFACT_BINDING_INVALID");
-  if (artifact.options && (Object.keys(artifact.options).length > 0 || Buffer.byteLength(JSON.stringify(artifact.options), "utf8") > ARTIFACT_CONTRACT_LIMITS.optionsBytes)) codes.push("ARTIFACT_OPTIONS_UNKNOWN");
+  if (artifact.options) {
+    const optionsBytes = Buffer.byteLength(JSON.stringify(artifact.options), "utf8");
+    const keys = Object.keys(artifact.options);
+    const markdownRoot = artifact.options.root;
+    const markdownOptionsValid = selected.adapter === "markdown-plan" && keys.every((key) => key === "root")
+      && (markdownRoot === undefined || (typeof markdownRoot === "string" && markdownRoot.length <= 512 && /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*){0,15}$/u.test(markdownRoot)
+        && !markdownRoot.split("/").some((part) => part === ".git" || part === ".pi" || part === "openspec")));
+    if (optionsBytes > ARTIFACT_CONTRACT_LIMITS.optionsBytes || (selected.adapter === "markdown-plan" ? !markdownOptionsValid : keys.length > 0)) codes.push("ARTIFACT_OPTIONS_UNKNOWN");
+  }
   const actual = new Set(Object.keys(approvals ?? {}));
   for (const id of selected.checkpoints) if (!actual.has(id)) codes.push("WORKFLOW_CHECKPOINT_MISSING");
   for (const id of actual) if (!selected.checkpoints.includes(id)) codes.push("WORKFLOW_CHECKPOINT_UNKNOWN");

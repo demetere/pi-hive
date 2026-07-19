@@ -27,6 +27,7 @@ export const DEFAULT_PROTECTED_PATHS: readonly ProtectedPathRoot[] = Object.free
   // directory has not yet been added to the specific registry above.
   Object.freeze({ path: ".pi/hive", kind: "authority-config" }),
   Object.freeze({ path: "openspec", kind: "artifact" }),
+  Object.freeze({ path: "plans", kind: "artifact" }),
   Object.freeze({ path: ".git", kind: "git-metadata" }),
 ]);
 
