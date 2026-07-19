@@ -38,7 +38,7 @@ export interface ArtifactProfileContract {
 }
 const author = Object.freeze(["new", "existing", "either"] as const);
 const existing = Object.freeze(["existing"] as const);
-const contract = (adapter: string, profile: string, bindings: readonly ArtifactBinding[], checkpoints: readonly string[]): ArtifactProfileContract => Object.freeze({
+const contract = (adapter: string, profile: string, bindings: readonly ArtifactBinding[], checkpoints: readonly string[], actionIds: readonly string[] = []): ArtifactProfileContract => Object.freeze({
   contractVersion: ARTIFACT_CONTRACT_VERSION,
   adapter,
   adapterVersion: ARTIFACT_PROFILE_VERSION,
@@ -47,19 +47,21 @@ const contract = (adapter: string, profile: string, bindings: readonly ArtifactB
   optionsSchemaVersion: ARTIFACT_PROFILE_VERSION,
   bindings: Object.freeze([...bindings]),
   checkpoints: Object.freeze([...checkpoints]),
-  actionIds: Object.freeze([]),
+  actionIds: Object.freeze([...actionIds]),
   viewVersion: ARTIFACT_VIEW_VERSION,
 });
+const openspecRead = "openspec.artifact.read", openspecWrite = "openspec.artifact.write", openspecValidate = "openspec.validate";
+const openspecTaskList = "openspec.tasks.list", openspecTaskComplete = "openspec.tasks.complete", openspecReviewInspect = "openspec.review.inspect";
 export const BUILTIN_ARTIFACT_PROFILES: readonly ArtifactProfileContract[] = Object.freeze([
   contract("none", "default", ["none"], []),
   contract("markdown-plan", "author", author, ["plan"]),
   contract("markdown-plan", "execute", existing, ["plan", "execution"]),
   contract("markdown-plan", "review", existing, ["execution", "review"]),
   contract("markdown-plan", "lifecycle", author, ["plan", "execution", "review"]),
-  contract("openspec", "author", author, ["proposal", "design", "specs", "tasks"]),
-  contract("openspec", "execute", existing, ["tasks", "implementation"]),
-  contract("openspec", "review", existing, ["implementation", "review"]),
-  contract("openspec", "lifecycle", author, ["proposal", "design", "specs", "tasks", "implementation", "review"]),
+  contract("openspec", "author", author, ["proposal", "design", "specs", "tasks"], [openspecRead, openspecWrite, openspecValidate]),
+  contract("openspec", "execute", existing, ["tasks", "implementation"], [openspecRead, openspecValidate, openspecTaskList, openspecTaskComplete]),
+  contract("openspec", "review", existing, ["implementation", "review"], [openspecRead, openspecValidate, openspecTaskList, openspecReviewInspect]),
+  contract("openspec", "lifecycle", author, ["proposal", "design", "specs", "tasks", "implementation", "review"], [openspecRead, openspecWrite, openspecValidate, openspecTaskList, openspecTaskComplete, openspecReviewInspect]),
 ]);
 export function artifactProfileContract(adapter: string, profile: string): ArtifactProfileContract | undefined {
   return BUILTIN_ARTIFACT_PROFILES.find((item) => item.adapter === adapter && item.profile === profile);

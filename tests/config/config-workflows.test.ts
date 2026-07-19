@@ -13,17 +13,41 @@ function resolveFixture(name: string) {
   return { fixture, result: resolveConfigWorkflows(project, catalogs) };
 }
 
-test("only implemented artifact profiles activate while reserved OpenSpec profiles quarantine deterministically", () => {
-  for (const [name, ids, valid] of [["artifact-free-debug", ["debug-chat"], true], ["combined-delivery", ["feature-delivery"], false], ["split-plan-build", ["feature-build", "feature-plan"], false]] as const) {
+test("implemented none and OpenSpec profiles activate for artifact-free, combined, and split configurations", () => {
+  for (const [name, ids] of [["artifact-free-debug", ["debug-chat"]], ["combined-delivery", ["feature-delivery"]], ["split-plan-build", ["feature-build", "feature-plan"]]] as const) {
     const { fixture, result } = resolveFixture(name);
     try {
       assert.deepEqual(result.workflows.map((x) => x.id), ids);
-      assert.equal(result.workflows.every((x) => x.status === (valid ? "valid" : "invalid")), true);
-      if (!valid) assert.equal(result.workflows.every((x) => x.diagnosticCodes.includes("ARTIFACT_ADAPTER_UNAVAILABLE")), true);
+      assert.equal(result.workflows.every((x) => x.status === "valid"), true);
       assert.deepEqual(result.summary.items.map((x) => x.id), ids);
       assert.equal(JSON.stringify(result.summary).includes("instructions"), false);
     } finally { fixture.cleanup(); }
   }
+});
+
+test("activation reachability checks mandatory completion actions but not optional inspect/read actions", () => {
+  const optional = copyWorkflowFixture("combined-delivery");
+  try {
+    for (const relative of [".pi/hive/agents/orchestrator.md", ".pi/hive/agents/tester.md"]) {
+      const path = join(optional.projectRoot, relative);
+      writeFileSync(path, readFileSync(path, "utf8").replace("artifact: [read, write, review]", "artifact: [read, write]").replace("artifact: [read, review]", "artifact: [read]"));
+    }
+    const project = loadConfigProject(optional.projectRoot); assert.equal(project.status, "configured");
+    const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
+    assert.equal(result.workflows[0].status, "valid", "optional review inspection capability is not an activation prerequisite");
+  } finally { optional.cleanup(); }
+
+  const mandatory = copyWorkflowFixture("combined-delivery");
+  try {
+    for (const relative of [".pi/hive/agents/orchestrator.md", ".pi/hive/agents/planner.md", ".pi/hive/agents/coder.md", ".pi/hive/agents/tester.md"]) {
+      const path = join(mandatory.projectRoot, relative);
+      writeFileSync(path, readFileSync(path, "utf8").replace("artifact: [read, write, review]", "artifact: [read]").replace("artifact: [read, write]", "artifact: [read]").replace("artifact: [read, review]", "artifact: [read]"));
+    }
+    const project = loadConfigProject(mandatory.projectRoot); assert.equal(project.status, "configured");
+    const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
+    assert.equal(result.workflows[0].status, "invalid");
+    assert.ok(result.workflows[0].diagnosticCodes.includes("ARTIFACT_ACTION_UNREACHABLE"));
+  } finally { mandatory.cleanup(); }
 });
 
 test("reserved Markdown profiles quarantine at resolution rather than failing on first run", () => {

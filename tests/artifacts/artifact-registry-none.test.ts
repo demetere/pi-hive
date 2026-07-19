@@ -26,13 +26,15 @@ test("the artifact registry is immutable, built-in-only, and version exact", () 
   assert.equal(resolved.profile.id, "default");
   assert.equal(resolved.profile.optionsSchemaVersion, "1");
 
-  assert.throws(() => BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
+  const openspec = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
     contractVersion: ARTIFACT_CONTRACT_VERSION,
     adapterId: "openspec",
     adapterVersion: ARTIFACT_PROFILE_VERSION,
     profileId: "author",
     profileVersion: ARTIFACT_PROFILE_VERSION,
-  }), (error: unknown) => error instanceof ArtifactRegistryError && error.code === "ADAPTER_UNAVAILABLE");
+  });
+  assert.equal(openspec.adapter.id, "openspec");
+  assert.deepEqual(openspec.profile.actions.map((action) => action.id), ["openspec.artifact.read", "openspec.artifact.write", "openspec.validate"]);
 
   for (const selection of [
     { adapterId: "external", adapterVersion: "1", profileId: "default", profileVersion: ARTIFACT_PROFILE_VERSION, contractVersion: ARTIFACT_CONTRACT_VERSION },

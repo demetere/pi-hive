@@ -92,10 +92,10 @@ export function bindPhysicalArtifactWorkspace(input: BindPhysicalArtifactWorkspa
   const lifecycle = requireLifecycle(input.adapter);
   let raw: ArtifactWorkspaceResolution | undefined;
   if (input.selection.mode === "new") {
-    if (lifecycle.resolve({ profileId: input.profile.id, workspaceId, options: input.options })) throw new Error(`Artifact workspace ${workspaceId} already exists; create collision refused`);
-    raw = lifecycle.create({ profileId: input.profile.id, workspaceId, options: input.options });
+    if (lifecycle.resolve({ projectRoot: input.projectRoot, profileId: input.profile.id, workspaceId, options: input.options })) throw new Error(`Artifact workspace ${workspaceId} already exists; create collision refused`);
+    raw = lifecycle.create({ projectRoot: input.projectRoot, profileId: input.profile.id, workspaceId, options: input.options });
   } else {
-    raw = lifecycle.resolve({ profileId: input.profile.id, workspaceId, options: input.options });
+    raw = lifecycle.resolve({ projectRoot: input.projectRoot, profileId: input.profile.id, workspaceId, options: input.options });
     if (!raw) throw new Error(`Existing artifact workspace ${workspaceId} was not found`);
   }
   const resolution = validateResolution(input.projectRoot, workspaceId, raw);
@@ -104,7 +104,7 @@ export function bindPhysicalArtifactWorkspace(input: BindPhysicalArtifactWorkspa
     if (input.selection.mode !== "existing") throw new Error("Handoff artifact references can bind only an existing workspace");
     if (input.handoffReference.workspaceId !== workspaceId) throw new Error("Handoff artifact workspace identity does not match the explicit selection");
     if (!lifecycle.validateHandoffReference) throw new Error("Target adapter cannot validate the handoff artifact reference");
-    const validation = lifecycle.validateHandoffReference({ profileId: input.profile.id, reference: input.handoffReference, workspace: resolution, hashes });
+    const validation = lifecycle.validateHandoffReference({ projectRoot: input.projectRoot, profileId: input.profile.id, reference: input.handoffReference, workspace: resolution, hashes });
     if (validation.state !== "valid") throw new Error(`Handoff artifact reference is ${validation.state}: ${boundedText(validation.reason, "Handoff validation reason", 2_048)}`);
   }
   return Object.freeze({
@@ -146,7 +146,7 @@ export function listPhysicalArtifactWorkspaces(input: ListPhysicalArtifactWorksp
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > ARTIFACT_WORKSPACE_LIMITS.listPage) throw new Error("Artifact workspace list limit is invalid");
   const options = input.options ?? Object.freeze({});
   const requestedCursor = cursor(input.cursor);
-  const raw = requireLifecycle(input.adapter).list({ profileId: input.profile.id, options, limit: input.limit, ...(requestedCursor ? { cursor: requestedCursor } : {}) });
+  const raw = requireLifecycle(input.adapter).list({ projectRoot: input.projectRoot, profileId: input.profile.id, options, limit: input.limit, ...(requestedCursor ? { cursor: requestedCursor } : {}) });
   if (!plainRecord(raw) || Object.keys(raw).some((key) => key !== "items" && key !== "nextCursor") || !Array.isArray(raw.items)
     || raw.items.length > input.limit || raw.items.length > ARTIFACT_WORKSPACE_LIMITS.listItems) throw new Error("Artifact workspace list page is invalid or exceeds its bound");
   const items = Object.freeze(raw.items.map(listItem));

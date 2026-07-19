@@ -119,8 +119,8 @@ export interface WorkflowToolRuntimeBindingInput {
   readonly dispatch: WorkerTrustedDispatch;
   readonly team: TeamRuntime;
   readonly workflowStatus: (input: WorkflowStatusRequest) => WorkflowStatusPage;
-  readonly artifactStatus?: (input: { readonly limit?: number; readonly cursor?: string }) => Promise<unknown>;
-  readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expectedWorkspaceHash?: string }, attemptId: string) => Promise<unknown>;
+  readonly artifactStatus?: (input: { readonly limit?: number; readonly cursor?: string }, signal?: AbortSignal) => Promise<unknown>;
+  readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expectedWorkspaceHash?: string }, attemptId: string, signal?: AbortSignal) => Promise<unknown>;
   readonly finish: (input: unknown, toolBatch: readonly string[]) => Promise<unknown>;
 }
 export interface WorkflowToolRuntimeBinding {
@@ -285,7 +285,7 @@ function assistantToolBatch(ctx: ExtensionContext, toolCallId: string): readonly
   return Object.freeze([...matches[0]]);
 }
 
-async function executeTool(name: GenericWorkflowToolName, toolCallId: string, raw: unknown, ctx: ExtensionContext): Promise<{ content: Array<{ type: "text"; text: string }>; details: object }> {
+async function executeTool(name: GenericWorkflowToolName, toolCallId: string, raw: unknown, ctx: ExtensionContext, signal?: AbortSignal): Promise<{ content: Array<{ type: "text"; text: string }>; details: object }> {
   const runtime = currentRuntime();
   const toolBatch = assistantToolBatch(ctx, toolCallId);
   const input = schemaInput(name, raw);
@@ -325,11 +325,11 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
       if (name === "workflow_status") return runtime.binding.workflowStatus(input as WorkflowStatusRequest);
       if (name === "artifact_status") {
         if (!runtime.binding.artifactStatus) throw Object.assign(new Error("Artifact status subsystem is not bound for this run"), { effectNotApplied: true });
-        return runtime.binding.artifactStatus(input as { limit?: number; cursor?: string });
+        return runtime.binding.artifactStatus(input as { limit?: number; cursor?: string }, signal);
       }
       if (name === "artifact_action") {
         if (!runtime.binding.artifactAction) throw Object.assign(new Error("Artifact action subsystem is not bound for this run"), { effectNotApplied: true });
-        return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }, attemptContext.attemptId);
+        return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }, attemptContext.attemptId, signal);
       }
       return runtime.binding.finish(input, toolBatch);
     },
@@ -366,7 +366,7 @@ function contract<N extends GenericWorkflowToolName>(name: N, label: string, des
     label,
     description,
     parameters: GENERIC_WORKFLOW_TOOL_SCHEMAS[name],
-    async execute(toolCallId: string, input: unknown, _signal, _onUpdate, ctx) { return executeTool(name, toolCallId, input, ctx); },
+    async execute(toolCallId: string, input: unknown, signal, _onUpdate, ctx) { return executeTool(name, toolCallId, input, ctx, signal); },
   };
 }
 

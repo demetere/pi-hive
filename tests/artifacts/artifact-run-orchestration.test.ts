@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { analyzeCommand } from "../../src/capabilities/command.ts";
 import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
 import {
   ARTIFACT_ACTION_VERSION,
@@ -17,6 +19,7 @@ import { ArtifactOperationRuntime } from "../../src/artifacts/operations.ts";
 import type {
   ArtifactActionContext,
   ArtifactActionContract,
+  ArtifactCheckpointDescriptorInput,
   ArtifactActionResultV1,
   ArtifactAdapter,
   ArtifactRuntimeProfile,
@@ -34,6 +37,7 @@ const setTitle = Object.freeze({
   argumentsSchemaVersion: "1" as const,
   argumentsSchema: Type.Object({ title: Type.String({ minLength: 1 }) }, strict),
   requiredCapabilities: Object.freeze(["write"] as const),
+  completion: "mandatory" as const,
   mutability: "mutating" as const,
   idempotency: "operation-bound" as const,
 });
@@ -95,7 +99,7 @@ function actionResult(operationId: string, workspaceHash: string): ArtifactActio
   });
 }
 
-function physicalAdapter(workspacePath: string, onRecovery?: () => void, onExecute?: () => void): ArtifactAdapter {
+function physicalAdapter(workspacePath: string, onRecovery?: () => void, onExecute?: (context: ArtifactActionContext) => void): ArtifactAdapter {
   const adapter: ArtifactAdapter = {
     contractVersion: ARTIFACT_CONTRACT_VERSION,
     id: "fixture",
@@ -120,7 +124,7 @@ function physicalAdapter(workspacePath: string, onRecovery?: () => void, onExecu
       };
     },
     async executeAction(context: ArtifactActionContext, _action: ArtifactActionContract, argumentsValue: Readonly<Record<string, unknown>>) {
-      onExecute?.();
+      onExecute?.(context);
       await context.enqueueMutation("state.txt", () => writeFileSync(join(workspacePath, "state.txt"), String(argumentsValue.title)));
       return actionResult(context.operationId, hashArtifactWorkspace(workspacePath).workspaceHash);
     },
@@ -146,7 +150,7 @@ function callTool(name: string, input: unknown): Promise<any> {
 
 interface FixtureOptions {
   readonly onRecovery?: () => void;
-  readonly onExecute?: () => void;
+  readonly onExecute?: (context: ArtifactActionContext) => void;
   readonly artifactOperationFault?: RunOrchestrationServiceOptions["artifactOperationFault"];
   readonly leaseFactory?: (options: WorkspaceLeaseRuntimeOptions) => WorkspaceLeaseRuntime;
   readonly pauseReleaseOwnership?: boolean;
@@ -204,6 +208,72 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("condition was not observed");
 }
 
+test("RunOrchestrationService freezes adapter checkpoint defaults and enforces its sole approval authority at completion", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-artifact-service-approvals-"));
+  const workspacePath = join(projectRoot, "workspace");
+  mkdirSync(workspacePath);
+  writeFileSync(join(workspacePath, "state.txt"), "approved content");
+  const approvalProfile: ArtifactRuntimeProfile = Object.freeze({ ...profile, checkpointIds: Object.freeze(["completion", "review"]) });
+  const base = physicalAdapter(workspacePath);
+  const adapter: ArtifactAdapter = Object.freeze({
+    ...base,
+    profiles: Object.freeze([approvalProfile]),
+    checkpointDescriptor: ({ binding, checkpointId }: ArtifactCheckpointDescriptorInput) => ({
+      formatVersion: 1 as const, adapterId: binding.adapterId, adapterVersion: binding.adapterVersion,
+      profileId: binding.profileId, profileVersion: binding.profileVersion, profileSchemaVersion: approvalProfile.optionsSchemaVersion,
+      checkpointId, checkpointVersion: "1", contributors: [{ kind: "file" as const, path: "state.txt" }],
+    }),
+  });
+  const activeSnapshot = snapshot() as unknown as { payload: { workflow: { artifact: Record<string, unknown> } } } & ActivationSnapshotFileV1;
+  activeSnapshot.payload.workflow.artifact.checkpoints = ["completion", "review"];
+  activeSnapshot.payload.workflow.artifact.approvals = { completion: "required", review: "optional" };
+  const sessionId = "session-approval-integration";
+  const ownerNonce = "owner-approval-integration";
+  assert.equal(acquireRuntimeOwnership(projectRoot, sessionId, { nonce: ownerNonce }).ok, true);
+  const service = new RunOrchestrationService({
+    projectRoot, projectId: "project-1", sessionId, snapshot: activeSnapshot, runtimeOwnerNonce: ownerNonce, maxParallel: 1,
+    workerFactory: async () => ({ linkedSessionId: "unused", prompt: async () => "unused", dispose() {} }),
+    createRunId: () => "run-approval-integration",
+    artifactRuntime: { adapter, profile: approvalProfile },
+    artifactMutationQueue: async (_target, _operationId, callback) => callback(),
+    checkpointApproval: {
+      authenticateControl: ({ credential }) => credential === "human-secret" ? { approverId: "human-1", authenticationId: "auth-1", mechanism: "test-control" } : undefined,
+      createRequestId: () => "request-integration",
+      createDecisionId: () => "decision-integration",
+    },
+    completion: { approvals: () => ({ state: "satisfied" }) },
+    pauseAuthority: { captureState: () => ({}), releaseLeases: () => {}, releaseOwnership: () => {} },
+    resumeAuthority: { acquireOwnership: () => {}, acquireLeases: () => {}, revalidateHashes: () => true, rollbackAuthority: () => {} },
+    cancellationAuthority: { terminateProcessTrees: () => {}, capturePartialState: () => ({}), releaseLeases: () => {} },
+  });
+  assert.ok(service.checkpointApprovals);
+  service.checkpointApprovals.setOptionalDefault({ operationId: "disable-review", checkpointId: "review", enabled: false, expectedDefaultsRevision: 0 });
+  service.lifecycle.recordUserInput({ inputId: "approval-input", text: "approve", source: "interactive" });
+  service.bindArtifactWorkspace({ mode: "existing", workspaceId: "shared" });
+  const run = service.lifecycle.restore().latestRun!;
+  assert.deepEqual(run.checkpointSnapshot?.enabledCheckpointIds, ["completion"]);
+  assert.equal(run.checkpointSnapshot?.defaultsRevision, service.checkpointApprovals.restore().defaultsRevision);
+  const delivery = service.lifecycle.prepareInputDelivery("approval-delivery");
+  service.lifecycle.confirmInputDelivery(delivery.requestId);
+  const bypass = await service.lifecycle.finish({ status: "completed", summary: "upstream hook cannot bypass checkpoint authority" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] });
+  assert.equal(bypass.ok, false);
+  if (!bypass.ok) assert.match(bypass.issues.join(" "), /checkpoint|approval|missing/i);
+
+  const lease = new WorkspaceLeaseRuntime({ projectRoot, adapterId: "fixture", workspaceId: "shared", sessionId, runId: run.runId });
+  assert.equal(lease.acquire().ok, true);
+  const currentHash = hashArtifactWorkspace(workspacePath).workspaceHash;
+  const request = await service.checkpointApprovals.requestApproval({ operationId: "request-completion", checkpointId: "completion", expectedWorkspaceHash: currentHash });
+  assert.equal(service.lifecycle.restore().latestRun?.status, "waiting_for_human");
+  await service.checkpointApprovals.decide({
+    operationId: "decide-completion", requestId: request.requestId, expectedRequestSequence: request.requestSequence,
+    digest: request.digest, expectedWorkspaceHash: currentHash, decision: "approved",
+  }, { channel: "dashboard", mode: "headless", dashboardAvailable: true, credential: "human-secret" });
+  assert.equal(service.lifecycle.restore().latestRun?.status, "running");
+  assert.equal(lease.release(), true);
+  const completed = await service.lifecycle.finish({ status: "completed", summary: "approved" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] });
+  assert.equal(completed.ok, true, completed.ok ? "" : completed.issues.join(" "));
+});
+
 test("RunOrchestrationService binds an injected physical adapter and carries fresh status hash through queued action commit", async () => {
   const f = fixture("binding");
   const listed = f.service.listArtifactWorkspaces({ limit: 5 });
@@ -215,6 +285,49 @@ test("RunOrchestrationService binds an injected physical adapter and carries fre
   const action = await root.runWithToolRuntime(() => callTool("artifact_action", { actionId: "set-title", arguments: { title: "after" }, expectedWorkspaceHash: readerHash }));
   assert.equal(action.details.workspaceHash, hashArtifactWorkspace(f.workspacePath).workspaceHash);
   assert.equal(f.service.lifecycle.restore().latestRun?.artifactWorkspace?.workspace.id, "shared");
+});
+
+test("artifact task evidence resolver binds successful W13 tool/command attempts and current repository hashes", async () => {
+  let references: Array<{ kind: "tool" | "command"; attemptId: string } | { kind: "repository"; path: string; digest: string }> = [];
+  let toolAttemptId = "";
+  let commandAttemptId = "";
+  let verified: unknown;
+  const f = fixture("evidence-authority", { onExecute: (context) => {
+    const verify = context.verifyEvidence!;
+    assert.throws(() => verify([]), /invalid|bound/i);
+    assert.throws(() => verify([{ kind: "tool", attemptId: "missing-attempt" }]), /completed|successful/i);
+    assert.throws(() => verify([{ kind: "command", attemptId: toolAttemptId }]), /shell|Git/i);
+    assert.throws(() => verify([{ kind: "tool", attemptId: commandAttemptId }]), /non-command|trusted/i);
+    assert.throws(() => verify([{ kind: "repository", path: "../escape", digest: `sha256:${"0".repeat(64)}` }]), /path|invalid/i);
+    assert.throws(() => verify([{ kind: "repository", path: "implementation.ts", digest: `sha256:${"0".repeat(64)}` }]), /stale/i);
+    verified = verify(references);
+  } });
+  const sourcePath = join(f.projectRoot, "implementation.ts");
+  writeFileSync(sourcePath, "export const implemented = true;\n");
+  const rootAuthority = (f.options.snapshot.payload.authority.nodes.find((node) => node.nodeId === "root") as { tools: string[] }).tools;
+  rootAuthority.push("bash");
+  const root = f.service.rootServices();
+  await root.dispatch.tool({
+    correlationId: "evidence-tool", toolName: "artifact_status", operation: "tool.artifact-status", input: {}, policyOutcome: "allowed",
+    dispatch: ({ attemptId }) => { toolAttemptId = attemptId; return { inspected: true }; },
+  });
+  await root.dispatch.tool({
+    correlationId: "evidence-command", toolName: "bash", operation: "command.git-status", input: { command: "git status" }, policyOutcome: "allowed",
+    commandMetadata: analyzeCommand("git status"),
+    dispatch: ({ attemptId }) => { commandAttemptId = attemptId; return { exitCode: 0 }; },
+  });
+  const repositoryDigest = `sha256:${createHash("sha256").update(readFileSync(sourcePath)).digest("hex")}`;
+  references = [
+    { kind: "tool", attemptId: toolAttemptId },
+    { kind: "command", attemptId: commandAttemptId },
+    { kind: "repository", path: "implementation.ts", digest: repositoryDigest },
+  ];
+  const status = await root.runWithToolRuntime(() => callTool("artifact_status", {}));
+  await root.runWithToolRuntime(() => callTool("artifact_action", { actionId: "set-title", arguments: { title: "evidence-bound" }, expectedWorkspaceHash: status.details.workspace.hash }));
+  assert.deepEqual((verified as Array<Record<string, unknown>>).map((entry) => entry.kind), ["tool", "command", "repository"]);
+  assert.equal((verified as Array<Record<string, unknown>>)[0].attemptId, toolAttemptId);
+  assert.equal((verified as Array<Record<string, unknown>>)[1].attemptId, commandAttemptId);
+  assert.equal((verified as Array<Record<string, unknown>>)[2].digest, repositoryDigest);
 });
 
 test("restart reconciles a durable artifact result into its matching enclosing W13 attempt and rejects differing replay input", async () => {

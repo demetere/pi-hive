@@ -162,6 +162,20 @@ export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: Con
       resourceId: resource.id,
       dependencyChain: [`workflow:${resource.id}`, `node:${finding.nodeId}`],
     });
+    if (resolvedArtifact && capabilities) {
+      for (const action of resolvedArtifact.profile.actions.filter((candidate) => candidate.completion === "mandatory")) {
+        const reachable = capabilities.policies.some((policy) => action.requiredCapabilities.every((required) => policy.capabilities.artifact.includes(required)));
+        if (!reachable) local.add({
+          code: "ARTIFACT_ACTION_UNREACHABLE",
+          severity: "error",
+          message: `Artifact action ${action.id} has no reachable node with its complete required capability set.`,
+          source: resource.source,
+          range: range(resource.sourceMap, "/artifact/profile"),
+          resourceId: resource.id,
+          dependencyChain: [`workflow:${resource.id}`, `artifact-action:${action.id}`],
+        });
+      }
+    }
     (raw["suggested-next"] ?? []).forEach((target, index) => { if (!registered.has(target)) local.add(issue("WORKFLOW_SUGGESTED_NEXT_UNKNOWN", resource.id, resource.source, resource.sourceMap, `/suggested-next/${index}`, [`workflow:${resource.id}`, `workflow:${target}`])); });
     const result = local.result();
     for (const diagnostic of result.diagnostics) collector.add(diagnostic);
