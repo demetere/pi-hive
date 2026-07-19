@@ -12,6 +12,7 @@ import type { RunLifecycleState } from "./runs";
 import type { HandoffPacket } from "./handoff";
 import type { WorkerTrustedDispatch } from "./workers";
 import { boundedJson } from "./values";
+import { QUESTION_LIMITS, normalizeQuestionDefinition } from "./question-validation";
 
 export const TOOL_CONTRACT_VERSION = "pi-hive-prompt-tool-contract-v1" as const;
 export const TOOL_CONTRACT_LIMITS = Object.freeze({
@@ -61,6 +62,21 @@ const EvidenceReference = Type.Object({
   toolCallId: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
   claim: Type.String({ minLength: 1, maxLength: 2_048 }),
 }, strict);
+const SAFE_QUESTION_TEXT_PATTERN = "^[^\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F]*$";
+const QuestionChoice = Type.Object({
+  value: Type.String({ minLength: 1, maxLength: QUESTION_LIMITS.choiceValueBytes, pattern: SAFE_QUESTION_TEXT_PATTERN }),
+  label: Type.String({ minLength: 1, maxLength: QUESTION_LIMITS.choiceLabelBytes, pattern: SAFE_QUESTION_TEXT_PATTERN }),
+}, strict);
+const QuestionTextValidation = Type.Object({
+  minLength: Type.Optional(Type.Integer({ minimum: 0, maximum: QUESTION_LIMITS.textAnswerBytes })),
+  maxLength: Type.Optional(Type.Integer({ minimum: 0, maximum: QUESTION_LIMITS.textAnswerBytes })),
+  pattern: Type.Optional(Type.String({ minLength: 1, maxLength: QUESTION_LIMITS.patternBytes })),
+}, strict);
+const QuestionMultiValidation = Type.Object({
+  minItems: Type.Optional(Type.Integer({ minimum: 0, maximum: QUESTION_LIMITS.choices })),
+  maxItems: Type.Optional(Type.Integer({ minimum: 0, maximum: QUESTION_LIMITS.choices })),
+}, strict);
+const QuestionPrompt = Type.String({ minLength: 1, maxLength: QUESTION_LIMITS.promptBytes, pattern: SAFE_QUESTION_TEXT_PATTERN });
 
 export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
   route_agent: Type.Object({
@@ -94,6 +110,12 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     arguments: Type.Record(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters }), Type.Unknown()),
     expectedWorkspaceHash: Type.Optional(Type.String({ pattern: "^sha256:[0-9a-f]{64}$", maxLength: 71 })),
   }, strict),
+  human_question: Type.Union([
+    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("single"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), required: Type.Boolean() }, strict),
+    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("multi"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), validation: Type.Optional(QuestionMultiValidation), required: Type.Boolean() }, strict),
+    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("text"), validation: Type.Optional(QuestionTextValidation), required: Type.Boolean() }, strict),
+    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("confirm"), required: Type.Boolean() }, strict),
+  ]),
   workflow_finish: Type.Object({
     status: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("failed")]),
     summary: Type.String({ minLength: 1, maxLength: 8_192 }),
@@ -121,6 +143,7 @@ export interface WorkflowToolRuntimeBindingInput {
   readonly workflowStatus: (input: WorkflowStatusRequest) => WorkflowStatusPage;
   readonly artifactStatus?: (input: { readonly limit?: number; readonly cursor?: string }, signal?: AbortSignal) => Promise<unknown>;
   readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expectedWorkspaceHash?: string }, attemptId: string, signal?: AbortSignal) => Promise<unknown>;
+  readonly question?: (input: unknown, toolCallId: string, signal?: AbortSignal, batchCallIds?: readonly string[]) => Promise<unknown>;
   readonly finish: (input: unknown, toolBatch: readonly string[]) => Promise<unknown>;
 }
 export interface WorkflowToolRuntimeBinding {
@@ -132,6 +155,7 @@ export interface WorkflowToolRuntimeBinding {
   readonly workflowStatus: WorkflowToolRuntimeBindingInput["workflowStatus"];
   readonly artifactStatus?: WorkflowToolRuntimeBindingInput["artifactStatus"];
   readonly artifactAction?: WorkflowToolRuntimeBindingInput["artifactAction"];
+  readonly question?: WorkflowToolRuntimeBindingInput["question"];
   readonly finish: WorkflowToolRuntimeBindingInput["finish"];
 }
 interface ActiveWorkflowToolRuntime { readonly binding: WorkflowToolRuntimeBinding }
@@ -188,6 +212,7 @@ function assertByteBounds(name: GenericWorkflowToolName, input: Record<string, u
     boundedJson(input.arguments, "artifact_action arguments", { bytes: 65_536, depth: 16, nodes: 4_096, rootRecord: true });
     if (input.expectedWorkspaceHash !== undefined) assertUtf8(input.expectedWorkspaceHash, "artifact_action expectedWorkspaceHash", 71);
   }
+  if (name === "human_question") normalizeQuestionDefinition(input);
   if (name === "workflow_finish") {
     assertUtf8(input.summary, "workflow_finish summary", 8_192);
     for (const [index, raw] of ((input.artifactRefs ?? []) as Array<Record<string, unknown>>).entries()) {
@@ -269,30 +294,44 @@ function schemaInput(name: GenericWorkflowToolName, value: unknown): Record<stri
   return input;
 }
 
-function assistantToolBatch(ctx: ExtensionContext, toolCallId: string): readonly string[] {
+interface AssistantToolBatch {
+  readonly names: readonly string[];
+  readonly callIds: readonly string[];
+}
+function assistantToolBatch(ctx: ExtensionContext, toolCallId: string): AssistantToolBatch {
   const manager = ctx?.sessionManager;
   if (!manager || typeof manager.getBranch !== "function") throw new Error("Trusted Pi session context is required for workflow tools");
-  const matches: string[][] = [];
+  const matches: AssistantToolBatch[] = [];
   for (const entry of manager.getBranch()) {
     if (!entry || entry.type !== "message" || !entry.message || entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
     const calls = entry.message.content.filter((part) => Boolean(part) && typeof part === "object" && !Array.isArray(part) && (part as { type?: unknown }).type === "toolCall") as Array<{ id?: unknown; toolCallId?: unknown; name?: unknown; toolName?: unknown }>;
     if (!calls.some((part) => part.id === toolCallId || part.toolCallId === toolCallId)) continue;
     const names = calls.map((part) => part.name ?? part.toolName);
-    if (!names.length || names.some((value) => typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > 128)) throw new Error("Trusted Pi assistant tool-call batch is invalid");
-    matches.push(names as string[]);
+    const identifierKey = calls.some((part) => part.id === toolCallId) ? "id" : "toolCallId";
+    const callIds = calls.map((part) => part[identifierKey]);
+    if (!names.length || names.some((value) => typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > 128)
+      || callIds.some((value) => typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > TOOL_CONTRACT_LIMITS.idBytes)
+      || new Set(callIds).size !== callIds.length) throw new Error("Trusted Pi assistant tool-call batch is invalid");
+    matches.push(Object.freeze({ names: Object.freeze(names as string[]), callIds: Object.freeze(callIds as string[]) }));
   }
-  if (matches.length !== 1 || matches[0].length > TOOL_CONTRACT_LIMITS.toolBatch) throw new Error("Workflow tool call is not bound to one trusted Pi assistant tool-call batch");
-  return Object.freeze([...matches[0]]);
+  if (matches.length !== 1 || matches[0].names.length > TOOL_CONTRACT_LIMITS.toolBatch) throw new Error("Workflow tool call is not bound to one trusted Pi assistant tool-call batch");
+  return matches[0];
 }
 
 async function executeTool(name: GenericWorkflowToolName, toolCallId: string, raw: unknown, ctx: ExtensionContext, signal?: AbortSignal): Promise<{ content: Array<{ type: "text"; text: string }>; details: object }> {
   const runtime = currentRuntime();
   const toolBatch = assistantToolBatch(ctx, toolCallId);
+  if (toolBatch.names.includes("delegate_agent") && toolBatch.names.includes("human_question")) {
+    // Both calls observe the complete immutable assistant batch before either
+    // reaches trusted dispatch, so sequential and concurrent execution orders
+    // reject without publishing a child task or a durable question.
+    throw new Error("delegate_agent and human_question cannot be sibling calls in one assistant tool batch");
+  }
   const input = schemaInput(name, raw);
   const descriptor = classifyTrustedTool(name);
   if (!descriptor || classifyTrustedToolRegistration(name, descriptor) !== descriptor) throw new Error(`Tool ${name} lacks trusted package registration identity`);
   const enabled = authorityTools(runtime.binding).includes(name);
-  const soleFinish = name !== "workflow_finish" || (toolBatch.length === 1 && toolBatch[0] === "workflow_finish");
+  const soleFinish = name !== "workflow_finish" || (toolBatch.names.length === 1 && toolBatch.names[0] === "workflow_finish");
   const team = runtime.binding.snapshot.payload.workflow.team as { nodes?: unknown[] } | undefined;
   const callerNode = Array.isArray(team?.nodes)
     ? team.nodes.find((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && (entry as { id?: unknown }).id === runtime.binding.nodeId) as { memberIds?: unknown } | undefined
@@ -312,6 +351,7 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
     policyOutcome: allowed ? "allowed" : "denied",
     ...(allowed ? {} : { denialReason }),
     ...(name === "workflow_finish" && allowed ? { finalization: true } : {}),
+    ...(name === "human_question" ? { questionBatchCallIds: toolBatch.callIds, questionBatchCurrentCallId: toolCallId } : {}),
     dispatch: async (attemptContext) => {
       if (name === "route_agent") return runtime.binding.team.route(input as never);
       if (name === "delegate_agent") return runtime.binding.team.delegate(input as never);
@@ -331,7 +371,11 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
         if (!runtime.binding.artifactAction) throw Object.assign(new Error("Artifact action subsystem is not bound for this run"), { effectNotApplied: true });
         return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }, attemptContext.attemptId, signal);
       }
-      return runtime.binding.finish(input, toolBatch);
+      if (name === "human_question") {
+        if (!runtime.binding.question) throw Object.assign(new Error("Human question subsystem is not bound for this run"), { effectNotApplied: true });
+        return runtime.binding.question(input, toolCallId, signal, toolBatch.callIds);
+      }
+      return runtime.binding.finish(input, toolBatch.names);
     },
   });
   if (name === "workflow_finish" && result && typeof result === "object" && "ok" in result && (result as { ok: boolean }).ok === false) {
@@ -379,6 +423,7 @@ export const GENERIC_WORKFLOW_TOOL_CONTRACTS: readonly ToolDefinition<any, objec
   contract("workflow_status", "Workflow Status", "Read bounded cursor-paginated workflow/run status and authority-derived terminal refs."),
   contract("artifact_status", "Artifact Status", "Read the active profile's bounded trusted workspace/checkpoint/action view."),
   contract("artifact_action", "Artifact Action", "Invoke one exact active-profile action; workspace and operation identity come only from trusted run state."),
+  contract("human_question", "Human Question", "Persist one bounded typed human question. Pending questions suspend the current task rather than blocking an in-memory promise."),
   contract("workflow_finish", "Workflow Finish", "Root-only sole-call request for a validated terminal workflow outcome."),
 ]);
 

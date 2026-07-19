@@ -27,11 +27,15 @@ import {
 } from "./delegation";
 import type { RouteDirectMembersInput, RouteRecommendation } from "./routing";
 import type { MutationAccountingRecorder } from "./change-accounting";
+import type { AttemptConsumerReceiptBinding } from "./attempts";
+import type { AcceptedQuestionForTask, QuestionService, TaskQuestionAnswerDelivery } from "./questions";
 import { deepFreeze, utf8Prefix } from "./values";
 import {
   assembleWorkerWorkflowPrompt,
   assertCompactionPreservation,
+  assertLosslessDynamicPromptInputs,
   buildCompactionPreservationBlock,
+  losslessDynamicPromptInputs,
   type DynamicPromptInput,
 } from "./prompts";
 
@@ -45,6 +49,7 @@ export interface WorkerPromptTaskContract {
   readonly deliverables: readonly string[]; readonly provenance: PersistedDelegationTask["provenance"];
   readonly creationSequence: number; readonly createdAt: string;
   readonly deliveredResults: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[];
+  readonly acceptedAnswers: readonly AcceptedQuestionForTask[];
 }
 export interface WorkerPromptContext {
   readonly snapshotHash: string; readonly workflowId: string; readonly nodeId: string; readonly agentId: string;
@@ -79,6 +84,9 @@ export interface WorkerTrustedToolExecutionContext {
 export interface WorkerTrustedToolDispatchRequest<T> {
   readonly correlationId: string; readonly toolName: string; readonly operation: string; readonly input: unknown;
   readonly policyOutcome: "allowed" | "denied"; readonly denialReason?: string; readonly finalization?: boolean;
+  /** Package-validated call IDs for the containing trusted assistant batch. */
+  readonly questionBatchCallIds?: readonly string[];
+  readonly questionBatchCurrentCallId?: string;
   readonly commandMetadata?: unknown; readonly dispatch: (context: WorkerTrustedToolExecutionContext) => T | Promise<T>;
 }
 export interface WorkerTrustedDispatch {
@@ -106,6 +114,11 @@ export interface WorkerSessionHandle {
 export type WorkerSessionFactory = (input: WorkerSessionFactoryInput) => WorkerSessionHandle | Promise<WorkerSessionHandle>;
 export interface WorkerModelDispatchInput {
   readonly task: PersistedDelegationTask; readonly text: string; readonly signal?: AbortSignal; readonly invocation: WorkerPromptInvocation;
+  readonly questionDeliveryIds: readonly string[]; readonly promptHash: string; readonly transcriptRef: string;
+  /** Includes live-tool deliveries created while this exact provider attempt is running. */
+  readonly resolveQuestionDeliveryIds: () => readonly string[];
+  readonly onConsumerSuccess: (modelAttemptId: string, binding: AttemptConsumerReceiptBinding) => void;
+  readonly questionContinuationReady: () => boolean;
   readonly invoke: () => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
 }
 export type WorkerModelDispatcher = (input: WorkerModelDispatchInput) => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
@@ -114,8 +127,11 @@ export interface WorkerSessionPoolOptions {
   readonly snapshot: ActivationSnapshotFileV1; readonly factory: WorkerSessionFactory; readonly resultSummaryBytes?: number;
   readonly dispatchModel?: WorkerModelDispatcher;
   readonly dispatchTool?: <T>(task: PersistedDelegationTask, input: WorkerTrustedToolDispatchRequest<T>) => Promise<T>;
+  readonly questions?: Pick<QuestionService, "pendingForTask" | "prepareTaskAnswerDeliveries" | "preparedTaskAnswerDeliveries" | "recordTaskAnswerDeliveryReceipt" | "taskAnswerDeliveryReturnedByTool" | "acceptTaskAnswerDelivery" | "markTaskConsumerReplaySettled">;
 }
-export type WorkerExecutionResult = WorkerResultInput | Readonly<{ status: "suspended"; dependencyTaskIds: readonly string[] }>;
+export type WorkerExecutionResult = WorkerResultInput
+  | Readonly<{ status: "suspended"; dependencyTaskIds?: readonly string[]; questionIds?: readonly string[] }>
+  | Readonly<{ status: "continuation"; questionIds: readonly string[] }>;
 
 interface WorkerExecutionConfig {
   readonly agentId: string; readonly modelId: string; readonly thinking: string; readonly tools: readonly string[];
@@ -231,6 +247,7 @@ export function deriveWorkerPromptContext(
   task: PersistedDelegationTask,
   deliveredResults: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[] = [],
   sessionId = task.runId,
+  acceptedAnswers: readonly AcceptedQuestionForTask[] = [],
 ): WorkerPromptContext {
   const workflow = snapshot.payload.workflow;
   const team = plainRecord(workflow.team) ? workflow.team : undefined;
@@ -269,6 +286,7 @@ export function deriveWorkerPromptContext(
     creationSequence: task.creationSequence,
     createdAt: task.createdAt,
     deliveredResults: structuredClone(deliveredResults),
+    acceptedAnswers: structuredClone(acceptedAnswers),
   });
   const promptRefs: DynamicPromptInput[] = task.contextRefs.map((entry) => {
     const source = entry.ref.kind === "artifact" || entry.ref.kind === "knowledge" || entry.ref.kind === "repository"
@@ -287,6 +305,12 @@ export function deriveWorkerPromptContext(
     content: delivered.result,
     ref: `run:${task.runId}/task:${delivered.taskId}/result`,
   });
+  const answerPromptInputs = acceptedAnswers.flatMap((accepted) => losslessDynamicPromptInputs({
+    provenance: `human-answer:${accepted.questionId}:${accepted.answer.channel}:${accepted.answer.identity}`,
+    content: { questionId: accepted.questionId, definition: accepted.definition, answer: accepted.answer },
+    ref: accepted.transcriptRef,
+  }));
+  promptRefs.push(...answerPromptInputs);
   const assembled = assembleWorkerWorkflowPrompt({
     snapshot,
     nodeId: task.targetNodeId,
@@ -294,6 +318,7 @@ export function deriveWorkerPromptContext(
     runId: task.runId,
     task: { taskId: task.taskId, parentNodeId: task.parentNodeId, objective: task.objective, deliverables: task.deliverables, refs: promptRefs },
   });
+  assertLosslessDynamicPromptInputs(assembled, answerPromptInputs);
   return deepFreeze({
     snapshotHash: snapshot.snapshotHash,
     workflowId: typeof workflow.id === "string" ? workflow.id : "",
@@ -314,6 +339,28 @@ export function deriveWorkerPromptContext(
     compactionPreservation: buildCompactionPreservationBlock(assembled),
     validateCompactionPreservation: (value: string) => assertCompactionPreservation(value, assembled),
   });
+}
+
+function selectTaskAnswerPromptPage(
+  snapshot: ActivationSnapshotFileV1,
+  task: PersistedDelegationTask,
+  deliveredResults: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[],
+  sessionId: string,
+  prepared: readonly TaskQuestionAnswerDelivery[],
+): Readonly<{ deliveries: readonly TaskQuestionAnswerDelivery[]; promptContext: WorkerPromptContext }> {
+  const selected: TaskQuestionAnswerDelivery[] = [];
+  let promptContext = deriveWorkerPromptContext(snapshot, task, deliveredResults, sessionId);
+  for (const delivery of prepared) {
+    try {
+      const candidate = [...selected, delivery];
+      promptContext = deriveWorkerPromptContext(snapshot, task, deliveredResults, sessionId, candidate.flatMap((entry) => entry.answers));
+      selected.push(delivery);
+    } catch (error) {
+      if (!selected.length || !String(error instanceof Error ? error.message : error).includes("Authority-relevant prompt data was omitted or truncated")) throw error;
+      break;
+    }
+  }
+  return Object.freeze({ deliveries: Object.freeze(selected), promptContext });
 }
 
 export class WorkerSessionPool {
@@ -400,7 +447,38 @@ export class WorkerSessionPool {
       deliverResults: (deliveryId: string, options: { limit?: number } = {}) => services.deliverResults(deliveryId, options),
       runWithToolRuntime: <T>(callback: () => T): T => services.runWithToolRuntime(callback),
     }) satisfies WorkerDelegationServices : undefined;
-    const promptContext = deriveWorkerPromptContext(this.options.snapshot, task, deliveredResults, this.options.sessionId);
+    const preparedAnswerDeliveries: readonly TaskQuestionAnswerDelivery[] = this.options.questions?.prepareTaskAnswerDeliveries(task.taskId) ?? [];
+    const answerPage = selectTaskAnswerPromptPage(this.options.snapshot, task, deliveredResults, this.options.sessionId, preparedAnswerDeliveries);
+    const answerDeliveries = answerPage.deliveries;
+    const promptContext = answerPage.promptContext;
+    const promptHash = createHash("sha256").update(promptContext.assembledPrompt).digest("hex");
+    const transcriptRef = `run:${task.runId}/node:${task.targetNodeId}/task:${task.taskId}/transcript`;
+    const consumedDeliveryIds = new Set<string>();
+    let consumerCompletionObserved = false;
+    let recoveredConsumerReplay = false;
+    const markRecoveredContinuation = (questionIds: readonly string[]): void => {
+      if (!recoveredConsumerReplay) return;
+      const taskAttemptId = task.attempts.at(-1)?.attemptId;
+      if (!taskAttemptId) throw new Error("Recovered worker continuation is missing its immutable task attempt");
+      this.options.questions?.markTaskConsumerReplaySettled(task.taskId, taskAttemptId, questionIds);
+    };
+    const recordConsumerSuccess = (attemptId: string, binding: AttemptConsumerReceiptBinding): void => {
+      consumerCompletionObserved = true;
+      if (binding.transcriptRef !== transcriptRef) throw new Error("Worker consumer settlement transcript does not match the task transcript");
+      if (binding.promptHash !== promptHash) recoveredConsumerReplay = true;
+      const boundDeliveryIds = new Set(binding.deliveryIds);
+      const prepared = this.options.questions?.preparedTaskAnswerDeliveries(task.taskId) ?? answerDeliveries;
+      for (const delivery of prepared) {
+        if (!boundDeliveryIds.has(delivery.deliveryId)) continue;
+        try { this.options.questions?.recordTaskAnswerDeliveryReceipt(delivery, { promptHash: binding.promptHash, attemptId, transcriptRef: binding.transcriptRef }); }
+        catch {
+          // A completed containing attempt is retryable control settlement. A
+          // second publication attempt never re-invokes the provider.
+          this.options.questions?.recordTaskAnswerDeliveryReceipt(delivery, { promptHash: binding.promptHash, attemptId, transcriptRef: binding.transcriptRef });
+        }
+        consumedDeliveryIds.add(delivery.deliveryId);
+      }
+    };
     const dispatch: WorkerTrustedDispatch | undefined = this.options.dispatchTool ? Object.freeze({
       schemaVersion: 1 as const,
       tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => this.options.dispatchTool!(task, input),
@@ -420,9 +498,31 @@ export class WorkerSessionPool {
           preservation: promptContext.compactionPreservation,
           validate: promptContext.validateCompactionPreservation,
         }));
+        let consumerReceiptRecorded = false;
         const response = await (this.options.dispatchModel
-          ? this.options.dispatchModel({ task, text, signal, invocation, invoke: () => pooled.session.prompt(text, signal, invocation) })
+          ? this.options.dispatchModel({
+            task, text, signal, invocation, promptHash, transcriptRef,
+            questionDeliveryIds: answerDeliveries.map((delivery) => delivery.deliveryId),
+            resolveQuestionDeliveryIds: () => {
+              const deliveries = this.options.questions?.preparedTaskAnswerDeliveries(task.taskId) ?? answerDeliveries;
+              return [...new Set(deliveries.filter((delivery) => answerDeliveries.some((candidate) => candidate.deliveryId === delivery.deliveryId)
+                || this.options.questions?.taskAnswerDeliveryReturnedByTool(delivery)).map((delivery) => delivery.deliveryId))];
+            },
+            onConsumerSuccess: (attemptId, binding) => { recordConsumerSuccess(attemptId, binding); consumerReceiptRecorded = true; },
+            questionContinuationReady: () => {
+              const pending = this.options.questions?.pendingForTask(task.taskId) ?? [];
+              const prepared = this.options.questions?.prepareTaskAnswerDeliveries(task.taskId) ?? [];
+              return pending.length === 0 && prepared.some((delivery) => !answerDeliveries.some((included) => included.deliveryId === delivery.deliveryId));
+            },
+            invoke: () => pooled.session.prompt(text, signal, invocation),
+          })
           : pooled.session.prompt(text, signal, invocation));
+        if (!consumerReceiptRecorded) {
+          const prepared = this.options.questions?.preparedTaskAnswerDeliveries(task.taskId) ?? answerDeliveries;
+          const deliveryIds = prepared.filter((delivery) => answerDeliveries.some((candidate) => candidate.deliveryId === delivery.deliveryId)
+            || this.options.questions?.taskAnswerDeliveryReturnedByTool(delivery)).map((delivery) => delivery.deliveryId);
+          recordConsumerSuccess(task.attempts.at(-1)?.attemptId ?? `task-${task.taskId}-transcript`, { deliveryIds, promptHash, transcriptRef });
+        }
         let output: string;
         if (plainRecord(response)) {
           if (typeof response.output !== "string") throw new Error("Worker prompt response output is invalid");
@@ -435,6 +535,27 @@ export class WorkerSessionPool {
             || !Number.isSafeInteger(response.usage.outputTokens) || Number(response.usage.outputTokens) < 0
             || (response.usage.precision !== "estimated" && response.usage.precision !== "provider-confirmed"))) throw new Error("Worker provider usage is invalid");
         } else output = String(response ?? "");
+        for (const delivery of this.options.questions?.preparedTaskAnswerDeliveries(task.taskId) ?? answerDeliveries) {
+          if (!consumedDeliveryIds.has(delivery.deliveryId)) continue;
+          try { this.options.questions?.acceptTaskAnswerDelivery(delivery); }
+          catch {
+            // A before-publication acceptance fault is safe to retry because the
+            // exact consumer receipt is already authoritative and idempotent.
+            this.options.questions?.acceptTaskAnswerDelivery(delivery);
+          }
+        }
+        const pendingQuestionIds = this.options.questions?.pendingForTask(task.taskId).map((question) => question.questionId) ?? [];
+        const newlyPrepared = this.options.questions?.prepareTaskAnswerDeliveries(task.taskId) ?? [];
+        const continuationQuestionIds = newlyPrepared.filter((delivery) => !consumedDeliveryIds.has(delivery.deliveryId)).flatMap((delivery) => delivery.questionIds);
+        if (delegatedTaskIds.length && (pendingQuestionIds.length || continuationQuestionIds.length)) throw new Error("Worker turn cannot suspend on delegation dependencies and human questions simultaneously");
+        if (pendingQuestionIds.length && !signal?.aborted && !this.closed) {
+          return Object.freeze({ status: "suspended" as const, questionIds: Object.freeze([...new Set(pendingQuestionIds)]) });
+        }
+        if (continuationQuestionIds.length && !signal?.aborted && !this.closed) {
+          const questionIds = Object.freeze([...new Set(continuationQuestionIds)]);
+          markRecoveredContinuation(questionIds);
+          return Object.freeze({ status: "continuation" as const, questionIds });
+        }
         if (delegatedTaskIds.length && !signal?.aborted && !this.closed) {
           return Object.freeze({ status: "suspended" as const, dependencyTaskIds: Object.freeze([...new Set(delegatedTaskIds)]) });
         }
@@ -446,10 +567,37 @@ export class WorkerSessionPool {
           data: { linkedSessionId: pooled.session.linkedSessionId },
         };
       } catch (error) {
-        if (delegatedTaskIds.length && !signal?.aborted && !this.closed) {
+        const detail = error && typeof error === "object" ? error as Record<string, unknown> : {};
+        const pendingQuestionIds = this.options.questions?.pendingForTask(task.taskId).map((question) => question.questionId) ?? [];
+        let continuationQuestionIds: readonly string[] = [];
+        try {
+          continuationQuestionIds = (this.options.questions?.prepareTaskAnswerDeliveries(task.taskId) ?? [])
+            .filter((delivery) => !answerDeliveries.some((included) => included.deliveryId === delivery.deliveryId) || consumedDeliveryIds.has(delivery.deliveryId))
+            .flatMap((delivery) => delivery.questionIds);
+        } catch {
+          continuationQuestionIds = (this.options.questions?.preparedTaskAnswerDeliveries(task.taskId) ?? [])
+            .filter((delivery) => consumedDeliveryIds.has(delivery.deliveryId))
+            .flatMap((delivery) => delivery.questionIds);
+        }
+        if (pendingQuestionIds.length && !delegatedTaskIds.length && !signal?.aborted && !this.closed) {
+          return Object.freeze({ status: "suspended" as const, questionIds: Object.freeze([...new Set(pendingQuestionIds)]) });
+        }
+        const providerKnownNotApplied = detail.effectNotApplied === true
+          || (detail.assistantOutputObserved === false && detail.toolCallObserved === false);
+        if (providerKnownNotApplied && !detail.policyDenied && !Array.isArray(detail.budgetExhausted) && !consumerCompletionObserved
+          && answerDeliveries.length && !delegatedTaskIds.length && !signal?.aborted && !this.closed) {
+          // Keep the answer undelivered: scheduler settlement advances only the
+          // durable continuation-turn identity, never this failed consumer.
+          return Object.freeze({ status: "continuation" as const, questionIds: Object.freeze([...new Set(answerDeliveries.flatMap((delivery) => delivery.questionIds))]) });
+        }
+        if ((continuationQuestionIds.length || (consumerCompletionObserved && answerDeliveries.length)) && !delegatedTaskIds.length && !signal?.aborted && !this.closed) {
+          const ids = Object.freeze([...new Set(continuationQuestionIds.length ? continuationQuestionIds : answerDeliveries.flatMap((delivery) => delivery.questionIds))]);
+          markRecoveredContinuation(ids);
+          return Object.freeze({ status: "continuation" as const, questionIds: ids });
+        }
+        if (delegatedTaskIds.length && !pendingQuestionIds.length && !continuationQuestionIds.length && !signal?.aborted && !this.closed) {
           return Object.freeze({ status: "suspended" as const, dependencyTaskIds: Object.freeze([...new Set(delegatedTaskIds)]) });
         }
-        const detail = error && typeof error === "object" ? error as Record<string, unknown> : {};
         const budgetExhausted = Array.isArray(detail.budgetExhausted) ? detail.budgetExhausted.filter((item): item is string => typeof item === "string").slice(0, 32) : [];
         return {
           status: signal?.aborted || this.closed ? "cancelled" : budgetExhausted.length ? "blocked" : "failed",

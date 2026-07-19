@@ -18,6 +18,8 @@ import { routeDirectMembers, type RouteDirectMembersInput, type RouteRecommendat
 import {
   CANCELLATION_TIMING,
   WorkflowRunLifecycle,
+  createEmptyRunLifecycleState,
+  reduceRunLifecycle,
   isOpenRunStatus,
   type ArtifactReference,
   type CancellationCoordinator,
@@ -28,6 +30,7 @@ import {
   type WorkflowRunLifecycleOptions,
 } from "./runs";
 import { DurableDelegationScheduler } from "./scheduler";
+import { replayWorkflowJournal } from "./replay";
 import {
   WorkerSessionPool,
   type WorkerPromptResponse,
@@ -50,14 +53,17 @@ import {
   attemptDescriptorFromCommandMetadata,
   attemptDescriptorFromTrustedTool,
   executeWithConservativeRetry,
+  type AttemptConsumerReceiptBinding,
   type TrustedAttemptDescriptor,
 } from "./attempts";
 import { ChangeAccountingRuntime, type ChangeAccountingOptions } from "./change-accounting";
 import { recoverUnknownSideEffects, type UnknownSideEffectRecoveryOptions, type UnknownSideEffectRecoveryReport } from "./recovery";
 import {
   assertCompactionPreservation,
+  assertLosslessDynamicPromptInputs,
   assembleRootWorkflowPrompt,
   buildCompactionPreservationBlock,
+  losslessDynamicPromptInputs,
   type WorkflowPromptAssembly,
 } from "./prompts";
 import { appendWorkflowEvent, readWorkflowJournal } from "./journal";
@@ -80,6 +86,9 @@ import { heartbeatCurrentRuntimeOwnership } from "./ownership";
 import { resolveContainedPath } from "../core/safe-path";
 import { CheckpointApprovalService, type CheckpointApprovalServiceOptions } from "../artifacts/approvals";
 import type { CheckpointPolicy } from "../artifacts/checkpoints";
+import { QuestionService, deriveQuestionRunStatus, type AcceptedQuestionForRoot, type QuestionControlAuthenticationRequest, type QuestionPresenter, type RootQuestionAnswerDelivery } from "./questions";
+import { QUESTION_LIMITS } from "./question-validation";
+import { utf8Prefix } from "./values";
 
 export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
@@ -104,16 +113,36 @@ export interface RunOrchestrationServiceOptions {
   /** Human control dependencies for the run-owned generic checkpoint authority. Omission denies every decision. */
   readonly checkpointApproval?: Partial<Pick<CheckpointApprovalServiceOptions, "authenticateControl" | "createRequestId" | "createDecisionId" | "fault">>;
   readonly verifiedTakeover?: () => boolean | Promise<boolean>;
-  readonly completion?: Omit<CompletionValidationHooks, "descendants">;
+  readonly completion?: Omit<CompletionValidationHooks, "descendants" | "questions" | "validateQuestionSet" | "validateRootQuestionDelivery">;
+  readonly questionControl?: Readonly<{ authenticateControl: (request: QuestionControlAuthenticationRequest) => string | undefined; presentLive?: QuestionPresenter; journalFault?: QuestionService["options"]["journalFault"] }>;
   /** Fault-injection seam for workflow lifecycle crash-recovery tests. */
   readonly journalFault?: WorkflowRunLifecycleOptions["journalFault"];
   readonly pauseAuthority: PauseCoordinator; readonly resumeAuthority: ResumeCoordinator;
   readonly cancellationAuthority: Pick<CancellationCoordinator, "terminateProcessTrees" | "capturePartialState" | "releaseLeases">;
 }
+export interface RootModelInvocation {
+  readonly promptContext: WorkflowPromptAssembly;
+  readonly rootQuestionDelivery?: RootQuestionAnswerDelivery;
+  readonly rootQuestionDeliveries?: readonly RootQuestionAnswerDelivery[];
+}
+interface ModelConsumerReceiptBinding {
+  readonly deliveryIds: readonly string[];
+  readonly promptHash: string;
+  readonly transcriptRef: string;
+  /** Pure durable-state snapshot, evaluated after provider dispatch and before result publication. */
+  readonly resolveDeliveryIds?: () => readonly string[];
+  readonly record: (attemptId: string, binding: AttemptConsumerReceiptBinding) => void;
+}
 export interface RootModelDispatchRequest {
   readonly correlationId: string; readonly operation: string; readonly input: unknown; readonly finalization?: boolean;
   readonly installCompactionBoundary?: (boundary: Readonly<{ preservation: string; validate(value: string): void }>) => void;
-  readonly dispatch: () => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
+  readonly dispatch: (invocation: RootModelInvocation) => string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
+  /** Package-internal exact prompt/delivery binding prepared by the root service. */
+  readonly promptInvocation?: RootModelInvocation;
+  readonly consumerReceipt?: ModelConsumerReceiptBinding;
+  /** Package-internal durable replay identity, independent of prompt delivery projection. */
+  readonly replayInput?: unknown;
+  readonly recoveryAttemptId?: string;
 }
 export interface TrustedWorkflowDispatch extends WorkerTrustedDispatch {
   model(input: RootModelDispatchRequest): Promise<string | WorkerPromptResponse>;
@@ -135,7 +164,7 @@ interface RunResources {
   readonly budgets: BudgetRuntime; readonly attempts: AttemptRuntime; readonly changes: ChangeAccountingRuntime;
   readonly recoveryIssues: readonly string[];
   readonly dispatchRuntime: DispatchResources;
-  readonly scheduler: DurableDelegationScheduler; readonly workers: WorkerSessionPool;
+  readonly scheduler: DurableDelegationScheduler; readonly workers: WorkerSessionPool; readonly questions: QuestionService;
 }
 interface DispatchResources extends Pick<RunResources, "budgets" | "attempts" | "changes"> {
   readonly assertAdmission: () => void;
@@ -256,6 +285,20 @@ export class RunOrchestrationService {
     const completion: CompletionValidationHooks = {
       ...(options.completion ?? {}),
       descendants: () => this.descendantGate(),
+      questions: () => {
+        const run = this.lifecycle.restore().latestRun;
+        return run ? this.questionRuntimeFor(run.runId).completionGate() : Object.freeze({ state: "not-present" as const });
+      },
+      validateQuestionSet: (events, expectedQuestionIds) => {
+        const run = this.lifecycle.restore().latestRun;
+        if (!run) throw new Error("Question set validation requires a current run");
+        this.questionRuntimeFor(run.runId).assertPendingSet(events, expectedQuestionIds);
+      },
+      validateRootQuestionDelivery: (events) => {
+        const run = this.lifecycle.restore().latestRun;
+        if (!run) throw new Error("Root question delivery validation requires a current run");
+        this.questionRuntimeFor(run.runId).assertRootMayTerminal(events);
+      },
       adapter: async () => {
         const run = this.lifecycle.restore().latestRun;
         const builtin = selectedArtifact?.adapter && run?.artifactWorkspace
@@ -298,6 +341,11 @@ export class RunOrchestrationService {
         });
       },
       settleTerminal: async (settlement) => {
+        this.questionRuntimeFor(settlement.runId).closePending({
+          reason: `run ${settlement.status}`,
+          operationId: settlement.operationId,
+          expectedQuestionIds: settlement.closedQuestionIds,
+        });
         await this.settleTerminalResources(settlement.runId);
         this.releaseArtifactLease("finish");
         await options.completion?.settleTerminal?.(settlement);
@@ -543,24 +591,53 @@ export class RunOrchestrationService {
     });
   }
 
-  private rootPromptAssembly(runId?: string): WorkflowPromptAssembly {
+  private rootPromptAssembly(runId?: string, acceptedAnswers: readonly AcceptedQuestionForRoot[] = []): WorkflowPromptAssembly {
     const run = this.lifecycle.restore().latestRun;
     if (!run || (runId !== undefined && run.runId !== runId)) throw new Error("Root prompt requires the current workflow run");
     const handoff = run.handoffPacketHash ? handoffForRun(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), run.runId) : undefined;
     if (run.handoffPacketHash && handoff?.packetHash !== run.handoffPacketHash) throw new Error("Consumed handoff packet is missing or does not match the run marker");
-    return assembleRootWorkflowPrompt({
+    const answerPromptInputs = acceptedAnswers.flatMap((accepted) => losslessDynamicPromptInputs({
+      provenance: `human-answer:${accepted.questionId}:${accepted.answer.channel}:${accepted.answer.identity}`,
+      content: { questionId: accepted.questionId, definition: accepted.definition, answer: accepted.answer },
+      ref: accepted.transcriptRef,
+    }));
+    const assembly = assembleRootWorkflowPrompt({
       snapshot: this.options.snapshot,
       nodeId: rootNodeId(this.options.snapshot),
       sessionId: this.options.sessionId,
       runId: run.runId,
       ...(handoff ? { handoff: handoffPromptInput(handoff) } : {}),
-      runInputs: run.inputs.map((entry) => ({
-        source: "user" as const,
-        provenance: `run-input:${entry.sequence}:${entry.source}`,
-        content: entry.text,
-        ref: `run:${run.runId}/input:${entry.sequence}`,
-      })),
+      runInputs: [
+        ...run.inputs.map((entry) => ({
+          source: "user" as const,
+          provenance: `run-input:${entry.sequence}:${entry.source}`,
+          content: entry.text,
+          ref: `run:${run.runId}/input:${entry.sequence}`,
+        })),
+        ...answerPromptInputs,
+      ],
     });
+    assertLosslessDynamicPromptInputs(assembly, answerPromptInputs);
+    return assembly;
+  }
+
+  private rootAnswerPromptPage(runId: string, prepared: readonly RootQuestionAnswerDelivery[]): Readonly<{
+    deliveries: readonly RootQuestionAnswerDelivery[];
+    promptContext: WorkflowPromptAssembly;
+  }> {
+    const selected: RootQuestionAnswerDelivery[] = [];
+    let promptContext = this.rootPromptAssembly(runId);
+    for (const delivery of prepared) {
+      try {
+        const candidate = [...selected, delivery];
+        promptContext = this.rootPromptAssembly(runId, candidate.flatMap((entry) => entry.answers));
+        selected.push(delivery);
+      } catch (error) {
+        if (!selected.length || !String(error instanceof Error ? error.message : error).includes("Authority-relevant prompt data was omitted or truncated")) throw error;
+        break;
+      }
+    }
+    return Object.freeze({ deliveries: Object.freeze(selected), promptContext });
   }
 
   private rootCompactionBoundary(runId?: string): Readonly<{ preservation: string; validate(value: string): void }> {
@@ -578,7 +655,9 @@ export class RunOrchestrationService {
   private blockRunForBudget(resources: RunResources, nodeId: string, reason: string): void {
     const bounded = `budget_exhausted: ${reason}`.slice(0, 2_048);
     resources.scheduler.closeAdmission(bounded);
-    resources.scheduler.cancelPending(bounded);
+    // Descendants remain journal-live until terminal preparation freezes and
+    // closes the exact pending question set. Cancelling them here can make the
+    // question terminal guard reject before budget failure is prepared.
     resources.scheduler.abortOwnedWork(bounded, nodeId);
     this.trackCleanup(resources.workers.abortSessionsExcept(nodeId));
   }
@@ -623,12 +702,34 @@ export class RunOrchestrationService {
     inputText = this.modelInputText(request.input),
   ): Promise<string | WorkerPromptResponse> {
     resources.assertAdmission();
-    const rootBoundary = nodeId === rootNodeId(this.options.snapshot) ? this.rootCompactionBoundary() : undefined;
+    const rootPrompt = nodeId === rootNodeId(this.options.snapshot) ? request.promptInvocation?.promptContext ?? this.rootPromptAssembly() : undefined;
+    const rootBoundary = rootPrompt ? Object.freeze({
+      preservation: buildCompactionPreservationBlock(rootPrompt),
+      validate: (value: string) => assertCompactionPreservation(value, rootPrompt),
+    }) : undefined;
     if (rootBoundary) request.installCompactionBoundary?.(rootBoundary);
     try {
+      const attemptInput = request.consumerReceipt ? {
+        requestInput: request.input,
+        consumerReceipt: { deliveryIds: [...request.consumerReceipt.deliveryIds], promptHash: request.consumerReceipt.promptHash, transcriptRef: request.consumerReceipt.transcriptRef },
+      } : request.input;
+      const recoveredBinding = request.recoveryAttemptId
+        ? resources.attempts.restore().attempts[request.recoveryAttemptId]?.consumerReceipt
+        : undefined;
       const value = await executeWithConservativeRetry(resources.attempts, {
-        correlationId: request.correlationId, nodeId, operation: request.operation, input: request.input,
+        correlationId: request.correlationId, nodeId, operation: request.operation, input: attemptInput,
+        replayInput: request.replayInput ?? request.input,
+        ...(request.recoveryAttemptId ? { recoveryAttemptId: request.recoveryAttemptId, ...(recoveredBinding ? { recoveryConsumerReceipt: recoveredBinding } : {}) } : {}),
         descriptor: attemptDescriptorForModel(),
+        ...(request.consumerReceipt ? {
+          consumerReceipt: { deliveryIds: [...request.consumerReceipt.deliveryIds], promptHash: request.consumerReceipt.promptHash, transcriptRef: request.consumerReceipt.transcriptRef },
+          consumerReceiptAfterDispatch: () => ({
+            deliveryIds: [...new Set(request.consumerReceipt!.resolveDeliveryIds?.() ?? request.consumerReceipt!.deliveryIds)],
+            promptHash: request.consumerReceipt!.promptHash,
+            transcriptRef: request.consumerReceipt!.transcriptRef,
+          }),
+          onConsumerCompleted: (attemptId: string, binding: AttemptConsumerReceiptBinding) => request.consumerReceipt!.record(attemptId, binding),
+        } : {}),
         dispatch: async ({ attemptId, ordinal }) => {
           resources.assertAdmission();
           const admitted = resources.budgets.startModelAttempt(nodeId, `${request.correlationId}-provider-${ordinal}`, { finalization: request.finalization });
@@ -638,7 +739,7 @@ export class RunOrchestrationService {
           if (!active.ok) this.throwBudgetAdmission(resources, nodeId, active);
           let response: string | WorkerPromptResponse;
           try {
-            response = await request.dispatch();
+            response = await request.dispatch(request.promptInvocation ?? Object.freeze({ promptContext: rootPrompt! }));
             if (rootBoundary && record(response) && response.compactionSummary !== undefined) {
               if (typeof response.compactionSummary !== "string") throw Object.assign(new Error("Root compaction summary is invalid"), { assistantOutputObserved: true, effectNotApplied: true });
               rootBoundary.validate(response.compactionSummary);
@@ -747,6 +848,16 @@ export class RunOrchestrationService {
     }
   }
 
+  private questionRuntimeFor(runId: string): QuestionService {
+    if (this.current?.runId === runId) return this.current.questions;
+    return new QuestionService({
+      projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId,
+      snapshot: this.options.snapshot, now: this.options.now,
+      authenticateControl: this.options.questionControl?.authenticateControl ?? (() => undefined),
+      journalFault: this.options.questionControl?.journalFault,
+    });
+  }
+
   private createResources(runId: string): RunResources {
     const budgets = this.budgetRuntimeFor(runId);
     const changes = this.changeAccountingFor(runId);
@@ -783,6 +894,7 @@ export class RunOrchestrationService {
         attempts.markUnknown(attempt.attemptId, "interrupted non-idempotent dispatch requires trusted reconciliation before admission");
       }
     }
+    const questions = this.questionRuntimeFor(runId);
     const runtime = new DelegationRuntime({
       projectRoot: this.options.projectRoot,
       projectId: this.options.projectId,
@@ -793,6 +905,13 @@ export class RunOrchestrationService {
       now: this.options.now,
       referenceAuthorizer: this.options.referenceAuthorizer,
       acceptanceAuthority: { admit: (events, parentNodeId) => budgets.admitDelegationAgainst(events, parentNodeId) },
+      startAuthority: { admit: (events) => {
+        const locked = replayWorkflowJournal(events, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
+        if (!locked || locked.runId !== runId || locked.status !== "running" || locked.cancellationRequested || locked.pendingTerminal
+          || locked.waitCauses?.includes("approval")) return Object.freeze({ ok: false as const, reason: "Task start admission lost to run lifecycle, cancellation, finalization, or approval state" });
+        return Object.freeze({ ok: true as const });
+      } },
+      terminalAuthority: { assertTaskMayTerminal: (events, taskId, status) => questions.assertTaskMayTerminal(events, taskId, status) },
     });
     const assertDispatchAdmission = (): void => {
       const run = this.lifecycle.restore().latestRun;
@@ -815,11 +934,21 @@ export class RunOrchestrationService {
       runId,
       snapshot: this.options.snapshot,
       factory: this.options.workerFactory,
-      dispatchModel: ({ task, text, invoke }) => this.dispatchModel(dispatchResources, task.targetNodeId, {
-        correlationId: `worker-model-${task.taskId}-${createHash("sha256").update(text).digest("hex").slice(0, 24)}`,
-        operation: "worker.provider.prompt", input: { taskId: task.taskId, promptHash: createHash("sha256").update(text).digest("hex") }, dispatch: invoke,
+      dispatchModel: ({ task, text, invoke, questionDeliveryIds, resolveQuestionDeliveryIds, promptHash, transcriptRef, onConsumerSuccess, questionContinuationReady }) => this.dispatchModel(dispatchResources, task.targetNodeId, {
+        correlationId: `worker-model-${task.taskId}-${promptHash.slice(0, 24)}-turn-${task.questionContinuationTurn ?? 0}`,
+        operation: "worker.provider.prompt", input: { taskId: task.taskId, promptHash, questionContinuationTurn: task.questionContinuationTurn ?? 0 }, replayInput: { taskId: task.taskId },
+        ...(questions.containingAttemptForTaskContinuation(task.taskId, task.resumedByQuestionSequence) ? { recoveryAttemptId: questions.containingAttemptForTaskContinuation(task.taskId, task.resumedByQuestionSequence) } : {}),
+        dispatch: async () => {
+          try { return await invoke(); }
+          catch (error) {
+            if (questionContinuationReady() && error && typeof error === "object") Object.assign(error, { effectNotApplied: true });
+            throw error;
+          }
+        },
+        consumerReceipt: { deliveryIds: questionDeliveryIds, promptHash, transcriptRef, resolveDeliveryIds: resolveQuestionDeliveryIds, record: onConsumerSuccess },
       }, text),
       dispatchTool: (task, input) => this.dispatchTool(dispatchResources, task.targetNodeId, input),
+      questions,
     });
     workers.rebuildBoundaries(Object.values(runtime.restore().tasks));
     const scheduler = new DurableDelegationScheduler({
@@ -827,7 +956,17 @@ export class RunOrchestrationService {
       maxParallel: Math.min(this.options.maxParallel, budgets.restore().limits.run.maxParallel),
       createAttemptId: this.options.createAttemptId,
       verifiedTakeover: this.options.verifiedTakeover,
-      onRecoveryReconciled: () => this.reconcileDurableNestedDeliveries(runtime),
+      onRecoveryReconciled: () => {
+        // Receipt-to-acceptance publication is retryable control settlement.
+        // It runs before task.started, so a fault cannot become a worker result
+        // or consume the durable same-attempt resume marker.
+        questions.reconcileAnswerDeliveryReceipts();
+        this.reconcileDurableNestedDeliveries(runtime);
+      },
+      canLaunch: () => {
+        const currentRun = this.lifecycle.restore().latestRun;
+        return currentRun?.runId === runId && currentRun.status === "running" && !(currentRun.waitCauses?.includes("approval") ?? false) && !currentRun.cancellationRequested && !currentRun.pendingTerminal;
+      },
       execute: async (task, control) => {
         const state = runtime.restore();
         const deliveredResults = (task.suspendedOn ?? []).flatMap((taskId) => {
@@ -847,7 +986,7 @@ export class RunOrchestrationService {
         workers.rebuildBoundaries(Object.values(runtime.restore().tasks));
       },
     });
-    const resources: RunResources = { runId, runtime, budgets, attempts, changes, recoveryIssues: Object.freeze(recoveryIssues), dispatchRuntime: dispatchResources, scheduler, workers };
+    const resources: RunResources = { runId, runtime, budgets, attempts, changes, recoveryIssues: Object.freeze(recoveryIssues), dispatchRuntime: dispatchResources, scheduler, workers, questions };
     const run = this.lifecycle.restore().latestRun;
     if (run?.runId === runId && run.pendingTerminal) this.failClosedForTerminal(resources);
     else this.reconcileDurableNestedDeliveries(runtime);
@@ -855,6 +994,14 @@ export class RunOrchestrationService {
   }
 
   private failClosedForTerminal(resources: RunResources): void {
+    const run = this.lifecycle.restore().latestRun;
+    if (run?.runId === resources.runId && run.pendingTerminal) {
+      resources.questions.closePending({
+        reason: `run ${run.pendingTerminal.status}`,
+        operationId: run.pendingTerminal.operationId,
+        expectedQuestionIds: run.pendingTerminal.closedQuestionIds,
+      });
+    }
     resources.scheduler.closeAdmission("workflow terminal settlement");
     resources.scheduler.cancelPending("workflow terminal settlement");
     resources.scheduler.abortOwnedWork("workflow terminal settlement");
@@ -922,7 +1069,7 @@ export class RunOrchestrationService {
     const resources = this.resources();
     const tasks = Object.values(resources.runtime.restore().tasks);
     const unsettled = tasks.filter((task) => task.queueState !== "terminal");
-    const undelivered = tasks.filter((task) => task.parentNodeId === resources.runtime.restore().rootNodeId && task.result && task.resultAcceptedSequence === undefined);
+    const undelivered = tasks.filter((task) => task.result && task.resultAcceptedSequence === undefined);
     if (!unsettled.length && !undelivered.length) return Object.freeze({ state: "satisfied" });
     return Object.freeze({
       state: "unsatisfied",
@@ -952,10 +1099,87 @@ export class RunOrchestrationService {
       if (this.lifecycle.restore().latestRun?.status !== "running") throw new Error("Workflow admission requires a running run");
       this.assertRecoveredForAdmission(resources);
     };
+    const isRootContext = context.nodeId === rootNodeId(this.options.snapshot);
+    const assertRootQuestionAdmission = (): void => {
+      if (!isRootContext) return;
+      const pending = Object.values(resources.questions.restore().questions)
+        .filter((question) => question.nodeId === context.nodeId && question.taskId === undefined && question.state === "pending");
+      if (pending.length) throw new Error(`Root dispatch is blocked by ${pending.length} pending durable human question(s)`);
+    };
+    const assertQuestionBatchAdmission = (toolCallId: string, batchCallIds: readonly string[]): void => {
+      if (!batchCallIds.includes(toolCallId) || new Set(batchCallIds).size !== batchCallIds.length) throw new Error("Human question call is not bound to its exact trusted assistant batch");
+      const prior = Object.values(resources.questions.restore().questions).some((question) => question.nodeId === context.nodeId
+        && question.taskId === context.taskId && question.taskAttemptId === context.attemptId
+        && question.provenance.toolCallId !== toolCallId && batchCallIds.includes(question.provenance.toolCallId));
+      if (!prior) {
+        assertAdmission();
+        assertRootQuestionAdmission();
+        return;
+      }
+      const run = this.lifecycle.restore().latestRun;
+      const delegation = resources.runtime.restore();
+      if (!run || run.runId !== resources.runId || run.status !== "running" || run.cancellationRequested || run.pendingTerminal
+        || this.current?.runId !== resources.runId || !delegation.admissionOpen || delegation.schedulerStatus !== "running") {
+        throw new Error("Same-batch human question admission requires the current running workflow attempt");
+      }
+      if (!isRootContext) resources.runtime.assertQuestionBatchExecutionContext(context);
+      this.assertRecoveredForAdmission(resources);
+    };
     const dispatch: TrustedWorkflowDispatch = Object.freeze({
       schemaVersion: 1 as const,
-      model: (input: RootModelDispatchRequest) => { assertAdmission(); return this.dispatchModel(resources.dispatchRuntime, context.nodeId, input); },
-      tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => { assertAdmission(); return this.dispatchTool(resources.dispatchRuntime, context.nodeId, input); },
+      model: async (input: RootModelDispatchRequest) => {
+        assertAdmission();
+        assertRootQuestionAdmission();
+        if (isRootContext) resources.questions.reconcileAnswerDeliveryReceipts();
+        const preparedRootQuestionDeliveries = isRootContext ? resources.questions.prepareRootAnswerDeliveries(context.nodeId) : [];
+        const rootAnswerPage = isRootContext ? this.rootAnswerPromptPage(resources.runId, preparedRootQuestionDeliveries) : undefined;
+        const rootQuestionDeliveries = rootAnswerPage?.deliveries ?? [];
+        const rootQuestionDelivery = rootQuestionDeliveries.length === 1 ? rootQuestionDeliveries[0] : undefined;
+        const promptContext = rootAnswerPage?.promptContext;
+        const promptHash = promptContext ? createHash("sha256").update(promptContext.text).digest("hex") : undefined;
+        const transcriptRef = isRootContext ? `run:${resources.runId}/node:${context.nodeId}/transcript` : undefined;
+        const { recoveryAttemptId: _untrustedRecoveryAttempt, replayInput: _untrustedReplayInput, ...publicInput } = input;
+        const recoveredRootAttempt = isRootContext && transcriptRef
+          ? Object.values(resources.attempts.restore().attempts).find((attempt) => attempt.correlationId === input.correlationId && attempt.nodeId === context.nodeId
+            && attempt.operation === input.operation && attempt.status === "completed" && attempt.result?.ok && attempt.consumerReceipt?.transcriptRef === transcriptRef)
+          : undefined;
+        const value = await this.dispatchModel(resources.dispatchRuntime, context.nodeId, {
+          ...publicInput,
+          replayInput: input.input,
+          ...(recoveredRootAttempt ? { recoveryAttemptId: recoveredRootAttempt.attemptId } : {}),
+          ...(promptContext ? { promptInvocation: Object.freeze({ promptContext, ...(rootQuestionDelivery ? { rootQuestionDelivery } : {}), ...(rootQuestionDeliveries.length ? { rootQuestionDeliveries } : {}) }) } : {}),
+          ...(promptHash && transcriptRef ? { consumerReceipt: {
+            deliveryIds: rootQuestionDeliveries.map((delivery) => delivery.deliveryId), promptHash, transcriptRef,
+            resolveDeliveryIds: () => {
+              const deliveries = resources.questions.preparedRootAnswerDeliveries(context.nodeId);
+              return [...new Set(deliveries.filter((delivery) => rootQuestionDeliveries.some((candidate) => candidate.deliveryId === delivery.deliveryId)
+                || resources.questions.rootAnswerDeliveryReturnedByTool(delivery)).map((delivery) => delivery.deliveryId))];
+            },
+            record: (attemptId: string, binding: AttemptConsumerReceiptBinding) => {
+              if (binding.transcriptRef !== transcriptRef) throw new Error("Root consumer settlement transcript does not match the root transcript");
+              const boundDeliveryIds = new Set(binding.deliveryIds);
+              for (const delivery of resources.questions.preparedRootAnswerDeliveries(context.nodeId)) {
+                if (boundDeliveryIds.has(delivery.deliveryId)) {
+                  resources.questions.recordRootAnswerDeliveryReceipt(delivery, { promptHash: binding.promptHash, attemptId, transcriptRef: binding.transcriptRef });
+                }
+              }
+            },
+          } } : {}),
+        });
+        if (isRootContext) {
+          resources.questions.reconcileAnswerDeliveryReceipts();
+          this.reconcileQuestionWait(resources);
+        }
+        return value;
+      },
+      tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => {
+        if (input.toolName === "human_question" && input.questionBatchCallIds && input.questionBatchCurrentCallId) assertQuestionBatchAdmission(input.questionBatchCurrentCallId, input.questionBatchCallIds);
+        else {
+          assertAdmission();
+          assertRootQuestionAdmission();
+        }
+        return this.dispatchTool(resources.dispatchRuntime, context.nodeId, input);
+      },
     });
     const bound: BoundDelegationServices = Object.freeze({
       context,
@@ -966,7 +1190,16 @@ export class RunOrchestrationService {
         try { return resources.runtime.accept(context, input); }
         catch (error) {
           const detail = record(error) ? error : {};
-          if (detail.budgetScope === "run" && Array.isArray(detail.budgetExhausted)) this.blockRunForBudget(resources, context.nodeId, String(error instanceof Error ? error.message : error));
+          if (detail.budgetScope === "run" && Array.isArray(detail.budgetExhausted)) {
+            const reason = String(error instanceof Error ? error.message : error);
+            this.blockRunForBudget(resources, context.nodeId, reason);
+            // Delegation admission is synchronous, so finish its fatal run-wide
+            // settlement on the owned cleanup lane after this call unwinds.
+            this.trackCleanup(Promise.resolve().then(async () => {
+              const terminal = await this.lifecycle.failBudgetExhaustion(reason);
+              if (!terminal.ok) throw new Error(`Run-wide delegation budget exhaustion failed to settle: ${terminal.issues.join("; ")}`);
+            }));
+          }
           throw error;
         }
       },
@@ -1018,6 +1251,14 @@ export class RunOrchestrationService {
               verifyEvidence: (references) => this.verifyArtifactEvidence(resources, references),
             });
           } : undefined,
+          question: async (input, toolCallId, signal, batchCallIds = [toolCallId]) => {
+            assertQuestionBatchAdmission(toolCallId, batchCallIds);
+            const request = { nodeId: context.nodeId, ...(context.taskId ? { taskId: context.taskId } : {}), definition: input, provenance: { source: "human_question" as const, toolCallId } };
+            const question = this.options.questionControl?.presentLive
+              ? await resources.questions.createAndPresent(request, this.options.questionControl.presentLive, signal)
+              : resources.questions.create(request);
+            return Object.freeze({ questionId: question.questionId, state: question.state, suspendTurn: question.state === "pending", ...(question.answer ? { answer: question.answer } : {}) });
+          },
           finish: (input, batch) => this.lifecycle.finish(input, { callerNodeId: context.nodeId, toolBatch: batch }),
         });
         return runWithWorkflowToolRuntime(binding, callback);
@@ -1028,6 +1269,11 @@ export class RunOrchestrationService {
 
   rootServices(): BoundDelegationServices {
     const resources = this.resources();
+    // Root admission, like scheduler recovery, retries durable receipt control
+    // settlement without turning a transient publication fault into a provider
+    // attempt or a permanent recovery diagnosis.
+    resources.questions.reconcileAnswerDeliveryReceipts();
+    this.reconcileQuestionWait(resources);
     this.assertRecoveredForAdmission(resources);
     return this.bind(resources.runtime.rootExecutionContext(), resources);
   }
@@ -1095,8 +1341,27 @@ export class RunOrchestrationService {
     return this.current.runtime.restore();
   }
 
+  private reconcileQuestionWait(resources: RunResources): void {
+    const beforeRun = this.lifecycle.restore().latestRun;
+    if (!beforeRun || (beforeRun.status !== "running" && beforeRun.status !== "waiting_for_human") || beforeRun.cancellationRequested || beforeRun.pendingTerminal) return;
+    const delegation = resources.runtime.restore();
+    const questions = Object.values(resources.questions.restore().questions);
+    const pendingQuestions = questions.filter((question) => question.state === "pending").length;
+    const rootId = rootNodeId(this.options.snapshot);
+    const rootQuestionSuspended = questions.some((question) => question.state === "pending" && question.nodeId === rootId && question.taskId === undefined);
+    const runnableTasks = Object.values(delegation.tasks).filter((task) => task.queueState === "queued" || (task.queueState === "active" && (task.resumedByQuestionSequence !== undefined || task.resumedByResultSequence !== undefined))).length;
+    const derived = deriveQuestionRunStatus({ pendingQuestions, activeExecutions: resources.scheduler.activeCount, runnableTasks, pendingRootInputs: this.lifecycle.pendingInputs().length, rootQuestionSuspended });
+    const hasQuestionCause = beforeRun.waitCauses?.includes("question") ?? false;
+    if (derived === "waiting_for_human" && !hasQuestionCause) {
+      this.lifecycle.transitionToWaitingForHuman("all runnable progress is suspended on durable human questions");
+    } else if (derived === "running" && beforeRun.status === "waiting_for_human" && hasQuestionCause) {
+      this.lifecycle.transitionFromWaitingForHuman("a durable human answer is ready for owner-controlled resume");
+    }
+  }
+
   async runWorkers(): Promise<void> {
     const resources = this.resources();
+    this.reconcileQuestionWait(resources);
     if (Object.values(resources.attempts.restore().attempts).some((attempt) => !attempt.result && attempt.recovery === "reconcile-required")) {
       const report = await recoverUnknownSideEffects(resources.attempts, {
         reconcilers: this.options.recoveryReconcilers,
@@ -1111,10 +1376,12 @@ export class RunOrchestrationService {
       throw new Error(`Worker admission paused for unresolved unknown side effects: ${admissionIssues.join("; ")}`);
     }
     const run = this.lifecycle.restore().latestRun;
-    if (!run || run.runId !== resources.runId || !isOpenRunStatus(run.status) || run.status === "paused" || run.cancellationRequested) {
-      throw new Error("Workers can run only for the current running workflow run");
+    if (!run || run.runId !== resources.runId || run.status !== "running" || run.waitCauses?.includes("approval") || run.cancellationRequested) {
+      throw new Error("Workers can run only for the current running workflow run without a pending approval wait");
     }
+    resources.budgets.resumeActive();
     await resources.scheduler.runUntilSettled();
+    if (!resources.questions.isShutdown()) this.reconcileQuestionWait(resources);
     const recoveryIssues = this.recoveryAdmissionIssues(resources);
     if (recoveryIssues.length) {
       if (this.lifecycle.restore().latestRun?.status === "running") await this.pause(`unknown_side_effect: ${recoveryIssues.join("; ").slice(0, 2_048)}`);
@@ -1219,9 +1486,30 @@ export class RunOrchestrationService {
 
   private cancellationCoordinator(reason: string): CancellationCoordinator {
     const resources = this.resources();
+    const closeFrozenQuestions = (): void => {
+      const frozenRun = this.lifecycle.restore().latestRun;
+      if (!frozenRun || frozenRun.runId !== resources.runId || !frozenRun.cancellationRequested || !frozenRun.cancellationReason) {
+        throw new Error("Cancellation question closure requires the frozen durable cancellation request");
+      }
+      const frozenQuestionIds = frozenRun.cancellationQuestionIds ?? [];
+      const closureHash = createHash("sha256")
+        .update("pi-hive-cancellation-question-closure-v1\0")
+        .update(canonicalJson({ projectId: this.options.projectId, sessionId: this.options.sessionId, runId: frozenRun.runId }))
+        .digest("hex");
+      resources.questions.closePending({
+        reason: utf8Prefix(frozenRun.cancellationReason, QUESTION_LIMITS.reasonBytes),
+        operationId: `cancel-question-closure-sha256-${closureHash}`,
+        expectedQuestionIds: frozenQuestionIds,
+      });
+    };
     return {
       rejectNewWork: () => { resources.scheduler.closeAdmission(reason); },
-      cancelQueuedWork: () => { resources.scheduler.cancelPending(reason); },
+      cancelQueuedWork: () => {
+        // Explicit run cancellation closes the frozen pending set before task
+        // cancellation so ordinary task terminal CAS never strands a question.
+        closeFrozenQuestions();
+        resources.scheduler.cancelPending(reason);
+      },
       abortOwnedWork: async () => {
         resources.scheduler.abortOwnedWork(reason);
         await resources.workers.closeSessions();
@@ -1246,6 +1534,7 @@ export class RunOrchestrationService {
         } as Readonly<Record<string, JsonValue>>;
       },
       releaseLeases: async () => {
+        closeFrozenQuestions();
         this.releaseArtifactLease("cancel");
         await this.options.cancellationAuthority.releaseLeases?.();
       },
@@ -1259,8 +1548,19 @@ export class RunOrchestrationService {
     return result;
   }
 
+  questionControls(): QuestionService {
+    const run = this.lifecycle.restore().latestRun;
+    if (!run || !isOpenRunStatus(run.status)) throw new Error("Question controls require a current open workflow run");
+    return this.questionRuntimeFor(run.runId);
+  }
+
+  activeWorkerCount(): number { return this.current?.scheduler.activeCount ?? 0; }
+
   async shutdown(reason = "process shutdown"): Promise<void> {
     this.artifactCallerIssuer?.revoke();
+    // Question tools may be the promise preventing a worker from reaching its
+    // pause boundary, so abort and await their wrappers before worker settlement.
+    if (this.current) await this.current.questions.shutdown();
     const run = this.lifecycle.restore().latestRun;
     if (run && isOpenRunStatus(run.status)) await this.pause(reason);
     if (this.current) await this.current.workers.closeSessions();
@@ -1268,6 +1568,6 @@ export class RunOrchestrationService {
   }
 
   hasLiveHandles(): boolean {
-    return Boolean(this.current?.scheduler.hasLiveHandles() || this.current?.workers.hasLiveHandles() || this.cleanup.size);
+    return Boolean(this.current?.questions.hasLiveHandles() || this.current?.scheduler.hasLiveHandles() || this.current?.workers.hasLiveHandles() || this.cleanup.size);
   }
 }

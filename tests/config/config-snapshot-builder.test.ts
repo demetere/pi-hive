@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildActivationSnapshot, buildActivationSummary } from "../../src/config/snapshot.ts";
+import { loadConfigCatalogs, loadConfigProject, resolveConfigWorkflows } from "../../src/config/index.ts";
 import { issueEffectiveAuthoritySnapshotForTest } from "../../src/config/snapshot-authority.ts";
 import { resolveWorkflowCapabilities } from "../../src/capabilities/resolve.ts";
 import { readActivationSnapshot, writeActivationSnapshot } from "../../src/config/snapshot-store.ts";
 import type { ValidWorkflowDefinition } from "../../src/config/resolver.ts";
 import type { ConfigCatalogResult } from "../../src/config/catalogs.ts";
 import type { ConfiguredProject } from "../../src/config/manifest.ts";
+import { copyWorkflowFixture } from "../helpers/workflow-fixtures.ts";
 
 function fixture() {
   const workflow = {
@@ -21,7 +23,7 @@ function fixture() {
   const project = { status: "configured", projectRoot: "/tmp/project", manifestPath: "/tmp/project/.pi/hive/hive-config.yaml", manifestSource: ".pi/hive/hive-config.yaml", rawSource: "manifest\n", manifest: { "schema-version": 1, agents: {}, workflows: {} }, sourceMap: {}, diagnostics: [], truncated: false, registries: { agents: [{ id: "agent", kind: "agents", status: "available", declaredPath: "agents/agent.md", projectPath: ".pi/hive/agents/agent.md", sourceRange: {} as never, diagnosticCodes: [], declaredData: "agents/agent.md", canonicalPath: "/tmp/project/.pi/hive/agents/agent.md" }], workflows: [{ id: "debug", kind: "workflows", status: "available", declaredPath: "workflows/debug.yaml", projectPath: ".pi/hive/workflows/debug.yaml", sourceRange: {} as never, diagnosticCodes: [], declaredData: "workflows/debug.yaml", canonicalPath: "/tmp/project/.pi/hive/workflows/debug.yaml" }], skills: [{ id: "skill", kind: "skills", status: "available", declaredPath: "skills/skill/", projectPath: ".pi/hive/skills/skill", sourceRange: {} as never, diagnosticCodes: [], declaredData: "skills/skill/", canonicalPath: "/tmp/project/.pi/hive/skills/skill" }], knowledge: [{ id: "knowledge", kind: "knowledge", status: "available", declaredPath: "knowledge/k/", projectPath: ".pi/hive/knowledge/k", sourceRange: {} as never, diagnosticCodes: [], declaredData: { provider: "okf", path: "knowledge/k/" }, canonicalPath: "/tmp/project/.pi/hive/knowledge/k" }] } } as unknown as ConfiguredProject;
   return { workflow, catalogs, project };
 }
-const models = { defaultModel: "provider/model", defaultThinking: "off", find: (id: string) => id === "provider/model" ? { id, contextWindow: 1_000_000, maxTokens: 8_000, thinking: ["off"] } : undefined, canActivate: () => true, estimateTokens: (text: string) => Buffer.byteLength(text) };
+const models = { defaultModel: "provider/model", defaultThinking: "off", find: (id: string) => id === "provider/model" ? { id, contextWindow: 1_000_000, maxTokens: 8_000, thinking: ["off", "medium"] } : undefined, canActivate: () => true, estimateTokens: (text: string) => Buffer.byteLength(text) };
 function authorityNode(nodeId = "root", model = "provider/model", thinking = "off") {
   return {
     nodeId,
@@ -114,6 +116,31 @@ test("snapshot identity consumes the exact resolver-issued effective authority",
   assert.notDeepEqual(fullSnapshot.payload.authority, narrowSnapshot.payload.authority);
   assert.notEqual(fullSnapshot.snapshotHash, narrowSnapshot.snapshotHash);
   assert.throws(() => buildActivationSnapshot({ ...full.base, authority: narrow.authority, models, packageVersion: "0.1.0" }), /exact resolved workflow authority/i);
+});
+
+test("configured human-input authority enables questions and survives snapshot persistence", () => {
+  const copied = copyWorkflowFixture("artifact-free-debug");
+  try {
+    const project = loadConfigProject(copied.projectRoot);
+    assert.equal(project.status, "configured");
+    if (project.status !== "configured") return;
+    const catalogs = loadConfigCatalogs(project);
+    const resolution = resolveConfigWorkflows(project, catalogs);
+    const workflow = resolution.workflows[0];
+    assert.equal(workflow.status, "valid");
+    if (workflow.status !== "valid") return;
+    const effective = workflow.authority.nodes[0].capabilities.effective as Readonly<Record<string, unknown>>;
+    assert.equal(effective["human-input"], true);
+    assert.equal(workflow.authority.nodes[0].tools.includes("human_question"), true);
+
+    const activation = buildActivationSnapshot({ project, workflow, catalogs, authority: workflow.authority, models, packageVersion: "0.1.0" });
+    writeActivationSnapshot(copied.projectRoot, activation);
+    const restored = readActivationSnapshot(copied.projectRoot, activation.snapshotHash);
+    assert.ok(restored);
+    const restoredNode = restored.payload.authority.nodes[0] as { tools: readonly string[]; capabilities: { effective: Readonly<Record<string, unknown>> } };
+    assert.equal(restoredNode.tools.includes("human_question"), true);
+    assert.equal(restoredNode.capabilities.effective["human-input"], true);
+  } finally { copied.cleanup(); }
 });
 
 test("resolver-produced activation snapshots round-trip through persistence with resolved team depths", () => {

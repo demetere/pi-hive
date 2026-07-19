@@ -5,10 +5,13 @@ import {
   type DelegationRuntime,
   type PersistedDelegationTask,
   type WorkerResultInput,
+  isDelegationResumeReady,
 } from "./delegation";
 import { compareText as compare, utf8Prefix } from "./values";
 
-export type SchedulerExecutionResult = WorkerResultInput | Readonly<{ status: "suspended"; dependencyTaskIds: readonly string[] }>;
+export type SchedulerExecutionResult = WorkerResultInput
+  | Readonly<{ status: "suspended"; dependencyTaskIds?: readonly string[]; questionIds?: readonly string[] }>
+  | Readonly<{ status: "continuation"; questionIds: readonly string[] }>;
 
 export interface SchedulerTaskControl {
   readonly signal: AbortSignal; readonly attemptId: string;
@@ -25,6 +28,8 @@ export interface DurableDelegationSchedulerOptions {
   readonly verifiedTakeover?: () => boolean | Promise<boolean>;
   readonly onRecoveryReconciled?: () => void | Promise<void>;
   readonly onResultDurable?: (task: PersistedDelegationTask) => void | Promise<void>;
+  /** Volatile run-wide gate: false stops new launches without mutating queued/resume-ready tasks or active work. */
+  readonly canLaunch?: () => boolean;
 }
 interface ActiveExecution {
   readonly nodeId: string; readonly attemptId: string;
@@ -33,8 +38,12 @@ interface ActiveExecution {
 
 function validateExecutionResult(value: SchedulerExecutionResult): void {
   if (!value || typeof value !== "object") throw new Error("Worker executor returned no result");
-  if (value.status === "suspended") {
-    if (!Array.isArray(value.dependencyTaskIds) || value.dependencyTaskIds.length === 0) throw new Error("Suspended worker returned no dependency tasks");
+  if (value.status === "suspended" || value.status === "continuation") {
+    const dependencies = value.status === "suspended" && Array.isArray(value.dependencyTaskIds) ? value.dependencyTaskIds : [];
+    const questions = Array.isArray(value.questionIds) ? value.questionIds : [];
+    if (!dependencies.length && !questions.length) throw new Error(value.status === "continuation" ? "Continuing worker returned no durable question IDs" : "Suspended worker returned no dependency tasks or question IDs");
+    if (dependencies.length && questions.length) throw new Error("Suspended worker must return exactly one dependency or question set");
+    if ([...dependencies, ...questions].some((id) => typeof id !== "string" || !id || Buffer.byteLength(id, "utf8") > 256) || new Set([...dependencies, ...questions]).size !== dependencies.length + questions.length) throw new Error("Worker suspension/continuation returned invalid or duplicate durable IDs");
     return;
   }
   if (value.status !== "completed" && value.status !== "blocked" && value.status !== "failed" && value.status !== "cancelled") {
@@ -64,7 +73,7 @@ export function selectNextDelegationTask(runtime: DelegationRuntime, activeNodes
   for (const [nodeId, queue] of nodeQueues) {
     if (activeNodes.has(nodeId)) continue;
     const head = queue.sort((a, b) => a.creationSequence - b.creationSequence || compare(a.taskId, b.taskId))[0];
-    if (head?.queueState === "queued" || (head?.queueState === "active" && head.resumedByResultSequence !== undefined)) eligible.push(head);
+    if (head?.queueState === "queued" || (head && isDelegationResumeReady(head))) eligible.push(head);
   }
   return eligible.sort((a, b) =>
     (lastDispatched.get(a.targetNodeId) ?? 0) - (lastDispatched.get(b.targetNodeId) ?? 0)
@@ -81,6 +90,7 @@ export class DurableDelegationScheduler {
   private reason = "Scheduler stopped";
   private runPromise?: Promise<void>;
   private recoveryComplete = false;
+  private yieldRequested = false;
 
   constructor(options: DurableDelegationSchedulerOptions) {
     if (!Number.isSafeInteger(options.maxParallel) || options.maxParallel < 1 || options.maxParallel > 1_024) {
@@ -106,7 +116,7 @@ export class DurableDelegationScheduler {
 
   private async reconcileTakeover(): Promise<void> {
     if (this.recoveryComplete) return;
-    const hasActive = Object.values(this.options.runtime.restore().tasks).some((task) => task.queueState === "active" && task.resumedByResultSequence === undefined);
+    const hasActive = Object.values(this.options.runtime.restore().tasks).some((task) => task.queueState === "active" && !isDelegationResumeReady(task));
     if (hasActive) {
       if (!this.options.verifiedTakeover || !await this.options.verifiedTakeover()) throw new Error("Journal-active delegation tasks require verified takeover before recovery");
       this.options.runtime.reconcileActiveAfterTakeover(true);
@@ -164,6 +174,7 @@ export class DurableDelegationScheduler {
     if (!current || current.queueState === "terminal") return;
     const pendingDependencies = current.suspendedOn?.filter((dependencyId) => currentState.tasks[dependencyId]?.resultAcceptedSequence === undefined) ?? [];
     if (controller.signal.aborted && this.paused && !this.closing) {
+      if ((current.queueState === "suspended" && current.suspendedOnQuestionIds?.length) || isDelegationResumeReady(current)) return;
       if (pendingDependencies.length) this.options.runtime.suspend(task.taskId, [...current.suspendedOn!]);
       else this.options.runtime.interrupt(task.taskId, this.reason);
       return;
@@ -172,12 +183,39 @@ export class DurableDelegationScheduler {
     if (pendingDependencies.length && !this.closing) {
       settledResult = Object.freeze({ status: "suspended" as const, dependencyTaskIds: Object.freeze([...current.suspendedOn!]) });
       this.options.runtime.suspend(task.taskId, [...current.suspendedOn!]);
-    } else if (result.status === "suspended") {
-      this.options.runtime.suspend(task.taskId, [...result.dependencyTaskIds]);
-    } else {
-      this.options.runtime.recordResult(task.taskId, result);
+    } else if (result.status === "continuation") {
       const durable = this.options.runtime.restore().tasks[task.taskId];
-      if (durable) await this.options.onResultDurable?.(durable);
+      if (durable?.queueState !== "active" || durable.resumedByQuestionSequence === undefined || durable.result) throw new Error("Question answer continuation does not match a durable resume-ready task");
+      // A continuation that did not consume its pre-bound answer must receive a
+      // fresh durable model-turn identity. The delegation attempt/transcript
+      // stay immutable, while a known failed containing attempt is never
+      // replayed as the next provider dispatch.
+      this.options.runtime.advanceQuestionContinuationTurn(task.taskId, attemptId, result.questionIds);
+      this.yieldRequested = true;
+    } else if (result.status === "suspended" && result.questionIds?.length) {
+      const durable = this.options.runtime.restore().tasks[task.taskId];
+      if (durable?.queueState !== "suspended" || !durable.suspendedOnQuestionIds
+        || durable.suspendedOnQuestionIds.length !== result.questionIds.length
+        || durable.suspendedOnQuestionIds.some((id) => !result.questionIds!.includes(id))) throw new Error("Question suspension does not match journal-first pending state");
+    } else if (result.status === "suspended") {
+      this.options.runtime.suspend(task.taskId, [...result.dependencyTaskIds!]);
+    } else {
+      try {
+        this.options.runtime.recordResult(task.taskId, result);
+        const durable = this.options.runtime.restore().tasks[task.taskId];
+        if (durable) await this.options.onResultDurable?.(durable);
+      } catch (error) {
+        const durable = this.options.runtime.restore().tasks[task.taskId];
+        const questionIds = durable?.resumedQuestionIds ?? [];
+        if (!durable || !isDelegationResumeReady(durable) || durable.attempts.at(-1)?.attemptId !== attemptId || durable.result || !questionIds.length) throw error;
+        // Terminal publication can lose to the undelivered-answer guard (for
+        // example after node-budget denial). Publish a fresh durable turn
+        // identity before yielding; a volatile continuation alone would leave
+        // the same resume-ready state in a scheduler hot loop.
+        this.options.runtime.advanceQuestionContinuationTurn(task.taskId, attemptId, questionIds);
+        this.yieldRequested = true;
+        settledResult = Object.freeze({ status: "continuation" as const, questionIds: Object.freeze([...questionIds]) });
+      }
     }
     await this.options.hooks?.onAttemptSettled?.(task, attemptId, settledResult);
   }
@@ -185,8 +223,8 @@ export class DurableDelegationScheduler {
   private async runLoop(): Promise<void> {
     await this.reconcileTakeover();
     for (;;) {
-      if (!this.closing && !this.paused) {
-        while (this.active.size < this.options.maxParallel) {
+      if (!this.yieldRequested && !this.closing && !this.paused && (this.options.canLaunch?.() ?? true)) {
+        while (this.active.size < this.options.maxParallel && (this.options.canLaunch?.() ?? true)) {
           const task = selectNextDelegationTask(this.options.runtime, this.activeNodes());
           if (!task) break;
           this.launch(task);
@@ -199,6 +237,7 @@ export class DurableDelegationScheduler {
 
   runUntilSettled(): Promise<void> {
     if (this.runPromise) return this.runPromise;
+    this.yieldRequested = false;
     const running = this.runLoop();
     const tracked = running.finally(() => {
       if (this.runPromise === tracked) this.runPromise = undefined;
@@ -229,7 +268,7 @@ export class DurableDelegationScheduler {
     if (temporarilyPaused) this.options.runtime.pauseAdmission(summary);
     try {
       for (const task of Object.values(this.options.runtime.restore().tasks)
-        .filter((candidate) => candidate.queueState === "queued" || candidate.queueState === "suspended")
+        .filter((candidate) => candidate.queueState === "queued" || candidate.queueState === "suspended" || isDelegationResumeReady(candidate))
         .sort((left, right) => left.creationSequence - right.creationSequence || compare(left.taskId, right.taskId))) {
         this.options.runtime.recordResult(task.taskId, { status: "cancelled", summary, outputRefs: [], evidenceRefs: [], data: { budgetExhausted: true } });
       }

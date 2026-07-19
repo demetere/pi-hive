@@ -30,6 +30,7 @@ const LIMITS = Object.freeze({
   statusPage: 100,
   statusObjectivePreviewBytes: 1_024,
   cursorBytes: 512,
+  questionContinuationTurns: 4_096,
 });
 
 export type DelegationContextReference = StructuredReference;
@@ -62,7 +63,9 @@ export interface PersistedDelegationTask {
   readonly provenance: DelegationProvenance; readonly creationSequence: number; readonly createdAt: string;
   readonly queueState: DelegationQueueState; readonly attempts: readonly DelegationAttempt[];
   readonly lastStartedSequence?: number; readonly suspendedOn?: readonly string[];
-  readonly resumedByResultSequence?: number; readonly result?: PersistedWorkerResult;
+  readonly suspendedOnQuestionIds?: readonly string[];
+  readonly resumedByResultSequence?: number; readonly resumedByQuestionSequence?: number; readonly resumedQuestionIds?: readonly string[];
+  readonly continuedQuestionResumeSequence?: number; readonly questionContinuationTurn?: number; readonly result?: PersistedWorkerResult;
   readonly resultDeliveryPreparedSequence?: number; readonly resultAcceptedSequence?: number;
 }
 export interface PreparedResultDelivery {
@@ -92,10 +95,19 @@ export interface DelegationAcceptanceAuthority {
     ok: false; reason: string; exhausted: readonly string[]; budgetExhausted: boolean; scope: "node" | "run";
   }>;
 }
+export interface DelegationStartAuthority {
+  /** Journal-locked run lifecycle/approval admission check for task.started. */
+  admit(events: readonly WorkflowEventEnvelope[], taskId: string): Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>;
+}
+export interface DelegationTerminalAuthority {
+  /** Journal-locked question-delivery check for task.result.recorded. */
+  assertTaskMayTerminal(events: readonly WorkflowEventEnvelope[], taskId: string, status: WorkerResultInput["status"]): void;
+}
 export interface DelegationRuntimeOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string; readonly runId: string;
   readonly snapshot: ActivationSnapshotFileV1; readonly createTaskId?: () => string; readonly now?: () => string;
   readonly referenceAuthorizer?: ReferenceAuthorizer; readonly acceptanceAuthority?: DelegationAcceptanceAuthority;
+  readonly startAuthority?: DelegationStartAuthority; readonly terminalAuthority?: DelegationTerminalAuthority;
   /** Fault-injection seam for durable delegation publication recovery tests. */
   readonly journalFault?: (eventType: WorkflowEventEnvelope["type"], stage: JournalFaultStage) => void;
 }
@@ -117,7 +129,7 @@ export interface ResultDeliveryBatch {
   readonly items: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[];
 }
 
-const TRUSTED_CONTEXTS = new WeakMap<object, Readonly<{ sessionId: string; runId: string; bindingSequence: number }>>();
+const TRUSTED_CONTEXTS = new WeakMap<object, Readonly<{ sessionId: string; runId: string; bindingSequence: number; questionContinuationTurn: number }>>();
 const DELEGATION_EVENTS = new Set([
   "task.accepted",
   "task.started",
@@ -129,6 +141,8 @@ const DELEGATION_EVENTS = new Set([
   "scheduler.paused",
   "scheduler.resumed",
   "scheduler.closed",
+  "task.transition",
+  "question.transition",
 ]);
 
 function payloadRecord(event: WorkflowEventEnvelope): Record<string, unknown> {
@@ -263,6 +277,11 @@ function dependenciesAccepted(state: DelegationState, task: PersistedDelegationT
   return Boolean(task.suspendedOn?.length) && task.suspendedOn!.every((dependency) => state.tasks[dependency]?.resultAcceptedSequence !== undefined);
 }
 
+/** One shared recovery/scheduler predicate for every durable same-attempt resume marker. */
+export function isDelegationResumeReady(task: PersistedDelegationTask): boolean {
+  return task.queueState === "active" && (task.resumedByResultSequence !== undefined || task.resumedByQuestionSequence !== undefined);
+}
+
 function validateEventPayload(event: WorkflowEventEnvelope, payload: Record<string, unknown>): void {
   const specifications: Partial<Record<WorkflowEventEnvelope["type"], readonly [readonly string[], readonly string[]]>> = {
     "task.accepted": [["formatVersion", "taskId", "parentNodeId", "targetNodeId", "objective", "contextRefs", "deliverables", "provenance"], []],
@@ -272,6 +291,7 @@ function validateEventPayload(event: WorkflowEventEnvelope, payload: Record<stri
     "task.result.recorded": [["formatVersion", "taskId", "result"], []],
     "task.result.delivery.prepared": [["formatVersion", "deliveryId", "recipientNodeId", "taskIds"], []],
     "task.result.delivery.accepted": [["formatVersion", "deliveryId", "recipientNodeId"], []],
+    "task.transition": [["formatVersion", "operation", "taskId", "attemptId", "resumedByQuestionSequence", "questionIds"], ["questionContinuationTurn"]],
     "scheduler.paused": [["formatVersion", "reason"], []],
     "scheduler.resumed": [["formatVersion"], []],
     "scheduler.closed": [["formatVersion", "reason"], []],
@@ -286,7 +306,7 @@ export function reduceDelegationState(state: DelegationState, event: WorkflowEve
   if (event.sessionId !== state.sessionId) throw new Error("Delegation event session identity mismatch");
   if (event.runId !== state.runId) return state;
   const payload = payloadRecord(event);
-  validateEventPayload(event, payload);
+  if (event.type !== "question.transition") validateEventPayload(event, payload);
   const next = cloneState(state) as DelegationState;
   const mutable = next as unknown as {
     tasks: Record<string, PersistedDelegationTask>;
@@ -296,6 +316,77 @@ export function reduceDelegationState(state: DelegationState, event: WorkflowEve
     closedReason?: string;
   };
   const tasks = mutable.tasks;
+
+  if (event.type === "question.transition") {
+    const operation = payload.operation;
+    if (operation === "create") {
+      exactKeys(payload, ["formatVersion", "operation", "questionId", "nodeId", "definition", "provenance"], ["taskId", "taskAttemptId"], "Question delegation event");
+      if (payload.taskId === undefined) return state;
+      if (event.producer !== "runtime") throw new Error("Question task suspension lacks runtime authority");
+      const taskId = boundedId(payload.taskId, "Question task ID");
+      const questionId = boundedId(payload.questionId, "Question ID");
+      const nodeId = boundedId(payload.nodeId, "Question node ID");
+      const taskAttemptId = boundedId(payload.taskAttemptId, "Question task attempt ID");
+      const task = tasks[taskId];
+      const questionSuspended = task?.queueState === "suspended" && Boolean(task.suspendedOnQuestionIds?.length) && !task.suspendedOn?.length;
+      if (!task || (task.queueState !== "active" && !questionSuspended) || task.targetNodeId !== nodeId || task.runId !== state.runId
+        || task.attempts.at(-1)?.attemptId !== taskAttemptId || task.suspendedOnQuestionIds?.includes(questionId)) throw new Error("Question can suspend only its exact journal-active task attempt");
+      tasks[taskId] = deepFreeze({
+        ...task,
+        queueState: "suspended",
+        suspendedOnQuestionIds: [...(task.suspendedOnQuestionIds ?? []), questionId],
+        ...(task.queueState === "active" ? { resumedQuestionIds: undefined } : {}),
+      });
+      return deepFreeze(next);
+    }
+    if (operation === "answer") {
+      exactKeys(payload, ["formatVersion", "operation", "questionId", "channel", "identity", "operationId", "inputHash", "value"], [], "Question answer delegation event");
+      const questionId = boundedId(payload.questionId, "Question ID");
+      const task = Object.values(tasks).find((candidate) => candidate.queueState === "suspended" && candidate.suspendedOnQuestionIds?.includes(questionId));
+      if (!task) return state;
+      const remaining = task.suspendedOnQuestionIds!.filter((id) => id !== questionId);
+      const resumedQuestionIds = [...(task.resumedQuestionIds ?? []), questionId];
+      tasks[task.taskId] = remaining.length
+        ? deepFreeze({ ...task, suspendedOnQuestionIds: remaining, resumedQuestionIds })
+        : deepFreeze({ ...task, queueState: "active", suspendedOnQuestionIds: undefined, resumedByQuestionSequence: event.sequence, resumedQuestionIds });
+      return deepFreeze(next);
+    }
+    if (operation === "task-delivery-consumed") {
+      exactKeys(payload, ["formatVersion", "operation", "deliveryId", "nodeId", "taskId", "questionIds", "promptHash", "attemptId", "transcriptRef"], [], "Task question delivery receipt delegation event");
+      const taskId = boundedId(payload.taskId, "Question receipt task ID");
+      const nodeId = boundedId(payload.nodeId, "Question receipt node ID");
+      const task = tasks[taskId];
+      const questionSuspended = task?.queueState === "suspended" && Boolean(task.suspendedOnQuestionIds?.length) && !task.suspendedOn?.length;
+      if (!task || task.targetNodeId !== nodeId || (task.queueState !== "active" && !questionSuspended) || task.result) throw new Error("Task question delivery receipt requires its exact active or question-suspended task");
+      if (task.queueState === "active") tasks[taskId] = deepFreeze({ ...task, resumedByQuestionSequence: event.sequence });
+      return deepFreeze(next);
+    }
+    if (operation === "close-pending" || operation === "tool-answer-returned" || operation === "root-delivery-prepared" || operation === "root-delivery-consumed" || operation === "root-delivery-accepted"
+      || operation === "task-delivery-prepared" || operation === "task-delivery-accepted") return state;
+    throw new Error("Question delegation operation is unsupported");
+  }
+
+  if (event.type === "task.transition") {
+    if (event.producer !== "harness" || (payload.operation !== "question-continuation" && payload.operation !== "question-turn-advanced")) throw new Error("Task question continuation transition is unauthorized");
+    const taskId = boundedId(payload.taskId, "Question continuation task ID");
+    const attemptId = boundedId(payload.attemptId, "Question continuation attempt ID");
+    const resumedByQuestionSequence = payload.resumedByQuestionSequence;
+    const questionIds = stringArray(payload.questionIds, "Question continuation IDs", 128, 256);
+    const task = tasks[taskId];
+    if (!Number.isSafeInteger(resumedByQuestionSequence) || Number(resumedByQuestionSequence) < 1 || !questionIds.length || new Set(questionIds).size !== questionIds.length
+      || !task || task.queueState !== "active" || task.result || task.attempts.at(-1)?.attemptId !== attemptId
+      || task.resumedByQuestionSequence !== resumedByQuestionSequence) throw new Error("Task question continuation does not match its exact active resume marker");
+    if (payload.operation === "question-continuation") {
+      if (payload.questionContinuationTurn !== undefined) throw new Error("Task consumer replay settlement cannot change the continuation turn");
+      tasks[taskId] = deepFreeze({ ...task, continuedQuestionResumeSequence: Number(resumedByQuestionSequence) });
+      return deepFreeze(next);
+    }
+    const continuationTurn = payload.questionContinuationTurn;
+    if (!Number.isSafeInteger(continuationTurn) || Number(continuationTurn) < 1 || Number(continuationTurn) > LIMITS.questionContinuationTurns
+      || Number(continuationTurn) !== (task.questionContinuationTurn ?? 0) + 1) throw new Error("Task question continuation turn is invalid or exhausted");
+    tasks[taskId] = deepFreeze({ ...task, questionContinuationTurn: Number(continuationTurn) });
+    return deepFreeze(next);
+  }
 
   if (event.type === "scheduler.paused") {
     if (event.producer !== "harness" || mutable.schedulerStatus !== "running") throw new Error("Scheduler pause transition is invalid");
@@ -394,12 +485,16 @@ export function reduceDelegationState(state: DelegationState, event: WorkflowEve
   const task = tasks[taskId];
   if (!task) throw new Error(`Unknown delegation task ${taskId}`);
   if (event.type === "task.started") {
-    if (event.producer !== "harness" || queueHead(next, task.targetNodeId)?.taskId !== taskId) throw new Error("Delegation task cannot start out of FIFO order");
+    if (event.producer !== "harness" || !mutable.admissionOpen || mutable.schedulerStatus !== "running" || queueHead(next, task.targetNodeId)?.taskId !== taskId) throw new Error("Delegation task cannot start while admission is closed or out of FIFO order");
     if (Object.values(tasks).some((other) => other.taskId !== taskId && other.targetNodeId === task.targetNodeId && other.queueState === "active")) throw new Error("Delegation node already has an active task");
     const attemptId = boundedId(payload.attemptId, "Delegation attempt ID");
-    if (task.queueState === "active" && task.resumedByResultSequence !== undefined) {
+    if (task.queueState === "active" && (task.resumedByResultSequence !== undefined || task.resumedByQuestionSequence !== undefined)) {
       if (task.attempts.at(-1)?.attemptId !== attemptId) throw new Error("Delegation continuation must preserve the active attempt ID");
-      const { resumedByResultSequence: _resumed, ...continued } = task;
+      // A question resume marker remains authoritative until this same attempt
+      // either terminalizes or suspends again. In particular, a completed
+      // containing model attempt may still need retryable receipt/acceptance
+      // publication without being mistaken for unknown in-flight work.
+      const { resumedByResultSequence: _resultResume, ...continued } = task;
       tasks[taskId] = deepFreeze({ ...continued, lastStartedSequence: event.sequence });
     } else {
       if (task.queueState !== "queued") throw new Error("Delegation task cannot start outside queued or resumed state");
@@ -408,6 +503,7 @@ export function reduceDelegationState(state: DelegationState, event: WorkflowEve
         ...task,
         queueState: "active",
         suspendedOn: undefined,
+        suspendedOnQuestionIds: undefined,
         attempts: [...task.attempts, { attemptId, startedSequence: event.sequence, startedAt: event.timestamp }],
         lastStartedSequence: event.sequence,
       });
@@ -443,7 +539,7 @@ export function reduceDelegationState(state: DelegationState, event: WorkflowEve
     if ((task.queueState === "active" || task.queueState === "suspended") && (!activeAttemptId || result.attemptId !== activeAttemptId)) throw new Error("Worker result does not match the journal-active attempt");
     if (task.queueState === "queued" && result.attemptId !== undefined) throw new Error("Queued cancellation cannot claim a worker attempt");
     const attempts = task.attempts.map((attempt) => attempt.attemptId === result.attemptId ? { ...attempt, resultSequence: event.sequence } : attempt);
-    tasks[taskId] = deepFreeze({ ...task, queueState: "terminal", suspendedOn: undefined, attempts, result });
+    tasks[taskId] = deepFreeze({ ...task, queueState: "terminal", suspendedOn: undefined, suspendedOnQuestionIds: undefined, attempts, result });
   }
   return deepFreeze(next);
 }
@@ -473,9 +569,9 @@ export class DelegationRuntime {
     return replayWorkflowJournal(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), this.zero, reduceDelegationState).state;
   }
 
-  private context(nodeId: string, taskId?: string, attemptId?: string, bindingSequence = 0): DelegationExecutionContext {
+  private context(nodeId: string, taskId?: string, attemptId?: string, bindingSequence = 0, questionContinuationTurn = 0): DelegationExecutionContext {
     const context = Object.freeze({ nodeId, ...(taskId ? { taskId } : {}), ...(attemptId ? { attemptId } : {}) });
-    TRUSTED_CONTEXTS.set(context, { sessionId: this.options.sessionId, runId: this.options.runId, bindingSequence });
+    TRUSTED_CONTEXTS.set(context, { sessionId: this.options.sessionId, runId: this.options.runId, bindingSequence, questionContinuationTurn });
     return context;
   }
 
@@ -487,8 +583,8 @@ export class DelegationRuntime {
   workerExecutionContext(taskId: string, attemptId: string): DelegationExecutionContext {
     const task = this.restore().tasks[boundedId(taskId, "Worker task ID")];
     if (!task || task.queueState !== "active" || task.attempts.at(-1)?.attemptId !== attemptId) throw new Error("Trusted execution context requires the current active worker task");
-    const bindingSequence = Math.max(task.lastStartedSequence ?? 0, task.resumedByResultSequence ?? 0);
-    return this.context(task.targetNodeId, task.taskId, attemptId, bindingSequence);
+    const bindingSequence = Math.max(task.lastStartedSequence ?? 0, task.resumedByResultSequence ?? 0, task.resumedByQuestionSequence ?? 0);
+    return this.context(task.targetNodeId, task.taskId, attemptId, bindingSequence, task.questionContinuationTurn ?? 0);
   }
 
   private assertContext(context: DelegationExecutionContext): DelegationExecutionContext {
@@ -502,9 +598,10 @@ export class DelegationRuntime {
       return context;
     }
     const task = context.taskId ? state.tasks[context.taskId] : undefined;
-    const bindingSequence = task ? Math.max(task.lastStartedSequence ?? 0, task.resumedByResultSequence ?? 0) : -1;
+    const bindingSequence = task ? Math.max(task.lastStartedSequence ?? 0, task.resumedByResultSequence ?? 0, task.resumedByQuestionSequence ?? 0) : -1;
     if (!task || task.queueState !== "active" || task.targetNodeId !== context.nodeId
-      || task.attempts.at(-1)?.attemptId !== context.attemptId || authority.bindingSequence !== bindingSequence) {
+      || task.attempts.at(-1)?.attemptId !== context.attemptId || authority.bindingSequence !== bindingSequence
+      || authority.questionContinuationTurn !== (task.questionContinuationTurn ?? 0)) {
       throw new Error("Trusted worker execution context is no longer the active matching task attempt");
     }
     return context;
@@ -514,12 +611,28 @@ export class DelegationRuntime {
     this.assertContext(context);
   }
 
+  /** Narrow authority for later human_question calls in the same provider batch. */
+  assertQuestionBatchExecutionContext(context: DelegationExecutionContext): void {
+    if (!context || typeof context !== "object") throw new Error("A trusted execution context is required");
+    const authority = TRUSTED_CONTEXTS.get(context as object);
+    if (!authority || authority.sessionId !== this.options.sessionId || authority.runId !== this.options.runId || !context.taskId || !context.attemptId) {
+      throw new Error("A trusted worker question execution context is required");
+    }
+    const task = this.restore().tasks[context.taskId];
+    const questionSuspended = task?.queueState === "suspended" && Boolean(task.suspendedOnQuestionIds?.length) && !task.suspendedOn?.length;
+    const answeredResume = task?.queueState === "active" && task.resumedByQuestionSequence !== undefined;
+    if (!task || (!questionSuspended && !answeredResume) || task.targetNodeId !== context.nodeId || task.result
+      || task.attempts.at(-1)?.attemptId !== context.attemptId || authority.questionContinuationTurn !== (task.questionContinuationTurn ?? 0)) {
+      throw new Error("Trusted worker question context is no longer the same suspended task attempt and continuation turn");
+    }
+  }
+
   private assertDelegatingContext(context: DelegationExecutionContext): DelegationExecutionContext {
     return this.assertContext(context);
   }
 
   private append(
-    type: "task.accepted" | "task.started" | "task.suspended" | "task.interrupted" | "task.result.recorded" | "task.result.delivery.prepared" | "task.result.delivery.accepted" | "scheduler.paused" | "scheduler.resumed" | "scheduler.closed",
+    type: "task.accepted" | "task.started" | "task.suspended" | "task.interrupted" | "task.result.recorded" | "task.result.delivery.prepared" | "task.result.delivery.accepted" | "task.transition" | "scheduler.paused" | "scheduler.resumed" | "scheduler.closed",
     payload: Record<string, JsonValue>,
     producer: "runtime" | "harness" | "recovery",
     validateLocked?: (events: readonly WorkflowEventEnvelope[]) => void,
@@ -582,11 +695,37 @@ export class DelegationRuntime {
   }
 
   start(taskId: string, attemptId: string): void {
-    this.append("task.started", { formatVersion: FORMAT_VERSION, taskId: boundedId(taskId, "Task ID"), attemptId: boundedId(attemptId, "Attempt ID") }, "harness");
+    const id = boundedId(taskId, "Task ID");
+    this.append("task.started", { formatVersion: FORMAT_VERSION, taskId: id, attemptId: boundedId(attemptId, "Attempt ID") }, "harness", (events) => {
+      const admission = this.options.startAuthority?.admit(events, id);
+      if (admission && !admission.ok) throw Object.assign(new Error(admission.reason), { admissionLost: true, effectNotApplied: true });
+    });
   }
 
   suspend(taskId: string, dependencyTaskIds: readonly string[]): void {
     this.append("task.suspended", { formatVersion: FORMAT_VERSION, taskId: boundedId(taskId, "Task ID"), dependencyTaskIds: [...dependencyTaskIds] }, "harness");
+  }
+
+  recordQuestionContinuation(taskId: string, attemptId: string, questionIds: readonly string[]): void {
+    const task = this.restore().tasks[boundedId(taskId, "Question continuation task ID")];
+    if (!task?.resumedByQuestionSequence) throw new Error("Question continuation requires an active resume marker");
+    this.append("task.transition", {
+      formatVersion: FORMAT_VERSION, operation: "question-continuation", taskId: task.taskId,
+      attemptId: boundedId(attemptId, "Question continuation attempt ID"), resumedByQuestionSequence: task.resumedByQuestionSequence,
+      questionIds: [...questionIds],
+    }, "harness");
+  }
+
+  advanceQuestionContinuationTurn(taskId: string, attemptId: string, questionIds: readonly string[]): void {
+    const task = this.restore().tasks[boundedId(taskId, "Question continuation task ID")];
+    if (!task?.resumedByQuestionSequence) throw new Error("Question continuation turn requires an active resume marker");
+    const continuationTurn = (task.questionContinuationTurn ?? 0) + 1;
+    if (continuationTurn > LIMITS.questionContinuationTurns) throw new Error("Question continuation turn bound is exhausted");
+    this.append("task.transition", {
+      formatVersion: FORMAT_VERSION, operation: "question-turn-advanced", taskId: task.taskId,
+      attemptId: boundedId(attemptId, "Question continuation attempt ID"), resumedByQuestionSequence: task.resumedByQuestionSequence,
+      questionIds: [...questionIds], questionContinuationTurn: continuationTurn,
+    }, "harness");
   }
 
   interrupt(taskId: string, reason: string): void {
@@ -597,7 +736,7 @@ export class DelegationRuntime {
   }
 
   reconcileActiveAfterTakeover(verified: boolean, reason = "Verified runtime takeover interrupted the prior attempt"): number {
-    const active = Object.values(this.restore().tasks).filter((task) => task.queueState === "active" && task.resumedByResultSequence === undefined);
+    const active = Object.values(this.restore().tasks).filter((task) => task.queueState === "active" && !isDelegationResumeReady(task));
     if (active.length && !verified) throw new Error("Active delegation recovery requires verified takeover");
     for (const task of active.sort((a, b) => a.creationSequence - b.creationSequence || compare(a.taskId, b.taskId))) {
       const attemptId = task.attempts.at(-1)?.attemptId;
@@ -618,7 +757,9 @@ export class DelegationRuntime {
     if (!task) throw new Error(`Unknown delegation task ${taskId}`);
     const result = normalizedResult(input, task, this.options.referenceAuthorizer);
     if (task.queueState !== "queued") result.attemptId = task.attempts.at(-1)!.attemptId;
-    this.append("task.result.recorded", { formatVersion: FORMAT_VERSION, taskId, result }, "harness");
+    this.append("task.result.recorded", { formatVersion: FORMAT_VERSION, taskId, result }, "harness", (events) => {
+      this.options.terminalAuthority?.assertTaskMayTerminal(events, taskId, input.status);
+    });
   }
 
   pauseAdmission(reason: string): void {
@@ -636,7 +777,7 @@ export class DelegationRuntime {
   cancelPending(reason: string): void {
     this.closeAdmission(reason);
     for (const task of Object.values(this.restore().tasks).sort((a, b) => a.creationSequence - b.creationSequence || compare(a.taskId, b.taskId))) {
-      if (task.queueState === "queued" || task.queueState === "suspended") {
+      if (task.queueState === "queued" || task.queueState === "suspended" || isDelegationResumeReady(task)) {
         this.recordResult(task.taskId, { status: "cancelled", summary: utf8Prefix(reason, LIMITS.resultSummaryBytes), outputRefs: [], evidenceRefs: [] });
       }
     }

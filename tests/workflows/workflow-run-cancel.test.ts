@@ -7,13 +7,24 @@ import { test } from "node:test";
 import { killProcessTree, spawnManaged } from "../../src/engine/process.ts";
 import { readWorkflowJournal } from "../../src/workflows/journal.ts";
 import { acquireRuntimeOwnership } from "../../src/workflows/ownership.ts";
+import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
+import { QuestionService } from "../../src/workflows/questions.ts";
 import {
   CANCELLATION_TIMING,
   WorkflowRunLifecycle,
   type CancellationCoordinator,
+  type CompletionValidationHooks,
 } from "../../src/workflows/runs.ts";
 
-function fixture() {
+function questionSnapshot(): ActivationSnapshotFileV1 {
+  return { snapshotHash: "q".repeat(64), createdAt: "2026-01-01T00:00:00.000Z", payload: {
+    project: { projectId: "project-1", rootRef: "." }, workflow: { id: "w", team: { rootId: "root", nodes: [{ id: "root", agentId: "lead", memberIds: [], depth: 1 }] } },
+    authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }] },
+    agents: [{ id: "lead", name: "Lead", prompt: "lead" }], skills: [], knowledge: [], models: [], sources: [], versions: {} as never,
+  } } as unknown as ActivationSnapshotFileV1;
+}
+
+function fixture(completion?: CompletionValidationHooks, journalFault?: (eventType: string, stage: string) => void) {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-run-cancel-"));
   let tick = 0;
   const options = {
@@ -25,6 +36,8 @@ function fixture() {
     runtimeOwnerNonce: "owner-1",
     createRunId: () => "run-1",
     now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(),
+    ...(completion ? { completion } : {}),
+    ...(journalFault ? { journalFault: journalFault as any } : {}),
   };
   const lifecycle = new WorkflowRunLifecycle(options);
   lifecycle.recordUserInput({ inputId: "initial", text: "mutate files", source: "interactive" });
@@ -54,6 +67,72 @@ test("two-phase idle cancellation settles before final capture without rollback 
   assert.deepEqual(JSON.parse(result.rendered), result.envelope);
   assert.deepEqual(readWorkflowJournal(f.projectRoot, "session-1").slice(-2).map((event) => event.type), ["run.cancel.requested", "terminal.recorded"]);
   assert.deepEqual(CANCELLATION_TIMING, { settleGraceMs: 2_000, killSettleMs: 1_000, coordinatorStepMs: 2_000 });
+});
+
+test("cancellation persists the exact pending question closure IDs", async () => {
+  const f = fixture({ questions: async () => ({ state: "unsatisfied", issues: ["pending"], pendingQuestionIds: ["q-cancel"] }) });
+  const result = await f.lifecycle.cancel("cancel with question", { waitForSettlement: async () => true });
+  assert.deepEqual(result.envelope.closedQuestionIds, ["q-cancel"]);
+  assert.deepEqual((readWorkflowJournal(f.projectRoot, "session-1").find((event) => event.type === "terminal.recorded")!.payload as any).closedQuestionIds, ["q-cancel"]);
+});
+
+test("cancellation retry after closure preserves its originally prepared question IDs", async () => {
+  let gateCalls = 0;
+  let fault = true;
+  const f = fixture({ questions: async () => gateCalls++ === 0
+    ? ({ state: "unsatisfied", issues: ["pending"], pendingQuestionIds: ["q-retry"] })
+    : ({ state: "satisfied" }) }, (eventType, stage) => {
+    if (fault && eventType === "terminal.recorded" && stage === "beforeRename") { fault = false; throw new Error("cancel terminal fault"); }
+  });
+  await assert.rejects(() => f.lifecycle.cancel("retry cancellation", { waitForSettlement: async () => true }), /cancel terminal fault/i);
+  const retried = await new WorkflowRunLifecycle(f.lifecycle.options).cancel("retry cancellation", { waitForSettlement: async () => true });
+  assert.deepEqual(retried.envelope.closedQuestionIds, ["q-retry"]);
+});
+
+test("cancellation freezes the exact real question set in its journal CAS for both answer race outcomes and restart", async () => {
+  for (const answerWins of [true, false]) {
+    const projectRoot = mkdtempSync(join(tmpdir(), "hive-cancel-question-race-"));
+    const question = new QuestionService({
+      projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: questionSnapshot(), createQuestionId: () => "question-1",
+      authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
+    });
+    let raced = false;
+    const completion: CompletionValidationHooks = {
+      questions: () => {
+        const gate = question.completionGate();
+        if (answerWins && !raced) {
+          raced = true;
+          question.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "question-1", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "answer-before-cancel" });
+        }
+        return gate;
+      },
+      validateQuestionSet: (events, expected) => question.assertPendingSet(events, expected),
+    } as CompletionValidationHooks;
+    const options = {
+      projectRoot, projectId: "project-1", sessionId: "session-1", snapshotId: "snapshot-1", rootNodeId: "root",
+      runtimeOwnerNonce: "owner-1", createRunId: () => "run-1", completion,
+    };
+    const lifecycle = new WorkflowRunLifecycle(options);
+    lifecycle.recordUserInput({ inputId: "initial", text: "work", source: "interactive" });
+    assert.equal(acquireRuntimeOwnership(projectRoot, "session-1", { nonce: "owner-1" }).ok, true);
+    question.create({ nodeId: "root", definition: { prompt: "Proceed?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "cancel-race" } });
+    let losingAnswerRejected = false;
+    const result = await lifecycle.cancel("stop", {
+      rejectNewWork: () => {
+        if (!answerWins) {
+          try { question.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "question-1", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "answer-after-cancel" }); }
+          catch { losingAnswerRejected = true; }
+        }
+      },
+      waitForSettlement: async () => true,
+      releaseLeases: () => { question.closePending({ reason: "stop", operationId: "cancel-run-1", expectedQuestionIds: lifecycle.restore().latestRun?.cancellationQuestionIds ?? [] }); },
+    });
+    assert.deepEqual(result.envelope.closedQuestionIds, answerWins ? [] : ["question-1"]);
+    assert.equal(question.restore().questions["question-1"].state, answerWins ? "answered" : "closed");
+    assert.equal(losingAnswerRejected, !answerWins);
+    const restarted = await new WorkflowRunLifecycle(options).cancel("retry", { waitForSettlement: async () => true });
+    assert.deepEqual(restarted.envelope, result.envelope);
+  }
 });
 
 test("concurrent cancellation callers share one settlement without releasing leases during capture", async () => {

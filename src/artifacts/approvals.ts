@@ -424,8 +424,11 @@ export class CheckpointApprovalService {
     return readWorkflowJournal(this.options.projectRoot, this.options.sessionId).find((event) => event.eventId === draft.eventId);
   }
 
-  private projectApprovalStatus(event: WorkflowEventEnvelope, status: Extract<OpenRunStatus, "running" | "waiting_for_human">): void {
+  private projectApprovalStatus(event: WorkflowEventEnvelope, _status: Extract<OpenRunStatus, "running" | "waiting_for_human">): void {
     if (!event.runId) throw new Error("Checkpoint status projection requires a run ID");
+    const status = readWorkflowJournal(this.options.projectRoot, this.options.sessionId)
+      .reduce(reduceRunLifecycle, createEmptyRunLifecycleState(this.options.sessionId)).latestRun?.status;
+    if (status !== "running" && status !== "waiting_for_human") throw new Error("Checkpoint status projection did not restore an open human-control state");
     this.options.onRunStatusChanged?.(event.runId, status, event.timestamp);
   }
 

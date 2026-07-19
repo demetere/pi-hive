@@ -8,6 +8,8 @@ import { DelegationRuntime } from "../../src/workflows/delegation.ts";
 import { RunOrchestrationService, type RunOrchestrationServiceOptions } from "../../src/workflows/orchestration.ts";
 import { acquireRuntimeOwnership } from "../../src/workflows/ownership.ts";
 import { WorkflowRunLifecycle } from "../../src/workflows/runs.ts";
+import { QuestionService } from "../../src/workflows/questions.ts";
+import { readWorkflowJournal } from "../../src/workflows/journal.ts";
 import type { WorkerSessionFactory } from "../../src/workflows/workers.ts";
 import type { EffectiveRuntimeBudgetLimits } from "../../src/workflows/budgets.ts";
 import { analyzeCommand } from "../../src/capabilities/command.ts";
@@ -595,6 +597,78 @@ test("root finalization reserve remains usable after its bounded response crosse
   assert.equal(await root.dispatch.tool({ correlationId: "finalization-overage-tool", toolName: "workflow_finish", operation: "finish", input: {}, finalization: true, policyOutcome: "allowed", dispatch: async () => "ok" }), "ok");
   await assert.rejects(() => root.dispatch.model({ correlationId: "ordinary-after-finalization", operation: "root.prompt", input: {}, dispatch: async () => "must not run" }), /budget|token/i);
   assert.equal(service.lifecycle.restore().latestRun?.terminal?.data.failureCode, "budget_exhausted");
+});
+
+test("run-wide budget preparation freezes questions before descendant cancellation across answer and restart races", async () => {
+  for (const answerWins of [false, true]) {
+    const active = snapshot() as any;
+    active.payload.workflow.team.nodes[0].memberIds = ["worker", "other"];
+    active.payload.workflow.team.nodes.push({ id: "other", agentId: "other-agent", parentId: "root", memberIds: [], depth: 2, role: "Other", responsibilities: [] });
+    active.payload.authority.nodes[0].capabilities.directMemberIds = ["worker", "other"];
+    active.payload.authority.nodes.push({ nodeId: "other", capabilities: { effective: {} }, tools: [], model: "other-model", thinking: "low" });
+    active.payload.agents.push({ id: "other-agent", name: "Other", tags: [], prompt: "other" });
+    active.payload.models.push({ nodeId: "other", modelId: "other-model", thinking: "low", staticTokens: 1, dynamicReserve: 1, contextWindow: 10 });
+    const workerAuthority = active.payload.authority.nodes.find((entry: any) => entry.nodeId === "worker");
+    workerAuthority.capabilities.effective = { ...(workerAuthority.capabilities.effective ?? {}), "human-input": true };
+    workerAuthority.tools = [...new Set([...workerAuthority.tools, "human_question"])].sort();
+    const limits: EffectiveRuntimeBudgetLimits = {
+      run: { maxParallel: 1, maxDelegations: 4, maxToolCalls: 20, tokenBudget: 10_000, activeWallTimeMs: 10_000 },
+      nodes: {
+        root: { maxAgentTurns: 4, maxToolCalls: 20, tokenBudget: 10_000, activeWallTimeMs: 10_000 },
+        worker: { maxAgentTurns: 4, maxToolCalls: 20, tokenBudget: 10_000, activeWallTimeMs: 10_000 },
+        leaf: { maxAgentTurns: 4, maxToolCalls: 20, tokenBudget: 10_000, activeWallTimeMs: 10_000 },
+        other: { maxAgentTurns: 4, maxToolCalls: 20, tokenBudget: 10_000, activeWallTimeMs: 10_000 },
+      },
+    };
+    const holder: { service?: RunOrchestrationService; questionId?: string; answered?: boolean } = {};
+    const built = fixture(async (input) => ({ linkedSessionId: `budget-${answerWins}-${input.nodeId}`, async prompt() {
+      if (input.nodeId === "worker") {
+        holder.questionId = holder.service!.questionControls().create({ nodeId: "worker", taskId: "task-1", definition: { prompt: "Budget race?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: `budget-question-${answerWins}` } }).questionId;
+        return "suspend on question";
+      }
+      return { output: "run budget exhausted", usage: { inputTokens: 20_000, outputTokens: 1, precision: "provider-confirmed" as const } };
+    }, dispose() {} }), {
+      snapshot: active,
+      budgetLimits: limits,
+      questionControl: { authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined },
+      completion: { projectState: () => {
+        if (answerWins && !holder.answered && holder.questionId) {
+          holder.answered = true;
+          holder.service!.questionControls().answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: holder.questionId, expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "budget-race-answer" });
+        }
+        return { state: "satisfied" as const, fileChanges: [], changeCoverage: "recorded" };
+      } },
+    });
+    holder.service = built.service;
+    deliverInitial(built.service, `budget-question-${answerWins}`);
+    const root = built.service.rootServices();
+    const suspended = root.delegate({ targetNodeId: "worker", objective: "wait on question", deliverables: [] });
+    const exhausted = root.delegate({ targetNodeId: "other", objective: "exhaust run budget", deliverables: [] });
+    await assert.rejects(() => built.service.runWorkers(), /budget|token|question/i);
+    const run = built.service.lifecycle.restore().latestRun!;
+    assert.equal(run.status, "failed");
+    assert.equal(run.terminal?.data.failureCode, "budget_exhausted");
+    assert.deepEqual(run.terminal?.closedQuestionIds, answerWins ? [] : [holder.questionId]);
+    const delegation = built.service.delegationState();
+    assert.equal(delegation.schedulerStatus, "closed");
+    assert.equal(delegation.tasks[suspended.taskId].result?.status, "cancelled");
+    assert.equal(delegation.tasks[exhausted.taskId].queueState, "terminal");
+    assert.equal(Object.values(delegation.tasks).some((task) => task.queueState !== "terminal"), false);
+    const question = new QuestionService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, authenticateControl: (request) => request.claimedIdentity }).restore().questions[holder.questionId!];
+    assert.equal(question.state, answerWins ? "answered" : "closed");
+    assert.equal(question.taskDeliveryAcceptedSequence, undefined);
+    const ordered = readWorkflowJournal(built.projectRoot, "session-1");
+    const preparedSequence = ordered.find((event) => event.type === "run.terminal.prepared")!.sequence;
+    const cancelledSequence = ordered.find((event) => event.type === "task.result.recorded" && (event.payload as any).taskId === suspended.taskId)!.sequence;
+    assert.ok(preparedSequence < cancelledSequence);
+    if (!answerWins) {
+      const closedSequence = ordered.find((event) => event.type === "question.transition" && (event.payload as any).operation === "close-pending")!.sequence;
+      assert.ok(preparedSequence < closedSequence && closedSequence < cancelledSequence);
+    }
+    const replayed = await new RunOrchestrationService(built.options).lifecycle.failBudgetExhaustion("restart replay");
+    assert.equal(replayed.ok, true);
+    if (replayed.ok) assert.equal(replayed.envelope.terminalEventHash, run.terminal?.terminalEventHash);
+  }
 });
 
 test("post-response token overage produces a budget-blocked worker result and closes ordinary admission", async () => {
