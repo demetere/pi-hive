@@ -10,6 +10,7 @@ import {
   type ArtifactBinding,
 } from "./contracts";
 import { NONE_ARTIFACT_ADAPTER, NONE_PROFILE } from "./adapters/none";
+import { OPEN_SPEC_ARTIFACT_ADAPTER, OPEN_SPEC_PROFILES } from "./adapters/openspec";
 import type {
   ArtifactAdapter,
   ArtifactBindRequest,
@@ -52,6 +53,7 @@ const strict = { additionalProperties: false } as const;
 const EMPTY_OPTIONS = Type.Object({}, strict);
 const runtimeProfiles: readonly ArtifactRuntimeProfile[] = Object.freeze(BUILTIN_ARTIFACT_PROFILES.map((metadata) => {
   if (metadata.adapter === "none" && metadata.profile === "default") return NONE_PROFILE;
+  if (metadata.adapter === "openspec") return OPEN_SPEC_PROFILES[metadata.profile as keyof typeof OPEN_SPEC_PROFILES];
   return Object.freeze({
     contractVersion: ARTIFACT_CONTRACT_VERSION,
     version: ARTIFACT_PROFILE_VERSION,
@@ -72,7 +74,9 @@ class BuiltinArtifactRegistry {
   private readonly profiles = runtimeProfiles;
 
   private implementation(adapterId: string): ArtifactAdapter | undefined {
-    return adapterId === "none" ? NONE_ARTIFACT_ADAPTER : undefined;
+    if (adapterId === "none") return NONE_ARTIFACT_ADAPTER;
+    if (adapterId === "openspec") return OPEN_SPEC_ARTIFACT_ADAPTER;
+    return undefined;
   }
 
   adapterIds(): readonly string[] {

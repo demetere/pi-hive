@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
 import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
@@ -73,8 +75,11 @@ import { WorkspaceLeaseRuntime, type WorkspaceLeaseRuntimeOptions } from "../art
 import { ArtifactOperationRuntime, type ArtifactOperationRuntimeOptions } from "../artifacts/operations";
 import { bindPhysicalArtifactWorkspace, listPhysicalArtifactWorkspaces, type PhysicalWorkspaceSelection } from "../artifacts/workspaces";
 import { createRunOrchestrationArtifactCallerIssuer, type RunOrchestrationArtifactCallerIssuer } from "../artifacts/internal/caller";
-import type { ArtifactWorkspaceBinding } from "../artifacts/types";
+import type { ArtifactEvidenceReferenceV1, ArtifactWorkspaceBinding, VerifiedArtifactEvidenceV1 } from "../artifacts/types";
 import { heartbeatCurrentRuntimeOwnership } from "./ownership";
+import { resolveContainedPath } from "../core/safe-path";
+import { CheckpointApprovalService, type CheckpointApprovalServiceOptions } from "../artifacts/approvals";
+import type { CheckpointPolicy } from "../artifacts/checkpoints";
 
 export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
@@ -96,6 +101,8 @@ export interface RunOrchestrationServiceOptions {
   readonly artifactLeaseFactory?: (options: WorkspaceLeaseRuntimeOptions) => WorkspaceLeaseRuntime;
   /** Fault-injection seam for artifact/W13 restart-settlement tests. */
   readonly artifactOperationFault?: ArtifactOperationRuntimeOptions["fault"];
+  /** Human control dependencies for the run-owned generic checkpoint authority. Omission denies every decision. */
+  readonly checkpointApproval?: Partial<Pick<CheckpointApprovalServiceOptions, "authenticateControl" | "createRequestId" | "createDecisionId" | "fault">>;
   readonly verifiedTakeover?: () => boolean | Promise<boolean>;
   readonly completion?: Omit<CompletionValidationHooks, "descendants">;
   /** Fault-injection seam for workflow lifecycle crash-recovery tests. */
@@ -163,6 +170,19 @@ function runtimeArtifact(snapshot: ActivationSnapshotFileV1, injected?: Resolved
   return resolved;
 }
 
+function checkpointPolicies(snapshot: ActivationSnapshotFileV1, selected: ResolvedArtifactProfile): Readonly<Record<string, CheckpointPolicy>> {
+  const artifact = (snapshot.payload.workflow as { artifact?: unknown }).artifact;
+  if (!record(artifact) || !record(artifact.approvals)) throw new Error("Activation snapshot checkpoint policies are invalid");
+  const policies: Record<string, CheckpointPolicy> = {};
+  for (const checkpointId of selected.profile.checkpointIds) {
+    const policy = artifact.approvals[checkpointId];
+    if (policy !== "required" && policy !== "optional" && policy !== "none") throw new Error(`Activation snapshot checkpoint policy is missing or invalid: ${checkpointId}`);
+    policies[checkpointId] = policy;
+  }
+  if (Object.keys(artifact.approvals).some((checkpointId) => !selected.profile.checkpointIds.includes(checkpointId))) throw new Error("Activation snapshot checkpoint policies contain an unknown checkpoint");
+  return Object.freeze(policies);
+}
+
 function rootNodeId(snapshot: ActivationSnapshotFileV1): string {
   const team = snapshot.payload.workflow.team as { rootId?: unknown } | undefined;
   if (typeof team?.rootId !== "string" || !team.rootId) throw new Error("Activation snapshot root node is invalid");
@@ -196,6 +216,8 @@ export class RunOrchestrationService {
   private readonly options: RunOrchestrationServiceOptions;
   private readonly selectedArtifact?: ResolvedArtifactProfile;
   private readonly artifactCallerIssuer?: RunOrchestrationArtifactCallerIssuer;
+  /** One authority owns run snapshots, requests, control decisions, and completion. */
+  readonly checkpointApprovals?: CheckpointApprovalService;
   private current?: RunResources;
   private artifactAuthority?: Readonly<{ runId: string; authority: ArtifactWorkspaceAuthority }>;
   private readonly cleanup = new Set<Promise<void>>();
@@ -205,6 +227,32 @@ export class RunOrchestrationService {
     const selectedArtifact = runtimeArtifact(options.snapshot, options.artifactRuntime);
     this.selectedArtifact = selectedArtifact;
     this.artifactCallerIssuer = selectedArtifact ? createRunOrchestrationArtifactCallerIssuer(options.snapshot) : undefined;
+    this.checkpointApprovals = selectedArtifact ? new CheckpointApprovalService({
+      projectRoot: options.projectRoot,
+      projectId: options.projectId,
+      sessionId: options.sessionId,
+      adapterId: selectedArtifact.adapter.id,
+      adapterVersion: selectedArtifact.adapter.version,
+      profileId: selectedArtifact.profile.id,
+      profileVersion: selectedArtifact.profile.version,
+      profileSchemaVersion: selectedArtifact.profile.optionsSchemaVersion,
+      checkpointPolicies: checkpointPolicies(options.snapshot, selectedArtifact),
+      ...(selectedArtifact.adapter.checkpointDescriptor ? {
+        resolveDescriptor: ({ checkpointId, binding }) => {
+          if (!binding.path) throw new Error("Physical checkpoint descriptor requires a bound workspace path");
+          return selectedArtifact.adapter.checkpointDescriptor!({ binding, checkpointId, hashes: hashArtifactWorkspace(binding.path) });
+        },
+      } : {}),
+      authenticateControl: options.checkpointApproval?.authenticateControl ?? (() => undefined),
+      ...(options.checkpointApproval?.createRequestId ? { createRequestId: options.checkpointApproval.createRequestId } : {}),
+      ...(options.checkpointApproval?.createDecisionId ? { createDecisionId: options.checkpointApproval.createDecisionId } : {}),
+      ...(options.checkpointApproval?.fault ? { fault: options.checkpointApproval.fault } : {}),
+      now: options.now,
+      onRunStatusChanged: (runId, status) => {
+        const budgets = this.budgetRuntimeFor(runId);
+        if (status === "waiting_for_human") budgets.pauseActive(status); else budgets.resumeActive();
+      },
+    }) : undefined;
     const completion: CompletionValidationHooks = {
       ...(options.completion ?? {}),
       descendants: () => this.descendantGate(),
@@ -216,6 +264,17 @@ export class RunOrchestrationService {
             ? Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([`artifact adapter ${selectedArtifact.profile.adapterId} is unavailable or unbound`]) })
             : Object.freeze({ state: "not-present" as const });
         const upstream = options.completion?.adapter ? await options.completion.adapter() : Object.freeze({ state: "not-present" as const });
+        if (builtin.state === "unsatisfied" || upstream.state === "unsatisfied") return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([...(("issues" in builtin && builtin.issues) || []), ...(("issues" in upstream && upstream.issues) || [])]) });
+        return Object.freeze({ state: builtin.state === "satisfied" || upstream.state === "satisfied" ? "satisfied" as const : "not-present" as const });
+      },
+      approvals: async () => {
+        const run = this.lifecycle.restore().latestRun;
+        const binding = run?.artifactWorkspace;
+        const expectedWorkspaceHash = binding?.workspace.kind === "physical" && binding.path ? hashArtifactWorkspace(binding.path).workspaceHash : undefined;
+        const builtin = this.checkpointApprovals
+          ? await this.checkpointApprovals.completionGate({ ...(expectedWorkspaceHash ? { expectedWorkspaceHash } : {}), ...(run ? { runId: run.runId } : {}) })
+          : Object.freeze({ state: "not-present" as const });
+        const upstream = options.completion?.approvals ? await options.completion.approvals() : Object.freeze({ state: "not-present" as const });
         if (builtin.state === "unsatisfied" || upstream.state === "unsatisfied") return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([...(("issues" in builtin && builtin.issues) || []), ...(("issues" in upstream && upstream.issues) || [])]) });
         return Object.freeze({ state: builtin.state === "satisfied" || upstream.state === "satisfied" ? "satisfied" as const : "not-present" as const });
       },
@@ -254,6 +313,7 @@ export class RunOrchestrationService {
       createRunId: options.createRunId,
       now: options.now,
       completion,
+      ...(this.checkpointApprovals ? { checkpointSnapshots: this.checkpointApprovals.runSnapshotProvider() } : {}),
       createArtifactWorkspace: selectedArtifact?.profile.adapterId === "none" ? (runId) => BUILTIN_ARTIFACT_REGISTRY.bind(selectedArtifact, {
         runId,
         binding: "none",
@@ -331,6 +391,42 @@ export class RunOrchestrationService {
     return Object.freeze(Object.values(authority.operations.restore().operations)
       .filter((operation) => !operation.result)
       .map((operation) => operation.operationId));
+  }
+
+  private verifyArtifactEvidence(resources: RunResources, references: readonly ArtifactEvidenceReferenceV1[]): readonly VerifiedArtifactEvidenceV1[] {
+    if (!Array.isArray(references) || !references.length || references.length > 32) throw new Error("Artifact evidence references are invalid or exceed their bound");
+    const attempts = resources.attempts.restore().attempts;
+    const commands = resources.changes.restore().commandAttempts;
+    return Object.freeze(references.map((reference): VerifiedArtifactEvidenceV1 => {
+      if (!reference || typeof reference !== "object" || typeof reference.kind !== "string") throw new Error("Artifact evidence reference is invalid");
+      if (reference.kind === "tool" || reference.kind === "command") {
+        const attemptId = reference.attemptId;
+        if (typeof attemptId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(attemptId)) throw new Error("Artifact attempt evidence ID is invalid");
+        const attempt = attempts[attemptId];
+        if (!attempt?.result?.ok || attempt.status !== "completed") throw new Error(`Artifact ${reference.kind} evidence does not reference a completed successful W13 attempt`);
+        const resultHash = createHash("sha256").update("pi-hive-artifact-evidence-result-v1\0").update(canonicalJson(attempt.result)).digest("hex");
+        if (reference.kind === "command") {
+          if (attempt.descriptor.effect !== "shell" && attempt.descriptor.effect !== "git") throw new Error("Artifact command evidence does not reference a W13 shell/Git attempt");
+          if (!attempt.descriptor.readOnly && commands[attempt.attemptId]?.status !== "completed") throw new Error("Artifact mutating command evidence lacks completed repository accounting");
+          return Object.freeze({ kind: "command", attemptId: attempt.attemptId, effect: attempt.descriptor.effect, operation: attempt.operation, inputHash: attempt.inputHash, resultHash });
+        }
+        if (attempt.descriptor.effect === "model" || attempt.descriptor.effect === "shell" || attempt.descriptor.effect === "git") throw new Error("Artifact tool evidence does not reference a trusted non-command W13 tool attempt");
+        return Object.freeze({ kind: "tool", attemptId: attempt.attemptId, operation: attempt.operation, inputHash: attempt.inputHash, resultHash });
+      }
+      if (reference.kind === "repository") {
+        const evidencePath = reference.path;
+        if (typeof evidencePath !== "string" || !evidencePath || evidencePath.includes("\\") || evidencePath.startsWith("/")
+          || evidencePath.split("/").some((part: string) => !part || part === "." || part === "..") || Buffer.byteLength(evidencePath, "utf8") > 4_096) throw new Error("Artifact repository evidence path is invalid");
+        const candidate = resolveContainedPath(this.options.projectRoot, join(this.options.projectRoot, evidencePath));
+        if (!candidate?.exists || relative(this.options.projectRoot, candidate.canonicalPath).split("\\").join("/") !== evidencePath) throw new Error("Artifact repository evidence escapes or is unavailable");
+        const stat = lstatSync(candidate.canonicalPath);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 33_554_432) throw new Error("Artifact repository evidence is not a bounded regular file");
+        const digest = `sha256:${createHash("sha256").update(readFileSync(candidate.canonicalPath)).digest("hex")}`;
+        if (reference.digest !== digest) throw new Error("Artifact repository evidence expected hash is stale");
+        return Object.freeze({ kind: "repository", path: evidencePath, digest, bytes: stat.size });
+      }
+      throw new Error("Artifact evidence reference kind is unsupported");
+    }));
   }
 
   private reconcileArtifactAttemptResults(attempts: AttemptRuntime, authority: ArtifactWorkspaceAuthority): readonly string[] {
@@ -888,23 +984,27 @@ export class RunOrchestrationService {
               ...(handoff ? { handoff } : {}),
             }, input);
           },
-          artifactStatus: this.selectedArtifact?.adapter ? async (input) => {
+          artifactStatus: this.selectedArtifact?.adapter ? async (input, signal) => {
             assertCurrent();
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
             if (!workspace) throw new Error("Artifact status requires a trusted run workspace binding");
             const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
             const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
-            return facade.status(caller, input);
+            return facade.status(caller, input, { ...(signal ? { signal } : {}) });
           } : undefined,
-          artifactAction: this.selectedArtifact?.adapter ? async (input, attemptId) => {
+          artifactAction: this.selectedArtifact?.adapter ? async (input, attemptId, signal) => {
             assertCurrent();
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
             if (!workspace) throw new Error("Artifact action requires a trusted run workspace binding");
             const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
             const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
-            return facade.action(caller, input, { attemptId });
+            return facade.action(caller, input, {
+              attemptId,
+              ...(signal ? { signal } : {}),
+              verifyEvidence: (references) => this.verifyArtifactEvidence(resources, references),
+            });
           } : undefined,
           finish: (input, batch) => this.lifecycle.finish(input, { callerNodeId: context.nodeId, toolBatch: batch }),
         });

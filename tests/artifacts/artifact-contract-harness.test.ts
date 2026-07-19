@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { NONE_ARTIFACT_ADAPTER } from "../../src/artifacts/adapters/none.ts";
+import { OPEN_SPEC_ARTIFACT_ADAPTER } from "../../src/artifacts/adapters/openspec.ts";
 import {
   assertArtifactActionFilesystemContained,
   assertArtifactAdapterContract,
   assertArtifactModuleBoundary,
 } from "../helpers/artifact-adapter-contract.ts";
 
-test("none passes the reusable adapter lifecycle contract", () => {
+test("built-in implemented adapters pass the reusable lifecycle contract", () => {
   assertArtifactAdapterContract(NONE_ARTIFACT_ADAPTER);
+  assertArtifactAdapterContract(OPEN_SPEC_ARTIFACT_ADAPTER);
 });
 
 test("real action harness snapshots the fixture filesystem and catches undeclared outside writes and symlink escapes", async () => {
@@ -22,6 +24,21 @@ test("real action harness snapshots the fixture filesystem and catches undeclare
   await assertArtifactActionFilesystemContained({ filesystemRoot: root, workspacePath: workspace, invoke: () => writeFileSync(join(workspace, "inside.txt"), "safe") });
   await assert.rejects(() => assertArtifactActionFilesystemContained({ filesystemRoot: root, workspacePath: workspace, invoke: () => writeFileSync(join(outside, "escaped.txt"), "unsafe") }), /outside its bound workspace/i);
   await assert.rejects(() => assertArtifactActionFilesystemContained({ filesystemRoot: root, workspacePath: workspace, invoke: () => symlinkSync(outside, join(workspace, "escaped-link")) }), /outside its bound workspace/i);
+});
+
+test("new generic runtime has no OpenSpec artifact-semantic branch or import", () => {
+  for (const path of [
+    "src/artifacts/facade.ts",
+    "src/artifacts/workspaces.ts",
+    "src/artifacts/operations.ts",
+    "src/artifacts/approvals.ts",
+    "src/workflows/prompts.ts",
+    "src/workflows/tools.ts",
+    "src/workflows/orchestration.ts",
+  ]) {
+    const source = readFileSync(resolve(path), "utf8");
+    assert.doesNotMatch(source, /(?:openspec|proposal|specs(?:\/|\b))/iu, `${path} contains OpenSpec-specific runtime semantics`);
+  }
 });
 
 test("artifact modules have no model, delegation, routing, Pi runtime, or workflow-orchestration boundary", () => {
@@ -36,5 +53,6 @@ test("artifact modules have no model, delegation, routing, Pi runtime, or workfl
     "src/artifacts/workspaces.ts",
     "src/artifacts/internal/caller.ts",
     "src/artifacts/adapters/none.ts",
+    "src/artifacts/adapters/openspec.ts",
   ].map((path) => resolve(path)));
 });

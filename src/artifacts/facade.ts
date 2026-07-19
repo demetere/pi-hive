@@ -17,6 +17,8 @@ import { recoverArtifactOperation, type ArtifactOperationRuntime } from "./opera
 import type {
   ArtifactActionContext,
   ArtifactActionResultV1,
+  ArtifactEvidenceReferenceV1,
+  VerifiedArtifactEvidenceV1,
   ArtifactAdapter,
   ArtifactActionRecoveryResult,
   ArtifactRuntimeProfile,
@@ -208,7 +210,7 @@ export class ArtifactFacade {
     this.workspaceAuthority = input.workspaceAuthority;
   }
 
-  async status(rawCaller: PackageArtifactCallerContext, rawPage: { readonly limit?: number; readonly cursor?: string } = {}): Promise<ArtifactStatusViewV1> {
+  async status(rawCaller: PackageArtifactCallerContext, rawPage: { readonly limit?: number; readonly cursor?: string } = {}, execution: Readonly<{ signal?: AbortSignal }> = {}): Promise<ArtifactStatusViewV1> {
     const caller = requireCaller(rawCaller, this.binding);
     requireTool(caller, "artifact_status");
     requireCapability(caller, "read");
@@ -218,7 +220,7 @@ export class ArtifactFacade {
     }
     const hashes = this.binding.workspace.kind === "physical" ? this.workspaceAuthority!.readHashes() : undefined;
     const currentBinding = hashes ? Object.freeze({ ...this.binding, workspaceHash: hashes.workspaceHash }) : this.binding;
-    const view = await this.adapter.status(Object.freeze({ binding: currentBinding, capabilities: caller.capabilities, ...(hashes ? { hashes } : {}) }), page);
+    const view = await this.adapter.status(Object.freeze({ binding: currentBinding, capabilities: caller.capabilities, ...(hashes ? { hashes } : {}), ...(execution.signal ? { signal: execution.signal } : {}) }), page);
     return validateView(view, this.adapter, this.profile, currentBinding, page);
   }
 
@@ -327,7 +329,11 @@ export class ArtifactFacade {
     return Object.freeze({ recovered: Object.freeze(recovered), unknown: Object.freeze(unknown), diagnostics: Object.freeze(diagnostics) });
   }
 
-  async action(rawCaller: PackageArtifactCallerContext, rawRequest: unknown, execution: { readonly attemptId: string }): Promise<ArtifactActionResultV1> {
+  async action(rawCaller: PackageArtifactCallerContext, rawRequest: unknown, execution: {
+    readonly attemptId: string;
+    readonly signal?: AbortSignal;
+    readonly verifyEvidence?: (references: readonly ArtifactEvidenceReferenceV1[]) => readonly VerifiedArtifactEvidenceV1[];
+  }): Promise<ArtifactActionResultV1> {
     const caller = requireCaller(rawCaller, this.binding);
     requireTool(caller, "artifact_action");
     if (!plainRecord(rawRequest)) throw new ArtifactFacadeError("REQUEST_INVALID", "Artifact action request must be an object");
@@ -429,7 +435,11 @@ export class ArtifactFacade {
       return mutation;
     };
     const currentBinding = expectedWorkspaceHash ? Object.freeze({ ...this.binding, workspaceHash: expectedWorkspaceHash }) : this.binding;
-    const context: ArtifactActionContext = Object.freeze({ binding: currentBinding, capabilities: caller.capabilities, operationId, expectedWorkspaceHash, enqueueMutation });
+    const context: ArtifactActionContext = Object.freeze({
+      binding: currentBinding, capabilities: caller.capabilities, operationId, expectedWorkspaceHash, enqueueMutation,
+      ...(execution.signal ? { signal: execution.signal } : {}),
+      ...(execution.verifyEvidence ? { verifyEvidence: execution.verifyEvidence } : {}),
+    });
     const argumentsValue = Object.freeze(structuredClone(rawRequest.arguments)) as never;
     let adapterExecution: Readonly<{ status: "fulfilled"; result: ArtifactActionResultV1 }> | Readonly<{ status: "rejected"; reason: unknown }>;
     try {

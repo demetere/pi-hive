@@ -40,6 +40,7 @@ const action = Object.freeze({
   argumentsSchemaVersion: "1" as const,
   argumentsSchema: Type.Object({ title: Type.String({ minLength: 1 }) }, strict),
   requiredCapabilities: Object.freeze(["write"] as const),
+  completion: "mandatory" as const,
   mutability: "mutating" as const,
   idempotency: "operation-bound" as const,
 });

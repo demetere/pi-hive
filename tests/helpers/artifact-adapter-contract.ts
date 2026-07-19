@@ -23,6 +23,7 @@ export function assertArtifactAdapterContract(adapter: ArtifactAdapter): void {
     assert.equal(profile.adapterId, adapter.id);
     assert.equal(profile.adapterVersion, adapter.version);
     assert.equal(new Set(profile.actions.map((action) => action.id)).size, profile.actions.length);
+    assert.equal(profile.actions.every((action) => action.completion === "mandatory" || action.completion === "optional"), true);
   }
 }
 
