@@ -142,8 +142,8 @@ function policyRecord(policy: EffectiveNodePolicy): Record<string, JsonValue> {
 export interface SerializedAuthorityValidationContextV1 {
   readonly rootNodeId: string;
   readonly directMemberIds: readonly string[];
-  /** Subsystem availability is frozen false for capability contract v1/W06. Later availability requires a versioned contract. */
-  readonly subsystems: { readonly artifact: false; readonly knowledge: false; readonly questions: false };
+  /** Availability is rederived from trusted package implementations, never from persisted tool claims. */
+  readonly subsystems: { readonly artifact: boolean; readonly artifactActions: boolean; readonly knowledge: boolean; readonly questions: boolean };
 }
 function normalizedCapabilitiesFromRecord(value: Record<string, JsonValue>): NormalizedCapabilities {
   return {
@@ -180,6 +180,7 @@ export function validateSerializedEffectiveAuthorityNodeV1(value: unknown, conte
       root: value.nodeId === context.rootNodeId,
       directMemberIds,
       artifactAvailable: context.subsystems.artifact,
+      artifactActionsAvailable: context.subsystems.artifactActions,
       knowledgeAvailable: context.subsystems.knowledge,
       knowledgeAttached: (attachments.knowledge as string[]).length > 0,
       questionsAvailable: context.subsystems.questions,
@@ -212,6 +213,7 @@ export function issueEffectiveAuthorityFromResolvedPolicies(input: {
   rootNodeId: string;
   policies: readonly EffectiveNodePolicy[];
   artifactAvailable: boolean;
+  artifactActionsAvailable?: boolean;
   knowledgeAvailable: boolean;
   questionsAvailable: boolean;
 }): EffectiveAuthoritySnapshotV1 {
@@ -222,6 +224,7 @@ export function issueEffectiveAuthorityFromResolvedPolicies(input: {
       root: policy.nodeId === input.rootNodeId,
       directMemberIds: policy.directMemberIds,
       artifactAvailable: input.artifactAvailable,
+      artifactActionsAvailable: input.artifactActionsAvailable,
       knowledgeAvailable: input.knowledgeAvailable,
       knowledgeAttached: policy.knowledge.length > 0,
       questionsAvailable: input.questionsAvailable,

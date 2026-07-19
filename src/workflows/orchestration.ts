@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
+import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
 import { classifyTrustedTool } from "../capabilities/tools";
 import type { CommandAttemptMetadata } from "../capabilities/command";
@@ -63,6 +64,9 @@ import {
   issueWorkflowToolRuntimeBinding,
   runWithWorkflowToolRuntime,
 } from "./tools";
+import { BUILTIN_ARTIFACT_REGISTRY, type ResolvedArtifactProfile } from "../artifacts/registry";
+import { ArtifactFacade, type ArtifactMutationQueue } from "../artifacts/facade";
+import { createRunOrchestrationArtifactCallerIssuer, type RunOrchestrationArtifactCallerIssuer } from "../artifacts/internal/caller";
 
 export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
@@ -76,6 +80,8 @@ export interface RunOrchestrationServiceOptions {
   readonly changeAccounting?: Pick<ChangeAccountingOptions, "scopes" | "protectedRoots" | "limits">;
   readonly createRunId?: () => string; readonly createTaskId?: () => string; readonly createAttemptId?: () => string;
   readonly now?: () => string; readonly referenceAuthorizer?: DelegationRuntime["options"]["referenceAuthorizer"];
+  /** Integration seam backed by Pi's withFileMutationQueue; required before any physical adapter mutation. */
+  readonly artifactMutationQueue?: ArtifactMutationQueue;
   readonly verifiedTakeover?: () => boolean | Promise<boolean>;
   readonly completion?: Omit<CompletionValidationHooks, "descendants">;
   /** Fault-injection seam for workflow lifecycle crash-recovery tests. */
@@ -117,6 +123,26 @@ interface DispatchResources extends Pick<RunResources, "budgets" | "attempts" | 
   readonly canTerminalizeRunBudget: () => boolean;
 }
 
+function runtimeArtifact(snapshot: ActivationSnapshotFileV1): ResolvedArtifactProfile | undefined {
+  const workflow = snapshot.payload.workflow as { artifact?: unknown };
+  if (!record(workflow.artifact)) return undefined;
+  const artifact = workflow.artifact;
+  if (typeof artifact.contractVersion !== "string" || typeof artifact.adapter !== "string" || typeof artifact.adapterVersion !== "string"
+    || typeof artifact.profile !== "string" || typeof artifact.profileVersion !== "string" || typeof artifact.optionsSchemaVersion !== "string"
+    || artifact.viewVersion !== 1 || !Array.isArray(artifact.checkpoints) || !Array.isArray(artifact.actionIds)) throw new Error("Activation snapshot artifact selection is invalid");
+  const resolved = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
+    contractVersion: artifact.contractVersion,
+    adapterId: artifact.adapter,
+    adapterVersion: artifact.adapterVersion,
+    profileId: artifact.profile,
+    profileVersion: artifact.profileVersion,
+  });
+  if (resolved.profile.optionsSchemaVersion !== artifact.optionsSchemaVersion || resolved.profile.viewVersion !== artifact.viewVersion
+    || canonicalJson(resolved.profile.checkpointIds) !== canonicalJson(artifact.checkpoints)
+    || canonicalJson(resolved.profile.actions.map((action) => action.id)) !== canonicalJson(artifact.actionIds)) throw new Error("Activation snapshot artifact profile identity is incompatible");
+  return resolved;
+}
+
 function rootNodeId(snapshot: ActivationSnapshotFileV1): string {
   const team = snapshot.payload.workflow.team as { rootId?: unknown } | undefined;
   if (typeof team?.rootId !== "string" || !team.rootId) throw new Error("Activation snapshot root node is invalid");
@@ -148,14 +174,30 @@ function budgetError(reason: string, exhausted: readonly string[], scope: "node"
 export class RunOrchestrationService {
   readonly lifecycle: WorkflowRunLifecycle;
   private readonly options: RunOrchestrationServiceOptions;
+  private readonly selectedArtifact?: ResolvedArtifactProfile;
+  private readonly artifactCallerIssuer?: RunOrchestrationArtifactCallerIssuer;
   private current?: RunResources;
   private readonly cleanup = new Set<Promise<void>>();
 
   constructor(options: RunOrchestrationServiceOptions) {
     this.options = options;
+    const selectedArtifact = runtimeArtifact(options.snapshot);
+    this.selectedArtifact = selectedArtifact;
+    this.artifactCallerIssuer = selectedArtifact ? createRunOrchestrationArtifactCallerIssuer(options.snapshot) : undefined;
     const completion: CompletionValidationHooks = {
       ...(options.completion ?? {}),
       descendants: () => this.descendantGate(),
+      adapter: async () => {
+        const run = this.lifecycle.restore().latestRun;
+        const builtin = selectedArtifact?.adapter && run?.artifactWorkspace
+          ? await selectedArtifact.adapter.validateCompletion(run.artifactWorkspace)
+          : selectedArtifact
+            ? Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([`artifact adapter ${selectedArtifact.profile.adapterId} is unavailable or unbound`]) })
+            : Object.freeze({ state: "not-present" as const });
+        const upstream = options.completion?.adapter ? await options.completion.adapter() : Object.freeze({ state: "not-present" as const });
+        if (builtin.state === "unsatisfied" || upstream.state === "unsatisfied") return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([...(("issues" in builtin && builtin.issues) || []), ...(("issues" in upstream && upstream.issues) || [])]) });
+        return Object.freeze({ state: builtin.state === "satisfied" || upstream.state === "satisfied" ? "satisfied" as const : "not-present" as const });
+      },
       projectState: async () => {
         const run = this.lifecycle.restore().latestRun;
         if (!run) return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze(["project state: no workflow run is active"]) });
@@ -190,6 +232,11 @@ export class RunOrchestrationService {
       createRunId: options.createRunId,
       now: options.now,
       completion,
+      createArtifactWorkspace: selectedArtifact ? (runId) => BUILTIN_ARTIFACT_REGISTRY.bind(selectedArtifact, {
+        runId,
+        binding: String((options.snapshot.payload.workflow.artifact as { binding?: unknown }).binding ?? ""),
+        options: (options.snapshot.payload.workflow.artifact as { options?: unknown }).options ?? {},
+      }) : undefined,
       onRunStarted: (runId) => { this.changeAccountingFor(runId).captureBaseline(); },
       onRunStatusChanged: (runId, status) => {
         const budgets = this.budgetRuntimeFor(runId);
@@ -675,6 +722,22 @@ export class RunOrchestrationService {
               ...(handoff ? { handoff } : {}),
             }, input);
           },
+          artifactStatus: this.selectedArtifact?.adapter ? async (input) => {
+            assertCurrent();
+            const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
+            if (!workspace) throw new Error("Artifact status requires a trusted run workspace binding");
+            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue });
+            const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
+            return facade.status(caller, input);
+          } : undefined,
+          artifactAction: this.selectedArtifact?.adapter ? async (input, attemptId) => {
+            assertCurrent();
+            const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
+            if (!workspace) throw new Error("Artifact action requires a trusted run workspace binding");
+            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue });
+            const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
+            return facade.action(caller, input, { attemptId });
+          } : undefined,
           finish: (input, batch) => this.lifecycle.finish(input, { callerNodeId: context.nodeId, toolBatch: batch }),
         });
         return runWithWorkflowToolRuntime(binding, callback);
@@ -857,11 +920,13 @@ export class RunOrchestrationService {
 
   async cancel(reason: string): Promise<CancellationResult> {
     const result = await this.lifecycle.cancel(reason, this.cancellationCoordinator(reason));
+    this.artifactCallerIssuer?.revoke();
     if (this.current) await this.current.workers.closeSessions();
     return result;
   }
 
   async shutdown(reason = "process shutdown"): Promise<void> {
+    this.artifactCallerIssuer?.revoke();
     const run = this.lifecycle.restore().latestRun;
     if (run && isOpenRunStatus(run.status)) await this.pause(reason);
     if (this.current) await this.current.workers.closeSessions();

@@ -88,6 +88,11 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     packetHash: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$", maxLength: 64 })),
     ...CursorPage,
   }, strict),
+  artifact_status: Type.Object(CursorPage, strict),
+  artifact_action: Type.Object({
+    actionId: Id,
+    arguments: Type.Record(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters }), Type.Unknown()),
+  }, strict),
   workflow_finish: Type.Object({
     status: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("failed")]),
     summary: Type.String({ minLength: 1, maxLength: 8_192 }),
@@ -113,6 +118,8 @@ export interface WorkflowToolRuntimeBindingInput {
   readonly dispatch: WorkerTrustedDispatch;
   readonly team: TeamRuntime;
   readonly workflowStatus: (input: WorkflowStatusRequest) => WorkflowStatusPage;
+  readonly artifactStatus?: (input: { readonly limit?: number; readonly cursor?: string }) => Promise<unknown>;
+  readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>> }, attemptId: string) => Promise<unknown>;
   readonly finish: (input: unknown, toolBatch: readonly string[]) => Promise<unknown>;
 }
 export interface WorkflowToolRuntimeBinding {
@@ -122,6 +129,8 @@ export interface WorkflowToolRuntimeBinding {
   readonly dispatch: WorkerTrustedDispatch;
   readonly team: TeamRuntime;
   readonly workflowStatus: WorkflowToolRuntimeBindingInput["workflowStatus"];
+  readonly artifactStatus?: WorkflowToolRuntimeBindingInput["artifactStatus"];
+  readonly artifactAction?: WorkflowToolRuntimeBindingInput["artifactAction"];
   readonly finish: WorkflowToolRuntimeBindingInput["finish"];
 }
 interface ActiveWorkflowToolRuntime { readonly binding: WorkflowToolRuntimeBinding }
@@ -173,6 +182,10 @@ function assertByteBounds(name: GenericWorkflowToolName, input: Record<string, u
     }
   }
   if (name === "team_status" && input.action === "deliver-results") assertUtf8(input.deliveryId, "team_status deliveryId", TOOL_CONTRACT_LIMITS.idBytes);
+  if (name === "artifact_action") {
+    assertUtf8(input.actionId, "artifact_action actionId", TOOL_CONTRACT_LIMITS.idBytes);
+    boundedJson(input.arguments, "artifact_action arguments", { bytes: 65_536, depth: 16, nodes: 4_096, rootRecord: true });
+  }
   if (name === "workflow_finish") {
     assertUtf8(input.summary, "workflow_finish summary", 8_192);
     for (const [index, raw] of ((input.artifactRefs ?? []) as Array<Record<string, unknown>>).entries()) {
@@ -297,7 +310,7 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
     policyOutcome: allowed ? "allowed" : "denied",
     ...(allowed ? {} : { denialReason }),
     ...(name === "workflow_finish" && allowed ? { finalization: true } : {}),
-    dispatch: async () => {
+    dispatch: async (attemptContext) => {
       if (name === "route_agent") return runtime.binding.team.route(input as never);
       if (name === "delegate_agent") return runtime.binding.team.delegate(input as never);
       if (name === "team_status") {
@@ -308,6 +321,14 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
         return runtime.binding.team.status(input as { limit?: number; cursor?: string });
       }
       if (name === "workflow_status") return runtime.binding.workflowStatus(input as WorkflowStatusRequest);
+      if (name === "artifact_status") {
+        if (!runtime.binding.artifactStatus) throw Object.assign(new Error("Artifact status subsystem is not bound for this run"), { effectNotApplied: true });
+        return runtime.binding.artifactStatus(input as { limit?: number; cursor?: string });
+      }
+      if (name === "artifact_action") {
+        if (!runtime.binding.artifactAction) throw Object.assign(new Error("Artifact action subsystem is not bound for this run"), { effectNotApplied: true });
+        return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>> }, attemptContext.attemptId);
+      }
       return runtime.binding.finish(input, toolBatch);
     },
   });
@@ -354,6 +375,8 @@ export const GENERIC_WORKFLOW_TOOL_CONTRACTS: readonly ToolDefinition<any, objec
   contract("delegate_agent", "Delegate Agent", "Persist and queue one bounded task for one exact direct member."),
   contract("team_status", "Team Status", "Read a bounded cursor-paginated view of task and direct-team runtime state."),
   contract("workflow_status", "Workflow Status", "Read bounded cursor-paginated workflow/run status and authority-derived terminal refs."),
+  contract("artifact_status", "Artifact Status", "Read the active profile's bounded trusted workspace/checkpoint/action view."),
+  contract("artifact_action", "Artifact Action", "Invoke one exact active-profile action; workspace and operation identity come only from trusted run state."),
   contract("workflow_finish", "Workflow Finish", "Root-only sole-call request for a validated terminal workflow outcome."),
 ]);
 

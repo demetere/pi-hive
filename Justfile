@@ -307,6 +307,10 @@ test:
 test-node-compat:
   node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test \
     tests/policy/artifact-contracts.test.ts \
+    tests/artifacts/artifact-contract-harness.test.ts \
+    tests/artifacts/artifact-facade.test.ts \
+    tests/artifacts/artifact-none-run.test.ts \
+    tests/artifacts/artifact-registry-none.test.ts \
     tests/capabilities/capability-filesystem-glob.test.ts \
     tests/capabilities/capability-filesystem-policy.test.ts \
     tests/capabilities/capability-filesystem-race.test.ts \

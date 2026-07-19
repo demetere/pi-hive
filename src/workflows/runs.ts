@@ -7,6 +7,8 @@ import { appendWorkflowEventChecked, readWorkflowJournal, workflowJournalIdentit
 import { heartbeatCurrentRuntimeOwnership } from "./ownership";
 import { replayWorkflowJournal } from "./replay";
 import { restoreHandoffState } from "./handoff";
+import { validateArtifactWorkspaceBinding } from "../artifacts/contracts";
+import type { ArtifactWorkspaceBinding } from "../artifacts/types";
 
 export const RUN_LIFECYCLE_FORMAT_VERSION = 1 as const;
 export const CANCELLATION_TIMING = Object.freeze({ settleGraceMs: 2_000, killSettleMs: 1_000, coordinatorStepMs: 2_000 });
@@ -95,6 +97,8 @@ export interface WorkflowRunRecord {
   readonly startedAt: string;
   /** Content-addressed, authority-free context consumed atomically by run.started. */
   readonly handoffPacketHash?: string;
+  /** Trusted adapter workspace selected once and durably bound by run.started. */
+  readonly artifactWorkspace?: ArtifactWorkspaceBinding;
   readonly inputs: readonly RunInputRecord[];
   readonly deliveredThrough: number;
   readonly pendingDelivery?: PendingInputDelivery;
@@ -160,6 +164,8 @@ export interface WorkflowRunLifecycleOptions {
   readonly completion?: CompletionValidationHooks;
   /** Synchronous harness initialization after a durable run start (for baseline/counter services). */
   readonly onRunStarted?: (runId: string, startedAt: string) => void;
+  /** Synchronous, side-effect-free binding factory; W16 uses it for none's logical record. */
+  readonly createArtifactWorkspace?: (runId: string, startedAt: string) => ArtifactWorkspaceBinding;
   /** Synchronous projection hook after durable open-state transitions. */
   readonly onRunStatusChanged?: (runId: string, status: OpenRunStatus, timestamp: string) => void;
   /** Fault-injection seam used to verify durable journal publication recovery. */
@@ -307,11 +313,13 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     if (input.sequence !== 1 || state.inputAssignments?.[input.inputId]) throw new Error("Run initial input is invalid or duplicated");
     const handoffPacketHash = payload.handoffPacketHash;
     if (handoffPacketHash !== undefined && (typeof handoffPacketHash !== "string" || !/^[0-9a-f]{64}$/u.test(handoffPacketHash))) throw new Error("Run handoff packet hash is invalid");
+    const artifactWorkspace = payload.artifactWorkspace === undefined ? undefined : validateArtifactWorkspaceBinding(payload.artifactWorkspace);
     const run: WorkflowRunRecord = {
       runId: event.runId,
       status: "running",
       startedAt: event.timestamp,
       ...(handoffPacketHash === undefined ? {} : { handoffPacketHash }),
+      ...(artifactWorkspace === undefined ? {} : { artifactWorkspace }),
       inputs: [input],
       deliveredThrough: 0,
       cancellationRequested: false,
@@ -714,13 +722,15 @@ export class WorkflowRunLifecycle {
       const runId = this.options.createRunId?.() ?? `run-${randomUUID()}`;
       const record = freezeInput({ ...input, sequence: 1, kind: "initial", receivedAt: now });
       const stagedHandoff = restoreHandoffState(eventsAtInput).staged;
+      const artifactWorkspace = this.options.createArtifactWorkspace?.(runId, now);
+      if (artifactWorkspace) validateArtifactWorkspaceBinding(artifactWorkspace);
       try {
         appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
           projectId: this.options.projectId,
           sessionId: this.options.sessionId,
           runId,
           type: "run.started",
-          payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, input: record, ...(stagedHandoff ? { handoffPacketHash: stagedHandoff.packetHash } : {}) }),
+          payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, input: record, ...(stagedHandoff ? { handoffPacketHash: stagedHandoff.packetHash } : {}), ...(artifactWorkspace ? { artifactWorkspace } : {}) }),
           producer: "runtime",
           timestamp: now,
         }), (existing) => {

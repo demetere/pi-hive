@@ -30,6 +30,7 @@ export interface ResolveEffectiveNodePolicyInput {
   skills: readonly string[];
   knowledge: readonly string[];
   artifactAvailable?: boolean;
+  artifactActionsAvailable?: boolean;
   knowledgeAvailable?: boolean;
   questionsAvailable?: boolean;
   projectModel?: string;
@@ -48,7 +49,7 @@ export function resolveEffectiveNodePolicy(input: ResolveEffectiveNodePolicyInpu
   if (!resolved.ok || !resolved.policy || !resolved.provenance) return Object.freeze({ ok: false, issues: resolved.issues });
   const directMemberIds = frozenSorted(input.directMembers);
   const skills = frozenSorted(input.skills), knowledge = frozenSorted(input.knowledge);
-  const tools = deriveNodeTools({ capabilities: resolved.policy, root: input.root, directMemberIds, artifactAvailable: input.artifactAvailable ?? false, knowledgeAvailable: input.knowledgeAvailable ?? false, knowledgeAttached: knowledge.length > 0, questionsAvailable: input.questionsAvailable ?? false });
+  const tools = deriveNodeTools({ capabilities: resolved.policy, root: input.root, directMemberIds, artifactAvailable: input.artifactAvailable ?? false, artifactActionsAvailable: input.artifactActionsAvailable ?? false, knowledgeAvailable: input.knowledgeAvailable ?? false, knowledgeAttached: knowledge.length > 0, questionsAvailable: input.questionsAvailable ?? false });
   const model = explicit(input.root ? input.persistedRootModel : undefined, input.nodeModel, input.agentModel, input.projectModel);
   const thinking = explicit(input.root ? input.persistedRootThinking : undefined, input.nodeThinking, input.agentThinking, input.projectThinking);
   return Object.freeze({
@@ -83,6 +84,7 @@ export function resolveWorkflowCapabilities(input: {
   team: ResolvedTeam;
   catalogs: ConfigCatalogResult;
   artifactAvailable: boolean;
+  artifactActionsAvailable?: boolean;
   knowledgeAvailable: boolean;
   questionsAvailable: boolean;
   projectModel?: string;
@@ -110,6 +112,7 @@ export function resolveWorkflowCapabilities(input: {
       skills: node.skills.resolved,
       knowledge: node.knowledge.resolved,
       artifactAvailable: input.artifactAvailable,
+      artifactActionsAvailable: input.artifactActionsAvailable,
       knowledgeAvailable: input.knowledgeAvailable,
       questionsAvailable: input.questionsAvailable,
       projectModel: input.projectModel,
@@ -132,6 +135,7 @@ export function resolveWorkflowCapabilities(input: {
     rootNodeId: input.team.rootId,
     policies,
     artifactAvailable: input.artifactAvailable,
+    artifactActionsAvailable: input.artifactActionsAvailable,
     knowledgeAvailable: input.knowledgeAvailable,
     questionsAvailable: input.questionsAvailable,
   });

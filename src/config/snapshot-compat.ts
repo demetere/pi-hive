@@ -1,4 +1,5 @@
-import { ARTIFACT_CONTRACT_VERSION } from "../artifacts/contracts";
+import { ARTIFACT_CONTRACT_VERSION, ARTIFACT_CONTRACT_LIMITS, ARTIFACT_VIEW_VERSION } from "../artifacts/contracts";
+import { BUILTIN_ARTIFACT_REGISTRY } from "../artifacts/registry";
 import { CAPABILITY_CONTRACT_VERSION, SCHEMA_VERSION } from "./versions";
 import { SNAPSHOT_CATALOG_HASH_VERSION, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_PACKAGE_CONTRACT_VERSION, verifyActivationSnapshotHash, type ActivationSnapshotFileV1, type SnapshotSourceV1 } from "./snapshot";
 import { SNAPSHOT_CONTEXT_POLICY, type SnapshotModelAdapter } from "./snapshot-model";
@@ -20,15 +21,65 @@ export function compareSnapshotSources(snapshot: ActivationSnapshotFileV1, probe
   const priority: SnapshotSourceState[] = ["invalid", "missing", "stale"];
   return { state: priority.find((state) => reasons.some((reason) => reason.state === state)) ?? "current", reasons };
 }
+export interface SnapshotArtifactCompatibilityIdentity {
+  readonly contractVersion: string;
+  readonly adapter: string;
+  readonly adapterVersion: string;
+  readonly profile: string;
+  readonly profileVersion: string;
+  readonly optionsSchemaVersion: string;
+  readonly viewVersion: number;
+  readonly checkpointIds: readonly string[];
+  readonly actionIds: readonly string[];
+}
 export interface SnapshotCompatibilityRuntime {
   sourceState: SnapshotSourceState;
   model: SnapshotModelAdapter;
   knowledgeAvailable(dependency: Record<string, unknown>): boolean;
   workspaceAvailable(workflow: Record<string, unknown>): boolean;
-  artifactProfileAvailable(adapter: string, profile: string): boolean;
+  artifactProfileAvailable(adapter: string, profile: string, identity: SnapshotArtifactCompatibilityIdentity): boolean;
 }
 export interface SnapshotCompatibilityResult { resumable: boolean; freshEnabled: boolean; codes: string[]; sourceState: SnapshotSourceState }
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
+function record(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  return Object.keys(value).length === expected.length && expected.every((key) => key in value);
+}
+function identifierList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= ARTIFACT_CONTRACT_LIMITS.viewItems && new Set(value).size === value.length
+    && value.every((item) => typeof item === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(item) && Buffer.byteLength(item, "utf8") <= ARTIFACT_CONTRACT_LIMITS.idBytes);
+}
+function snapshotArtifactIdentity(value: unknown): SnapshotArtifactCompatibilityIdentity | undefined {
+  if (!record(value) || !exactKeys(value, ["adapter", "adapterVersion", "profile", "profileVersion", "binding", "options", "optionsSchemaVersion", "contractVersion", "checkpoints", "actionIds", "viewVersion", "approvals"])) return undefined;
+  if (typeof value.adapter !== "string" || typeof value.adapterVersion !== "string" || typeof value.profile !== "string" || typeof value.profileVersion !== "string"
+    || typeof value.optionsSchemaVersion !== "string" || typeof value.contractVersion !== "string" || value.viewVersion !== ARTIFACT_VIEW_VERSION
+    || typeof value.binding !== "string" || !record(value.options) || !record(value.approvals) || !identifierList(value.checkpoints) || !identifierList(value.actionIds)) return undefined;
+  try {
+    const resolved = BUILTIN_ARTIFACT_REGISTRY.resolveProfile({
+      contractVersion: value.contractVersion,
+      adapterId: value.adapter,
+      adapterVersion: value.adapterVersion,
+      profileId: value.profile,
+      profileVersion: value.profileVersion,
+    });
+    if (resolved.profile.optionsSchemaVersion !== value.optionsSchemaVersion || resolved.profile.viewVersion !== value.viewVersion
+      || !resolved.profile.bindings.some((binding) => binding === value.binding)
+      || JSON.stringify(resolved.profile.checkpointIds) !== JSON.stringify(value.checkpoints)
+      || JSON.stringify(resolved.profile.actions.map((action) => action.id)) !== JSON.stringify(value.actionIds)) return undefined;
+    BUILTIN_ARTIFACT_REGISTRY.validateOptions(resolved.profile, value.options);
+    return Object.freeze({
+      contractVersion: value.contractVersion,
+      adapter: value.adapter,
+      adapterVersion: value.adapterVersion,
+      profile: value.profile,
+      profileVersion: value.profileVersion,
+      optionsSchemaVersion: value.optionsSchemaVersion,
+      viewVersion: value.viewVersion,
+      checkpointIds: Object.freeze([...value.checkpoints]),
+      actionIds: Object.freeze([...value.actionIds]),
+    });
+  } catch { return undefined; }
+}
 export function validateSnapshotResumeCompatibility(snapshot: ActivationSnapshotFileV1, runtime: SnapshotCompatibilityRuntime): SnapshotCompatibilityResult {
   const codes: string[] = [];
   if (!verifyActivationSnapshotHash(snapshot)) codes.push("SNAPSHOT_INTEGRITY_INVALID");
@@ -68,10 +119,10 @@ export function validateSnapshotResumeCompatibility(snapshot: ActivationSnapshot
     try { if (!runtime.knowledgeAvailable(dependency)) codes.push("SNAPSHOT_KNOWLEDGE_UNAVAILABLE"); }
     catch { codes.push("SNAPSHOT_KNOWLEDGE_PROBE_FAILED"); }
   }
-  const artifact = snapshot.payload.workflow.artifact as { adapter?: unknown; profile?: unknown; contractVersion?: unknown } | undefined;
-  if (!artifact || typeof artifact.adapter !== "string" || typeof artifact.profile !== "string" || artifact.contractVersion !== versions.artifact) codes.push("SNAPSHOT_ARTIFACT_CONTRACT_UNSUPPORTED");
+  const artifact = snapshotArtifactIdentity(snapshot.payload.workflow.artifact);
+  if (!artifact || artifact.contractVersion !== versions.artifact) codes.push("SNAPSHOT_ARTIFACT_CONTRACT_UNSUPPORTED");
   else {
-    try { if (!runtime.artifactProfileAvailable(artifact.adapter, artifact.profile)) codes.push("SNAPSHOT_ARTIFACT_CONTRACT_UNSUPPORTED"); }
+    try { if (!runtime.artifactProfileAvailable(artifact.adapter, artifact.profile, artifact)) codes.push("SNAPSHOT_ARTIFACT_CONTRACT_UNSUPPORTED"); }
     catch { codes.push("SNAPSHOT_ARTIFACT_PROBE_FAILED"); }
   }
   try { if (!runtime.workspaceAvailable(snapshot.payload.workflow)) codes.push("SNAPSHOT_WORKSPACE_UNAVAILABLE"); }

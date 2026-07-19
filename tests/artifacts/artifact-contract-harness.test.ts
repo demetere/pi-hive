@@ -1,0 +1,36 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { test } from "node:test";
+import { NONE_ARTIFACT_ADAPTER } from "../../src/artifacts/adapters/none.ts";
+import {
+  assertArtifactActionFilesystemContained,
+  assertArtifactAdapterContract,
+  assertArtifactModuleBoundary,
+} from "../helpers/artifact-adapter-contract.ts";
+
+test("none passes the reusable adapter lifecycle contract", () => {
+  assertArtifactAdapterContract(NONE_ARTIFACT_ADAPTER);
+});
+
+test("real action harness snapshots the fixture filesystem and catches undeclared outside writes and symlink escapes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "hive-adapter-contract-"));
+  const workspace = join(root, "workspace");
+  const outside = join(root, "outside");
+  mkdirSync(workspace); mkdirSync(outside);
+  await assertArtifactActionFilesystemContained({ filesystemRoot: root, workspacePath: workspace, invoke: () => writeFileSync(join(workspace, "inside.txt"), "safe") });
+  await assert.rejects(() => assertArtifactActionFilesystemContained({ filesystemRoot: root, workspacePath: workspace, invoke: () => writeFileSync(join(outside, "escaped.txt"), "unsafe") }), /outside its bound workspace/i);
+  await assert.rejects(() => assertArtifactActionFilesystemContained({ filesystemRoot: root, workspacePath: workspace, invoke: () => symlinkSync(outside, join(workspace, "escaped-link")) }), /outside its bound workspace/i);
+});
+
+test("artifact modules have no model, delegation, routing, Pi runtime, or workflow-orchestration boundary", () => {
+  assertArtifactModuleBoundary([
+    "src/artifacts/types.ts",
+    "src/artifacts/contracts.ts",
+    "src/artifacts/registry.ts",
+    "src/artifacts/facade.ts",
+    "src/artifacts/internal/caller.ts",
+    "src/artifacts/adapters/none.ts",
+  ].map((path) => resolve(path)));
+});

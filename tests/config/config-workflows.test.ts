@@ -13,21 +13,44 @@ function resolveFixture(name: string) {
   return { fixture, result: resolveConfigWorkflows(project, catalogs) };
 }
 
-test("combined, split, and artifact-free fixtures resolve deterministically", () => {
-  for (const [name, ids] of [["artifact-free-debug", ["debug-chat"]], ["combined-delivery", ["feature-delivery"]], ["split-plan-build", ["feature-build", "feature-plan"]]] as const) {
+test("only implemented artifact profiles activate while reserved OpenSpec profiles quarantine deterministically", () => {
+  for (const [name, ids, valid] of [["artifact-free-debug", ["debug-chat"], true], ["combined-delivery", ["feature-delivery"], false], ["split-plan-build", ["feature-build", "feature-plan"], false]] as const) {
     const { fixture, result } = resolveFixture(name);
     try {
       assert.deepEqual(result.workflows.map((x) => x.id), ids);
-      assert.equal(result.workflows.every((x) => x.status === "valid"), true);
+      assert.equal(result.workflows.every((x) => x.status === (valid ? "valid" : "invalid")), true);
+      if (!valid) assert.equal(result.workflows.every((x) => x.diagnosticCodes.includes("ARTIFACT_ADAPTER_UNAVAILABLE")), true);
       assert.deepEqual(result.summary.items.map((x) => x.id), ids);
       assert.equal(JSON.stringify(result.summary).includes("instructions"), false);
     } finally { fixture.cleanup(); }
   }
 });
 
-test("recursive teams preserve preorder, repeated agents, and unique node IDs", () => {
-  const { fixture, result } = resolveFixture("split-plan-build");
+test("reserved Markdown profiles quarantine at resolution rather than failing on first run", () => {
+  const fixture = copyWorkflowFixture("artifact-free-debug");
   try {
+    const path = join(fixture.projectRoot, ".pi/hive/workflows/debug-chat.yaml");
+    const source = readFileSync(path, "utf8")
+      .replace("  adapter: none\n  profile: default\n  binding: none", "  adapter: markdown-plan\n  profile: author\n  binding: new")
+      .replace("\nteam:\n", "\napprovals:\n  plan: required\n\nteam:\n");
+    writeFileSync(path, source);
+    const project = loadConfigProject(fixture.projectRoot); assert.equal(project.status, "configured");
+    const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
+    assert.equal(result.workflows[0].status, "invalid");
+    assert.ok(result.workflows[0].diagnosticCodes.includes("ARTIFACT_ADAPTER_UNAVAILABLE"));
+  } finally { fixture.cleanup(); }
+});
+
+test("recursive teams preserve preorder, repeated agents, and unique node IDs for an activatable profile", () => {
+  const fixture = copyWorkflowFixture("split-plan-build");
+  try {
+    const path = join(fixture.projectRoot, ".pi/hive/workflows/feature-build.yaml");
+    const source = readFileSync(path, "utf8")
+      .replace("  adapter: openspec\n  profile: execute\n  binding: existing", "  adapter: none\n  profile: default\n  binding: none")
+      .replace("\napprovals:\n  tasks: required\n  implementation: required\n", "\n");
+    writeFileSync(path, source);
+    const project = loadConfigProject(fixture.projectRoot); assert.equal(project.status, "configured");
+    const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
     const workflow = result.workflows.find((x) => x.id === "feature-build");
     assert.equal(workflow?.status, "valid");
     if (workflow?.status === "valid") assert.deepEqual(workflow.team.nodes.map((x) => x.id), ["root", "builder", "tester"]);

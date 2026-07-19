@@ -1,20 +1,54 @@
 import type { ConfigDiagnosticCode } from "../config/diagnostics";
+import type { ArtifactWorkspaceBinding } from "./types";
 
 export const ARTIFACT_CONTRACT_VERSION = "pi-hive-artifact-contract-v1" as const;
+export const ARTIFACT_PROFILE_VERSION = "1" as const;
+export const ARTIFACT_ACTION_VERSION = 1 as const;
+export const ARTIFACT_VIEW_VERSION = 1 as const;
+export const ARTIFACT_CONTRACT_LIMITS = Object.freeze({
+  idCharacters: 256,
+  idBytes: 256,
+  optionsBytes: 65_536,
+  argumentsBytes: 65_536,
+  jsonDepth: 16,
+  jsonNodes: 4_096,
+  pageSize: 40,
+  cursorCharacters: 512,
+  cursorBytes: 512,
+  viewItems: 256,
+  refs: 256,
+  viewBytes: 65_536,
+  resultBytes: 65_536,
+  summaryBytes: 8_192,
+});
+
 export type ArtifactBinding = "none" | "new" | "existing" | "either";
 export interface ArtifactProfileContract {
-  adapter: string;
-  profile: string;
-  bindings: readonly ArtifactBinding[];
-  checkpoints: readonly string[];
+  readonly contractVersion: typeof ARTIFACT_CONTRACT_VERSION;
+  readonly adapter: string;
+  readonly adapterVersion: typeof ARTIFACT_PROFILE_VERSION;
+  readonly profile: string;
+  readonly profileVersion: typeof ARTIFACT_PROFILE_VERSION;
+  readonly optionsSchemaVersion: typeof ARTIFACT_PROFILE_VERSION;
+  readonly bindings: readonly ArtifactBinding[];
+  readonly checkpoints: readonly string[];
+  /** Adapter-defined actions are introduced with their owning adapter task. */
+  readonly actionIds: readonly string[];
+  readonly viewVersion: typeof ARTIFACT_VIEW_VERSION;
 }
 const author = Object.freeze(["new", "existing", "either"] as const);
 const existing = Object.freeze(["existing"] as const);
 const contract = (adapter: string, profile: string, bindings: readonly ArtifactBinding[], checkpoints: readonly string[]): ArtifactProfileContract => Object.freeze({
+  contractVersion: ARTIFACT_CONTRACT_VERSION,
   adapter,
+  adapterVersion: ARTIFACT_PROFILE_VERSION,
   profile,
+  profileVersion: ARTIFACT_PROFILE_VERSION,
+  optionsSchemaVersion: ARTIFACT_PROFILE_VERSION,
   bindings: Object.freeze([...bindings]),
   checkpoints: Object.freeze([...checkpoints]),
+  actionIds: Object.freeze([]),
+  viewVersion: ARTIFACT_VIEW_VERSION,
 });
 export const BUILTIN_ARTIFACT_PROFILES: readonly ArtifactProfileContract[] = Object.freeze([
   contract("none", "default", ["none"], []),
@@ -30,17 +64,65 @@ export const BUILTIN_ARTIFACT_PROFILES: readonly ArtifactProfileContract[] = Obj
 export function artifactProfileContract(adapter: string, profile: string): ArtifactProfileContract | undefined {
   return BUILTIN_ARTIFACT_PROFILES.find((item) => item.adapter === adapter && item.profile === profile);
 }
+function validContractId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value) && Buffer.byteLength(value, "utf8") <= ARTIFACT_CONTRACT_LIMITS.idBytes;
+}
+function exactObjectKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): void {
+  const allowed = new Set([...required, ...optional]);
+  if (required.some((key) => !(key in value)) || Object.keys(value).some((key) => !allowed.has(key))) throw new Error("Artifact workspace binding contains unknown or missing fields");
+}
+/** Strict replay validator for the trusted workspace record embedded in run.started. */
+export function validateArtifactWorkspaceBinding(value: unknown): ArtifactWorkspaceBinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Artifact workspace binding is invalid");
+  const raw = value as Record<string, unknown>;
+  const required = ["schemaVersion", "contractVersion", "adapterId", "adapterVersion", "profileId", "profileVersion", "binding", "workspace", "checkpointIds", "actionIds"];
+  exactObjectKeys(raw, required, ["path", "workspaceHash", "writerLease"]);
+  if (raw.schemaVersion !== 1 || raw.contractVersion !== ARTIFACT_CONTRACT_VERSION || raw.profileVersion !== ARTIFACT_PROFILE_VERSION
+    || !validContractId(raw.adapterId) || !validContractId(raw.adapterVersion) || !validContractId(raw.profileId)
+    || !(["none", "new", "existing", "either"] as const).includes(raw.binding as ArtifactBinding)) throw new Error("Artifact workspace binding contract identity is invalid");
+  if (!raw.workspace || typeof raw.workspace !== "object" || Array.isArray(raw.workspace)) throw new Error("Artifact workspace identity is invalid");
+  const workspace = raw.workspace as Record<string, unknown>;
+  exactObjectKeys(workspace, ["id", "kind"]);
+  if (!validContractId(workspace.id) || (workspace.kind !== "logical-empty" && workspace.kind !== "physical")) throw new Error("Artifact workspace identity is invalid");
+  const list = (input: unknown, label: string): readonly string[] => {
+    if (!Array.isArray(input) || input.length > ARTIFACT_CONTRACT_LIMITS.viewItems || input.some((item) => !validContractId(item)) || new Set(input).size !== input.length) throw new Error(`${label} is invalid`);
+    return Object.freeze([...input] as string[]);
+  };
+  const checkpointIds = list(raw.checkpointIds, "Artifact checkpoint IDs");
+  const actionIds = list(raw.actionIds, "Artifact action IDs");
+  if (raw.path !== undefined && (typeof raw.path !== "string" || !raw.path.startsWith("/") || Buffer.byteLength(raw.path, "utf8") > 4_096)) throw new Error("Artifact workspace path is invalid");
+  if (raw.workspaceHash !== undefined && (typeof raw.workspaceHash !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(raw.workspaceHash))) throw new Error("Artifact workspace hash is invalid");
+  if (raw.writerLease !== undefined && (!raw.writerLease || typeof raw.writerLease !== "object" || Array.isArray(raw.writerLease) || Object.keys(raw.writerLease as object).length !== 1 || (raw.writerLease as { required?: unknown }).required !== true)) throw new Error("Artifact writer lease contract is invalid");
+  if (workspace.kind === "logical-empty" && (raw.path !== undefined || raw.workspaceHash !== undefined || raw.writerLease !== undefined || checkpointIds.length || actionIds.length || raw.binding !== "none")) throw new Error("Logical empty artifact workspace cannot carry physical authority");
+  const result: ArtifactWorkspaceBinding = {
+    schemaVersion: 1,
+    contractVersion: ARTIFACT_CONTRACT_VERSION,
+    adapterId: raw.adapterId,
+    adapterVersion: raw.adapterVersion,
+    profileId: raw.profileId,
+    profileVersion: ARTIFACT_PROFILE_VERSION,
+    binding: raw.binding as ArtifactBinding,
+    workspace: Object.freeze({ id: workspace.id, kind: workspace.kind }),
+    ...(raw.path === undefined ? {} : { path: raw.path as string }),
+    ...(raw.workspaceHash === undefined ? {} : { workspaceHash: raw.workspaceHash as string }),
+    ...(raw.writerLease === undefined ? {} : { writerLease: Object.freeze({ required: true }) }),
+    checkpointIds,
+    actionIds,
+  };
+  return Object.freeze(result);
+}
+
 export function validateArtifactDeclaration(
   artifact: { adapter: string; profile: string; binding: string; options?: Record<string, unknown> },
   approvals: Record<string, unknown> | undefined,
 ): { contract?: ArtifactProfileContract; codes: ConfigDiagnosticCode[] } {
   const codes: ConfigDiagnosticCode[] = [];
-  const contract = artifactProfileContract(artifact.adapter, artifact.profile);
-  if (!contract) return { codes: ["ARTIFACT_PROFILE_UNKNOWN"] };
-  if (!contract.bindings.includes(artifact.binding as ArtifactBinding)) codes.push("ARTIFACT_BINDING_INVALID");
-  if (artifact.options && Object.keys(artifact.options).length > 0) codes.push("ARTIFACT_OPTIONS_UNKNOWN");
+  const selected = artifactProfileContract(artifact.adapter, artifact.profile);
+  if (!selected) return { codes: ["ARTIFACT_PROFILE_UNKNOWN"] };
+  if (!selected.bindings.includes(artifact.binding as ArtifactBinding)) codes.push("ARTIFACT_BINDING_INVALID");
+  if (artifact.options && (Object.keys(artifact.options).length > 0 || Buffer.byteLength(JSON.stringify(artifact.options), "utf8") > ARTIFACT_CONTRACT_LIMITS.optionsBytes)) codes.push("ARTIFACT_OPTIONS_UNKNOWN");
   const actual = new Set(Object.keys(approvals ?? {}));
-  for (const id of contract.checkpoints) if (!actual.has(id)) codes.push("WORKFLOW_CHECKPOINT_MISSING");
-  for (const id of actual) if (!contract.checkpoints.includes(id)) codes.push("WORKFLOW_CHECKPOINT_UNKNOWN");
-  return { contract, codes };
+  for (const id of selected.checkpoints) if (!actual.has(id)) codes.push("WORKFLOW_CHECKPOINT_MISSING");
+  for (const id of actual) if (!selected.checkpoints.includes(id)) codes.push("WORKFLOW_CHECKPOINT_UNKNOWN");
+  return { contract: selected, codes };
 }
