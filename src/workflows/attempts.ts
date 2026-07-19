@@ -70,7 +70,7 @@ export interface ConservativeRetryInput<T> {
 
 const ATTEMPT_EVENTS = new Set<WorkflowEventType>(["attempt.intent.recorded", "attempt.result.recorded", "attempt.reconciliation.recorded"]);
 const EFFECTS = new Set<AttemptEffect>(["model", "tool", "filesystem", "artifact", "shell", "git", "network", "approval", "question", "delegation", "external"]);
-function inputHash(input: unknown): string {
+export function hashAttemptInput(input: unknown): string {
   const normalized = boundedJson(input, "Attempt input", { bytes: 131_072, depth: 32, nodes: 8_192 });
   return createHash("sha256").update("pi-hive-attempt-input-v1\0").update(canonicalJson(normalized)).digest("hex");
 }
@@ -197,7 +197,7 @@ export class AttemptRuntime {
     const nodeId = boundedId(input.nodeId, "Attempt node ID");
     const operation = boundedText(input.operation, "Attempt operation", 1_024);
     const parsedDescriptor = descriptor(input.descriptor);
-    const hash = inputHash(input.input);
+    const hash = hashAttemptInput(input.input);
     const existing = this.restore().attempts[attemptId];
     if (existing) {
       if (existing.correlationId !== correlationId || existing.nodeId !== nodeId || existing.operation !== operation || existing.inputHash !== hash || canonicalJson(existing.descriptor) !== canonicalJson(parsedDescriptor)) throw new Error("Attempt ID reuse with different input or descriptor is rejected");

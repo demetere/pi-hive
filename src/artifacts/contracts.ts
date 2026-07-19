@@ -76,7 +76,7 @@ export function validateArtifactWorkspaceBinding(value: unknown): ArtifactWorksp
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Artifact workspace binding is invalid");
   const raw = value as Record<string, unknown>;
   const required = ["schemaVersion", "contractVersion", "adapterId", "adapterVersion", "profileId", "profileVersion", "binding", "workspace", "checkpointIds", "actionIds"];
-  exactObjectKeys(raw, required, ["path", "workspaceHash", "writerLease"]);
+  exactObjectKeys(raw, required, ["selection", "path", "workspaceHash", "writerLease"]);
   if (raw.schemaVersion !== 1 || raw.contractVersion !== ARTIFACT_CONTRACT_VERSION || raw.profileVersion !== ARTIFACT_PROFILE_VERSION
     || !validContractId(raw.adapterId) || !validContractId(raw.adapterVersion) || !validContractId(raw.profileId)
     || !(["none", "new", "existing", "either"] as const).includes(raw.binding as ArtifactBinding)) throw new Error("Artifact workspace binding contract identity is invalid");
@@ -90,10 +90,13 @@ export function validateArtifactWorkspaceBinding(value: unknown): ArtifactWorksp
   };
   const checkpointIds = list(raw.checkpointIds, "Artifact checkpoint IDs");
   const actionIds = list(raw.actionIds, "Artifact action IDs");
+  if (raw.selection !== undefined && raw.selection !== "new" && raw.selection !== "existing") throw new Error("Artifact workspace selection is invalid");
   if (raw.path !== undefined && (typeof raw.path !== "string" || !raw.path.startsWith("/") || Buffer.byteLength(raw.path, "utf8") > 4_096)) throw new Error("Artifact workspace path is invalid");
   if (raw.workspaceHash !== undefined && (typeof raw.workspaceHash !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(raw.workspaceHash))) throw new Error("Artifact workspace hash is invalid");
   if (raw.writerLease !== undefined && (!raw.writerLease || typeof raw.writerLease !== "object" || Array.isArray(raw.writerLease) || Object.keys(raw.writerLease as object).length !== 1 || (raw.writerLease as { required?: unknown }).required !== true)) throw new Error("Artifact writer lease contract is invalid");
-  if (workspace.kind === "logical-empty" && (raw.path !== undefined || raw.workspaceHash !== undefined || raw.writerLease !== undefined || checkpointIds.length || actionIds.length || raw.binding !== "none")) throw new Error("Logical empty artifact workspace cannot carry physical authority");
+  if (workspace.kind === "logical-empty" && (raw.selection !== undefined || raw.path !== undefined || raw.workspaceHash !== undefined || raw.writerLease !== undefined || checkpointIds.length || actionIds.length || raw.binding !== "none")) throw new Error("Logical empty artifact workspace cannot carry physical authority");
+  if (workspace.kind === "physical" && ((raw.selection !== "new" && raw.selection !== "existing") || raw.binding === "none" || raw.path === undefined || raw.workspaceHash === undefined || raw.writerLease === undefined)) throw new Error("Physical artifact workspace requires explicit selection, path, hash, and writer lease");
+  if (raw.selection !== undefined && raw.binding !== "either" && raw.binding !== raw.selection) throw new Error("Artifact workspace selection is incompatible with its configured binding");
   const result: ArtifactWorkspaceBinding = {
     schemaVersion: 1,
     contractVersion: ARTIFACT_CONTRACT_VERSION,
@@ -102,6 +105,7 @@ export function validateArtifactWorkspaceBinding(value: unknown): ArtifactWorksp
     profileId: raw.profileId,
     profileVersion: ARTIFACT_PROFILE_VERSION,
     binding: raw.binding as ArtifactBinding,
+    ...(raw.selection === undefined ? {} : { selection: raw.selection as "new" | "existing" }),
     workspace: Object.freeze({ id: workspace.id, kind: workspace.kind }),
     ...(raw.path === undefined ? {} : { path: raw.path as string }),
     ...(raw.workspaceHash === undefined ? {} : { workspaceHash: raw.workspaceHash as string }),

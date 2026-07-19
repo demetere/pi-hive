@@ -309,8 +309,14 @@ test-node-compat:
     tests/policy/artifact-contracts.test.ts \
     tests/artifacts/artifact-contract-harness.test.ts \
     tests/artifacts/artifact-facade.test.ts \
+    tests/artifacts/artifact-leases-cross-process.test.ts \
+    tests/artifacts/artifact-lifecycle-integration.test.ts \
     tests/artifacts/artifact-none-run.test.ts \
+    tests/artifacts/artifact-operations-fault.test.ts \
     tests/artifacts/artifact-registry-none.test.ts \
+    tests/artifacts/artifact-run-orchestration.test.ts \
+    tests/artifacts/artifact-workspaces.test.ts \
+    tests/artifacts/artifact-w17-edge-branches.test.ts \
     tests/capabilities/capability-filesystem-glob.test.ts \
     tests/capabilities/capability-filesystem-policy.test.ts \
     tests/capabilities/capability-filesystem-race.test.ts \

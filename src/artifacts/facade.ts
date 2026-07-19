@@ -11,10 +11,14 @@ import {
   ARTIFACT_VIEW_VERSION,
 } from "./contracts";
 import { isPackageArtifactCaller, type PackageArtifactCallerContext } from "./internal/caller";
+import { isArtifactHash, type ArtifactWorkspaceHashesV1 } from "./hashes";
+import type { WorkspaceLeaseRuntime } from "./leases";
+import { recoverArtifactOperation, type ArtifactOperationRuntime } from "./operations";
 import type {
   ArtifactActionContext,
   ArtifactActionResultV1,
   ArtifactAdapter,
+  ArtifactActionRecoveryResult,
   ArtifactRuntimeProfile,
   ArtifactStatusViewV1,
   ArtifactWorkspaceBinding,
@@ -29,6 +33,11 @@ export type ArtifactFacadeErrorCode =
   | "WORKSPACE_MISMATCH"
   | "WORKSPACE_ESCAPE"
   | "ATTEMPT_INVALID"
+  | "EXPECTED_HASH_REQUIRED"
+  | "WORKSPACE_HASH_CONFLICT"
+  | "WORKSPACE_AUTHORITY_REQUIRED"
+  | "WRITER_LEASE_CONFLICT"
+  | "OPERATION_RECOVERY_REQUIRED"
   | "MUTATION_QUEUE_REQUIRED"
   | "VIEW_INVALID"
   | "VIEW_LIMIT_EXCEEDED"
@@ -45,6 +54,16 @@ export class ArtifactFacadeError extends Error {
 }
 
 export type ArtifactMutationQueue = <T>(target: string, operationId: string, callback: () => T | Promise<T>) => Promise<T>;
+export interface ArtifactWorkspaceAuthority {
+  readonly readHashes: () => ArtifactWorkspaceHashesV1;
+  readonly lease: WorkspaceLeaseRuntime;
+  readonly operations: ArtifactOperationRuntime;
+}
+export interface ArtifactOperationRecoveryReport {
+  readonly recovered: readonly string[];
+  readonly unknown: readonly string[];
+  readonly diagnostics: readonly string[];
+}
 
 function requireCaller(value: PackageArtifactCallerContext, binding: ArtifactWorkspaceBinding): PackageArtifactCallerContext {
   if (!isPackageArtifactCaller(value)) throw new ArtifactFacadeError("UNTRUSTED_CALLER", "Artifact facade requires an active package-minted caller context");
@@ -56,11 +75,6 @@ function requireCapability(caller: PackageArtifactCallerContext, capability: Art
 }
 function requireTool(caller: PackageArtifactCallerContext, tool: "artifact_status" | "artifact_action"): void {
   if (!caller.tools.includes(tool)) throw new ArtifactFacadeError("UNTRUSTED_CALLER", `Immutable authority does not grant trusted tool ${tool}`);
-}
-function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const allowed = new Set(keys);
-  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
-  if (unknown.length || keys.some((key) => !(key in value))) throw new ArtifactFacadeError("REQUEST_INVALID", `${label} contains unknown or missing fields`);
 }
 function validateId(value: unknown, label: string, code: ArtifactFacadeErrorCode = "REQUEST_INVALID"): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value) || Buffer.byteLength(value, "utf8") > ARTIFACT_CONTRACT_LIMITS.idBytes) {
@@ -182,7 +196,8 @@ export class ArtifactFacade {
   private readonly profile: ArtifactRuntimeProfile;
   private readonly binding: ArtifactWorkspaceBinding;
   private readonly mutationQueue?: ArtifactMutationQueue;
-  constructor(input: { readonly adapter: ArtifactAdapter; readonly profile: ArtifactRuntimeProfile; readonly binding: ArtifactWorkspaceBinding; readonly mutationQueue?: ArtifactMutationQueue }) {
+  private readonly workspaceAuthority?: ArtifactWorkspaceAuthority;
+  constructor(input: { readonly adapter: ArtifactAdapter; readonly profile: ArtifactRuntimeProfile; readonly binding: ArtifactWorkspaceBinding; readonly mutationQueue?: ArtifactMutationQueue; readonly workspaceAuthority?: ArtifactWorkspaceAuthority }) {
     if (input.adapter.contractVersion !== ARTIFACT_CONTRACT_VERSION || input.profile.contractVersion !== ARTIFACT_CONTRACT_VERSION || input.binding.contractVersion !== ARTIFACT_CONTRACT_VERSION
       || input.adapter.id !== input.profile.adapterId || input.adapter.version !== input.profile.adapterVersion || input.binding.adapterId !== input.adapter.id || input.binding.adapterVersion !== input.adapter.version
       || input.binding.profileId !== input.profile.id || input.binding.profileVersion !== input.profile.version || !input.profile.bindings.includes(input.binding.binding)) throw new ArtifactFacadeError("WORKSPACE_MISMATCH", "Artifact facade contract/profile/workspace identity is inconsistent");
@@ -190,6 +205,7 @@ export class ArtifactFacade {
     this.profile = input.profile;
     this.binding = input.binding;
     this.mutationQueue = input.mutationQueue;
+    this.workspaceAuthority = input.workspaceAuthority;
   }
 
   async status(rawCaller: PackageArtifactCallerContext, rawPage: { readonly limit?: number; readonly cursor?: string } = {}): Promise<ArtifactStatusViewV1> {
@@ -197,15 +213,125 @@ export class ArtifactFacade {
     requireTool(caller, "artifact_status");
     requireCapability(caller, "read");
     const page = pageRequest(rawPage);
-    const view = await this.adapter.status(Object.freeze({ binding: this.binding, capabilities: caller.capabilities }), page);
-    return validateView(view, this.adapter, this.profile, this.binding, page);
+    if (this.binding.workspace.kind === "physical" && !this.workspaceAuthority) {
+      throw new ArtifactFacadeError("WORKSPACE_AUTHORITY_REQUIRED", "Physical artifact status requires fresh workspace authority");
+    }
+    const hashes = this.binding.workspace.kind === "physical" ? this.workspaceAuthority!.readHashes() : undefined;
+    const currentBinding = hashes ? Object.freeze({ ...this.binding, workspaceHash: hashes.workspaceHash }) : this.binding;
+    const view = await this.adapter.status(Object.freeze({ binding: currentBinding, capabilities: caller.capabilities, ...(hashes ? { hashes } : {}) }), page);
+    return validateView(view, this.adapter, this.profile, currentBinding, page);
+  }
+
+  private assertWriterLease(authority: ArtifactWorkspaceAuthority = this.workspaceAuthority!): void {
+    try { authority.lease.assertOwned(); }
+    catch (error) { throw new ArtifactFacadeError("WRITER_LEASE_CONFLICT", String(error instanceof Error ? error.message : error)); }
+  }
+
+  private normalizeWriterLeaseFailure(error: unknown, authority: ArtifactWorkspaceAuthority = this.workspaceAuthority!): unknown {
+    try { authority.lease.assertOwned(); return error; }
+    catch (ownershipError) { return new ArtifactFacadeError("WRITER_LEASE_CONFLICT", String(ownershipError instanceof Error ? ownershipError.message : ownershipError)); }
+  }
+
+  private recoverOperation(operationId: string, current?: ArtifactWorkspaceHashesV1) {
+    const authority = this.workspaceAuthority;
+    if (!authority) throw new ArtifactFacadeError("WORKSPACE_AUTHORITY_REQUIRED", "Physical artifact operation recovery requires workspace authority");
+    this.assertWriterLease(authority);
+    const operation = authority.operations.restore().operations[operationId];
+    if (!operation) throw new ArtifactFacadeError("OPERATION_RECOVERY_REQUIRED", `Artifact operation ${operationId} has no durable intent`);
+    const hashes = current ?? authority.readHashes();
+    let adapterDiagnostic: string | undefined;
+    const recovery = recoverArtifactOperation(authority.operations, operationId, hashes, (pending, currentHashes) => {
+      const action = this.profile.actions.find((candidate) => candidate.id === pending.actionId);
+      if (!action || typeof this.adapter.reconcileAction !== "function") {
+        adapterDiagnostic = `Adapter cannot reconcile interrupted artifact action ${pending.actionId}`;
+        return undefined;
+      }
+      let proof: ArtifactActionRecoveryResult;
+      try {
+        proof = this.adapter.reconcileAction(Object.freeze({
+          binding: Object.freeze({ ...this.binding, workspaceHash: currentHashes.workspaceHash }),
+          hashes: currentHashes,
+          operation: Object.freeze({
+            operationId: pending.operationId,
+            actionId: pending.actionId,
+            inputHash: pending.inputHash,
+            expectedWorkspaceHash: pending.expectedWorkspaceHash,
+            intentAt: pending.intentAt,
+          }),
+        }), action);
+      } catch (error) {
+        adapterDiagnostic = `Adapter operation reconciliation failed: ${String(error instanceof Error ? error.message : error)}`;
+        return undefined;
+      }
+      if (!plainRecord(proof)) {
+        adapterDiagnostic = "Adapter operation reconciliation returned an invalid proof";
+        return undefined;
+      }
+      if (proof.state === "unknown") {
+        try {
+          exactDto(proof, ["state", "diagnostic"], [], "OPERATION_RECOVERY_REQUIRED", "Artifact operation recovery proof");
+          adapterDiagnostic = boundedText(proof.diagnostic, "Artifact operation recovery diagnostic", ARTIFACT_CONTRACT_LIMITS.summaryBytes);
+        } catch (error) {
+          adapterDiagnostic = `Adapter operation reconciliation returned an invalid unknown proof: ${String(error instanceof Error ? error.message : error)}`;
+        }
+        return undefined;
+      }
+      if (proof.state !== "applied") {
+        adapterDiagnostic = "Adapter operation reconciliation returned an unsupported proof state";
+        return undefined;
+      }
+      try {
+        exactDto(proof, ["state", "result"], [], "OPERATION_RECOVERY_REQUIRED", "Artifact operation recovery proof");
+        const result = validateResult(proof.result, pending.actionId, pending.operationId);
+        if (result.workspaceHash !== currentHashes.workspaceHash) {
+          adapterDiagnostic = "Adapter applied proof hash does not match current workspace state";
+          return undefined;
+        }
+        return result;
+      } catch (error) {
+        adapterDiagnostic = `Adapter applied proof is invalid: ${String(error instanceof Error ? error.message : error)}`;
+        return undefined;
+      }
+    });
+    if (recovery.state === "unknown" && adapterDiagnostic) {
+      authority.operations.markUnknown(operationId, adapterDiagnostic);
+      return Object.freeze({ state: "unknown" as const, diagnostic: adapterDiagnostic });
+    }
+    return recovery;
+  }
+
+  recoverUnresolvedOperations(): ArtifactOperationRecoveryReport {
+    if (this.binding.workspace.kind !== "physical") return Object.freeze({ recovered: Object.freeze([]), unknown: Object.freeze([]), diagnostics: Object.freeze([]) });
+    if (!this.workspaceAuthority) throw new ArtifactFacadeError("WORKSPACE_AUTHORITY_REQUIRED", "Physical artifact operation recovery requires workspace authority");
+    this.assertWriterLease(this.workspaceAuthority);
+    const recovered: string[] = [];
+    const unknown: string[] = [];
+    const diagnostics: string[] = [];
+    const operations = Object.values(this.workspaceAuthority.operations.restore().operations)
+      .filter((operation) => !operation.result)
+      .sort((a, b) => a.intentSequence - b.intentSequence || a.operationId.localeCompare(b.operationId));
+    for (const operation of operations) {
+      try {
+        const result = this.recoverOperation(operation.operationId);
+        if (result.state === "unknown") {
+          unknown.push(operation.operationId);
+          diagnostics.push(result.diagnostic);
+        } else recovered.push(operation.operationId);
+      } catch (error) {
+        const diagnostic = `Artifact operation ${operation.operationId} recovery failed: ${String(error instanceof Error ? error.message : error)}`;
+        try { this.workspaceAuthority.operations.markUnknown(operation.operationId, diagnostic); } catch { /* preserve the primary recovery failure */ }
+        unknown.push(operation.operationId);
+        diagnostics.push(diagnostic);
+      }
+    }
+    return Object.freeze({ recovered: Object.freeze(recovered), unknown: Object.freeze(unknown), diagnostics: Object.freeze(diagnostics) });
   }
 
   async action(rawCaller: PackageArtifactCallerContext, rawRequest: unknown, execution: { readonly attemptId: string }): Promise<ArtifactActionResultV1> {
     const caller = requireCaller(rawCaller, this.binding);
     requireTool(caller, "artifact_action");
     if (!plainRecord(rawRequest)) throw new ArtifactFacadeError("REQUEST_INVALID", "Artifact action request must be an object");
-    exactKeys(rawRequest, ["actionId", "arguments"], "Artifact action request");
+    exactDto(rawRequest, ["actionId", "arguments"], ["expectedWorkspaceHash"], "REQUEST_INVALID", "Artifact action request");
     const actionId = validateId(rawRequest.actionId, "Artifact action ID");
     const action = this.profile.actions.find((candidate) => candidate.id === actionId);
     if (!action || !this.binding.actionIds.includes(actionId) || !this.adapter.executeAction) throw new ArtifactFacadeError("ACTION_UNKNOWN", `Artifact action ${actionId} is not supported by the active profile`);
@@ -215,7 +341,37 @@ export class ArtifactFacade {
     if (containsWorkspaceSpoof(rawRequest.arguments) || !Value.Check(action.argumentsSchema, rawRequest.arguments)) throw new ArtifactFacadeError("ARGUMENTS_INVALID", "Artifact action arguments contain unknown, invalid, or workspace-spoofing fields");
     for (const capability of action.requiredCapabilities) requireCapability(caller, capability);
     const operationId = validateId(execution?.attemptId, "Artifact operation/attempt ID", "ATTEMPT_INVALID");
+    const physicalMutation = action.mutability === "mutating" && this.binding.workspace.kind === "physical";
+    if (physicalMutation && !this.workspaceAuthority) throw new ArtifactFacadeError("WORKSPACE_AUTHORITY_REQUIRED", "Every physical mutating artifact action requires workspace authority");
     if (action.mutability === "mutating" && (!this.mutationQueue || !this.binding.path || !this.binding.workspaceHash)) throw new ArtifactFacadeError("MUTATION_QUEUE_REQUIRED", "Mutating artifact actions require a trusted workspace path/hash and Pi mutation queue");
+    if (physicalMutation) {
+      const authority = this.workspaceAuthority!;
+      if (!isArtifactHash(rawRequest.expectedWorkspaceHash)) throw new ArtifactFacadeError("EXPECTED_HASH_REQUIRED", "Mutating artifact action requires the current reader workspace hash");
+      const existing = authority.operations.restore().operations[operationId];
+      if (existing) {
+        const replay = authority.operations.begin({ operationId, actionId, arguments: rawRequest.arguments, expectedWorkspaceHash: rawRequest.expectedWorkspaceHash });
+        if (replay.state === "completed") return replay.result;
+        const lease = authority.lease.acquire();
+        if (!lease.ok) throw new ArtifactFacadeError("WRITER_LEASE_CONFLICT", lease.reason);
+        this.assertWriterLease(authority);
+        const recovery = this.recoverOperation(operationId, authority.readHashes());
+        if (recovery.state === "unknown") throw new ArtifactFacadeError("OPERATION_RECOVERY_REQUIRED", `unknown_side_effect: ${recovery.diagnostic}`);
+        return recovery.result;
+      }
+      let alreadyOwned = false;
+      try { authority.lease.assertOwned(); alreadyOwned = true; } catch { /* acquire below */ }
+      const lease = authority.lease.acquire();
+      if (!lease.ok) throw new ArtifactFacadeError("WRITER_LEASE_CONFLICT", lease.reason);
+      this.assertWriterLease(authority);
+      const current = authority.readHashes();
+      if (current.workspaceHash !== rawRequest.expectedWorkspaceHash) {
+        if (!alreadyOwned) authority.lease.release();
+        throw new ArtifactFacadeError("WORKSPACE_HASH_CONFLICT", "Artifact workspace changed after writer lease acquisition; retry from fresh status");
+      }
+      authority.operations.begin({ operationId, actionId, arguments: rawRequest.arguments, expectedWorkspaceHash: current.workspaceHash });
+    }
+    const expectedWorkspaceHash = physicalMutation && this.workspaceAuthority ? String(rawRequest.expectedWorkspaceHash) : this.binding.workspaceHash;
+    let authorizedWorkspaceHash = expectedWorkspaceHash;
     const canonicalWorkspace = action.mutability === "mutating" && this.binding.path ? resolveCanonicalPath(this.binding.path) : undefined;
     if (action.mutability === "mutating" && (!canonicalWorkspace || !canonicalWorkspace.exists)) throw new ArtifactFacadeError("WORKSPACE_ESCAPE", "Trusted artifact workspace cannot be canonically resolved");
     type MutationSettlement = Readonly<{ status: "fulfilled" }> | Readonly<{ status: "rejected"; reason: unknown }>;
@@ -239,9 +395,31 @@ export class ArtifactFacade {
         };
         queued += 1;
         return this.mutationQueue(authorized.canonicalPath, operationId, async () => {
-          recheckCanonicalTarget();
-          try { return await callback(); }
-          finally { recheckCanonicalTarget(); }
+          const execute = async (): Promise<T> => {
+            recheckCanonicalTarget();
+            try {
+              if (physicalMutation) {
+                const authority = this.workspaceAuthority!;
+                this.assertWriterLease(authority);
+                const current = authority.readHashes();
+                if (current.workspaceHash !== authorizedWorkspaceHash) throw new ArtifactFacadeError("WORKSPACE_HASH_CONFLICT", "Artifact workspace changed before queued mutation commit");
+                this.assertWriterLease(authority);
+              }
+              const result = await callback();
+              recheckCanonicalTarget();
+              if (physicalMutation) {
+                const authority = this.workspaceAuthority!;
+                this.assertWriterLease(authority);
+                authorizedWorkspaceHash = authority.readHashes().workspaceHash;
+              }
+              return result;
+            } finally {
+              recheckCanonicalTarget();
+            }
+          };
+          if (!physicalMutation) return execute();
+          try { return await this.workspaceAuthority!.lease.withOwnedMutation(execute); }
+          catch (error) { throw this.normalizeWriterLeaseFailure(error); }
         });
       })();
       mutationSettlements.push(mutation.then<MutationSettlement, MutationSettlement>(
@@ -250,7 +428,8 @@ export class ArtifactFacade {
       ));
       return mutation;
     };
-    const context: ArtifactActionContext = Object.freeze({ binding: this.binding, capabilities: caller.capabilities, operationId, expectedWorkspaceHash: this.binding.workspaceHash, enqueueMutation });
+    const currentBinding = expectedWorkspaceHash ? Object.freeze({ ...this.binding, workspaceHash: expectedWorkspaceHash }) : this.binding;
+    const context: ArtifactActionContext = Object.freeze({ binding: currentBinding, capabilities: caller.capabilities, operationId, expectedWorkspaceHash, enqueueMutation });
     const argumentsValue = Object.freeze(structuredClone(rawRequest.arguments)) as never;
     let adapterExecution: Readonly<{ status: "fulfilled"; result: ArtifactActionResultV1 }> | Readonly<{ status: "rejected"; reason: unknown }>;
     try {
@@ -265,10 +444,40 @@ export class ArtifactFacade {
       settlements.push(...await Promise.all(pending));
       drained += pending.length;
     }
-    if (adapterExecution.status === "rejected") throw adapterExecution.reason;
     const mutationFailure = settlements.find((settlement): settlement is Readonly<{ status: "rejected"; reason: unknown }> => settlement.status === "rejected");
-    if (mutationFailure) throw mutationFailure.reason;
+    const failure = adapterExecution.status === "rejected" ? adapterExecution.reason : mutationFailure?.reason;
+    if (failure !== undefined) {
+      if (physicalMutation) {
+        try {
+          const recovery = this.recoverOperation(operationId);
+          if (recovery.state === "not-applied" && failure && (typeof failure === "object" || typeof failure === "function")) Object.assign(failure, { effectNotApplied: true });
+        } catch (recoveryError) {
+          this.workspaceAuthority!.operations.markUnknown(operationId, `Artifact operation recovery failed: ${String(recoveryError instanceof Error ? recoveryError.message : recoveryError)}`);
+        }
+      }
+      throw failure;
+    }
+    if (adapterExecution.status === "rejected") throw adapterExecution.reason;
     if (adapterExecution.result.changed && queued === 0) throw new ArtifactFacadeError("MUTATION_QUEUE_REQUIRED", "Artifact action reported mutation without using the trusted mutation queue");
+    if (physicalMutation) {
+      const authority = this.workspaceAuthority!;
+      try {
+        return await authority.lease.withOwnedMutation(() => {
+          this.assertWriterLease(authority);
+          const hashes = authority.readHashes();
+          if (hashes.workspaceHash !== authorizedWorkspaceHash || adapterExecution.result.workspaceHash !== hashes.workspaceHash) {
+            throw new ArtifactFacadeError("RESULT_INVALID", "Artifact action result does not report the fresh committed workspace hash");
+          }
+          this.assertWriterLease(authority);
+          return authority.operations.complete(operationId, adapterExecution.result);
+        });
+      } catch (error) {
+        const failure = this.normalizeWriterLeaseFailure(error, authority);
+        try { authority.operations.markUnknown(operationId, `Artifact result commit failed before durable completion: ${String(failure instanceof Error ? failure.message : failure)}`); }
+        catch { /* preserve the primary commit failure */ }
+        throw failure;
+      }
+    }
     return adapterExecution.result;
   }
 

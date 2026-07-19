@@ -30,6 +30,10 @@ test("artifact modules have no model, delegation, routing, Pi runtime, or workfl
     "src/artifacts/contracts.ts",
     "src/artifacts/registry.ts",
     "src/artifacts/facade.ts",
+    "src/artifacts/hashes.ts",
+    "src/artifacts/leases.ts",
+    "src/artifacts/operations.ts",
+    "src/artifacts/workspaces.ts",
     "src/artifacts/internal/caller.ts",
     "src/artifacts/adapters/none.ts",
   ].map((path) => resolve(path)));
