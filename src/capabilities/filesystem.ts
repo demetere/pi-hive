@@ -7,6 +7,7 @@ import { checkProtectedPath, type ProtectedPathRoot } from "./reserved-paths";
 import type { EffectiveNodePolicy, FilesystemOperation, NormalizedFilesystemGrant } from "./types";
 import type { MutationAccountingRecorder, MutationIntent } from "../workflows/change-accounting";
 import type { AttemptRuntime } from "../workflows/attempts";
+import { BUILTIN_ARTIFACT_REGISTRY, type ResolvedArtifactProfile } from "../artifacts/registry";
 
 const MAX_TOOL_PATHS = 32;
 const MAX_DIAGNOSTIC_BYTES = 2_048;
@@ -35,6 +36,8 @@ export interface CompileFilesystemPolicyInput {
   readonly effectivePolicy: EffectiveNodePolicy;
   readonly secretPaths?: readonly string[];
   readonly additionalProtectedRoots?: readonly ProtectedPathRoot[];
+  /** Resolved activation/runtime selection; its adapter roots cannot be omitted by callers. */
+  readonly artifact?: Readonly<{ resolved: ResolvedArtifactProfile; options: unknown }>;
   readonly platform?: NodeJS.Platform;
 }
 
@@ -84,6 +87,12 @@ export function compileFilesystemPolicy(input: CompileFilesystemPolicyInput): Co
   const canonical = resolveCanonicalPath(lexicalProjectRoot);
   if (!canonical || !canonical.exists || !statSync(canonical.canonicalPath).isDirectory()) throw new Error("FILESYSTEM_PROJECT_ROOT_INVALID");
   const grants = input.effectivePolicy.capabilities.filesystem.map((grant) => canonicalGrant(lexicalProjectRoot, grant));
+  const artifactRoots = (() => {
+    if (!input.artifact) return Object.freeze([]) as readonly ProtectedPathRoot[];
+    const { resolved } = input.artifact;
+    const options = BUILTIN_ARTIFACT_REGISTRY.validateOptions(resolved.profile, input.artifact.options);
+    return Object.freeze([...(resolved.adapter.protectedWorkspaceRoots?.({ projectRoot: canonical.canonicalPath, profile: resolved.profile, options }) ?? [])]);
+  })();
   return Object.freeze({
     projectRoot: canonical.canonicalPath,
     lexicalProjectRoot,
@@ -91,7 +100,7 @@ export function compileFilesystemPolicy(input: CompileFilesystemPolicyInput): Co
     nodeId: input.effectivePolicy.nodeId,
     grants: Object.freeze(grants),
     secretPaths: Object.freeze([...(input.secretPaths ?? [])]),
-    additionalProtectedRoots: Object.freeze([...(input.additionalProtectedRoots ?? [])]),
+    additionalProtectedRoots: Object.freeze([...(input.additionalProtectedRoots ?? []), ...artifactRoots]),
   });
 }
 

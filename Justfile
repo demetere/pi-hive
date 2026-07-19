@@ -311,6 +311,8 @@ test-node-compat:
     tests/artifacts/artifact-facade.test.ts \
     tests/artifacts/artifact-leases-cross-process.test.ts \
     tests/artifacts/artifact-lifecycle-integration.test.ts \
+    tests/artifacts/artifact-markdown-plan.test.ts \
+    tests/artifacts/artifact-markdown-plan-e2e.test.ts \
     tests/artifacts/artifact-none-run.test.ts \
     tests/artifacts/artifact-operations-fault.test.ts \
     tests/artifacts/artifact-registry-none.test.ts \

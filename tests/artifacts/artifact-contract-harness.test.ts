@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { MARKDOWN_PLAN_ARTIFACT_ADAPTER } from "../../src/artifacts/adapters/markdown-plan.ts";
 import { NONE_ARTIFACT_ADAPTER } from "../../src/artifacts/adapters/none.ts";
 import { OPEN_SPEC_ARTIFACT_ADAPTER } from "../../src/artifacts/adapters/openspec.ts";
 import {
@@ -13,6 +14,7 @@ import {
 
 test("built-in implemented adapters pass the reusable lifecycle contract", () => {
   assertArtifactAdapterContract(NONE_ARTIFACT_ADAPTER);
+  assertArtifactAdapterContract(MARKDOWN_PLAN_ARTIFACT_ADAPTER);
   assertArtifactAdapterContract(OPEN_SPEC_ARTIFACT_ADAPTER);
 });
 
@@ -53,6 +55,7 @@ test("artifact modules have no model, delegation, routing, Pi runtime, or workfl
     "src/artifacts/workspaces.ts",
     "src/artifacts/internal/caller.ts",
     "src/artifacts/adapters/none.ts",
+    "src/artifacts/adapters/markdown-plan.ts",
     "src/artifacts/adapters/openspec.ts",
   ].map((path) => resolve(path)));
 });

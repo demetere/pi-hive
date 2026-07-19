@@ -16,8 +16,8 @@ export const ARTIFACT_HASH_VERSION = 1 as const;
 export const ARTIFACT_HASH_LIMITS = Object.freeze({
   files: 2_048,
   pathBytes: 262_144,
-  fileBytes: 33_554_432,
-  aggregateBytes: 67_108_864,
+  fileBytes: 67_108_864,
+  aggregateBytes: 134_217_728,
   depth: 128,
 });
 

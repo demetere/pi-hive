@@ -100,7 +100,7 @@ test("all protected subsystem and credential roots override a broad generic gran
   const paths = [
     ".pi/hive/hive-config.yaml", ".pi/hive/workflows/build.yaml", ".pi/hive/agents/a.md", ".pi/hive/skills/x/SKILL.md",
     ".pi/hive/knowledge/shared/knowledge.md", ".pi/hive/sessions/run/journal.jsonl", ".pi/hive/telemetry/events.jsonl",
-    ".pi/hive/dashboard-auth/token", "openspec/changes/x/tasks.md", ".git/config", ".env.local", ".npmrc", "keys/id_ed25519",
+    ".pi/hive/dashboard-auth/token", "openspec/changes/x/tasks.md", "plans/change/plan.md", ".git/config", ".env.local", ".npmrc", "keys/id_ed25519",
     "custom/secret-store/token.json",
   ];
   for (const path of paths) {

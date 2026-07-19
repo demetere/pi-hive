@@ -1,6 +1,7 @@
 import type { TSchema } from "typebox";
 import type { JsonValue } from "../config/types";
 import type { ArtifactCapability } from "../capabilities/types";
+import type { ProtectedPathRoot } from "../capabilities/reserved-paths";
 import type { ArtifactReference } from "../workflows/runs";
 import type { ArtifactWorkspaceHashesV1 } from "./hashes";
 import type { CheckpointDescriptorV1 } from "./checkpoints";
@@ -196,6 +197,8 @@ export interface ArtifactAdapter {
   readonly id: string;
   readonly version: string;
   readonly profiles: readonly ArtifactRuntimeProfile[];
+  /** Adapter-owned roots automatically incorporated into generic filesystem policy. */
+  protectedWorkspaceRoots?(input: Readonly<{ projectRoot: string; profile: ArtifactRuntimeProfile; options: Readonly<Record<string, JsonValue>> }>): readonly ProtectedPathRoot[];
   readonly workspaceLifecycle?: ArtifactWorkspaceLifecycle;
   bind(profile: ArtifactRuntimeProfile, request: ArtifactBindRequest): ArtifactWorkspaceBinding;
   status(context: ArtifactStatusContext, page: ArtifactStatusPageRequest): ArtifactStatusViewV1 | Promise<ArtifactStatusViewV1>;

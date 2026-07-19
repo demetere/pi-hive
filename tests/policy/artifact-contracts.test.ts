@@ -36,7 +36,7 @@ test("artifact contract graph is exactly nine rows and deeply immutable", () => 
   assert.deepEqual(artifactProfileContract("openspec", "author")?.checkpoints, ["proposal", "design", "specs", "tasks"]);
 });
 
-test("artifact declarations require valid bindings, empty options, and exact checkpoint sets", () => {
+test("artifact declarations require valid bindings, profile options, and exact checkpoint sets", () => {
   for (const [adapter, profile, bindings, checkpoints] of rows) {
     for (const binding of bindings) {
       const approvals = Object.fromEntries(checkpoints.map((id) => [id, "required"]));
@@ -47,6 +47,8 @@ test("artifact declarations require valid bindings, empty options, and exact che
       assert.ok(validateArtifactDeclaration({ adapter, profile, binding: bindings[0], options: {} }, missing).codes.includes("WORKFLOW_CHECKPOINT_MISSING"));
     }
   }
+  assert.deepEqual(validateArtifactDeclaration({ adapter: "markdown-plan", profile: "author", binding: "new", options: { root: "docs/plans" } }, { plan: "required" }).codes, []);
+  assert.ok(validateArtifactDeclaration({ adapter: "markdown-plan", profile: "author", binding: "new", options: { root: "../plans" } }, { plan: "required" }).codes.includes("ARTIFACT_OPTIONS_UNKNOWN"));
   assert.ok(validateArtifactDeclaration({ adapter: "none", profile: "default", binding: "new", options: {} }, undefined).codes.includes("ARTIFACT_BINDING_INVALID"));
   assert.ok(validateArtifactDeclaration({ adapter: "none", profile: "default", binding: "none", options: { x: true } }, undefined).codes.includes("ARTIFACT_OPTIONS_UNKNOWN"));
   assert.ok(validateArtifactDeclaration({ adapter: "unknown", profile: "default", binding: "none", options: {} }, undefined).codes.includes("ARTIFACT_PROFILE_UNKNOWN"));

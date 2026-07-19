@@ -524,10 +524,22 @@ export class RunOrchestrationService {
     });
   }
 
+  private artifactProtectedWorkspaceRoots() {
+    if (!this.selectedArtifact) return Object.freeze([]);
+    const configured = this.artifactSelection();
+    return this.selectedArtifact.adapter.protectedWorkspaceRoots?.({
+      projectRoot: this.options.projectRoot,
+      profile: this.selectedArtifact.profile,
+      options: configured.options,
+    }) ?? Object.freeze([]);
+  }
+
   private changeAccountingFor(runId: string): ChangeAccountingRuntime {
+    const configured = this.options.changeAccounting;
     return new ChangeAccountingRuntime({
       projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId,
-      now: this.options.now, ...this.options.changeAccounting,
+      now: this.options.now, ...configured,
+      protectedRoots: Object.freeze([...(configured?.protectedRoots ?? []), ...this.artifactProtectedWorkspaceRoots()]),
     });
   }
 

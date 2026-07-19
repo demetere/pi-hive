@@ -50,18 +50,20 @@ test("activation reachability checks mandatory completion actions but not option
   } finally { mandatory.cleanup(); }
 });
 
-test("reserved Markdown profiles quarantine at resolution rather than failing on first run", () => {
+test("implemented Markdown profiles activate with exact options and reachable mandatory actions", () => {
   const fixture = copyWorkflowFixture("artifact-free-debug");
   try {
     const path = join(fixture.projectRoot, ".pi/hive/workflows/debug-chat.yaml");
     const source = readFileSync(path, "utf8")
-      .replace("  adapter: none\n  profile: default\n  binding: none", "  adapter: markdown-plan\n  profile: author\n  binding: new")
+      .replace("  adapter: none\n  profile: default\n  binding: none\n  options: {}", "  adapter: markdown-plan\n  profile: author\n  binding: new\n  options: { root: docs/plans }")
       .replace("\nteam:\n", "\napprovals:\n  plan: required\n\nteam:\n");
     writeFileSync(path, source);
+    const agentPath = join(fixture.projectRoot, ".pi/hive/agents/debugger.md");
+    writeFileSync(agentPath, readFileSync(agentPath, "utf8").replace("  human-input: true", "  human-input: true\n  artifact: [read, write]"));
     const project = loadConfigProject(fixture.projectRoot); assert.equal(project.status, "configured");
     const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
-    assert.equal(result.workflows[0].status, "invalid");
-    assert.ok(result.workflows[0].diagnosticCodes.includes("ARTIFACT_ADAPTER_UNAVAILABLE"));
+    assert.equal(result.workflows[0].status, "valid");
+    assert.equal(result.workflows[0].diagnosticCodes.includes("ARTIFACT_ADAPTER_UNAVAILABLE"), false);
   } finally { fixture.cleanup(); }
 });
 
