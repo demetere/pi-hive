@@ -25,6 +25,66 @@ export interface DynamicPromptInput {
   readonly content: unknown;
   readonly ref?: string;
 }
+
+const LOSSLESS_DYNAMIC_CHUNK_BYTES = 8_192;
+const LOSSLESS_REQUIRED_ENVELOPE_BYTES = 69_632;
+const PAGINATED_DYNAMIC_SELECTION_BYTES = PROMPT_LIMITS.dynamicAggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - 4_096;
+
+/**
+ * A worker authority delivery reserves one complete task envelope. The exact
+ * post-escaping delivery check keeps both below the page selection budget.
+ */
+export const LOSSLESS_DYNAMIC_DELIVERY_LIMITS = Object.freeze({
+  encodedBytes: PAGINATED_DYNAMIC_SELECTION_BYTES - LOSSLESS_REQUIRED_ENVELOPE_BYTES,
+  sections: PROMPT_LIMITS.dynamicSections - 1,
+});
+
+/**
+ * A root authority delivery reserves both non-pageable root envelopes: the
+ * first durable run input and a consumed handoff. Each is C0-safe, is bounded
+ * to a 32,768-byte section before canonical rendering, and fits the same
+ * 69,632-byte escaped-envelope reserve used by worker task delivery. The
+ * section bound additionally reserves those two envelopes plus the pagination
+ * marker, so a persisted root answer always has a complete containing page.
+ */
+export const ROOT_LOSSLESS_DYNAMIC_DELIVERY_LIMITS = Object.freeze({
+  encodedBytes: PAGINATED_DYNAMIC_SELECTION_BYTES - (2 * LOSSLESS_REQUIRED_ENVELOPE_BYTES),
+  sections: PROMPT_LIMITS.dynamicSections - 3,
+});
+
+/**
+ * Encode authority-relevant dynamic data as complete UTF-8 chunks. Callers
+ * must verify every returned provenance is present and untruncated in the
+ * assembled page before publishing a consumer receipt.
+ */
+export function losslessDynamicPromptInputs(input: Readonly<{ provenance: string; content: unknown; ref: string }>): readonly DynamicPromptInput[] {
+  const serialized = canonicalJson(input.content);
+  const chunks: string[] = [];
+  let chunk = "";
+  let bytes = 0;
+  for (const character of serialized) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > LOSSLESS_DYNAMIC_CHUNK_BYTES && chunk) { chunks.push(chunk); chunk = ""; bytes = 0; }
+    chunk += character;
+    bytes += size;
+  }
+  if (chunk || !chunks.length) chunks.push(chunk);
+  return Object.freeze(chunks.map((content, index) => Object.freeze({
+    source: "tool-output" as const,
+    provenance: `${input.provenance}:chunk:${index + 1}/${chunks.length}`,
+    content,
+    ref: input.ref,
+  })));
+}
+
+export function assertLosslessDynamicPromptInputs(assembly: WorkflowPromptAssembly, inputs: readonly DynamicPromptInput[]): void {
+  for (const input of inputs) {
+    const section = assembly.dynamicSections.find((candidate) => candidate.source === input.source && candidate.provenance === input.provenance);
+    if (!section || section.truncated || section.includedBytes !== section.originalBytes) {
+      throw new Error(`Authority-relevant prompt data was omitted or truncated: ${input.provenance}`);
+    }
+  }
+}
 export interface PromptTaskInput {
   readonly taskId: string;
   readonly parentNodeId: string;
@@ -298,6 +358,32 @@ function dynamicBytes(entries: readonly BoundDynamicResult[]): number {
   return entries.reduce((total, entry) => total + Buffer.byteLength(entry.rendered, "utf8"), 0);
 }
 
+export interface LosslessDynamicDeliveryMeasurement {
+  readonly sections: number;
+  readonly encodedBytes: number;
+}
+
+/** Exact post-escaping size of one lossless authority delivery. */
+export function measureLosslessDynamicPromptDelivery(inputs: readonly DynamicPromptInput[]): LosslessDynamicDeliveryMeasurement {
+  const entries = inputs.map((input) => boundDynamic(input));
+  return Object.freeze({ sections: entries.length, encodedBytes: dynamicBytes(entries) });
+}
+
+function assertLosslessDynamicPromptDeliveryBound(inputs: readonly DynamicPromptInput[], limits: LosslessDynamicDeliveryMeasurement): void {
+  const measured = measureLosslessDynamicPromptDelivery(inputs);
+  if (measured.sections > limits.sections || measured.encodedBytes > limits.encodedBytes) {
+    throw new Error(`Question answer exceeds the exact lossless delivery page bound (${measured.encodedBytes}/${limits.encodedBytes} encoded bytes)`);
+  }
+}
+
+export function assertLosslessDynamicPromptDeliveryFits(inputs: readonly DynamicPromptInput[]): void {
+  assertLosslessDynamicPromptDeliveryBound(inputs, LOSSLESS_DYNAMIC_DELIVERY_LIMITS);
+}
+
+export function assertLosslessRootDynamicPromptDeliveryFits(inputs: readonly DynamicPromptInput[]): void {
+  assertLosslessDynamicPromptDeliveryBound(inputs, ROOT_LOSSLESS_DYNAMIC_DELIVERY_LIMITS);
+}
+
 /**
  * Select a bounded first/latest page and add a durable pagination index rather
  * than rejecting a legal stream merely because it contains more than 64
@@ -307,6 +393,7 @@ function boundDynamicPage(inputs: readonly DynamicPromptInput[], required?: Read
   const requiredIndex = required === undefined
     ? -1
     : inputs.findIndex((entry) => entry.source === required.source && entry.provenance === required.provenance);
+  const protectedFirstIndex = requiredIndex < 0 ? 0 : -1;
   const maxSelected = Math.max(0, PROMPT_LIMITS.dynamicSections - 1);
   const priority: number[] = [];
   const prioritySet = new Set<number>();
@@ -331,7 +418,7 @@ function boundDynamicPage(inputs: readonly DynamicPromptInput[], required?: Read
   }
   const selectedBudget = PROMPT_LIMITS.dynamicAggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - 4_096;
   while (selected.length && dynamicBytes(selected) > selectedBudget) {
-    let removeAt = selectedIndexes.findIndex((index) => index !== requiredIndex && index !== 0);
+    let removeAt = selectedIndexes.findIndex((index) => index !== requiredIndex && index !== protectedFirstIndex);
     if (removeAt < 0) removeAt = selectedIndexes.findIndex((index) => index !== requiredIndex);
     if (removeAt < 0) break;
     selectedIndexes = selectedIndexes.filter((_index, position) => position !== removeAt);

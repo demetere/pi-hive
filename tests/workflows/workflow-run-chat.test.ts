@@ -54,6 +54,16 @@ test("idle input creates one run, later input steers it, duplicate callbacks are
   assert.deepEqual(replayedBeforeProvider.pendingInputs(), []);
 });
 
+test("run input rejects unsafe C0 controls before persistence while preserving structured whitespace", () => {
+  const f = fixture();
+  const lifecycle = new WorkflowRunLifecycle(f.options);
+  assert.throws(() => lifecycle.recordUserInput({ inputId: "unsafe", text: "unsafe\u0001input", source: "interactive" }), /unsafe|control|input/i);
+  assert.equal(readWorkflowJournal(f.projectRoot, "session-1").length, 0);
+  const accepted = lifecycle.recordUserInput({ inputId: "whitespace", text: "line one\nline two\tend", source: "interactive" });
+  assert.equal(accepted.input.text, "line one\nline two\tend");
+  assert.equal(new WorkflowRunLifecycle(f.options).restore().latestRun?.inputs[0].text, accepted.input.text);
+});
+
 test("a crash fault after publishing delivery preparation is reconciled from the durable request", () => {
   const f = fixture();
   const lifecycle = new WorkflowRunLifecycle(f.options);

@@ -107,9 +107,15 @@ export interface WorkflowRunRecord {
   readonly pendingDelivery?: PendingInputDelivery;
   readonly cancellationRequested: boolean;
   readonly cancellationReason?: string;
+  /** Exact question closure set frozen atomically with the cancellation request. */
+  readonly cancellationQuestionIds?: readonly string[];
   readonly cancellationSettlementFailure?: string;
   readonly pauseState?: Readonly<Record<string, JsonValue>>;
   readonly resumeStatus?: Exclude<OpenRunStatus, "paused">;
+  /** Durable exact approval requests; the approval wait cause remains until this set is empty. */
+  readonly pendingApprovalRequestIds?: readonly string[];
+  /** Durable independent causes whose removal controls waiting_for_human settlement. */
+  readonly waitCauses?: readonly ("approval" | "question")[];
   readonly pauseReleasePending?: boolean;
   readonly pendingTerminal?: PendingTerminalSettlement;
   readonly terminal?: PersistedTerminalEnvelope;
@@ -144,6 +150,10 @@ export interface TerminalSettlementRequest {
 export interface CompletionValidationHooks {
   readonly descendants?: () => CompletionGateResult | Promise<CompletionGateResult>;
   readonly questions?: () => CompletionGateResult | Promise<CompletionGateResult>;
+  /** Synchronously validates the exact pending question projection under a journal append lock. */
+  readonly validateQuestionSet?: (events: readonly WorkflowEventEnvelope[], expectedQuestionIds: readonly string[]) => void;
+  /** Rejects ordinary root terminal preparation while an answered root value is not transcript-delivered. */
+  readonly validateRootQuestionDelivery?: (events: readonly WorkflowEventEnvelope[]) => void;
   readonly adapter?: () => CompletionGateResult | Promise<CompletionGateResult>;
   readonly approvals?: () => CompletionGateResult | Promise<CompletionGateResult>;
   readonly evidence?: (references: readonly EvidenceReference[]) => CompletionGateResult | Promise<CompletionGateResult>;
@@ -288,6 +298,13 @@ function requiredString(payload: Record<string, JsonValue>, key: string, maxByte
   return value;
 }
 
+function hasUnsafeInputControl(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.codePointAt(0)!;
+    return code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d;
+  });
+}
+
 function parseInput(value: JsonValue | undefined, expectedKind?: RunInputKind): RunInputRecord {
   const input = recordPayload(value as JsonValue);
   const sequence = input.sequence;
@@ -297,11 +314,13 @@ function parseInput(value: JsonValue | undefined, expectedKind?: RunInputKind): 
   if (kind !== "initial" && kind !== "steering" && kind !== "handoff") throw new Error("Run input kind is invalid");
   if (expectedKind && kind !== expectedKind) throw new Error("Run input kind does not match event");
   if (source !== "interactive" && source !== "rpc" && source !== "extension" && source !== "handoff") throw new Error("Run input source is invalid");
+  const text = requiredString(input, "text", RUN_LIFECYCLE_LIMITS.inputBytes);
+  if (hasUnsafeInputControl(text)) throw new Error("Run input text contains an unsafe control character");
   return freezeInput({
     sequence: sequence as number,
     inputId: requiredString(input, "inputId"),
     kind,
-    text: requiredString(input, "text", RUN_LIFECYCLE_LIMITS.inputBytes),
+    text,
     source,
     receivedAt: requiredString(input, "receivedAt"),
   });
@@ -343,14 +362,21 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
 
   if (event.type === "approval.recorded" && payload.subsystem === "checkpoint-approval" && (payload.operation === "request" || payload.operation === "decision")) {
     const run = requireCurrentRun(state, event);
-    if (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Checkpoint approval cannot change a terminal, cancelling, or finalizing run");
+    if (!isOpenRunStatus(run.status) || run.status === "paused" || run.cancellationRequested || run.pendingTerminal) throw new Error("Checkpoint approval cannot change a terminal, paused, cancelling, or finalizing run");
+    const causes = new Set(run.waitCauses ?? (run.status === "waiting_for_human" ? ["approval" as const] : []));
+    const requestId = requiredString(payload, "requestId", RUN_LIFECYCLE_LIMITS.requestIdBytes);
+    const pendingApprovals = new Set(run.pendingApprovalRequestIds ?? []);
     if (payload.operation === "request") {
-      if (event.producer !== "harness" || run.status !== "running") throw new Error("Checkpoint approval request lacks harness authority or a running run");
-      return freezeRun(state, { ...run, status: "waiting_for_human" });
+      if (event.producer !== "harness" || (run.status !== "running" && run.status !== "waiting_for_human")) throw new Error("Checkpoint approval request lacks harness authority or an open run");
+      if (pendingApprovals.has(requestId)) throw new Error("Checkpoint approval request identity is already pending");
+      pendingApprovals.add(requestId);
+      causes.add("approval");
+      return freezeRun(state, { ...run, status: "waiting_for_human", pendingApprovalRequestIds: Object.freeze([...pendingApprovals].sort()), waitCauses: Object.freeze([...causes].sort()) });
     }
     if (payload.operation === "decision") {
-      if ((event.producer !== "dashboard" && event.producer !== "harness") || run.status !== "waiting_for_human") throw new Error("Checkpoint decision lacks human control authority or a waiting run");
-      return freezeRun(state, { ...run, status: "running" });
+      if ((event.producer !== "dashboard" && event.producer !== "harness") || run.status !== "waiting_for_human" || !causes.has("approval") || !pendingApprovals.delete(requestId)) throw new Error("Checkpoint decision lacks human control authority or an exact pending approval wait");
+      if (!pendingApprovals.size) causes.delete("approval");
+      return freezeRun(state, { ...run, status: causes.size ? "waiting_for_human" : "running", pendingApprovalRequestIds: Object.freeze([...pendingApprovals].sort()), waitCauses: Object.freeze([...causes].sort()) });
     }
     throw new Error("Checkpoint approval operation is unsupported");
   }
@@ -397,7 +423,8 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     if (run.pendingTerminal) throw new Error("Run terminal settlement is already prepared");
     if (run.cancellationRequested) throw new Error("Run cancellation was already requested");
     const reason = requiredString(payload, "reason", RUN_LIFECYCLE_LIMITS.summaryBytes);
-    return freezeRun(state, { ...run, cancellationRequested: true, cancellationReason: reason });
+    const cancellationQuestionIds = payload.closedQuestionIds === undefined ? Object.freeze([]) : terminalStringArray(payload.closedQuestionIds, "cancellation questions", 256);
+    return freezeRun(state, { ...run, cancellationRequested: true, cancellationReason: reason, cancellationQuestionIds });
   }
 
   if (event.type === "run.cancel.settlement.failed") {
@@ -429,8 +456,23 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     if (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Terminal, cancelling, or finalizing run state is immutable");
     const from = statusValue(payload.from);
     const to = statusValue(payload.to);
-    if (from !== run.status || !isOpenRunStatus(from) || !isOpenRunStatus(to) || from === to) {
+    const waitCause = payload.waitCause;
+    const waitOperation = payload.waitOperation;
+    const isCauseTransition = waitCause === "question" && (waitOperation === "add" || waitOperation === "remove")
+      && from === "waiting_for_human" && to === "waiting_for_human";
+    if (from !== run.status || !isOpenRunStatus(from) || !isOpenRunStatus(to) || (from === to && !isCauseTransition)) {
       throw new Error(`Invalid run transition: ${String(from)} -> ${String(to)}`);
+    }
+    if (waitCause !== undefined || waitOperation !== undefined) {
+      if (waitCause !== "question" || (waitOperation !== "add" && waitOperation !== "remove") || from === "paused" || to === "paused") throw new Error("Run wait-cause transition is invalid");
+      const causes = new Set(run.waitCauses ?? (run.status === "waiting_for_human" ? ["question" as const] : []));
+      if (waitOperation === "add") causes.add("question"); else {
+        if (!causes.has("question")) throw new Error("Run question wait cause is not active");
+        causes.delete("question");
+      }
+      const expectedStatus: OpenRunStatus = causes.size ? "waiting_for_human" : "running";
+      if (to !== expectedStatus) throw new Error("Run wait-cause transition does not match remaining causes");
+      return freezeRun(state, { ...run, status: expectedStatus, waitCauses: Object.freeze([...causes].sort()) });
     }
     if (to === "paused") {
       if (from === "paused") throw new Error(`Invalid run transition: ${String(from)} -> ${String(to)}`);
@@ -452,6 +494,7 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     if (terminal.status !== "cancelled" && !budgetFailure && (run.pendingDelivery || run.deliveredThrough !== run.inputs.length)) throw new Error("Terminal outcome requires every input to be delivered");
     if (terminal.runId !== run.runId) throw new Error("Terminal envelope run identity mismatch");
     if (terminal.status === "cancelled" && !run.cancellationRequested) throw new Error("Cancelled terminal requires a cancellation request");
+    if (terminal.status === "cancelled" && canonicalJson(terminal.closedQuestionIds) !== canonicalJson(run.cancellationQuestionIds ?? [])) throw new Error("Cancelled terminal question closures do not match the frozen cancellation set");
     if (terminal.status !== "cancelled" && run.cancellationRequested) throw new Error("Cancellation in progress blocks a non-cancelled terminal outcome");
     if (terminal.status !== "cancelled") {
       if (!run.pendingTerminal) throw new Error("Non-cancelled terminal outcome requires durable settlement preparation");
@@ -477,7 +520,7 @@ function asJson(value: unknown): JsonValue {
 
 function validateInput(input: RecordRunInput): void {
   if (!input.inputId || Buffer.byteLength(input.inputId, "utf8") > 256) throw new Error("Run input ID is invalid");
-  if (!input.text || Buffer.byteLength(input.text, "utf8") > RUN_LIFECYCLE_LIMITS.inputBytes) throw new Error("Run input text is empty or too large");
+  if (!input.text || Buffer.byteLength(input.text, "utf8") > RUN_LIFECYCLE_LIMITS.inputBytes || hasUnsafeInputControl(input.text)) throw new Error("Run input text is empty, unsafe, or too large");
   if (input.source !== "interactive" && input.source !== "rpc" && input.source !== "extension" && input.source !== "handoff") throw new Error("Run input source is invalid");
 }
 
@@ -889,22 +932,42 @@ export class WorkflowRunLifecycle {
     });
   }
 
+  transitionFromWaitingForHuman(reason: string): void {
+    if (!reason.trim()) throw new Error("Human-resume reason is required");
+    const run = this.restore().latestRun;
+    if (!run || run.status !== "waiting_for_human" || run.cancellationRequested || run.pendingTerminal) throw new Error("Only a waiting non-finalizing run can resume from human input");
+    const causes = new Set(run.waitCauses ?? ["question" as const]);
+    if (!causes.has("question")) throw new Error("Run is not waiting on a human question");
+    causes.delete("question");
+    const to = causes.size ? "waiting_for_human" as const : "running" as const;
+    const timestamp = this.options.now?.() ?? new Date().toISOString();
+    appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
+      projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, type: "run.transition",
+      payload: { formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, from: "waiting_for_human", to, reason: reason.slice(0, 2_048), waitCause: "question", waitOperation: "remove" },
+      producer: "runtime", timestamp,
+    }), (existing) => {
+      const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
+      if (!locked || locked.runId !== run.runId || locked.status !== "waiting_for_human" || !(locked.waitCauses ?? ["question"]).includes("question") || locked.cancellationRequested || locked.pendingTerminal) throw new Error("Run changed before human-answer resume persistence");
+    });
+    this.options.onRunStatusChanged?.(run.runId, to, timestamp);
+  }
+
   transitionToWaitingForHuman(reason: string): void {
     if (!reason.trim()) throw new Error("Waiting reason is required");
     const run = this.restore().latestRun;
-    if (!run || run.status !== "running" || run.cancellationRequested || run.pendingTerminal) throw new Error("Only a running non-finalizing run can wait for human input");
+    if (!run || (run.status !== "running" && run.status !== "waiting_for_human") || run.waitCauses?.includes("question") || run.cancellationRequested || run.pendingTerminal) throw new Error("Only an open non-question-waiting run can wait for human input");
     const timestamp = this.options.now?.() ?? new Date().toISOString();
     appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
       projectId: this.options.projectId,
       sessionId: this.options.sessionId,
       runId: run.runId,
       type: "run.transition",
-      payload: { formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, from: "running", to: "waiting_for_human", reason: reason.slice(0, 2_048) },
+      payload: { formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, from: run.status, to: "waiting_for_human", reason: reason.slice(0, 2_048), waitCause: "question", waitOperation: "add" },
       producer: "runtime",
       timestamp,
     }), (existing) => {
       const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
-      if (!locked || locked.runId !== run.runId || locked.status !== "running" || locked.cancellationRequested || locked.pendingTerminal) throw new Error("Run changed before waiting state persistence");
+      if (!locked || locked.runId !== run.runId || locked.status !== run.status || locked.waitCauses?.includes("question") || locked.cancellationRequested || locked.pendingTerminal) throw new Error("Run changed before waiting state persistence");
     });
     this.options.onRunStatusChanged?.(run.runId, "waiting_for_human", timestamp);
   }
@@ -1011,9 +1074,10 @@ export class WorkflowRunLifecycle {
     }
   }
 
-  requestCancellation(reason: string): void {
+  requestCancellation(reason: string, closedQuestionIds: readonly string[] = [], validateQuestionSet?: (events: readonly WorkflowEventEnvelope[], expectedQuestionIds: readonly string[]) => void): void {
     if (!reason.trim()) throw new Error("Cancellation reason is empty");
     const boundedReason = truncateUtf8(reason, RUN_LIFECYCLE_LIMITS.summaryBytes);
+    const boundedQuestionIds = terminalStringArray(closedQuestionIds, "cancellation questions", 256);
     const events = readWorkflowJournal(this.options.projectRoot, this.options.sessionId);
     const state = replayWorkflowJournal(events, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state;
     const run = state.latestRun;
@@ -1021,16 +1085,17 @@ export class WorkflowRunLifecycle {
     if (run.pendingTerminal) throw new Error("Cannot cancel while terminal settlement is in progress");
     if (run.cancellationRequested) return;
     const timestamp = this.options.now?.() ?? new Date().toISOString();
-    const draft = createWorkflowEvent({ projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, type: "run.cancel.requested", payload: { formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, reason: boundedReason }, producer: "harness", timestamp });
+    const draft = createWorkflowEvent({ projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, type: "run.cancel.requested", payload: { formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, reason: boundedReason, closedQuestionIds: [...boundedQuestionIds] }, producer: "harness", timestamp });
     try {
       appendWorkflowEventChecked(this.options.projectRoot, draft, (existing) => {
         const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
         if (!locked || locked.runId !== run.runId || !isOpenRunStatus(locked.status) || locked.pendingTerminal) throw new Error("Run changed before cancellation could be requested");
         if (locked.cancellationRequested) throw new Error("Cancellation was already requested concurrently");
+        validateQuestionSet?.(existing, boundedQuestionIds);
       });
     } catch (error) {
       const latest = this.restore().latestRun;
-      if (latest?.runId === run.runId && latest.cancellationRequested) return;
+      if (latest?.runId === run.runId && latest.cancellationRequested && canonicalJson(latest.cancellationQuestionIds ?? []) === canonicalJson(boundedQuestionIds)) return;
       throw error;
     }
   }
@@ -1064,7 +1129,20 @@ export class WorkflowRunLifecycle {
     if (initial?.status === "cancelled" && initial.terminal) return Object.freeze({ envelope: initial.terminal, rendered: canonicalJson(initial.terminal) });
     if (!initial || !isOpenRunStatus(initial.status)) throw new Error("Cannot cancel a terminal or missing run");
     this.assertCurrentRuntimeOwner();
-    if (!initial.cancellationRequested) this.requestCancellation(reason);
+    if (!initial.cancellationRequested) {
+      for (let attempt = 0; attempt <= 256; attempt++) {
+        const questionGate = await runGate("questions", this.options.completion?.questions);
+        const expected = Object.freeze([...(questionGate.pendingQuestionIds ?? [])].sort());
+        try {
+          this.requestCancellation(reason, expected, this.options.completion?.validateQuestionSet);
+          break;
+        } catch (error) {
+          const latest = this.restore().latestRun;
+          if (latest?.cancellationRequested) break;
+          if (!this.options.completion?.validateQuestionSet || !/question set changed/i.test(String(error instanceof Error ? error.message : error)) || attempt === 256) throw error;
+        }
+      }
+    }
     const run = this.restore().latestRun!;
     const terminalSummary = truncateUtf8(`Cancelled: ${run.cancellationReason ?? reason}`, RUN_LIFECYCLE_LIMITS.summaryBytes);
     if (!terminalSummary) throw new Error("Cancellation terminal summary is invalid");
@@ -1083,6 +1161,7 @@ export class WorkflowRunLifecycle {
 
   private async settleCancellation(run: WorkflowRunRecord, terminalSummary: string, coordinator: CancellationCoordinator, settlementKey: string): Promise<CancellationResult> {
     const diagnostics: string[] = [];
+    const closedQuestionIds = Object.freeze([...(run.cancellationQuestionIds ?? [])]);
     if (OUTSTANDING_CANCELLATION_STEPS.get(settlementKey)?.size) {
       this.persistCancellationSettlementFailure(run.runId, ["a previously timed-out coordinator action is still running"]);
     }
@@ -1144,7 +1223,7 @@ export class WorkflowRunLifecycle {
       evidenceRefs: [],
       data: {},
       unsatisfiedGates: [],
-      closedQuestionIds: [],
+      closedQuestionIds,
       partialState,
       finishedByNodeId: "harness",
       finishedAt,
@@ -1199,7 +1278,7 @@ export class WorkflowRunLifecycle {
         if (!locked || locked.runId !== run.runId || !isOpenRunStatus(locked.status) || locked.cancellationRequested || locked.pendingTerminal?.operationId !== prepared.operationId) throw new Error("Terminal settlement changed before commit");
         const { operationId: _lockedOperationId, ...lockedPayload } = locked.pendingTerminal;
         if (canonicalJson(lockedPayload) !== canonicalJson(payload)) throw new Error("Terminal settlement payload changed before commit");
-      });
+      }, { fault: (stage) => this.options.journalFault?.("terminal.recorded", stage) });
     } catch (error) {
       const latest = this.restore().latestRun;
       if (latest?.terminal && latest.runId === run.runId) return Object.freeze({ ok: true, envelope: latest.terminal, rendered: canonicalJson(latest.terminal) });
@@ -1226,6 +1305,8 @@ export class WorkflowRunLifecycle {
         : Object.freeze({ ok: false, issues: Object.freeze(["A different terminal settlement is already prepared for this run"]) });
     }
 
+    const questionGate = await runGate("questions", this.options.completion?.questions);
+    const closedQuestionIds = Object.freeze([...(questionGate.pendingQuestionIds ?? [])].sort());
     let fileChanges: readonly FileChangeRecord[] = [];
     let changeCoverage = "partial";
     let partialState: Readonly<Record<string, JsonValue>> = Object.freeze({});
@@ -1248,7 +1329,7 @@ export class WorkflowRunLifecycle {
       evidenceRefs: [],
       data: { failureCode: "budget_exhausted" },
       unsatisfiedGates: ["budget_exhausted"],
-      closedQuestionIds: [],
+      closedQuestionIds,
       partialState,
       finishedByNodeId: this.options.rootNodeId,
       finishedAt,
@@ -1266,11 +1347,13 @@ export class WorkflowRunLifecycle {
       }), (existing) => {
         const locked = replayWorkflowJournal(existing, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
         if (!locked || locked.runId !== restored.runId || !isOpenRunStatus(locked.status) || locked.cancellationRequested || locked.pendingTerminal) throw new Error("Run changed before budget failure preparation");
+        this.options.completion?.validateQuestionSet?.(existing, closedQuestionIds);
       }, { fault: (stage) => this.options.journalFault?.("run.terminal.prepared", stage) });
     } catch (error) {
       const concurrent = this.restore().latestRun;
       if (concurrent?.terminal?.data.failureCode === "budget_exhausted") return Object.freeze({ ok: true, envelope: concurrent.terminal, rendered: canonicalJson(concurrent.terminal) });
       if (concurrent?.pendingTerminal?.data.failureCode === "budget_exhausted") return this.commitPreparedTerminal(concurrent, concurrent.pendingTerminal);
+      if (this.options.completion?.validateQuestionSet && /question set changed/i.test(String(error instanceof Error ? error.message : error))) return this.failBudgetExhaustion(reason);
       return Object.freeze({ ok: false, issues: Object.freeze([String(error instanceof Error ? error.message : error)]) });
     }
     const prepared = this.restore().latestRun?.pendingTerminal;
@@ -1391,6 +1474,7 @@ export class WorkflowRunLifecycle {
         if (!lockedRun || lockedRun.runId !== run.runId || !isOpenRunStatus(lockedRun.status)) throw new Error("run changed during finish validation");
         if (lockedRun.cancellationRequested || lockedRun.pendingTerminal) throw new Error("cancellation or terminal settlement started during finish validation");
         if (lockedRun.pendingDelivery || lockedRun.deliveredThrough !== lockedRun.inputs.length) throw new Error("input arrived during finish validation and must be delivered");
+        hooks.validateRootQuestionDelivery?.(existing);
       }, { fault: (stage) => this.options.journalFault?.("run.terminal.prepared", stage) });
     } catch (error) {
       return Object.freeze({ ok: false, issues: Object.freeze([String(error instanceof Error ? error.message : error)]) });

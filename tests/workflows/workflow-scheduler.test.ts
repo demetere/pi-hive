@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { test } from "node:test";
 import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
 import { DelegationRuntime, type WorkerResultInput } from "../../src/workflows/delegation.ts";
 import { DurableDelegationScheduler } from "../../src/workflows/scheduler.ts";
+import { QuestionService } from "../../src/workflows/questions.ts";
 
 function snapshot(): ActivationSnapshotFileV1 {
   return { snapshotHash: "c".repeat(64), createdAt: "2026-01-01T00:00:00.000Z", payload: {
@@ -197,6 +199,238 @@ test("a durable resume-ready task continues the same attempt after scheduler res
   assert.deepEqual(replayed.restore().tasks[parentId].attempts.map((attempt) => attempt.attemptId), ["attempt-parent"]);
 });
 
+test("human question suspension releases the slot and an answer resumes the same task attempt", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-question-"));
+  let taskNumber = 0;
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const runtime = new DelegationRuntime({ projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => `task-${++taskNumber}` });
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "ask then resume", deliverables: [] }).taskId;
+  const questions = new QuestionService({
+    projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot,
+    createQuestionId: () => "question-1", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
+  });
+  let executions = 0;
+  const scheduler = new DurableDelegationScheduler({
+    runtime, maxParallel: 1, createAttemptId: () => "attempt-1",
+    execute: async (task) => {
+      if (executions++ === 0) {
+        const question = questions.create({ nodeId: task.targetNodeId, taskId: task.taskId, definition: { prompt: "Proceed?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "call-1" } });
+        return { status: "suspended", questionIds: [question.questionId] };
+      }
+      assert.equal(questions.acceptedAnswersForTask(task.taskId)[0].answer.value, true);
+      return completed("resumed same task");
+    },
+  });
+  await scheduler.runUntilSettled();
+  assert.equal(scheduler.activeCount, 0, "waiting questions must not occupy max-parallel slots");
+  assert.equal(runtime.restore().tasks[taskId].queueState, "suspended");
+  assert.deepEqual(runtime.restore().tasks[taskId].attempts.map((attempt) => attempt.attemptId), ["attempt-1"]);
+  questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "question-1", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "answer-1" });
+  await scheduler.runUntilSettled();
+  assert.equal(runtime.restore().tasks[taskId].result?.summary, "resumed same task");
+  assert.deepEqual(runtime.restore().tasks[taskId].attempts.map((attempt) => attempt.attemptId), ["attempt-1"], "question resume must preserve the task attempt");
+});
+
+test("offline question answer resumes after scheduler restart without takeover", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-question-restart-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const options = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "task-question-restart" };
+  const runtime = new DelegationRuntime(options);
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "resume after owner restart", deliverables: [] }).taskId;
+  runtime.start(taskId, "attempt-question-restart");
+  const questions = new QuestionService({
+    projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot,
+    createQuestionId: () => "question-restart", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
+  });
+  questions.create({ nodeId: "a", taskId, definition: { prompt: "Proceed?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "call-restart" } });
+  questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "question-restart", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "answer-restart" });
+
+  let takeoverChecks = 0;
+  const replayed = new DelegationRuntime(options);
+  const scheduler = new DurableDelegationScheduler({
+    runtime: replayed, maxParallel: 1,
+    verifiedTakeover: () => { takeoverChecks++; return false; },
+    execute: async (_task, control) => {
+      assert.equal(control.attemptId, "attempt-question-restart");
+      return completed("continued after offline answer");
+    },
+  });
+  await scheduler.runUntilSettled();
+  assert.equal(takeoverChecks, 0);
+  assert.equal(replayed.restore().tasks[taskId].result?.summary, "continued after offline answer");
+  assert.deepEqual(replayed.restore().tasks[taskId].attempts.map((attempt) => attempt.attemptId), ["attempt-question-restart"]);
+});
+
+test("mixed takeover preserves question and consumed-receipt resume-ready attempts", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-mixed-takeover-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [
+    { nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] },
+    { nodeId: "b", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] },
+  ];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  let taskNumber = 0;
+  const options = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => `mixed-${++taskNumber}` };
+  const runtime = new DelegationRuntime(options);
+  const root = runtime.rootExecutionContext();
+  const unknown = runtime.accept(root, { targetNodeId: "a", objective: "unknown active", deliverables: [] }).taskId;
+  const resume = runtime.accept(root, { targetNodeId: "b", objective: "question resume", deliverables: [] }).taskId;
+  runtime.start(unknown, "attempt-unknown");
+  runtime.start(resume, "attempt-resume");
+  const questions = new QuestionService({
+    projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot,
+    createQuestionId: () => "mixed-question", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
+  });
+  questions.create({ nodeId: "b", taskId: resume, definition: { prompt: "Resume?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "mixed-call" } });
+  questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "mixed-question", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "mixed-answer" });
+  const [delivery] = questions.prepareTaskAnswerDeliveries(resume);
+  questions.recordTaskAnswerDeliveryReceipt(delivery, { promptHash: "a".repeat(64), attemptId: "attempt-resume", transcriptRef: `run:run-1/node:b/task:${resume}/transcript` });
+
+  const recovered = new DelegationRuntime(options);
+  recovered.reconcileActiveAfterTakeover(true);
+  assert.equal(recovered.restore().tasks[unknown].queueState, "queued");
+  assert.equal(recovered.restore().tasks[resume].queueState, "active");
+  assert.equal(recovered.restore().tasks[resume].attempts[0].interruptedSequence, undefined);
+});
+
+test("task start admission CAS leaves queued work unchanged when approval wins the race", () => {
+  const f = fixture();
+  const runtime = new DelegationRuntime({
+    ...f.runtime.options,
+    startAuthority: { admit: () => ({ ok: false as const, reason: "approval wait won admission" }) },
+  });
+  assert.throws(() => runtime.start(f.ids.a1, "attempt-raced"), /approval wait/i);
+  assert.equal(runtime.restore().tasks[f.ids.a1].queueState, "queued");
+  assert.equal(runtime.restore().tasks[f.ids.a1].attempts.length, 0);
+});
+
+test("worker terminal publication loses to an answered undelivered question and preserves the attempt", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-terminal-question-cas-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const base = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "terminal-race" };
+  const runtime = new DelegationRuntime(base);
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "terminal race", deliverables: [] }).taskId;
+  runtime.start(taskId, "attempt-terminal-race");
+  const questions = new QuestionService({ ...base, createQuestionId: () => "terminal-question", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined });
+  questions.create({ nodeId: "a", taskId, definition: { prompt: "Late?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "terminal-call" } });
+  questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "terminal-question", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "terminal-answer" });
+  const guarded = new DelegationRuntime({ ...base, terminalAuthority: { assertTaskMayTerminal: (events: any, id: string) => questions.assertTaskMayTerminal(events, id) } });
+  assert.throws(() => guarded.recordResult(taskId, completed("must lose")), /undelivered|unaccepted|answer/i);
+  const preserved = guarded.restore().tasks[taskId];
+  assert.equal(preserved.queueState, "active");
+  assert.equal(preserved.resumedByQuestionSequence !== undefined, true);
+  assert.deepEqual(preserved.attempts.map((attempt) => attempt.attemptId), ["attempt-terminal-race"]);
+});
+
+test("ordinary worker terminal publication rejects pending task questions and preserves the exact attempt across restart", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-pending-terminal-cas-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const base = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "pending-terminal-task" };
+  const questions = new QuestionService({ ...base, createQuestionId: () => "pending-terminal-question", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined });
+  const runtime = new DelegationRuntime({ ...base, terminalAuthority: { assertTaskMayTerminal: (events, id) => questions.assertTaskMayTerminal(events, id) } });
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "pending terminal", deliverables: [] }).taskId;
+  runtime.start(taskId, "pending-terminal-attempt");
+  questions.create({ nodeId: "a", taskId, definition: { prompt: "Still needed?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "pending-terminal-call" } });
+
+  assert.throws(() => runtime.recordResult(taskId, completed("must not publish")), /pending|question|undelivered/i);
+  const restarted = new DelegationRuntime(runtime.options).restore().tasks[taskId];
+  assert.equal(restarted.queueState, "suspended");
+  assert.deepEqual(restarted.attempts.map((attempt) => attempt.attemptId), ["pending-terminal-attempt"]);
+});
+
+test("task-bound answer rejects a terminal exact task attempt without creating an answered orphan", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-terminal-first-answer-cas-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const base = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "terminal-first-task" };
+  const runtime = new DelegationRuntime(base);
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "terminal first", deliverables: [] }).taskId;
+  runtime.start(taskId, "terminal-first-attempt");
+  const questions = new QuestionService({ ...base, createQuestionId: () => "terminal-first-question", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined });
+  const question = questions.create({ nodeId: "a", taskId, definition: { prompt: "Too late?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "terminal-first-call" } });
+  runtime.recordResult(taskId, completed("terminal won without the production guard"));
+
+  assert.throws(() => questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: question.questionId, expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "terminal-first-answer" }), /task|attempt|terminal|live|late/i);
+  const restored = new QuestionService({ ...questions.options }).restore().questions[question.questionId];
+  assert.equal(restored.state, "pending");
+  assert.equal(restored.answer, undefined);
+});
+
+test("cross-process answer and ordinary terminal publication serialize through the journal CAS", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-question-cross-process-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const base = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "cross-task" };
+  const runtime = new DelegationRuntime(base);
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "cross process race", deliverables: [] }).taskId;
+  runtime.start(taskId, "cross-attempt");
+  const questions = new QuestionService({ ...base, createQuestionId: () => "cross-question", authenticateControl: (request) => request.claimedIdentity });
+  questions.create({ nodeId: "a", taskId, definition: { prompt: "Race?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "cross-call" } });
+  const common = `const projectRoot=${JSON.stringify(projectRoot)}; const snapshot=${JSON.stringify(authoritySnapshot)};`;
+  const scripts = [
+    `${common} const {QuestionService}=await import('./src/workflows/questions.ts'); const q=new QuestionService({projectRoot,projectId:'project-1',sessionId:'session-1',runId:'run-1',snapshot,authenticateControl:r=>r.claimedIdentity}); q.answer({projectId:'project-1',sessionId:'session-1',runId:'run-1',questionId:'cross-question',expectedState:'pending',value:true,channel:'dashboard',claimedIdentity:'human',operationId:'cross-answer'});`,
+    `${common} const [{DelegationRuntime},{QuestionService}]=await Promise.all([import('./src/workflows/delegation.ts'),import('./src/workflows/questions.ts')]); const q=new QuestionService({projectRoot,projectId:'project-1',sessionId:'session-1',runId:'run-1',snapshot,authenticateControl:r=>r.claimedIdentity}); const d=new DelegationRuntime({projectRoot,projectId:'project-1',sessionId:'session-1',runId:'run-1',snapshot,terminalAuthority:{assertTaskMayTerminal:(events,id)=>q.assertTaskMayTerminal(events,id)}}); d.recordResult('cross-task',{status:'completed',summary:'race terminal',outputRefs:[],evidenceRefs:[]});`,
+  ];
+  const run = (script: string) => new Promise<number | null>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: process.cwd(), env: { ...process.env, NODE_V8_COVERAGE: "" }, stdio: ["ignore", "ignore", "ignore"] });
+    child.once("error", reject); child.once("exit", resolve);
+  });
+  const codes = await Promise.all(scripts.map(run));
+  assert.equal(codes.filter((code) => code === 0).length, 1);
+  const restoredTask = new DelegationRuntime(base).restore().tasks[taskId];
+  const restoredQuestion = new QuestionService({ ...questions.options }).restore().questions["cross-question"];
+  assert.equal(restoredTask.queueState, "active");
+  assert.equal(restoredQuestion.state, "answered");
+  assert.deepEqual(restoredTask.attempts.map((attempt) => attempt.attemptId), ["cross-attempt"]);
+});
+
+test("scheduler terminal CAS loses to a late answer and continues the same attempt", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-scheduler-late-answer-"));
+  const authoritySnapshot = snapshot() as any;
+  authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+  authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+  const base = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "late-task" };
+  const questions = new QuestionService({ ...base, createQuestionId: () => "late-question", authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined });
+  const runtime = new DelegationRuntime({ ...base, terminalAuthority: { assertTaskMayTerminal: (events, id) => questions.assertTaskMayTerminal(events, id) } });
+  const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "late answer", deliverables: [] }).taskId;
+  let executions = 0;
+  const scheduler = new DurableDelegationScheduler({
+    runtime, maxParallel: 1, createAttemptId: () => "late-attempt",
+    execute: async () => {
+      executions++;
+      if (executions === 1) {
+        questions.create({ nodeId: "a", taskId, definition: { prompt: "Late?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "late-call" } });
+        questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "late-question", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "late-answer" });
+        return completed("stale terminal result");
+      }
+      const [delivery] = questions.prepareTaskAnswerDeliveries(taskId);
+      questions.recordTaskAnswerDeliveryReceipt(delivery, { promptHash: "e".repeat(64), attemptId: "late-attempt", transcriptRef: `run:run-1/node:a/task:${taskId}/transcript` });
+      questions.acceptTaskAnswerDelivery(delivery);
+      return completed("continued after late answer");
+    },
+  });
+  await scheduler.runUntilSettled();
+  const yielded = runtime.restore().tasks[taskId];
+  assert.equal(executions, 1, "terminal CAS loss durably yields instead of relaunching in the same scheduler drain");
+  assert.equal(yielded.result, undefined);
+  assert.equal(yielded.questionContinuationTurn, 1);
+  await scheduler.runUntilSettled();
+  const terminal = runtime.restore().tasks[taskId];
+  assert.equal(executions, 2);
+  assert.equal(terminal.result?.summary, "continued after late answer");
+  assert.deepEqual(terminal.attempts.map((attempt) => attempt.attemptId), ["late-attempt"]);
+});
+
 test("verified takeover interrupts and requeues journal-active tasks", async () => {
   const f = fixture();
   f.runtime.start(f.ids.a1, "crashed-attempt");
@@ -272,6 +506,60 @@ test("pause aborts cooperative work and restart resumes queued tasks", async () 
   assert.equal(releases, 1);
   assert.equal(Object.values(f.runtime.restore().tasks).every((task) => task.queueState === "queued"), true);
   scheduler.resume();
+});
+
+test("answer and pause in either order preserve question resume-ready work on the same attempt across restart", async () => {
+  for (const answerFirst of [true, false]) {
+    const projectRoot = mkdtempSync(join(tmpdir(), `hive-scheduler-answer-pause-${answerFirst ? "answer-first" : "pause-first"}-`));
+    const authoritySnapshot = snapshot() as any;
+    authoritySnapshot.payload.authority.nodes = [{ nodeId: "a", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }];
+    authoritySnapshot.payload.agents = [{ id: "shared", name: "Shared", prompt: "worker" }];
+    const options = { projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: authoritySnapshot, createTaskId: () => "pause-question-task" };
+    const runtime = new DelegationRuntime(options);
+    const taskId = runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "a", objective: "pause answer race", deliverables: [] }).taskId;
+    const questions = new QuestionService({ ...options, createQuestionId: () => "pause-question", authenticateControl: (request) => request.claimedIdentity });
+    let questionCreated!: () => void;
+    const created = new Promise<void>((resolve) => { questionCreated = resolve; });
+    const scheduler = new DurableDelegationScheduler({
+      runtime, maxParallel: 1, createAttemptId: () => "immutable-attempt",
+      execute: async (_task, control) => {
+        questions.create({ nodeId: "a", taskId, definition: { prompt: "Resume?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "pause-call" } });
+        questionCreated();
+        if (!control.signal.aborted) await new Promise<void>((resolve) => control.signal.addEventListener("abort", () => resolve(), { once: true }));
+        return completed("aborted containing turn");
+      },
+    });
+    const running = scheduler.runUntilSettled();
+    await created;
+    const answer = () => questions.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "pause-question", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", operationId: `pause-answer-${answerFirst}` });
+    if (answerFirst) answer();
+    scheduler.pauseAdmission("process shutdown");
+    scheduler.abortOwnedWork("process shutdown");
+    if (!answerFirst) answer();
+    assert.equal(await scheduler.waitForSettlement(500), true);
+    await running;
+
+    const pausedTask = runtime.restore().tasks[taskId];
+    assert.equal(pausedTask.queueState, "active");
+    assert.equal(pausedTask.resumedByQuestionSequence !== undefined, true);
+    assert.deepEqual(pausedTask.attempts.map((attempt) => attempt.attemptId), ["immutable-attempt"]);
+
+    const replayed = new DelegationRuntime(options);
+    const restarted = new DurableDelegationScheduler({
+      runtime: replayed, maxParallel: 1, createAttemptId: () => "must-not-create",
+      execute: async (_task, control) => {
+        assert.equal(control.attemptId, "immutable-attempt");
+        const [delivery] = questions.prepareTaskAnswerDeliveries(taskId);
+        questions.recordTaskAnswerDeliveryReceipt(delivery, { promptHash: "f".repeat(64), attemptId: control.attemptId, transcriptRef: `run:run-1/node:a/task:${taskId}/transcript` });
+        questions.acceptTaskAnswerDelivery(delivery);
+        return completed("resumed after restart");
+      },
+    });
+    restarted.resume();
+    await restarted.runUntilSettled();
+    assert.equal(replayed.restore().tasks[taskId].result?.summary, "resumed after restart");
+    assert.deepEqual(replayed.restore().tasks[taskId].attempts.map((attempt) => attempt.attemptId), ["immutable-attempt"]);
+  }
 });
 
 test("cancellation settles interrupted queued work without claiming its stale attempt", async () => {

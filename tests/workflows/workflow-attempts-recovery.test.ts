@@ -41,6 +41,52 @@ test("completed same attempt ID replays its bounded result while different input
   assert.throws(() => runtime.begin({ attemptId: "attempt-1", correlationId: "correlation-1", nodeId: "worker", operation: "read", input: { path: "src/b.ts" }, descriptor: readonlyTool }), /different input|reuse/i);
 });
 
+test("successful model result atomically binds deliveries created during that exact attempt before receipt settlement", async () => {
+  const { projectRoot, runtime } = fixture();
+  let providerCalls = 0;
+  let receiptFaults = 0;
+  const input = {
+    correlationId: "dynamic-consumer", nodeId: "worker", operation: "provider.request", input: { promptHash: "a".repeat(64) },
+    descriptor: attemptDescriptorForModel(),
+    consumerReceipt: { deliveryIds: [], promptHash: "a".repeat(64), transcriptRef: "run:run-1/node:worker/task:task-1/transcript" },
+    consumerReceiptAfterDispatch: () => ({ deliveryIds: ["dynamic-delivery"], promptHash: "a".repeat(64), transcriptRef: "run:run-1/node:worker/task:task-1/transcript" }),
+    dispatch: async () => { providerCalls++; return "provider result"; },
+    onConsumerCompleted: () => { if (receiptFaults++ === 0) throw new Error("persistent process stop before receipt"); },
+  } as const;
+  await assert.rejects(() => executeWithConservativeRetry(runtime, input), /before receipt/i);
+  const completed = Object.values(runtime.restore().attempts)[0];
+  assert.equal(completed.status, "completed");
+  assert.deepEqual(completed.consumerReceipt?.deliveryIds, ["dynamic-delivery"]);
+  assert.deepEqual(completed.intentConsumerReceipt?.deliveryIds, []);
+
+  const restarted = new AttemptRuntime({ projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1" });
+  assert.equal(await executeWithConservativeRetry(restarted, input), "provider result");
+  assert.equal(providerCalls, 1, "durable successful result must replay without provider redispatch");
+});
+
+test("completed consumer replay exposes only its exact durable final delivery binding to settlement", async () => {
+  const { projectRoot, runtime } = fixture();
+  const durableBinding = { deliveryIds: ["delivery-old"], promptHash: "a".repeat(64), transcriptRef: "run:run-1/node:worker/task:task-1/transcript" } as const;
+  runtime.begin({
+    attemptId: "consumer-replay", correlationId: "consumer-replay-correlation", nodeId: "worker", operation: "provider.request",
+    input: { promptHash: durableBinding.promptHash }, replayInput: { taskId: "task-1" }, descriptor: attemptDescriptorForModel(), consumerReceipt: durableBinding,
+  });
+  runtime.complete("consumer-replay", { ok: true, value: "old result" }, durableBinding);
+
+  let settledBinding: unknown;
+  const restarted = new AttemptRuntime({ projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1" });
+  const result = await executeWithConservativeRetry(restarted, {
+    correlationId: "reused-correlation", nodeId: "worker", operation: "provider.request",
+    input: { promptHash: "b".repeat(64) }, replayInput: { taskId: "task-1" }, descriptor: attemptDescriptorForModel(),
+    recoveryAttemptId: "consumer-replay", recoveryConsumerReceipt: durableBinding,
+    consumerReceipt: { deliveryIds: ["delivery-old", "delivery-new"], promptHash: "b".repeat(64), transcriptRef: durableBinding.transcriptRef },
+    dispatch: async () => "must not run",
+    onConsumerCompleted: (_attemptId, binding) => { settledBinding = binding; },
+  });
+  assert.equal(result, "old result");
+  assert.deepEqual(settledBinding, durableBinding);
+});
+
 test("model retries at most twice only before output/tool calls and every provider attempt is durable", async () => {
   const { runtime } = fixture();
   let calls = 0;

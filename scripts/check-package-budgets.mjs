@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 export const PACKAGE_BASELINES = Object.freeze({
   packedBytes: 605_461,
-  unpackedBytes: 2_164_548,
+  unpackedBytes: 2_366_282,
   reviewRawBytes: 12_625,
   reviewCompressedBytes: 4_304,
 });

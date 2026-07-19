@@ -303,7 +303,7 @@ function validatePayload(value: unknown): void {
     validateSerializedEffectiveAuthorityNodeV1(entry, {
       rootNodeId: workflowCoverage.rootNodeId,
       directMemberIds: workflowCoverage.directMembers.get(nodeIdForContext) ?? [],
-      subsystems: { artifact: workflowCoverage.artifactAvailable, artifactActions: workflowCoverage.artifactActionsAvailable, knowledge: false, questions: false },
+      subsystems: { artifact: workflowCoverage.artifactAvailable, artifactActions: workflowCoverage.artifactActionsAvailable, knowledge: false, questions: true },
     });
     const workflowNode = workflowCoverage.nodes.get(nodeIdForContext);
     const ceiling = workflowNode ? agentCapabilityCeilings.get(workflowNode.agentId) : undefined;

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { readWorkflowJournal } from "../../src/workflows/journal.ts";
+import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
+import { QuestionService } from "../../src/workflows/questions.ts";
 import {
   WorkflowRunLifecycle,
   terminalEnvelopeFromEvent,
@@ -12,7 +14,15 @@ import {
   type FinishResult,
 } from "../../src/workflows/runs.ts";
 
-function fixture(hooks: CompletionValidationHooks = {}) {
+function questionSnapshot(): ActivationSnapshotFileV1 {
+  return { snapshotHash: "q".repeat(64), createdAt: "2026-01-01T00:00:00.000Z", payload: {
+    project: { projectId: "project-1", rootRef: "." }, workflow: { id: "w", team: { rootId: "root", nodes: [{ id: "root", agentId: "lead", memberIds: [], depth: 1 }] } },
+    authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective: { "human-input": true } }, tools: ["human_question"] }] },
+    agents: [{ id: "lead", name: "Lead", prompt: "lead" }], skills: [], knowledge: [], models: [], sources: [], versions: {} as never,
+  } } as unknown as ActivationSnapshotFileV1;
+}
+
+function fixture(hooks: CompletionValidationHooks = {}, journalFault?: (eventType: string, stage: string) => void) {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-run-finish-"));
   let run = 0;
   let tick = 0;
@@ -25,6 +35,7 @@ function fixture(hooks: CompletionValidationHooks = {}) {
     createRunId: () => `run-${++run}`,
     now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(),
     completion: hooks,
+    journalFault: journalFault as any,
   });
   return { projectRoot, lifecycle };
 }
@@ -174,6 +185,94 @@ test("terminal settlement intent makes question closure and lease release replay
   assert.equal(operationIds.length, 2);
   assert.equal(operationIds[0], operationIds[1], "retries must reuse the durable idempotency key");
   assert.deepEqual(readWorkflowJournal(f.projectRoot, "session-1").slice(-2).map((event) => event.type), ["run.terminal.prepared", "terminal.recorded"]);
+});
+
+test("fault after question closure but before terminal publication retries one closure and one terminal", async () => {
+  let closureEffects = 0;
+  let failCommit = true;
+  const operationIds: string[] = [];
+  const f = fixture({
+    questions: async () => ({ state: "unsatisfied", issues: ["question pending"], pendingQuestionIds: ["q-1"] }),
+    evidence: async () => ({ state: "satisfied" }),
+    settleTerminal: async (settlement) => {
+      operationIds.push(settlement.operationId);
+      if (closureEffects === 0) closureEffects++;
+      else assert.equal(settlement.operationId, operationIds[0], "closure retry must reconcile the same durable operation");
+    },
+  }, (eventType, stage) => {
+    if (failCommit && eventType === "terminal.recorded" && stage === "beforeRename") {
+      failCommit = false;
+      throw new Error("crash after closure before terminal publication");
+    }
+  });
+  startAndDeliver(f.lifecycle);
+  const failed = { ...request, status: "failed" as const, evidenceRefs: [{ kind: "test", claim: "failure evidence" }] };
+  const first = await f.lifecycle.finish(failed, rootBatch);
+  assert.equal(first.ok, false);
+  assert.match(issuesOf(first), /crash after closure/i);
+  const second = await new WorkflowRunLifecycle(f.lifecycle.options).finish(failed, rootBatch);
+  assert.equal(second.ok, true, issuesOf(second));
+  assert.equal(closureEffects, 1);
+  assert.deepEqual(operationIds, [operationIds[0], operationIds[0]]);
+  assert.equal(readWorkflowJournal(f.projectRoot, "session-1").filter((event) => event.type === "terminal.recorded").length, 1);
+});
+
+test("automatic budget failure persists and settles exact pending question IDs", async () => {
+  const settlements: any[] = [];
+  const f = fixture({
+    questions: async () => ({ state: "unsatisfied", issues: ["pending"], pendingQuestionIds: ["q-budget"] }),
+    settleTerminal: async (settlement) => { settlements.push(settlement); },
+  });
+  f.lifecycle.recordUserInput({ inputId: "budget-input", text: "work", source: "interactive" });
+  const result = await f.lifecycle.failBudgetExhaustion("tokens exhausted");
+  assert.equal(result.ok, true, issuesOf(result));
+  if (!result.ok) return;
+  assert.deepEqual(result.envelope.closedQuestionIds, ["q-budget"]);
+  assert.deepEqual(settlements[0].closedQuestionIds, ["q-budget"]);
+  assert.deepEqual(f.lifecycle.restore().latestRun?.terminal?.closedQuestionIds, ["q-budget"]);
+});
+
+test("budget failure freezes the exact real question set in its preparation CAS for both answer race outcomes and restart", async () => {
+  for (const answerWins of [true, false]) {
+    const projectRoot = mkdtempSync(join(tmpdir(), "hive-budget-question-race-"));
+    const question = new QuestionService({
+      projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: questionSnapshot(), createQuestionId: () => "question-1",
+      authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
+    });
+    let raced = false;
+    let losingAnswerRejected = false;
+    const hooks: CompletionValidationHooks = {
+      questions: () => {
+        const gate = question.completionGate();
+        if (answerWins && !raced) {
+          raced = true;
+          question.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "question-1", expectedState: "pending", value: true, channel: "dashboard", claimedIdentity: "human", credential: "secret", operationId: "answer-before-budget" });
+        }
+        return gate;
+      },
+      validateQuestionSet: (events, expected) => question.assertPendingSet(events, expected),
+      settleTerminal: (settlement) => {
+        if (!answerWins) {
+          try { question.answer({ projectId: "project-1", sessionId: "session-1", runId: "run-1", questionId: "question-1", expectedState: "pending", value: true, channel: "command", claimedIdentity: "human", credential: "secret", operationId: "answer-after-budget" }); }
+          catch { losingAnswerRejected = true; }
+        }
+        question.closePending({ reason: "run failed", operationId: settlement.operationId, expectedQuestionIds: settlement.closedQuestionIds });
+      },
+    } as CompletionValidationHooks;
+    const options = { projectRoot, projectId: "project-1", sessionId: "session-1", snapshotId: "snapshot-1", rootNodeId: "root", createRunId: () => "run-1", completion: hooks };
+    const lifecycle = new WorkflowRunLifecycle(options);
+    lifecycle.recordUserInput({ inputId: "initial", text: "work", source: "interactive" });
+    question.create({ nodeId: "root", definition: { prompt: "Proceed?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: "budget-race" } });
+    const result = await lifecycle.failBudgetExhaustion("tokens exhausted");
+    assert.equal(result.ok, true, issuesOf(result));
+    if (!result.ok) continue;
+    assert.deepEqual(result.envelope.closedQuestionIds, answerWins ? [] : ["question-1"]);
+    assert.equal(question.restore().questions["question-1"].state, answerWins ? "answered" : "closed");
+    assert.equal(losingAnswerRejected, !answerWins);
+    const restarted = await new WorkflowRunLifecycle(options).failBudgetExhaustion("retry");
+    assert.equal(restarted.ok, true, issuesOf(restarted));
+    if (restarted.ok) assert.deepEqual(restarted.envelope, result.envelope);
+  }
 });
 
 test("strict terminal validation runs before append so malformed subsystem records cannot corrupt replay", async () => {

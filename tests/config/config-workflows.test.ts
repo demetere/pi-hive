@@ -196,7 +196,7 @@ test("capability widening quarantines only its workflow while valid definitions 
       assert.equal(valid.result.workflows[0].authority.workflowId, "debug-chat");
       assert.deepEqual(valid.result.workflows[0].authority.nodes.map((node) => node.nodeId), valid.result.workflows[0].team.nodes.map((node) => node.id).sort());
       assert.equal(valid.result.workflows[0].policies.every((policy) => policy.tools.every((tool) => typeof tool === "string")), true);
-      assert.equal(valid.result.workflows[0].policies[0].tools.includes("human_question"), false, "later subsystem tools remain reserved but inactive");
+      assert.equal(valid.result.workflows[0].policies[0].tools.includes("human_question"), true, "W21 activates the question subsystem only for effective human-input authority");
     }
   } finally { valid.fixture.cleanup(); }
 

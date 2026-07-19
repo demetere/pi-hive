@@ -102,6 +102,43 @@ function terminalPayload(status: "completed" | "blocked" | "failed" | "cancelled
   };
 }
 
+test("multiple approval requests and a question wait settle independently by request identity", () => {
+  const approvalA = reduceRunLifecycle(stateWith("running"), event("approval.recorded", {
+    subsystem: "checkpoint-approval", operation: "request", requestId: "approval-a",
+  }, 1, runId, "harness"));
+  const approvalB = reduceRunLifecycle(approvalA, event("approval.recorded", {
+    subsystem: "checkpoint-approval", operation: "request", requestId: "approval-b",
+  }, 2, runId, "harness"));
+  assert.equal(approvalB.latestRun?.status, "waiting_for_human");
+  assert.deepEqual(approvalB.latestRun?.pendingApprovalRequestIds, ["approval-a", "approval-b"]);
+  assert.deepEqual(approvalB.latestRun?.waitCauses, ["approval"]);
+
+  const simultaneous = reduceRunLifecycle(approvalB, event("run.transition", {
+    from: "waiting_for_human", to: "waiting_for_human", reason: "question pending", waitCause: "question", waitOperation: "add",
+  }, 3));
+  assert.deepEqual(simultaneous.latestRun?.waitCauses, ["approval", "question"]);
+
+  const decidedA = reduceRunLifecycle(simultaneous, event("approval.recorded", {
+    subsystem: "checkpoint-approval", operation: "decision", requestId: "approval-a",
+  }, 4, runId, "dashboard"));
+  assert.equal(decidedA.latestRun?.status, "waiting_for_human");
+  assert.deepEqual(decidedA.latestRun?.pendingApprovalRequestIds, ["approval-b"]);
+  assert.deepEqual(decidedA.latestRun?.waitCauses, ["approval", "question"]);
+
+  const answered = reduceRunLifecycle(decidedA, event("run.transition", {
+    from: "waiting_for_human", to: "waiting_for_human", reason: "question answered", waitCause: "question", waitOperation: "remove",
+  }, 5));
+  assert.equal(answered.latestRun?.status, "waiting_for_human");
+  assert.deepEqual(answered.latestRun?.waitCauses, ["approval"]);
+
+  const approved = reduceRunLifecycle(answered, event("approval.recorded", {
+    subsystem: "checkpoint-approval", operation: "decision", requestId: "approval-b",
+  }, 6, runId, "dashboard"));
+  assert.equal(approved.latestRun?.status, "running");
+  assert.deepEqual(approved.latestRun?.pendingApprovalRequestIds, []);
+  assert.deepEqual(approved.latestRun?.waitCauses, []);
+});
+
 test("run reducer rejects ordinary transitions once cancellation or terminal settlement begins", () => {
   const cancelling = { ...stateWith("running"), latestRun: { ...stateWith("running").latestRun!, cancellationRequested: true } };
   assert.throws(() => reduceRunLifecycle(cancelling, event("run.transition", { from: "running", to: "paused", resumeStatus: "running", pauseState: {} })), /cancel|immutable|final/i);
@@ -129,6 +166,18 @@ test("run reducer enforces authoritative producers and cancellation/delivery ter
   const cancelling = { ...stateWith("running"), latestRun: { ...stateWith("running").latestRun!, cancellationRequested: true } };
   assert.throws(() => reduceRunLifecycle(cancelling, event("terminal.recorded", terminalPayload("completed"), 1, runId, "harness")), /cancel/i);
   assert.equal(reduceRunLifecycle(cancelling, event("terminal.recorded", terminalPayload("cancelled"), 1, runId, "harness")).latestRun?.status, "cancelled");
+});
+
+test("cancelled terminal replay must equal the question set frozen by cancellation", () => {
+  const cancelling = {
+    ...stateWith("running"),
+    latestRun: { ...stateWith("running").latestRun!, cancellationRequested: true, cancellationQuestionIds: ["q-frozen"] },
+  };
+  assert.throws(
+    () => reduceRunLifecycle(cancelling, event("terminal.recorded", { ...terminalPayload("cancelled"), closedQuestionIds: [] }, 1, runId, "harness")),
+    /question|closure|cancel|frozen|match/i,
+  );
+  assert.equal(reduceRunLifecycle(cancelling, event("terminal.recorded", { ...terminalPayload("cancelled"), closedQuestionIds: ["q-frozen"] }, 1, runId, "harness")).latestRun?.status, "cancelled");
 });
 
 test("terminal envelopes are strictly and semantically validated during replay", () => {
