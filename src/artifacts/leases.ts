@@ -60,6 +60,10 @@ export type WorkspaceLeaseAcquireResult =
 export type WorkspaceLeaseView =
   | Readonly<{ state: "available" }>
   | Readonly<{ state: "owned"; runId: string; heartbeatAt: string; expiresAt: string }>;
+export interface WorkspaceLeaseRunIdentity {
+  readonly sessionId: string;
+  readonly runId: string;
+}
 
 function id(value: string, label: string): string {
   if (!value || Buffer.byteLength(value, "utf8") > 256 || value.includes("/") || value.includes("\\") || value.includes("\0")) throw new Error(`${label} is invalid`);
@@ -157,6 +161,36 @@ export function inspectWorkspaceLease(projectRoot: string, adapterId: string, wo
   if (!owner) return Object.freeze({ state: "available" });
   // Expiry alone does not publish availability: acquisition must also prove death.
   return Object.freeze({ state: "owned", runId: owner.runId, heartbeatAt: owner.heartbeatAt, expiresAt: owner.expiresAt });
+}
+
+function assertRunLeaseOwner(path: string, identity: WorkspaceLeaseRunIdentity, now: number): void {
+  const owner = readLease(path);
+  if (!owner || owner.sessionId !== identity.sessionId || owner.runId !== identity.runId || now >= Date.parse(owner.expiresAt)) {
+    throw new Error("Current run does not own the fresh artifact writer lease");
+  }
+}
+
+/**
+ * Serialize an approval/hash validation with artifact mutations, while proving
+ * that the exact session/run still owns a fresh writer lease. This intentionally
+ * reveals no owner nonce to dashboard/control callers.
+ */
+export async function withWorkspaceLeaseRunValidation<T>(
+  projectRoot: string,
+  adapterId: string,
+  workspaceId: string,
+  identity: WorkspaceLeaseRunIdentity,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  id(adapterId, "Artifact lease adapter ID"); id(workspaceId, "Artifact lease workspace ID");
+  id(identity.sessionId, "Artifact lease session ID"); id(identity.runId, "Artifact lease run ID");
+  const path = leasePath(projectRoot, adapterId, workspaceId);
+  return withCrossProcessFileLockAsync(`${path}.mutation`, async () => {
+    withLeaseLock(path, () => assertRunLeaseOwner(path, identity, Date.now()));
+    const result = await callback();
+    withLeaseLock(path, () => assertRunLeaseOwner(path, identity, Date.now()));
+    return result;
+  }, { timeoutMs: WORKSPACE_LEASE_TIMING.lockTimeoutMs, staleMs: WORKSPACE_LEASE_TIMING.lockStaleMs });
 }
 
 export class WorkspaceLeaseRuntime {

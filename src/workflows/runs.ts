@@ -9,6 +9,7 @@ import { replayWorkflowJournal } from "./replay";
 import { restoreHandoffState } from "./handoff";
 import { validateArtifactWorkspaceBinding } from "../artifacts/contracts";
 import type { ArtifactWorkspaceBinding } from "../artifacts/types";
+import { validateRunCheckpointSnapshot, type RunCheckpointSnapshotV1 } from "../artifacts/checkpoints";
 
 export const RUN_LIFECYCLE_FORMAT_VERSION = 1 as const;
 export const CANCELLATION_TIMING = Object.freeze({ settleGraceMs: 2_000, killSettleMs: 1_000, coordinatorStepMs: 2_000 });
@@ -99,6 +100,8 @@ export interface WorkflowRunRecord {
   readonly handoffPacketHash?: string;
   /** Trusted adapter workspace selected once and durably bound by run.started. */
   readonly artifactWorkspace?: ArtifactWorkspaceBinding;
+  /** Effective required/optional set frozen atomically into run.started. */
+  readonly checkpointSnapshot?: RunCheckpointSnapshotV1;
   readonly inputs: readonly RunInputRecord[];
   readonly deliveredThrough: number;
   readonly pendingDelivery?: PendingInputDelivery;
@@ -151,6 +154,12 @@ export interface CompletionValidationHooks {
   readonly settleTerminal?: (settlement: TerminalSettlementRequest) => void | Promise<void>;
 }
 
+export interface RunCheckpointSnapshotProvider {
+  create(runId: string, startedAt: string): RunCheckpointSnapshotV1;
+  /** Recheck remembered defaults under the run.started journal append lock. */
+  validate(snapshot: RunCheckpointSnapshotV1, events: readonly WorkflowEventEnvelope[]): void;
+}
+
 export interface WorkflowRunLifecycleOptions {
   readonly projectRoot: string;
   readonly projectId: string;
@@ -166,6 +175,8 @@ export interface WorkflowRunLifecycleOptions {
   readonly onRunStarted?: (runId: string, startedAt: string) => void;
   /** Synchronous, side-effect-free binding factory; W16 uses it for none's logical record. */
   readonly createArtifactWorkspace?: (runId: string, startedAt: string) => ArtifactWorkspaceBinding;
+  /** Generic checkpoint policy snapshot frozen by the same event that creates the run. */
+  readonly checkpointSnapshots?: RunCheckpointSnapshotProvider;
   /** Synchronous projection hook after durable open-state transitions. */
   readonly onRunStatusChanged?: (runId: string, status: OpenRunStatus, timestamp: string) => void;
   /** Fault-injection seam used to verify durable journal publication recovery. */
@@ -314,17 +325,34 @@ export function reduceRunLifecycle(state: RunLifecycleState, event: WorkflowEven
     const handoffPacketHash = payload.handoffPacketHash;
     if (handoffPacketHash !== undefined && (typeof handoffPacketHash !== "string" || !/^[0-9a-f]{64}$/u.test(handoffPacketHash))) throw new Error("Run handoff packet hash is invalid");
     const artifactWorkspace = payload.artifactWorkspace === undefined ? undefined : validateArtifactWorkspaceBinding(payload.artifactWorkspace);
+    const checkpointSnapshot = payload.checkpointSnapshot === undefined ? undefined : validateRunCheckpointSnapshot(payload.checkpointSnapshot);
+    if (checkpointSnapshot && checkpointSnapshot.runId !== event.runId) throw new Error("Run checkpoint snapshot identity mismatch");
     const run: WorkflowRunRecord = {
       runId: event.runId,
       status: "running",
       startedAt: event.timestamp,
       ...(handoffPacketHash === undefined ? {} : { handoffPacketHash }),
       ...(artifactWorkspace === undefined ? {} : { artifactWorkspace }),
+      ...(checkpointSnapshot === undefined ? {} : { checkpointSnapshot }),
       inputs: [input],
       deliveredThrough: 0,
       cancellationRequested: false,
     };
     return freezeRun(state, run, { inputId: input.inputId, runId: event.runId, input });
+  }
+
+  if (event.type === "approval.recorded" && payload.subsystem === "checkpoint-approval" && (payload.operation === "request" || payload.operation === "decision")) {
+    const run = requireCurrentRun(state, event);
+    if (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Checkpoint approval cannot change a terminal, cancelling, or finalizing run");
+    if (payload.operation === "request") {
+      if (event.producer !== "harness" || run.status !== "running") throw new Error("Checkpoint approval request lacks harness authority or a running run");
+      return freezeRun(state, { ...run, status: "waiting_for_human" });
+    }
+    if (payload.operation === "decision") {
+      if ((event.producer !== "dashboard" && event.producer !== "harness") || run.status !== "waiting_for_human") throw new Error("Checkpoint decision lacks human control authority or a waiting run");
+      return freezeRun(state, { ...run, status: "running" });
+    }
+    throw new Error("Checkpoint approval operation is unsupported");
   }
 
   if (event.type === "artifact.recorded" && payload.subsystem === "workspace" && payload.operation === "bind") {
@@ -734,13 +762,15 @@ export class WorkflowRunLifecycle {
       const stagedHandoff = restoreHandoffState(eventsAtInput).staged;
       const artifactWorkspace = this.options.createArtifactWorkspace?.(runId, now);
       if (artifactWorkspace) validateArtifactWorkspaceBinding(artifactWorkspace);
+      const checkpointSnapshot = this.options.checkpointSnapshots?.create(runId, now);
+      if (checkpointSnapshot) validateRunCheckpointSnapshot(checkpointSnapshot);
       try {
         appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
           projectId: this.options.projectId,
           sessionId: this.options.sessionId,
           runId,
           type: "run.started",
-          payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, input: record, ...(stagedHandoff ? { handoffPacketHash: stagedHandoff.packetHash } : {}), ...(artifactWorkspace ? { artifactWorkspace } : {}) }),
+          payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, input: record, ...(stagedHandoff ? { handoffPacketHash: stagedHandoff.packetHash } : {}), ...(artifactWorkspace ? { artifactWorkspace } : {}), ...(checkpointSnapshot ? { checkpointSnapshot } : {}) }),
           producer: "runtime",
           timestamp: now,
         }), (existing) => {
@@ -749,6 +779,7 @@ export class WorkflowRunLifecycle {
           if (locked.latestRun && isOpenRunStatus(locked.latestRun.status)) throw new Error("Workflow session already has an open run");
           const lockedHandoff = restoreHandoffState(existing).staged;
           if (lockedHandoff?.packetHash !== stagedHandoff?.packetHash) throw new Error("Staged handoff changed before atomic run creation");
+          if (checkpointSnapshot) this.options.checkpointSnapshots?.validate(checkpointSnapshot, existing);
         });
       } catch (error) {
         const concurrent = this.restore().inputAssignments?.[input.inputId];
