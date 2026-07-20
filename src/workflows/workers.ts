@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
+import type { SnapshotNodeToolPolicy } from "../capabilities/runtime-policy";
 import { canonicalJson } from "../config/snapshot-canonical";
 import { resolveProjectPath } from "../core/safe-path";
 import {
@@ -42,6 +43,8 @@ import {
 export interface WorkerSessionFactoryInput {
   readonly sessionId: string; readonly runId: string; readonly nodeId: string; readonly agentId: string;
   readonly modelId: string; readonly thinking: string; readonly transcriptPath: string; readonly tools: readonly string[];
+  /** Pre-execution policy for every direct/re-enabled generic filesystem or Bash call in this linked node session. */
+  readonly toolPolicy?: SnapshotNodeToolPolicy;
 }
 export interface WorkerPromptTaskContract {
   readonly taskId: string; readonly runId: string; readonly parentNodeId: string; readonly targetNodeId: string;
@@ -128,6 +131,8 @@ export interface WorkerSessionPoolOptions {
   readonly dispatchModel?: WorkerModelDispatcher;
   readonly dispatchTool?: <T>(task: PersistedDelegationTask, input: WorkerTrustedToolDispatchRequest<T>) => Promise<T>;
   readonly questions?: Pick<QuestionService, "pendingForTask" | "prepareTaskAnswerDeliveries" | "preparedTaskAnswerDeliveries" | "recordTaskAnswerDeliveryReceipt" | "taskAnswerDeliveryReturnedByTool" | "acceptTaskAnswerDelivery" | "markTaskConsumerReplaySettled">;
+  readonly knowledgeIndex?: (nodeId: string) => readonly DynamicPromptInput[];
+  readonly toolPolicyForNode?: (nodeId: string) => SnapshotNodeToolPolicy;
 }
 export type WorkerExecutionResult = WorkerResultInput
   | Readonly<{ status: "suspended"; dependencyTaskIds?: readonly string[]; questionIds?: readonly string[] }>
@@ -248,6 +253,7 @@ export function deriveWorkerPromptContext(
   deliveredResults: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[] = [],
   sessionId = task.runId,
   acceptedAnswers: readonly AcceptedQuestionForTask[] = [],
+  knowledgeIndex: readonly DynamicPromptInput[] = [],
 ): WorkerPromptContext {
   const workflow = snapshot.payload.workflow;
   const team = plainRecord(workflow.team) ? workflow.team : undefined;
@@ -317,6 +323,7 @@ export function deriveWorkerPromptContext(
     sessionId,
     runId: task.runId,
     task: { taskId: task.taskId, parentNodeId: task.parentNodeId, objective: task.objective, deliverables: task.deliverables, refs: promptRefs },
+    knowledgeIndex,
   });
   assertLosslessDynamicPromptInputs(assembled, answerPromptInputs);
   return deepFreeze({
@@ -347,13 +354,14 @@ function selectTaskAnswerPromptPage(
   deliveredResults: readonly Readonly<{ taskId: string; result: PersistedWorkerResult }>[],
   sessionId: string,
   prepared: readonly TaskQuestionAnswerDelivery[],
+  knowledgeIndex: readonly DynamicPromptInput[],
 ): Readonly<{ deliveries: readonly TaskQuestionAnswerDelivery[]; promptContext: WorkerPromptContext }> {
   const selected: TaskQuestionAnswerDelivery[] = [];
-  let promptContext = deriveWorkerPromptContext(snapshot, task, deliveredResults, sessionId);
+  let promptContext = deriveWorkerPromptContext(snapshot, task, deliveredResults, sessionId, [], knowledgeIndex);
   for (const delivery of prepared) {
     try {
       const candidate = [...selected, delivery];
-      promptContext = deriveWorkerPromptContext(snapshot, task, deliveredResults, sessionId, candidate.flatMap((entry) => entry.answers));
+      promptContext = deriveWorkerPromptContext(snapshot, task, deliveredResults, sessionId, candidate.flatMap((entry) => entry.answers), knowledgeIndex);
       selected.push(delivery);
     } catch (error) {
       if (!selected.length || !String(error instanceof Error ? error.message : error).includes("Authority-relevant prompt data was omitted or truncated")) throw error;
@@ -412,6 +420,7 @@ export class WorkerSessionPool {
         thinking: config.thinking,
         transcriptPath,
         tools: config.tools,
+        ...(this.options.toolPolicyForNode ? { toolPolicy: this.options.toolPolicyForNode(task.targetNodeId) } : {}),
       });
       if (!session?.linkedSessionId || typeof session.prompt !== "function" || typeof session.dispose !== "function") throw new Error("Invalid linked worker session");
       if (this.closed) {
@@ -448,7 +457,7 @@ export class WorkerSessionPool {
       runWithToolRuntime: <T>(callback: () => T): T => services.runWithToolRuntime(callback),
     }) satisfies WorkerDelegationServices : undefined;
     const preparedAnswerDeliveries: readonly TaskQuestionAnswerDelivery[] = this.options.questions?.prepareTaskAnswerDeliveries(task.taskId) ?? [];
-    const answerPage = selectTaskAnswerPromptPage(this.options.snapshot, task, deliveredResults, this.options.sessionId, preparedAnswerDeliveries);
+    const answerPage = selectTaskAnswerPromptPage(this.options.snapshot, task, deliveredResults, this.options.sessionId, preparedAnswerDeliveries, this.options.knowledgeIndex?.(task.targetNodeId) ?? []);
     const answerDeliveries = answerPage.deliveries;
     const promptContext = answerPage.promptContext;
     const promptHash = createHash("sha256").update(promptContext.assembledPrompt).digest("hex");

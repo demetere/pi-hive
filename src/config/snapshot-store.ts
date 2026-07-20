@@ -233,7 +233,7 @@ function requireCanonicalEquality(actual: unknown, expected: unknown, label: str
 }
 function validatePayload(value: unknown): void {
   const payload = record(value, "payload");
-  exactKeys(payload, ["versions", "project", "workflow", "agents", "skills", "knowledge", "authority", "models", "sources"], [], "payload");
+  exactKeys(payload, ["versions", "project", "workflow", "agents", "skills", "knowledge", "authority", "models", "sources"], ["subsystems"], "payload");
   const versions = record(payload.versions, "versions");
   exactKeys(versions, ["snapshot", "packageContract", "schema", "capability", "catalogHash", "artifact", "contextPolicy", "package"], [], "versions");
   safeInteger(versions.snapshot, "versions.snapshot", true); safeInteger(versions.schema, "versions.schema", true); safeInteger(versions.capability, "versions.capability", true);
@@ -290,6 +290,25 @@ function validatePayload(value: unknown): void {
     stringArray(dependency.attachedNodeIds, `knowledge[${index}].attachedNodeIds`);
   }
   uniqueIds(knowledgeIds, "knowledge");
+  for (const [index, entry] of payload.knowledge.entries()) {
+    const dependency = entry as Record<string, unknown>;
+    const expectedAttachedNodeIds = [...workflowCoverage.nodes.entries()]
+      .filter(([, node]) => node.knowledge.includes(dependency.id as string))
+      .map(([nodeId]) => nodeId)
+      .sort();
+    const actualAttachedNodeIds = dependency.attachedNodeIds as string[];
+    if (new Set(actualAttachedNodeIds).size !== actualAttachedNodeIds.length
+      || canonicalJson(actualAttachedNodeIds) !== canonicalJson(expectedAttachedNodeIds)) {
+      throw new Error(`Snapshot knowledge[${index}].attachedNodeIds diverges from frozen workflow attachments.`);
+    }
+  }
+  let knowledgeAvailable = false;
+  if (payload.subsystems !== undefined) {
+    const subsystems = record(payload.subsystems, "subsystems");
+    exactKeys(subsystems, ["knowledge"], [], "subsystems");
+    if (typeof subsystems.knowledge !== "boolean") throw new Error("Snapshot subsystems.knowledge must be boolean.");
+    knowledgeAvailable = subsystems.knowledge;
+  }
   const authority = record(payload.authority, "authority");
   exactKeys(authority, ["capabilityContractVersion", "nodes"], [], "authority");
   safeInteger(authority.capabilityContractVersion, "authority.capabilityContractVersion", true);
@@ -303,7 +322,7 @@ function validatePayload(value: unknown): void {
     validateSerializedEffectiveAuthorityNodeV1(entry, {
       rootNodeId: workflowCoverage.rootNodeId,
       directMemberIds: workflowCoverage.directMembers.get(nodeIdForContext) ?? [],
-      subsystems: { artifact: workflowCoverage.artifactAvailable, artifactActions: workflowCoverage.artifactActionsAvailable, knowledge: false, questions: true },
+      subsystems: { artifact: workflowCoverage.artifactAvailable, artifactActions: workflowCoverage.artifactActionsAvailable, knowledge: knowledgeAvailable, questions: true },
     });
     const workflowNode = workflowCoverage.nodes.get(nodeIdForContext);
     const ceiling = workflowNode ? agentCapabilityCeilings.get(workflowNode.agentId) : undefined;

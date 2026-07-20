@@ -5,7 +5,7 @@ import type { JsonValue } from "../config/types";
 import { issueEffectiveAuthorityFromResolvedPolicies, type EffectiveAuthoritySnapshotV1 } from "../config/snapshot-authority";
 import { resolveCapabilityOverlay } from "./policy";
 import { deriveNodeTools } from "./tools";
-import type { CapabilityDeclaration, CapabilityIssue, EffectiveNodePolicy } from "./types";
+import { CAPABILITY_POLICY_LIMITS, type CapabilityDeclaration, type CapabilityIssue, type EffectiveNodePolicy } from "./types";
 
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function explicit(...values: Array<string | undefined>): string | undefined { return values.find((value) => value !== undefined && value !== "inherit"); }
@@ -45,10 +45,18 @@ export interface ResolveEffectiveNodePolicyInput {
 export interface ResolveEffectiveNodePolicyResult { readonly ok: boolean; readonly policy?: EffectiveNodePolicy; readonly issues: readonly CapabilityIssue[] }
 
 export function resolveEffectiveNodePolicy(input: ResolveEffectiveNodePolicyInput): ResolveEffectiveNodePolicyResult {
-  const resolved = resolveCapabilityOverlay(input.ceiling, input.overlay);
-  if (!resolved.ok || !resolved.policy || !resolved.provenance) return Object.freeze({ ok: false, issues: resolved.issues });
   const directMemberIds = frozenSorted(input.directMembers);
   const skills = frozenSorted(input.skills), knowledge = frozenSorted(input.knowledge);
+  if (knowledge.length > CAPABILITY_POLICY_LIMITS.attachmentValues) return Object.freeze({
+    ok: false,
+    issues: Object.freeze([Object.freeze({
+      code: "CAPABILITY_VALUE_INVALID" as const,
+      group: "knowledge" as const,
+      message: `Effective knowledge attachments exceed the normalized limit of ${CAPABILITY_POLICY_LIMITS.attachmentValues}.`,
+    })]),
+  });
+  const resolved = resolveCapabilityOverlay(input.ceiling, input.overlay);
+  if (!resolved.ok || !resolved.policy || !resolved.provenance) return Object.freeze({ ok: false, issues: resolved.issues });
   const tools = deriveNodeTools({ capabilities: resolved.policy, root: input.root, directMemberIds, artifactAvailable: input.artifactAvailable ?? false, artifactActionsAvailable: input.artifactActionsAvailable ?? false, knowledgeAvailable: input.knowledgeAvailable ?? false, knowledgeAttached: knowledge.length > 0, questionsAvailable: input.questionsAvailable ?? false });
   const model = explicit(input.root ? input.persistedRootModel : undefined, input.nodeModel, input.agentModel, input.projectModel);
   const thinking = explicit(input.root ? input.persistedRootThinking : undefined, input.nodeThinking, input.agentThinking, input.projectThinking);

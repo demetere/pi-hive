@@ -347,6 +347,8 @@ test-node-compat:
     tests/config/config-workflows.test.ts \
     tests/config/config-yaml.test.ts \
     tests/dashboard/dashboard-event-ring.test.ts \
+    tests/knowledge/knowledge-search.test.ts \
+    tests/knowledge/okf-provider.test.ts \
     tests/orchestration/governance.test.ts \
     tests/core/limits.test.ts \
     tests/core/project-identity.test.ts \

@@ -4,6 +4,7 @@ import { CatalogAggregateLimitError } from "./catalog-budget";
 import { CONFIG_CATALOG_LIMITS, type AgentCatalogNode, type CatalogDependencyEdge } from "./catalog-types";
 import { createDiagnosticCollector, sourceRange, type ConfigDiagnostic, type ConfigDiagnosticCode } from "./diagnostics";
 import { loadKnowledgeCatalog, type KnowledgeCatalogNode, type KnowledgeLoadOperations } from "./knowledge";
+import { createBuiltInKnowledgeProviderRegistry, type KnowledgeProviderRegistry } from "../knowledge/provider";
 import type { ConfiguredProject } from "./manifest";
 import { loadSkillCatalog, type SkillCatalogNode, type SkillLoadOperations } from "./skills";
 
@@ -35,6 +36,7 @@ export interface CatalogLoadOperations {
   agents?: AgentLoadOperations;
   skills?: SkillLoadOperations;
   knowledge?: KnowledgeLoadOperations;
+  knowledgeProviders?: KnowledgeProviderRegistry;
 }
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function dependencyDiagnostic(code: "CATALOG_DEPENDENCY_MISSING" | "CATALOG_DEPENDENCY_FAILED", edge: CatalogDependencyEdge): ConfigDiagnostic {
@@ -77,14 +79,17 @@ export function buildCatalogSummary(nodes: readonly (AgentCatalogNode | SkillCat
 export function loadConfigCatalogs(project: ConfiguredProject, operations: CatalogLoadOperations = {}): ConfigCatalogResult {
   let consumed = 0;
   let exhausted = false;
-  const budgetedRead = (read: ((path: string) => Uint8Array) | undefined, path: string): Uint8Array => {
-    if (exhausted) throw new CatalogAggregateLimitError();
-    const value = read?.(path) ?? readFileSync(path);
-    if (consumed + value.byteLength > CONFIG_CATALOG_LIMITS.aggregateContentBytes) {
+  const reserveContentBytes = (bytes: number): void => {
+    if (exhausted || !Number.isSafeInteger(bytes) || bytes < 0 || consumed + bytes > CONFIG_CATALOG_LIMITS.aggregateContentBytes) {
       exhausted = true;
       throw new CatalogAggregateLimitError();
     }
-    consumed += value.byteLength;
+    consumed += bytes;
+  };
+  const budgetedRead = (read: ((path: string) => Uint8Array) | undefined, path: string): Uint8Array => {
+    if (exhausted) throw new CatalogAggregateLimitError();
+    const value = read?.(path) ?? readFileSync(path);
+    reserveContentBytes(value.byteLength);
     return value;
   };
   const agentResult = loadAgentCatalog(project, {
@@ -98,10 +103,29 @@ export function loadConfigCatalogs(project: ConfiguredProject, operations: Catal
   const knowledgeResult = loadKnowledgeCatalog(project, agentResult.agents, operations.knowledge);
   let agents = [...agentResult.agents];
   const skills = skillResult.skills;
-  let knowledge = [...knowledgeResult.knowledge];
-  const edges = [...agentResult.edges, ...knowledgeResult.edges].sort((a, b) => compare(`${a.from}\0${a.target}`, `${b.from}\0${b.target}`));
   const collector = createDiagnosticCollector();
+  const knowledgeProviders = operations.knowledgeProviders ?? createBuiltInKnowledgeProviderRegistry();
   for (const diagnostic of [...agentResult.diagnostics, ...skillResult.diagnostics, ...knowledgeResult.diagnostics]) collector.add(diagnostic);
+  let knowledge = knowledgeResult.knowledge.map((node): KnowledgeCatalogNode => {
+    if (node.status !== "available") return node;
+    const registry = project.registries.knowledge.find((entry) => entry.id === node.id);
+    if (!registry?.projectPath) return { kind: "knowledge", id: node.id, status: "failed", diagnosticCodes: ["KNOWLEDGE_BUNDLE_INVALID"], updates: node.updates, ...(node.owner ? { owner: node.owner } : {}) };
+    const loaded = knowledgeProviders.load({
+      projectRoot: project.projectRoot,
+      declaration: { id: node.id, providerId: registry.declaredData.provider, path: registry.projectPath, updatePolicy: node.updates, ...(node.owner ? { ownerAgentId: node.owner } : {}) },
+      reserveContentBytes,
+    });
+    if (!loaded.ok || !loaded.bundle) {
+      collector.add({
+        code: "KNOWLEDGE_BUNDLE_INVALID", severity: "error",
+        message: `The knowledge bundle is invalid (${loaded.diagnostics.slice(0, 8).map((item) => item.code).join(",") || "validation failed"}).`,
+        source: project.manifestSource, range: registry.sourceRange, resourceId: node.id,
+      });
+      return { kind: "knowledge", id: node.id, status: "failed", diagnosticCodes: ["KNOWLEDGE_BUNDLE_INVALID"], updates: node.updates, ...(node.owner ? { owner: node.owner } : {}) };
+    }
+    return { ...node, fingerprint: loaded.bundle.contentHash, entryCount: loaded.bundle.documents.length, metadataBytes: loaded.bundle.totalBytes };
+  });
+  const edges = [...agentResult.edges, ...knowledgeResult.edges].sort((a, b) => compare(`${a.from}\0${a.target}`, `${b.from}\0${b.target}`));
   const statusByNode = new Map<string, "available" | "failed">();
   for (const node of agents) statusByNode.set(`agent:${node.id}`, node.status);
   for (const node of skills) statusByNode.set(`skill:${node.id}`, node.status);
