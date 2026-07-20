@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -355,23 +355,28 @@ test("GNU recursive and dereference aliases are executable-supported but fail po
   }
 });
 
-test("rg hostname helpers execute in the real binary but fail policy closed in separate and attached forms", () => {
-  const root = mkdtempSync(join(tmpdir(), "hive-command-rg-hostname-"));
-  const workspace = join(root, "workspace");
-  const marker = join(root, "hostname-bin-ran");
-  mkdirSync(workspace);
-  writeFileSync(join(workspace, "needle.txt"), "W22-RG-HOSTNAME-MARKER\n");
-  writeFileSync(join(root, "hostname-bin"), `#!/bin/sh\nprintf hostname > '${marker}'\n`, { mode: 0o755 });
-
-  assert.doesNotThrow(() => execFileSync("rg", [
-    "--hostname-bin", "./hostname-bin", "--hyperlink-format", "file://{host}{path}:{line}", "--color=always",
-    "W22-RG-HOSTNAME-MARKER", "workspace",
-  ], { cwd: root, stdio: "ignore" }));
-  assert.equal(readFileSync(marker, "utf8"), "hostname", "the regression must prove ripgrep launched the configured executable");
+test("rg hostname helpers fail policy closed in separate and attached forms", async (t) => {
   for (const command of [
     "rg --hostname-bin ./hostname-bin --hyperlink-format 'file://{host}{path}:{line}' --color=always W22-RG-HOSTNAME-MARKER workspace",
     "rg --hostname-bin=./hostname-bin --hyperlink-format 'file://{host}{path}:{line}' --color=always W22-RG-HOSTNAME-MARKER workspace",
   ]) assert.equal(analyzeCommand(command).valid, false, command);
+
+  const ripgrepProbe = spawnSync("rg", ["--version"], { stdio: "ignore" });
+  const ripgrepMissing = (ripgrepProbe.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+  await t.test("real ripgrep executes the hostname helper when installed", { skip: ripgrepMissing ? "ripgrep is not installed" : false }, () => {
+    const root = mkdtempSync(join(tmpdir(), "hive-command-rg-hostname-"));
+    const workspace = join(root, "workspace");
+    const marker = join(root, "hostname-bin-ran");
+    mkdirSync(workspace);
+    writeFileSync(join(workspace, "needle.txt"), "W22-RG-HOSTNAME-MARKER\n");
+    writeFileSync(join(root, "hostname-bin"), `#!/bin/sh\nprintf hostname > '${marker}'\n`, { mode: 0o755 });
+
+    assert.doesNotThrow(() => execFileSync("rg", [
+      "--hostname-bin", "./hostname-bin", "--hyperlink-format", "file://{host}{path}:{line}", "--color=always",
+      "W22-RG-HOSTNAME-MARKER", "workspace",
+    ], { cwd: root, stdio: "ignore" }));
+    assert.equal(readFileSync(marker, "utf8"), "hostname", "the regression must prove ripgrep launched the configured executable");
+  });
 });
 
 test("sed permits proven inline substitutions and rejects hidden read, write, execute, and script effects", () => {
