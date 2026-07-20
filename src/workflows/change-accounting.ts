@@ -370,7 +370,7 @@ export class ChangeAccountingRuntime {
   beginCommandAttempt(attemptId: string, metadata: CommandAttemptMetadata): CommandMutationIntent {
     if (!isTrustedCommandAttemptMetadata(metadata) || !metadata.valid || !metadata.mutating) throw new Error("Command change accounting requires trusted valid mutating metadata");
     const id = boundedId(attemptId, "Command change attempt ID");
-    const paths = [...new Set(metadata.effects.flatMap((effect) => effect.path === "." ? [] : [normalizedPath(effect.path)]))];
+    const paths = [...new Set(metadata.effects.flatMap((effect) => effect.operation === "read" || effect.path === "." ? [] : [normalizedPath(effect.path)]))];
     const effect = metadata.git ? "git" : "shell";
     this.append("change.command.started", { attemptId: id, effect, paths });
     const command = this.restore().commandAttempts[id];

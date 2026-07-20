@@ -144,7 +144,7 @@ export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: Con
       catalogs,
       artifactAvailable: resolvedArtifact !== undefined,
       artifactActionsAvailable: Boolean(resolvedArtifact?.adapter.executeAction && resolvedArtifact.profile.actions.length),
-      knowledgeAvailable: false,
+      knowledgeAvailable: true,
       questionsAvailable: true,
       projectModel: project.manifest.settings?.defaults?.agent?.model,
       projectThinking: project.manifest.settings?.defaults?.agent?.thinking,

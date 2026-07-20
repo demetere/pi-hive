@@ -13,6 +13,7 @@ import type { HandoffPacket } from "./handoff";
 import type { WorkerTrustedDispatch } from "./workers";
 import { boundedJson } from "./values";
 import { QUESTION_LIMITS, normalizeQuestionDefinition } from "./question-validation";
+import { KNOWLEDGE_IDENTITY_LIMITS } from "../knowledge/types";
 
 export const TOOL_CONTRACT_VERSION = "pi-hive-prompt-tool-contract-v1" as const;
 export const TOOL_CONTRACT_LIMITS = Object.freeze({
@@ -110,6 +111,17 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     arguments: Type.Record(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters }), Type.Unknown()),
     expectedWorkspaceHash: Type.Optional(Type.String({ pattern: "^sha256:[0-9a-f]{64}$", maxLength: 71 })),
   }, strict),
+  knowledge_search: Type.Object({
+    query: Type.String({ minLength: 1, maxLength: 4_096 }),
+    bundleIds: Type.Optional(Type.Array(Id, { maxItems: 128, uniqueItems: true })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TOOL_CONTRACT_LIMITS.pageSize })),
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048, pattern: "^[A-Za-z0-9_-]+$" })),
+  }, strict),
+  knowledge_read: Type.Object({
+    bundleId: Id,
+    documentId: Type.String({ minLength: 1, maxLength: KNOWLEDGE_IDENTITY_LIMITS.documentIdBytes }),
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048, pattern: "^[A-Za-z0-9_-]+$" })),
+  }, strict),
   human_question: Type.Union([
     Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("single"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), required: Type.Boolean() }, strict),
     Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("multi"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), validation: Type.Optional(QuestionMultiValidation), required: Type.Boolean() }, strict),
@@ -143,6 +155,8 @@ export interface WorkflowToolRuntimeBindingInput {
   readonly workflowStatus: (input: WorkflowStatusRequest) => WorkflowStatusPage;
   readonly artifactStatus?: (input: { readonly limit?: number; readonly cursor?: string }, signal?: AbortSignal) => Promise<unknown>;
   readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expectedWorkspaceHash?: string }, attemptId: string, signal?: AbortSignal) => Promise<unknown>;
+  readonly knowledgeSearch?: (input: { readonly query: string; readonly bundleIds?: readonly string[]; readonly limit?: number; readonly cursor?: string }, attemptId: string) => unknown;
+  readonly knowledgeRead?: (input: { readonly bundleId: string; readonly documentId: string; readonly cursor?: string }, attemptId: string) => unknown;
   readonly question?: (input: unknown, toolCallId: string, signal?: AbortSignal, batchCallIds?: readonly string[]) => Promise<unknown>;
   readonly finish: (input: unknown, toolBatch: readonly string[]) => Promise<unknown>;
 }
@@ -155,6 +169,8 @@ export interface WorkflowToolRuntimeBinding {
   readonly workflowStatus: WorkflowToolRuntimeBindingInput["workflowStatus"];
   readonly artifactStatus?: WorkflowToolRuntimeBindingInput["artifactStatus"];
   readonly artifactAction?: WorkflowToolRuntimeBindingInput["artifactAction"];
+  readonly knowledgeSearch?: WorkflowToolRuntimeBindingInput["knowledgeSearch"];
+  readonly knowledgeRead?: WorkflowToolRuntimeBindingInput["knowledgeRead"];
   readonly question?: WorkflowToolRuntimeBindingInput["question"];
   readonly finish: WorkflowToolRuntimeBindingInput["finish"];
 }
@@ -211,6 +227,15 @@ function assertByteBounds(name: GenericWorkflowToolName, input: Record<string, u
     assertUtf8(input.actionId, "artifact_action actionId", TOOL_CONTRACT_LIMITS.idBytes);
     boundedJson(input.arguments, "artifact_action arguments", { bytes: 65_536, depth: 16, nodes: 4_096, rootRecord: true });
     if (input.expectedWorkspaceHash !== undefined) assertUtf8(input.expectedWorkspaceHash, "artifact_action expectedWorkspaceHash", 71);
+  }
+  if (name === "knowledge_search") {
+    assertUtf8(input.query, "knowledge_search query", 4_096);
+    for (const [index, bundleId] of ((input.bundleIds ?? []) as unknown[]).entries()) assertUtf8(bundleId, `knowledge_search bundleIds[${index}]`, TOOL_CONTRACT_LIMITS.idBytes);
+  }
+  if (name === "knowledge_read") {
+    assertUtf8(input.bundleId, "knowledge_read bundleId", TOOL_CONTRACT_LIMITS.idBytes);
+    assertUtf8(input.documentId, "knowledge_read documentId", KNOWLEDGE_IDENTITY_LIMITS.documentIdBytes);
+    if (input.cursor !== undefined) assertUtf8(input.cursor, "knowledge_read cursor", 2_048);
   }
   if (name === "human_question") normalizeQuestionDefinition(input);
   if (name === "workflow_finish") {
@@ -371,6 +396,14 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
         if (!runtime.binding.artifactAction) throw Object.assign(new Error("Artifact action subsystem is not bound for this run"), { effectNotApplied: true });
         return runtime.binding.artifactAction(input as { actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }, attemptContext.attemptId, signal);
       }
+      if (name === "knowledge_search") {
+        if (!runtime.binding.knowledgeSearch) throw Object.assign(new Error("Knowledge search subsystem is not bound for this run"), { effectNotApplied: true });
+        return runtime.binding.knowledgeSearch(input as { query: string; bundleIds?: readonly string[]; limit?: number; cursor?: string }, attemptContext.attemptId);
+      }
+      if (name === "knowledge_read") {
+        if (!runtime.binding.knowledgeRead) throw Object.assign(new Error("Knowledge read subsystem is not bound for this run"), { effectNotApplied: true });
+        return runtime.binding.knowledgeRead(input as { bundleId: string; documentId: string; cursor?: string }, attemptContext.attemptId);
+      }
       if (name === "human_question") {
         if (!runtime.binding.question) throw Object.assign(new Error("Human question subsystem is not bound for this run"), { effectNotApplied: true });
         return runtime.binding.question(input, toolCallId, signal, toolBatch.callIds);
@@ -423,6 +456,8 @@ export const GENERIC_WORKFLOW_TOOL_CONTRACTS: readonly ToolDefinition<any, objec
   contract("workflow_status", "Workflow Status", "Read bounded cursor-paginated workflow/run status and authority-derived terminal refs."),
   contract("artifact_status", "Artifact Status", "Read the active profile's bounded trusted workspace/checkpoint/action view."),
   contract("artifact_action", "Artifact Action", "Invoke one exact active-profile action; workspace and operation identity come only from trusted run state."),
+  contract("knowledge_search", "Knowledge Search", "Search only this node's attached local knowledge bundles with deterministic bounded lexical ranking."),
+  contract("knowledge_read", "Knowledge Read", "Read one exact bounded page from an attached knowledge document with content-hash provenance."),
   contract("human_question", "Human Question", "Persist one bounded typed human question. Pending questions suspend the current task rather than blocking an in-memory promise."),
   contract("workflow_finish", "Workflow Finish", "Root-only sole-call request for a validated terminal workflow outcome."),
 ]);

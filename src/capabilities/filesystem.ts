@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, openSync, readSync, statSync } from "n
 import { relative, resolve, sep } from "node:path";
 import { isPathInside, resolveCanonicalPath, resolveProjectPath } from "../core/safe-path";
 import { compileFilesystemGlobList, matchFilesystemGlob, normalizeFilesystemRelativePath, type CompiledFilesystemGlob } from "./glob";
-import { checkProtectedPath, type ProtectedPathRoot } from "./reserved-paths";
+import { DEFAULT_PROTECTED_PATHS, checkProtectedPath, type ProtectedPathKind, type ProtectedPathRoot } from "./reserved-paths";
 import type { EffectiveNodePolicy, FilesystemOperation, NormalizedFilesystemGrant } from "./types";
 import type { MutationAccountingRecorder, MutationIntent } from "../workflows/change-accounting";
 import type { AttemptRuntime } from "../workflows/attempts";
@@ -42,7 +42,7 @@ export interface CompileFilesystemPolicyInput {
 }
 
 export type FilesystemDecisionCode = "FILESYSTEM_TARGET_INVALID" | "FILESYSTEM_EXISTENCE_MISMATCH" | "FILESYSTEM_PROTECTED" | "FILESYSTEM_SCOPE_DENIED";
-export interface FilesystemAuthorizationRequest { readonly operation: FilesystemOperation; readonly path: string }
+export interface FilesystemAuthorizationRequest { readonly operation: FilesystemOperation; readonly path: string; readonly recursive?: true }
 export interface FilesystemAuthorizationDecision {
   readonly ok: boolean;
   readonly code?: FilesystemDecisionCode;
@@ -114,6 +114,24 @@ function grantMatches(grant: CompiledGrant, target: { lexicalPath: string; canon
   return grant.include.length === 0 || grant.include.some((pattern) => matchFilesystemGlob(pattern, normalized));
 }
 
+export function recursiveFilesystemEffectProtectedKind(policy: CompiledFilesystemPolicy, requestedPath: string): ProtectedPathKind | undefined {
+  const candidate = resolveProjectPath(policy.lexicalProjectRoot, requestedPath, { allowMissing: true });
+  if (!candidate) return "project-boundary";
+  const roots: ProtectedPathRoot[] = [...DEFAULT_PROTECTED_PATHS, ...policy.additionalProtectedRoots];
+  for (const secret of policy.secretPaths) {
+    if (!secret || (secret.startsWith("/") && !isPathInside(policy.projectRoot, secret))) continue;
+    roots.push({ path: relative(policy.projectRoot, resolve(policy.projectRoot, secret)).split(sep).join("/"), kind: "credential-secret" });
+  }
+  for (const root of roots) {
+    if (!root.path || root.path.startsWith("/")) continue;
+    const protectedLexical = resolve(policy.lexicalProjectRoot, root.path);
+    const protectedCanonical = resolveProjectPath(policy.lexicalProjectRoot, root.path, { allowMissing: true });
+    if (isPathInside(candidate.lexicalPath, protectedLexical)
+      || Boolean(protectedCanonical && isPathInside(candidate.canonicalPath, protectedCanonical.canonicalPath))) return root.kind;
+  }
+  return undefined;
+}
+
 export function authorizeFilesystemOperation(policy: CompiledFilesystemPolicy, request: FilesystemAuthorizationRequest): FilesystemAuthorizationDecision {
   if (!request || !(["read", "create", "update", "delete"] as readonly string[]).includes(request.operation)
     || typeof request.path !== "string" || !request.path || Buffer.byteLength(request.path, "utf8") > 4_096 || request.path.includes("\0")) {
@@ -159,7 +177,8 @@ function extractPaths(toolName: string, input: unknown): string[] {
 export function classifyFilesystemToolCall(toolName: string, input: unknown, policy: CompiledFilesystemPolicy): FilesystemAuthorizationRequest[] {
   const paths = extractPaths(toolName, input);
   if (["read", "write", "edit", "delete"].includes(toolName) && paths.length === 0) throw new Error("FILESYSTEM_TOOL_TARGET_REQUIRED");
-  if (["read", "grep", "find", "ls"].includes(toolName)) return paths.map((path) => ({ operation: "read", path }));
+  if (["grep", "find"].includes(toolName)) return paths.map((path) => ({ operation: "read", path, recursive: true }));
+  if (["read", "ls"].includes(toolName)) return paths.map((path) => ({ operation: "read", path }));
   if (toolName === "edit") return paths.map((path) => ({ operation: "update", path }));
   if (toolName === "delete") return paths.map((path) => ({ operation: "delete", path }));
   if (toolName === "write") return paths.map((path) => {
@@ -175,6 +194,13 @@ export function createFilesystemPolicyHook(policy: CompiledFilesystemPolicy): (e
       for (const request of classifyFilesystemToolCall(String(event.toolName ?? ""), event.input, policy)) {
         const decision = authorizeFilesystemOperation(policy, request);
         if (!decision.ok) return { block: true, reason: decision.reason };
+        if (request.recursive) {
+          const protectedKind = recursiveFilesystemEffectProtectedKind(policy, request.path);
+          if (protectedKind) return {
+            block: true,
+            reason: clipped(`Filesystem recursive read denied for ${policy.workflowId}/${policy.nodeId}: effect intersects a protected ${protectedKind} path.`),
+          };
+        }
       }
       return undefined;
     } catch (error) {

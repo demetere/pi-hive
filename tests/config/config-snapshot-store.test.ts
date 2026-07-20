@@ -107,6 +107,26 @@ test("snapshot publication never clobbers a concurrent equivalent winner", () =>
   assert.deepEqual(readActivationSnapshot(root, value.snapshotHash), winner);
 });
 
+test("persisted pre-W22 snapshots retain knowledge-unavailable authority semantics", () => {
+  const root = mkdtempSync(join(tmpdir(), "hive-snapshot-pre-w22-"));
+  mkdirSync(join(root, ".pi/hive/sessions/activations"), { recursive: true, mode: 0o700 });
+  const legacy = structuredClone(snapshot()) as any;
+  legacy.payload.agents[0].frontmatter.capabilities.knowledge = ["read"];
+  legacy.payload.authority.nodes[0].capabilities.effective.knowledge = ["read"];
+  assert.equal("subsystems" in legacy.payload, false, "fixture models the persisted pre-W22 shape");
+  assert.equal(legacy.payload.authority.nodes[0].tools.includes("knowledge_search"), false);
+  const identity = {
+    ...legacy.payload,
+    knowledge: legacy.payload.knowledge.map(({ metadataFingerprint: _metadataFingerprint, ...entry }: any) => entry),
+  };
+  legacy.snapshotHash = hashActivationPayload(identity);
+  const path = snapshotFilePath(root, legacy.snapshotHash);
+  writeFileSync(path, JSON.stringify(legacy), { mode: 0o600 });
+  const restored = readActivationSnapshot(root, legacy.snapshotHash);
+  assert.ok(restored);
+  assert.deepEqual(restored.payload.authority.nodes[0].tools, ["artifact_status", "workflow_finish", "workflow_status"]);
+});
+
 test("persisted snapshots enforce semantic identity coverage and contract invariants", () => {
   const root = mkdtempSync(join(tmpdir(), "hive-snapshot-semantics-"));
   mkdirSync(join(root, ".pi/hive/sessions/activations"), { recursive: true, mode: 0o700 });
@@ -120,7 +140,7 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
     assert.throws(() => readActivationSnapshot(root, hash), pattern);
   };
   const agent = { id: "a", name: "A", tags: [], frontmatter: {}, prompt: "p", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) };
-  const node = { id: "root", agentId: "a", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: [] }, budgets: {} };
+  const node = { id: "root", agentId: "a", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: ["k"] }, budgets: {} };
   const authority = {
     nodeId: "root",
     capabilities: {
@@ -130,7 +150,7 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
         "external-network": ["agent-ceiling", "inherited"], "human-input": ["agent-ceiling", "inherited"],
         artifact: ["agent-ceiling", "inherited"], knowledge: ["agent-ceiling", "inherited"],
       },
-      budgets: {}, attachments: { skills: [], knowledge: [] }, directMemberIds: [],
+      budgets: {}, attachments: { skills: [], knowledge: ["k"] }, directMemberIds: [],
     },
     tools: ["workflow_finish", "workflow_status"],
   };
@@ -147,6 +167,12 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
   assertRejected((payload) => {
     payload.workflow.team.nodes = [{ ...node, skills: { resolved: ["skill-a"] } }]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [model];
   }, /authority.*attachment|attachment.*persisted/i);
+  assertRejected((payload) => { payload.knowledge[0].attachedNodeIds = ["missing-node"]; }, /knowledge.*attach|attach.*knowledge|node/i);
+  assertRejected((payload) => {
+    payload.knowledge[0].owner = "catalog-valid-owner-not-frozen";
+    payload.workflow.team.nodes[0].knowledge.resolved = [];
+    payload.knowledge[0].attachedNodeIds = [];
+  }, /authority.*attachment|attachment.*authority/i);
   assertRejected((payload) => { payload.authority.capabilityContractVersion = 2; }, /capability.*contract/i);
   assertRejected((payload) => { delete payload.versions.contextPolicy; }, /context.*policy|missing/i);
   assertRejected((payload) => { payload.workflow.artifact.contractVersion = "other"; }, /artifact.*contract/i);
@@ -175,7 +201,7 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
     const rootNode = { ...node, memberIds: ["leaf"] };
     const leafNode = { ...node, id: "leaf", parentId: "root" };
     const rootAuthority = { ...authority, capabilities: { ...authority.capabilities, directMemberIds: ["leaf"] }, tools: ["delegate_agent", "route_agent", "team_status", "workflow_finish", "workflow_status"] };
-    payload.workflow.team.rootId = "root"; payload.workflow.team.nodes = [rootNode, leafNode]; payload.agents = [agent]; payload.authority.nodes = [rootAuthority, { ...authority, nodeId: "leaf", tools: ["workflow_finish"] }]; payload.models = [model, { ...model, nodeId: "leaf" }];
+    payload.workflow.team.rootId = "root"; payload.workflow.team.nodes = [rootNode, leafNode]; payload.knowledge[0].attachedNodeIds = ["leaf", "root"]; payload.agents = [agent]; payload.authority.nodes = [rootAuthority, { ...authority, nodeId: "leaf", tools: ["workflow_finish"] }]; payload.models = [model, { ...model, nodeId: "leaf" }];
   }, /authority|tool|deriv/i);
   assertRejected((payload) => {
     payload.workflow.team.nodes = [node]; payload.agents = [agent]; payload.authority.nodes = [{ ...authority, capabilities: { ...authority.capabilities, directMemberIds: Array.from({ length: 1_025 }, (_, index) => `child-${index}`) } }]; payload.models = [model];
@@ -214,6 +240,7 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
   const configureGraph = (payload: any) => {
     payload.workflow.team.rootId = "root";
     payload.workflow.team.nodes = [graphNode, graphLeaf];
+    payload.knowledge[0].attachedNodeIds = ["leaf", "root"];
     payload.agents = [agent];
     payload.authority.nodes = [graphRootAuthority, graphLeafAuthority];
     payload.models = [model, { ...model, nodeId: "leaf" }];

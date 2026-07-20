@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdtempSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -139,6 +139,10 @@ test("generic TypeBox schemas are exact and reject unknown or oversized fields",
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.workflow_status, { section: "unknown" }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.artifact_status, { limit: 1, workspaceId: "spoof" }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.artifact_action, { actionId: "x", arguments: {}, operationId: "spoof" }), false);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_search, { query: "architecture", callerNodeId: "spoof" }), false);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_read, { bundleId: "shared", documentId: "api", path: "../../secret" }), false);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_read, { bundleId: "shared", documentId: "x".repeat(1_716) }), true);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_read, { bundleId: "shared", documentId: "x".repeat(1_717) }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.workflow_finish, { status: "cancelled", summary: "no" }), false);
 });
 
@@ -152,7 +156,7 @@ test("generic tool exposure follows frozen topology and reserves inactive subsys
   assert.deepEqual(genericWorkflowToolContractsForNode(snapshot(), "leaf"), []);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_status"), true);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_action"), true);
-  assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "knowledge_read"), false);
+  assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "knowledge_read"), true);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "human_question"), true, "the generic contract is registered while immutable authority still controls exposure");
   assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).human_question, {
     prompt: "Which database?", kind: "single", choices: [{ value: "postgres", label: "PostgreSQL" }], required: true,
@@ -185,6 +189,70 @@ test("artifact tools remain profile/capability gated and none exposes only bound
   assert.deepEqual(details.workspace, { id: "none", kind: "logical-empty", binding: "none" });
   assert.deepEqual(details.actions, []);
   assert.deepEqual(details.checkpoints, []);
+});
+
+test("knowledge tools are attached-only, locally retrieved, bounded, and journal exact provenance", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const rootAuthority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  rootAuthority.capabilities.effective = { ...rootAuthority.capabilities.effective, knowledge: ["read"] };
+  rootAuthority.capabilities.attachments.knowledge = ["shared"];
+  rootAuthority.tools = [...new Set([...rootAuthority.tools, "knowledge_read", "knowledge_search"])].sort();
+  const built = fixture(undefined, active);
+  const directory = join(built.projectRoot, ".pi/hive/knowledge/shared");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "api.md"), "---\ntype: Reference\ntitle: Public API\ndescription: Gateway behavior\n---\n\nThe gateway routes requests.\n");
+  const root = built.service.rootServices();
+  const searched = await root.runWithToolRuntime(() => call("knowledge_search", { query: "gateway", limit: 5 }));
+  const searchDetails = searched.details as any;
+  assert.equal(searchDetails.items[0].documentId, "api");
+  const read = await root.runWithToolRuntime(() => call("knowledge_read", { bundleId: "shared", documentId: "api" }));
+  const readDetails = read.details as any;
+  assert.match(readDetails.content, /gateway routes/);
+  assert.equal(readDetails.returnedContentHash, `sha256:${createHash("sha256").update(readDetails.content, "utf8").digest("hex")}`);
+  const provenance = readWorkflowJournal(built.projectRoot, "session-1").filter((event) => event.type === "knowledge.transition");
+  assert.deepEqual(provenance.map((event) => (event.payload as any).operation), ["search", "read"]);
+});
+
+test("actual knowledge_read delivers escape-heavy pages within bounds and journals only returned pages", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: "custom/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const rootAuthority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  rootAuthority.capabilities.effective = { ...rootAuthority.capabilities.effective, knowledge: ["read"] };
+  rootAuthority.capabilities.attachments.knowledge = ["shared"];
+  rootAuthority.tools = [...new Set([...rootAuthority.tools, "knowledge_read", "knowledge_search"])].sort();
+  const built = fixture(undefined, active);
+  const directory = join(built.projectRoot, "custom/knowledge/shared");
+  mkdirSync(directory, { recursive: true });
+  const exact = `---\ntype: Reference\ntitle: Escaped delivery\n---\n\n${"\\\"\u0000\u0001\n".repeat(12_000)}`;
+  writeFileSync(join(directory, "escaped.md"), exact);
+  for (const nodeId of ["root", "worker", "leaf"]) {
+    const policy = built.service.toolPolicyForNode(nodeId);
+    const blocked = await policy.hook({ toolName: "read", input: { path: "custom/knowledge/shared/escaped.md" } });
+    assert.equal(blocked?.block, true, `${nodeId} actual generic file policy must protect the custom knowledge root`);
+    assert.match(blocked?.reason ?? "", /protected knowledge path/i);
+  }
+  const root = built.service.rootServices();
+  let cursor: string | undefined;
+  let reconstructed = "";
+  const returnedHashes: string[] = [];
+  do {
+    const result = await root.runWithToolRuntime(() => call("knowledge_read", {
+      bundleId: "shared", documentId: "escaped", ...(cursor ? { cursor } : {}),
+    }));
+    assert.ok(Buffer.byteLength(result.content[0].text, "utf8") <= TOOL_CONTRACT_LIMITS.outputBytes);
+    const page = result.details as any;
+    assert.ok(page.returnedBytes > 0);
+    reconstructed += page.content;
+    returnedHashes.push(page.returnedContentHash);
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.equal(reconstructed, exact);
+  const events = readWorkflowJournal(built.projectRoot, "session-1").filter((event) => event.type === "knowledge.transition");
+  assert.equal(events.length, returnedHashes.length, "only pages returned through the actual tool are journaled");
+  assert.deepEqual(events.map((event) => (event.payload as any).returnedContentHash), returnedHashes);
 });
 
 test("tools require trusted async runtime identity and route/delegate only through direct-member authority", async () => {
@@ -248,6 +316,34 @@ test("accepted multiline delegation content remains delimited and assembles into
   assert.equal(persisted.result?.status, "completed", "an accepted task must not fail later prompt assembly");
   assert.ok(assembledPrompt.includes("line one\\\\nthen line two\\\\t"), "multiline objective must remain escaped inside canonical JSON");
   assert.ok(assembledPrompt.includes("report one\\\\nreport two\\\\t"), "multiline deliverable must remain escaped inside canonical JSON");
+});
+
+test("root and linked worker plumbing consume the compiled knowledge policy hook", async () => {
+  const active = snapshot() as any;
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: "custom/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: [] }];
+  for (const authority of active.payload.authority.nodes) authority.capabilities.effective = {
+    ...(authority.capabilities.effective ?? {}),
+    filesystem: [{ path: ".", operations: ["read", "create", "update", "delete"], include: [], exclude: [], ceilingClause: 0 }],
+    shell: ["inspect"],
+  };
+  let workerBlocked = false;
+  const built = fixture(async (input) => ({
+    linkedSessionId: `linked-${input.nodeId}`,
+    async prompt() {
+      assert.ok(input.toolPolicy, "linked worker factory must receive its exact compiled node policy");
+      workerBlocked = Boolean(await input.toolPolicy.hook({ toolName: "bash", input: { command: "find -H custom/knowledge/shared -name '*.md'" } }));
+      return "policy consumed";
+    },
+    dispose() {},
+  }), active);
+  const directory = join(built.projectRoot, "custom/knowledge/shared");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "secret.md"), "protected");
+  const rootPolicy = built.service.toolPolicyForNode("root");
+  assert.equal(Boolean(await rootPolicy.hook({ toolName: "bash", input: { command: "cat custom/knowledge/shared/secret.md" } })), true);
+  await built.service.rootServices().runWithToolRuntime(() => call("delegate_agent", { targetNodeId: "worker", objective: "consume linked policy", deliverables: [] }));
+  await built.service.runWorkers();
+  assert.equal(workerBlocked, true, "linked session must consume policy before the simulated tool effect");
 });
 
 test("team and workflow status are bounded, cursor-paginated, and expose explicit readback refs", async () => {

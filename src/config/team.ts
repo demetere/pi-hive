@@ -4,6 +4,7 @@ import type { AvailableAgentCatalogNode, CatalogDependencyEdge } from "./catalog
 import { createDiagnosticCollector, sourceRange, type ConfigDiagnostic, type ConfigDiagnosticCode, type SourceRange } from "./diagnostics";
 import type { YamlSourceMap } from "./yaml";
 import { parseDurationV1, resolveBudgetDeclarations, validateBudgetDeclarations, type ResolvedBudgetDeclarations } from "./budgets";
+import { CAPABILITY_POLICY_LIMITS } from "../capabilities/types";
 
 export const WORKFLOW_LIMITS = Object.freeze({
   fileBytes: 524_288, teamDepth: 32, teamNodes: 1_024,
@@ -64,7 +65,19 @@ function resolveDelta(kind: "skill" | "knowledge", raw: { add?: string[]; remove
     const index = originalRemove.indexOf(id), itemRange = rangeFor(map, `${pointer}/remove/${index}`);
     if (!baseSet.has(id)) collector.add(diagnostic("WORKFLOW_ATTACHMENT_REMOVE_MISSING", source, workflowId, itemRange));
   }
-  return { base, add, remove, resolved: [...base.filter((id) => !removeSet.has(id)), ...add.filter((id) => !baseSet.has(id) && !removeSet.has(id))].sort(compare) };
+  const owned = kind === "knowledge"
+    ? catalogs.knowledge.filter((node) => node.owner === agent.id).map((node) => node.id).sort(compare)
+    : [];
+  for (const id of owned) {
+    const target = `knowledge:${id}`, itemRange = rangeFor(map, pointer);
+    if (!edges.some((edge) => edge.from === `workflow:${workflowId}` && edge.target === target)) edges.push({ from: `workflow:${workflowId}`, target, source, range: itemRange, kind: "attachment" });
+    if (byId.get(id) === "failed") collector.add(diagnostic("WORKFLOW_ATTACHMENT_FAILED", source, workflowId, itemRange, [`workflow:${workflowId}`, target]));
+  }
+  const resolved = [...new Set([...base.filter((id) => !removeSet.has(id)), ...add.filter((id) => !baseSet.has(id) && !removeSet.has(id)), ...owned])].sort(compare);
+  if (kind === "knowledge" && resolved.length > CAPABILITY_POLICY_LIMITS.attachmentValues) {
+    collector.add(diagnostic("WORKFLOW_ATTACHMENT_LIMIT_EXCEEDED", source, workflowId, rangeFor(map, pointer)));
+  }
+  return { base, add, remove, resolved };
 }
 function budgetValue(raw: RawAgentBudgets, field: keyof RawAgentBudgets): number | undefined {
   const value = raw[field];

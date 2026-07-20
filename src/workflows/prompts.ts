@@ -164,6 +164,7 @@ interface StaticPromptInput {
   readonly authority: AuthorityNode;
   readonly adapterContract: Readonly<Record<string, unknown>>;
   readonly skills: readonly Readonly<Record<string, unknown>>[];
+  readonly protectedKnowledgePaths?: readonly string[];
   readonly workspace?: Readonly<Record<string, unknown>>;
 }
 
@@ -231,7 +232,8 @@ function staticPromptSections(input: StaticPromptInput): { sections: readonly st
     effectivePolicy: input.authority.capabilities,
     effectiveTools: [...input.authority.tools].sort(compare),
     directMemberIds: [...(input.node.memberIds ?? [])],
-    reservedPaths: DEFAULT_PROTECTED_PATHS.map((entry) => ({ path: entry.path, kind: entry.kind })),
+    reservedPaths: [...DEFAULT_PROTECTED_PATHS.map((entry) => ({ path: entry.path, kind: entry.kind })), ...(input.protectedKnowledgePaths ?? []).map((path) => ({ path, kind: "knowledge" }))]
+      .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.path === entry.path && candidate.kind === entry.kind) === index),
     trustPrecedence: [
       "immutable harness policy and mechanical checks",
       "workflow shared/root procedure",
@@ -282,6 +284,7 @@ export interface StaticPromptForActivationInput {
   readonly authority: AuthorityNode;
   readonly adapterContract: Readonly<Record<string, unknown>>;
   readonly skills: readonly Readonly<Record<string, unknown>>[];
+  readonly protectedKnowledgePaths?: readonly string[];
 }
 
 /** Conservative static activation preflight: runtime IDs use their maximum v1 width. */
@@ -510,6 +513,7 @@ function assemble(input: WorkflowPromptBaseInput, kind: PromptKind, task?: Promp
     authority,
     adapterContract: adapter,
     skills,
+    protectedKnowledgePaths: input.snapshot.payload.knowledge.flatMap((entry) => typeof entry.path === "string" ? [entry.path] : []).sort(compare),
     ...(input.workspace ? { workspace: input.workspace } : {}),
   });
   const finalContract = statics.sections.at(-1)!;

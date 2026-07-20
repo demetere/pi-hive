@@ -48,6 +48,7 @@ test("builder requires branded complete matching authority and produces stable r
   assert.equal(first.payload.models[0].dynamicReserve >= 266_240, true, "activation records the complete bounded dynamic prompt reserve");
   assert.notEqual(first.createdAt, second.createdAt);
   assert.equal(first.payload.project.rootRef, ".");
+  assert.deepEqual(first.payload.subsystems, { knowledge: true });
   assert.equal(JSON.stringify(first).includes("/tmp/project"), false);
   assert.equal(first.payload.knowledge[0].metadataFingerprint, "f".repeat(64));
   assert.equal(JSON.stringify(first).includes("Skill"), true);
@@ -116,6 +117,23 @@ test("snapshot identity consumes the exact resolver-issued effective authority",
   assert.notDeepEqual(fullSnapshot.payload.authority, narrowSnapshot.payload.authority);
   assert.notEqual(fullSnapshot.snapshotHash, narrowSnapshot.snapshotHash);
   assert.throws(() => buildActivationSnapshot({ ...full.base, authority: narrow.authority, models, packageVersion: "0.1.0" }), /exact resolved workflow authority/i);
+});
+
+test("capability resolution rejects N+1 normalized knowledge attachments before authority issuance", () => {
+  const resolve = (count: number) => {
+    const base = fixture();
+    (base.workflow.team.nodes[0] as any).knowledge.resolved = Array.from({ length: count }, (_, index) => `bundle-${String(index).padStart(3, "0")}`);
+    return resolveWorkflowCapabilities({
+      workflowId: base.workflow.id, team: base.workflow.team, catalogs: base.catalogs,
+      artifactAvailable: false, knowledgeAvailable: true, questionsAvailable: false,
+    });
+  };
+  assert.equal(resolve(128).ok, true);
+  let overflow: ReturnType<typeof resolve> | undefined;
+  assert.doesNotThrow(() => { overflow = resolve(129); });
+  assert.equal(overflow?.ok, false);
+  assert.equal(overflow?.authority, undefined);
+  assert.deepEqual(overflow?.issues.map((entry) => [entry.nodeId, entry.issue.group]), [["root", "knowledge"]]);
 });
 
 test("configured human-input authority enables questions and survives snapshot persistence", () => {

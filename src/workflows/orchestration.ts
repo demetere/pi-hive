@@ -6,6 +6,7 @@ import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
 import { classifyTrustedTool } from "../capabilities/tools";
 import type { CommandAttemptMetadata } from "../capabilities/command";
+import { compileSnapshotNodeToolPolicies, type SnapshotNodeToolPolicy } from "../capabilities/runtime-policy";
 import {
   DelegationRuntime,
   type AcceptDelegationInput,
@@ -89,6 +90,8 @@ import type { CheckpointPolicy } from "../artifacts/checkpoints";
 import { QuestionService, deriveQuestionRunStatus, type AcceptedQuestionForRoot, type QuestionControlAuthenticationRequest, type QuestionPresenter, type RootQuestionAnswerDelivery } from "./questions";
 import { QUESTION_LIMITS } from "./question-validation";
 import { utf8Prefix } from "./values";
+import { KnowledgeService } from "../knowledge/search";
+import { createKnowledgeReferenceAuthorizer, knowledgeProtectedPathRoots } from "../knowledge/attachments";
 
 export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
@@ -162,6 +165,7 @@ export interface BoundDelegationServices {
 interface RunResources {
   readonly runId: string; readonly runtime: DelegationRuntime;
   readonly budgets: BudgetRuntime; readonly attempts: AttemptRuntime; readonly changes: ChangeAccountingRuntime;
+  readonly knowledge: KnowledgeService;
   readonly recoveryIssues: readonly string[];
   readonly dispatchRuntime: DispatchResources;
   readonly scheduler: DurableDelegationScheduler; readonly workers: WorkerSessionPool; readonly questions: QuestionService;
@@ -245,6 +249,7 @@ export class RunOrchestrationService {
   private readonly options: RunOrchestrationServiceOptions;
   private readonly selectedArtifact?: ResolvedArtifactProfile;
   private readonly artifactCallerIssuer?: RunOrchestrationArtifactCallerIssuer;
+  private readonly nodeToolPolicies: ReadonlyMap<string, SnapshotNodeToolPolicy>;
   /** One authority owns run snapshots, requests, control decisions, and completion. */
   readonly checkpointApprovals?: CheckpointApprovalService;
   private current?: RunResources;
@@ -256,6 +261,13 @@ export class RunOrchestrationService {
     const selectedArtifact = runtimeArtifact(options.snapshot, options.artifactRuntime);
     this.selectedArtifact = selectedArtifact;
     this.artifactCallerIssuer = selectedArtifact ? createRunOrchestrationArtifactCallerIssuer(options.snapshot) : undefined;
+    const artifact = record(options.snapshot.payload.workflow.artifact) ? options.snapshot.payload.workflow.artifact as Record<string, unknown> : undefined;
+    const compiledToolPolicies = compileSnapshotNodeToolPolicies({
+      projectRoot: options.projectRoot,
+      snapshot: options.snapshot,
+      ...(selectedArtifact ? { artifact: { resolved: selectedArtifact, options: record(artifact?.options) ? artifact.options : {} } } : {}),
+    });
+    this.nodeToolPolicies = new Map(compiledToolPolicies.map((policy) => [policy.nodeId, policy]));
     this.checkpointApprovals = selectedArtifact ? new CheckpointApprovalService({
       projectRoot: options.projectRoot,
       projectId: options.projectId,
@@ -375,6 +387,12 @@ export class RunOrchestrationService {
       },
       journalFault: options.journalFault,
     });
+  }
+
+  toolPolicyForNode(nodeId: string): SnapshotNodeToolPolicy {
+    const policy = this.nodeToolPolicies.get(nodeId);
+    if (!policy) throw new Error(`Tool policy node ${nodeId} is absent from immutable authority`);
+    return policy;
   }
 
   private artifactSelection(): Readonly<{ binding: string; options: Readonly<Record<string, JsonValue>> }> {
@@ -587,8 +605,13 @@ export class RunOrchestrationService {
     return new ChangeAccountingRuntime({
       projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId,
       now: this.options.now, ...configured,
-      protectedRoots: Object.freeze([...(configured?.protectedRoots ?? []), ...this.artifactProtectedWorkspaceRoots()]),
+      protectedRoots: Object.freeze([...(configured?.protectedRoots ?? []), ...this.artifactProtectedWorkspaceRoots(), ...knowledgeProtectedPathRoots(this.options.snapshot)]),
     });
+  }
+
+  private knowledgeService(runId: string): KnowledgeService {
+    if (this.current?.runId === runId) return this.current.knowledge;
+    return new KnowledgeService({ projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId, snapshot: this.options.snapshot, now: this.options.now });
   }
 
   private rootPromptAssembly(runId?: string, acceptedAnswers: readonly AcceptedQuestionForRoot[] = []): WorkflowPromptAssembly {
@@ -607,6 +630,7 @@ export class RunOrchestrationService {
       sessionId: this.options.sessionId,
       runId: run.runId,
       ...(handoff ? { handoff: handoffPromptInput(handoff) } : {}),
+      knowledgeIndex: this.knowledgeService(run.runId).promptSummaries(rootNodeId(this.options.snapshot)),
       runInputs: [
         ...run.inputs.map((entry) => ({
           source: "user" as const,
@@ -895,6 +919,7 @@ export class RunOrchestrationService {
       }
     }
     const questions = this.questionRuntimeFor(runId);
+    const knowledge = this.knowledgeService(runId);
     const runtime = new DelegationRuntime({
       projectRoot: this.options.projectRoot,
       projectId: this.options.projectId,
@@ -903,7 +928,7 @@ export class RunOrchestrationService {
       snapshot: this.options.snapshot,
       createTaskId: this.options.createTaskId,
       now: this.options.now,
-      referenceAuthorizer: this.options.referenceAuthorizer,
+      referenceAuthorizer: createKnowledgeReferenceAuthorizer(this.options.snapshot, knowledge, this.options.referenceAuthorizer),
       acceptanceAuthority: { admit: (events, parentNodeId) => budgets.admitDelegationAgainst(events, parentNodeId) },
       startAuthority: { admit: (events) => {
         const locked = replayWorkflowJournal(events, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
@@ -934,6 +959,7 @@ export class RunOrchestrationService {
       runId,
       snapshot: this.options.snapshot,
       factory: this.options.workerFactory,
+      toolPolicyForNode: (nodeId) => this.toolPolicyForNode(nodeId),
       dispatchModel: ({ task, text, invoke, questionDeliveryIds, resolveQuestionDeliveryIds, promptHash, transcriptRef, onConsumerSuccess, questionContinuationReady }) => this.dispatchModel(dispatchResources, task.targetNodeId, {
         correlationId: `worker-model-${task.taskId}-${promptHash.slice(0, 24)}-turn-${task.questionContinuationTurn ?? 0}`,
         operation: "worker.provider.prompt", input: { taskId: task.taskId, promptHash, questionContinuationTurn: task.questionContinuationTurn ?? 0 }, replayInput: { taskId: task.taskId },
@@ -949,6 +975,7 @@ export class RunOrchestrationService {
       }, text),
       dispatchTool: (task, input) => this.dispatchTool(dispatchResources, task.targetNodeId, input),
       questions,
+      knowledgeIndex: (nodeId) => knowledge.promptSummaries(nodeId),
     });
     workers.rebuildBoundaries(Object.values(runtime.restore().tasks));
     const scheduler = new DurableDelegationScheduler({
@@ -986,7 +1013,7 @@ export class RunOrchestrationService {
         workers.rebuildBoundaries(Object.values(runtime.restore().tasks));
       },
     });
-    const resources: RunResources = { runId, runtime, budgets, attempts, changes, recoveryIssues: Object.freeze(recoveryIssues), dispatchRuntime: dispatchResources, scheduler, workers, questions };
+    const resources: RunResources = { runId, runtime, budgets, attempts, changes, knowledge, recoveryIssues: Object.freeze(recoveryIssues), dispatchRuntime: dispatchResources, scheduler, workers, questions };
     const run = this.lifecycle.restore().latestRun;
     if (run?.runId === runId && run.pendingTerminal) this.failClosedForTerminal(resources);
     else this.reconcileDurableNestedDeliveries(runtime);
@@ -1251,6 +1278,14 @@ export class RunOrchestrationService {
               verifyEvidence: (references) => this.verifyArtifactEvidence(resources, references),
             });
           } : undefined,
+          knowledgeSearch: (input, attemptId) => {
+            assertCurrent();
+            return resources.knowledge.search(context.nodeId, input, attemptId);
+          },
+          knowledgeRead: (input, attemptId) => {
+            assertCurrent();
+            return resources.knowledge.read(context.nodeId, input, attemptId);
+          },
           question: async (input, toolCallId, signal, batchCallIds = [toolCallId]) => {
             assertQuestionBatchAdmission(toolCallId, batchCallIds);
             const request = { nodeId: context.nodeId, ...(context.taskId ? { taskId: context.taskId } : {}), definition: input, provenance: { source: "human_question" as const, toolCallId } };
