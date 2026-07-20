@@ -29,7 +29,12 @@ import { createWorkflowEvent } from "../../src/workflows/events.ts";
 import { AttemptRuntime, attemptDescriptorForModel, executeWithConservativeRetry } from "../../src/workflows/attempts.ts";
 import { KnowledgeEnrichmentService, restoreKnowledgeEnrichmentState } from "../../src/knowledge/enrichment.ts";
 import { DurableKnowledgeQueue } from "../../src/knowledge/queue.ts";
+import type { KnowledgeMutationQueue } from "../../src/knowledge/proposals.ts";
 import type { EffectiveRuntimeBudgetLimits } from "../../src/workflows/budgets.ts";
+
+const [NODE_MAJOR = 0, NODE_MINOR = 0] = process.versions.node.split(".").map(Number);
+const PI_RUNTIME_ENGINE_SUPPORTED = NODE_MAJOR > 22 || (NODE_MAJOR === 22 && NODE_MINOR >= 19);
+const PI_RUNTIME_ENGINE_SKIP_REASON = "locked @earendil-works/pi-coding-agent 0.80.7 requires Node >=22.19.0; the older-Node lane tests utility compatibility only";
 
 function snapshot(): ActivationSnapshotFileV1 {
   return { snapshotHash: "b".repeat(64), createdAt: "2026-01-01T00:00:00.000Z", payload: {
@@ -103,7 +108,7 @@ function fixture(
   factoryOverride?: WorkerSessionFactory,
   snapshotOverride: ActivationSnapshotFileV1 = snapshot(),
   presentLive?: any,
-  overrides: { runId?: string; createRunId?: () => string; initialInputText?: string; stagedHandoff?: HandoffPacket; cancellationReleaseLeases?: () => void | Promise<void>; questionJournalFault?: (eventType: "question.transition", stage: "beforeWrite" | "afterFileFsync" | "beforeRename" | "afterRename" | "beforeDirFsync") => void; budgetLimits?: EffectiveRuntimeBudgetLimits; prepareProject?: (projectRoot: string) => void } = {},
+  overrides: { runId?: string; createRunId?: () => string; initialInputText?: string; stagedHandoff?: HandoffPacket; cancellationReleaseLeases?: () => void | Promise<void>; questionJournalFault?: (eventType: "question.transition", stage: "beforeWrite" | "afterFileFsync" | "beforeRename" | "afterRename" | "beforeDirFsync") => void; budgetLimits?: EffectiveRuntimeBudgetLimits; knowledgeMutationQueue?: KnowledgeMutationQueue; prepareProject?: (projectRoot: string) => void } = {},
 ) {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-tools-"));
   overrides.prepareProject?.(projectRoot);
@@ -122,6 +127,7 @@ function fixture(
     projectRoot, projectId: "project-1", sessionId: "session-1", snapshot: snapshotOverride, runtimeOwnerNonce: ownerNonce,
     maxParallel: 1, workerFactory: factory, createRunId: overrides.createRunId ?? (() => overrides.runId ?? "run-1"), createTaskId: () => `task-${++task}`, createAttemptId: () => `attempt-${task}`,
     ...(overrides.budgetLimits ? { budgetLimits: overrides.budgetLimits } : {}),
+    ...(overrides.knowledgeMutationQueue ? { knowledgeMutationQueue: overrides.knowledgeMutationQueue } : {}),
     pauseAuthority: { captureState: () => ({}), releaseLeases: () => {}, releaseOwnership: () => {} },
     resumeAuthority: { acquireOwnership: () => {}, acquireLeases: () => {}, revalidateHashes: () => true, rollbackAuthority: () => {} },
     cancellationAuthority: { terminateProcessTrees: () => {}, capturePartialState: () => ({}), releaseLeases: overrides.cancellationReleaseLeases ?? (() => {}) },
@@ -281,7 +287,9 @@ test("knowledge_propose is capability-gated and persists only bounded citation-d
   assert.equal(built.service.hasLiveHandles(), false);
 });
 
-test("production automatic enrichment uses Pi's mutation queue without an injected test seam", async () => {
+test("production automatic enrichment uses Pi's mutation queue without an injected test seam", {
+  skip: PI_RUNTIME_ENGINE_SUPPORTED ? false : PI_RUNTIME_ENGINE_SKIP_REASON,
+}, async () => {
   const active = snapshot() as any;
   active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
   active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "automatic", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
@@ -303,17 +311,109 @@ test("production automatic enrichment uses Pi's mutation queue without an inject
       writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
     },
   });
-  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
-    eventId: "automatic-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
-    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"5".repeat(64)}` },
-  }));
-  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "automatic-candidate" })
-    .propose("root", "automatic-attempt", { scope: "shared", conclusion: "Automatic production enrichment uses the Pi mutation queue.", evidenceEventIds: [evidence.eventId] });
-  const root = built.service.rootServices();
-  await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Apply automatic knowledge.", artifactRefs: [], evidenceRefs: [] }));
-  await built.service.runKnowledgeEnrichment();
-  assert.match(readFileSync(join(built.projectRoot, ".pi/hive/knowledge/shared/curated.md"), "utf8"), /Pi mutation queue/u);
-  await built.service.shutdown();
+  try {
+    const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+      eventId: "automatic-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+      payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"5".repeat(64)}` },
+    }));
+    new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "automatic-candidate" })
+      .propose("root", "automatic-attempt", { scope: "shared", conclusion: "Automatic production enrichment uses the Pi mutation queue.", evidenceEventIds: [evidence.eventId] });
+    const root = built.service.rootServices();
+    await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Apply automatic knowledge.", artifactRefs: [], evidenceRefs: [] }));
+    await built.service.runKnowledgeEnrichment();
+    const durable = restoreKnowledgeEnrichmentState(readWorkflowJournal(built.projectRoot, "session-1"));
+    assert.equal(Object.values(durable.jobs).every((job) => job.state === "completed" && durable.curatorPlanEffectsComplete[job.jobId]), true, JSON.stringify(Object.values(durable.jobs)));
+    assert.match(readFileSync(join(built.projectRoot, ".pi/hive/knowledge/shared/curated.md"), "utf8"), /Pi mutation queue/u);
+  } finally {
+    await built.service.shutdown();
+    assert.equal(built.service.hasLiveHandles(), false);
+  }
+});
+
+test("runKnowledgeEnrichment follows an older reconciliation snapshot with exactly one terminal disposition and mutation", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "automatic", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let mutationCalls = 0;
+  const mutationQueue: KnowledgeMutationQueue = async (_canonicalPath, _operationId, callback) => {
+    mutationCalls++;
+    return await callback();
+  };
+  const built = fixture(async (input) => ({
+    linkedSessionId: `knowledge-${input.nodeId}`,
+    async prompt(text) {
+      const candidateId = /"candidateId":"([^"]+)"/u.exec(text)?.[1];
+      assert.ok(candidateId);
+      return JSON.stringify({ formatVersion: 1, conclusions: [{ text: "A follow-up reconciliation applies the newly durable terminal exactly once.", citationIds: [candidateId] }] });
+    },
+    abort() {}, dispose() {},
+  }), active, undefined, {
+    knowledgeMutationQueue: mutationQueue,
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const reconcileTerminalEnrichment = (built.service as any).reconcileTerminalEnrichment.bind(built.service);
+  let releaseOlderPass = (): void => {};
+  let olderPass: Promise<void> | undefined;
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+      eventId: "follow-up-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+      payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"6".repeat(64)}` },
+    }));
+    new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "follow-up-candidate" })
+      .propose("root", "follow-up-attempt", { scope: "shared", conclusion: "A follow-up reconciliation applies the newly durable terminal exactly once.", evidenceEventIds: [evidence.eventId] });
+
+    let snapshotTaken!: () => void;
+    const didTakeSnapshot = new Promise<void>((resolve) => { snapshotTaken = resolve; });
+    const holdOlderPass = new Promise<void>((resolve) => { releaseOlderPass = resolve; });
+    // Run the prior one-snapshot shape through the real reconciliation lock,
+    // then hold it after its snapshot so the terminal is durably newer.
+    (built.service as any).reconcileTerminalEnrichment = async (...args: unknown[]) => {
+      await reconcileTerminalEnrichment(...args);
+      snapshotTaken();
+      await holdOlderPass;
+    };
+    olderPass = (built.service as any).executeKnowledgeReconciliation();
+    await didTakeSnapshot;
+    (built.service as any).reconcileTerminalEnrichment = reconcileTerminalEnrichment;
+
+    const root = built.service.rootServices();
+    await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Publish after the older reconciliation snapshot.", artifactRefs: [], evidenceRefs: [] }));
+    const terminal = readWorkflowJournal(built.projectRoot, "session-1").find((event) => event.type === "terminal.recorded" && event.runId === "run-1");
+    assert.ok(terminal);
+    assert.equal(restoreKnowledgeEnrichmentState(readWorkflowJournal(built.projectRoot, "session-1")).terminalEnqueueCompleted[terminal.eventHash], undefined,
+      "the held older pass took its only snapshot before the terminal became durable");
+
+    const enrichment = built.service.runKnowledgeEnrichment();
+    releaseOlderPass();
+    await enrichment;
+
+    const events = readWorkflowJournal(built.projectRoot, "session-1");
+    const durable = restoreKnowledgeEnrichmentState(events);
+    const jobs = Object.values(durable.jobs);
+    assert.equal(durable.terminalEnqueueCompleted[terminal.eventHash], true);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].state, "completed");
+    assert.equal(durable.curatorPlanEffectsComplete[jobs[0].jobId], true);
+    assert.equal(events.filter((event) => (event.payload as any).operation === "jobs-enqueued").length, 1);
+    assert.equal(events.filter((event) => (event.payload as any).operation === "jobs-enqueue-completed").length, 1);
+    assert.equal(mutationCalls, 1);
+    assert.match(readFileSync(join(built.projectRoot, ".pi/hive/knowledge/shared/curated.md"), "utf8"), /newly durable terminal exactly once/u);
+  } finally {
+    (built.service as any).reconcileTerminalEnrichment = reconcileTerminalEnrichment;
+    releaseOlderPass();
+    await olderPass?.catch(() => undefined);
+    await built.service.shutdown();
+    assert.equal(built.service.hasLiveHandles(), false);
+  }
 });
 
 test("active root user work preempts curation and prevents idle restart until the user model settles", async () => {

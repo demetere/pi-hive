@@ -8,7 +8,7 @@ import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
 import { canonicalJson } from "../../src/config/snapshot-canonical.ts";
 import { readWorkflowJournal } from "../../src/workflows/journal.ts";
 import { KnowledgeService, KNOWLEDGE_SEARCH_LIMITS } from "../../src/knowledge/search.ts";
-import { attachedKnowledgeBundleIds, createKnowledgeReferenceAuthorizer } from "../../src/knowledge/attachments.ts";
+import { attachedKnowledgeBundleIds, createKnowledgeReferenceAuthorizer, knowledgeProtectedPathRoots, nodeHasKnowledgeRead } from "../../src/knowledge/attachments.ts";
 import { buildKnowledgeLexicalIndex, KNOWLEDGE_INDEX_LIMITS, searchKnowledgeLexicalIndex } from "../../src/knowledge/index.ts";
 import { KnowledgeProviderRegistry } from "../../src/knowledge/provider.ts";
 import type { KnowledgeBundle, KnowledgeDocument } from "../../src/knowledge/types.ts";
@@ -484,6 +484,75 @@ test("maximum public knowledge read refs fit structured-reference transport and 
   assert.equal(runtime.restore().tasks[accepted.taskId].contextRefs[0].authorization, "authorized");
 });
 
+test("knowledge runtime rejects malformed filters, cursors, limits, declarations, and read identities", () => {
+  const f = fixture();
+  const service = new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: f.snapshot });
+  for (const request of [
+    { query: "gateway", bundleIds: {} },
+    { query: "gateway", bundleIds: Array.from({ length: 33 }, (_, index) => `bundle-${index}`) },
+    { query: "gateway", bundleIds: ["shared", "shared"] },
+    { query: "gateway", bundleIds: ["bad/id"] },
+    { query: "gateway", bundleIds: ["owned"] },
+    { query: "gateway", cursor: "" },
+    { query: "gateway", cursor: "!" },
+    { query: "gateway", cursor: "a".repeat(2_049) },
+    { query: "gateway", cursor: Buffer.from("null").toString("base64url") },
+    { query: "gateway", cursor: Buffer.from(JSON.stringify({ v: 1 })).toString("base64url") },
+    { query: "gateway", limit: 0 },
+    { query: "gateway", limit: 65 },
+    { query: "gateway", limit: 1.5 },
+  ]) assert.throws(() => service.search("root", request as never), /bundle|cursor|limit|filter|attached|invalid/i);
+
+  const first = service.search("root", { query: "alpha", limit: 1 });
+  assert.ok(first.nextCursor);
+  const cursor = JSON.parse(Buffer.from(first.nextCursor, "base64url").toString("utf8"));
+  cursor.o = 99_999;
+  assert.throws(() => service.search("root", { query: "alpha", cursor: Buffer.from(JSON.stringify(cursor)).toString("base64url") }), /cursor.*range/i);
+
+  for (const request of [
+    { bundleId: "bad/id", documentId: "api" },
+    { bundleId: "shared", documentId: "bad/id" },
+    { bundleId: "owned", documentId: "tactics" },
+    { bundleId: "shared", documentId: "missing" },
+    { bundleId: "shared", documentId: "api", cursor: Buffer.from(JSON.stringify({ v: 3 })).toString("base64url") },
+  ]) assert.throws(() => service.read("root", request), /identity|attached|unavailable|cursor/i);
+
+  const noAttachments = structuredClone(f.snapshot) as any;
+  const denied = noAttachments.payload.authority.nodes.find((entry: any) => entry.nodeId === "denied");
+  denied.capabilities.effective.knowledge = ["read"];
+  denied.tools = ["knowledge_search", "knowledge_read"];
+  assert.throws(() => new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: noAttachments }).search("denied", { query: "gateway" }), /no bundle.*attached/i);
+
+  assert.equal((service.promptSummaries("worker")[0].content as any).scope, "agent-owned");
+  assert.throws(() => service.inspectReference("root", "bad/id", "api"), /unauthorized/i);
+  assert.throws(() => service.inspectReference("root", "shared", ""), /unauthorized/i);
+  assert.throws(() => service.inspectReference("root", "shared", "api", `sha256:${"0".repeat(64)}`), /stale/i);
+  const inspected = service.inspectReference("root", "shared", "api");
+  assert.equal(service.inspectReference("root", "shared", "api", inspected.contentHash as string).contentHash, inspected.contentHash);
+
+  const timed = new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-timed", runId: "run-1", snapshot: f.snapshot, now: () => "2026-01-01T00:00:00.000Z" });
+  timed.search("root", { query: "gateway" }, "timed-attempt");
+  assert.equal(readWorkflowJournal(f.projectRoot, "session-timed").at(-1)?.timestamp, "2026-01-01T00:00:00.000Z");
+
+  const unavailable = new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: f.snapshot, providers: new KnowledgeProviderRegistry() });
+  assert.throws(() => unavailable.search("root", { query: "gateway", bundleIds: ["shared"] }), /failed validation.*KNOWLEDGE_PROVIDER_UNAVAILABLE/i);
+  const emptyDiagnostics = new KnowledgeProviderRegistry();
+  emptyDiagnostics.register({ id: "okf", version: "empty-diagnostics", load: () => ({ ok: false, diagnostics: [] }) });
+  assert.throws(() => new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: f.snapshot, providers: emptyDiagnostics }).search("root", { query: "gateway", bundleIds: ["shared"] }), /failed validation$/i);
+
+  for (const mutate of [
+    (raw: any) => { raw.provider = "other"; },
+    (raw: any) => { raw.path = 1; },
+    (raw: any) => { raw.owner = 1; },
+    (raw: any) => { raw.updates = "mutable"; },
+  ]) {
+    const malformed = structuredClone(f.snapshot) as any;
+    mutate(malformed.payload.knowledge.find((entry: any) => entry.id === "shared"));
+    const malformedService = new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: malformed });
+    assert.throws(() => malformedService.search("root", { query: "gateway", bundleIds: ["shared"] }), /bundle.*unavailable/i);
+  }
+});
+
 test("knowledge references are re-authorized for their recipient and expose only provenance", () => {
   const f = fixture();
   const service = new KnowledgeService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: f.snapshot });
@@ -494,6 +563,55 @@ test("knowledge references are re-authorized for their recipient and expose only
   const denied = authorizer.authorize({ kind: "knowledge", id: "secret/passwords" }, "worker");
   assert.equal(denied.authorized, false);
   assert.equal(JSON.stringify(denied).includes("TOP-SECRET"), false);
+});
+
+test("attachment runtime rejects malformed authority, paths, reference identities, and stale inspectors", () => {
+  const active = structuredClone(snapshot()) as any;
+  active.payload.knowledge.push(
+    { id: "duplicate", path: ".pi/hive/knowledge/shared" },
+    { id: "absolute", path: "/tmp/knowledge" },
+    { id: "separator", path: ".pi\\hive\\knowledge" },
+    { id: "empty", path: "" },
+  );
+  assert.deepEqual(knowledgeProtectedPathRoots(active).map((entry) => entry.path), [
+    ".pi/hive/knowledge/owned", ".pi/hive/knowledge/secret", ".pi/hive/knowledge/shared",
+  ]);
+  assert.deepEqual(attachedKnowledgeBundleIds(active, "missing"), []);
+  assert.equal(nodeHasKnowledgeRead(active, "missing"), false);
+
+  const malformed = structuredClone(active) as any;
+  const worker = malformed.payload.authority.nodes.find((entry: any) => entry.nodeId === "worker");
+  worker.capabilities.attachments.knowledge = ["owned", 1];
+  assert.deepEqual(attachedKnowledgeBundleIds(malformed, "worker"), []);
+  worker.capabilities.attachments = undefined;
+  assert.deepEqual(attachedKnowledgeBundleIds(malformed, "worker"), []);
+  worker.capabilities.effective = undefined;
+  assert.equal(nodeHasKnowledgeRead(malformed, "worker"), false);
+  worker.capabilities = null;
+  assert.deepEqual(attachedKnowledgeBundleIds(malformed, "worker"), []);
+  assert.equal(nodeHasKnowledgeRead(malformed, "worker"), false);
+  malformed.payload.knowledge.push({ id: 1, path: ".pi/hive/knowledge/non-string-id" });
+  assert.deepEqual(attachedKnowledgeBundleIds(malformed, "root"), ["shared"]);
+
+  const inspected: Array<readonly [string, string, string, string | undefined]> = [];
+  const inspector = {
+    inspectReference(nodeId: string, bundleId: string, documentId: string, expectedHash?: string) {
+      inspected.push([nodeId, bundleId, documentId, expectedHash]);
+      if (documentId === "stale") throw new Error("stale");
+      return { nodeId, bundleId, documentId, expectedHash: expectedHash ?? null };
+    },
+  };
+  const fallback = { authorize: () => ({ authorized: true as const, resolved: { fallback: true } }) };
+  const authorizer = createKnowledgeReferenceAuthorizer(active, inspector, fallback);
+  assert.equal(authorizer.authorize({ kind: "artifact", id: "plan" }, "worker").authorized, true);
+  assert.equal(createKnowledgeReferenceAuthorizer(active, inspector).authorize({ kind: "artifact", id: "plan" }, "worker").authorized, false);
+  for (const id of ["owned", "/tactics", "owned/"]) assert.equal(authorizer.authorize({ kind: "knowledge", id }, "worker").authorized, false);
+  assert.equal(authorizer.authorize({ kind: "knowledge", id: "owned/tactics" }, "denied").authorized, false);
+  assert.equal(authorizer.authorize({ kind: "knowledge", id: "secret/passwords" }, "worker").authorized, false);
+  assert.equal(authorizer.authorize({ kind: "knowledge", id: `owned/tactics@${"a".repeat(64)}` }, "worker").authorized, true);
+  assert.equal(authorizer.authorize({ kind: "knowledge", id: `owned/tactics@sha256:${"b".repeat(64)}` }, "worker").authorized, true);
+  assert.equal(authorizer.authorize({ kind: "knowledge", id: "owned/stale" }, "worker").authorized, false);
+  assert.deepEqual(inspected.map((entry) => entry[3]), ["a".repeat(64), `sha256:${"b".repeat(64)}`, undefined]);
 });
 
 test("delegation context and worker-result knowledge refs reauthorize for each recipient", () => {

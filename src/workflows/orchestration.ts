@@ -788,9 +788,6 @@ export class RunOrchestrationService {
   private executeKnowledgeReconciliation(): Promise<void> {
     if (this.knowledgeReconciliation) return this.knowledgeReconciliation;
     const work = (async () => {
-      // Persist every terminal-to-job disposition before model work. Queue
-      // draining is deliberately detached: an older non-cooperative provider
-      // must not hold the reconciliation lock needed by a newer terminal.
       await this.reconcileTerminalEnrichment();
       this.wakeKnowledgeQueue();
     })();
@@ -811,8 +808,6 @@ export class RunOrchestrationService {
 
   private scheduleKnowledgeReconciliation(_terminal?: import("./events").WorkflowEventEnvelope, _preserveCancelled = false): void {
     if (this.shuttingDown || this.knowledgeReconcileImmediate !== undefined) return;
-    // A macrotask boundary is deliberate: no journal/provider/enqueue work can
-    // run ahead of the caller awaiting the already-durable terminal result.
     this.knowledgeReconcileImmediate = setTimeout(() => {
       this.knowledgeReconcileImmediate = undefined;
       const active = this.knowledgeReconciliation;
@@ -843,6 +838,8 @@ export class RunOrchestrationService {
       this.knowledgeReconcileImmediate = undefined;
     }
     await this.executeKnowledgeReconciliation();
+    if (this.shuttingDown) return;
+    await this.reconcileTerminalEnrichment();
     if (!this.shuttingDown) await this.knowledgeQueue.wake();
   }
 
