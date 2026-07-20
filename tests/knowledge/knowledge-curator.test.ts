@@ -6,7 +6,7 @@ import {
   parseCuratorOutput,
   type CuratorCandidateView,
 } from "../../src/knowledge/curator.ts";
-import { boundCuratorTargetContext as boundAdmissionTargetContext, buildCuratorPrompt as buildAdmissionPrompt } from "../../src/knowledge/curator-contract.ts";
+import { boundCuratorTargetContext as boundAdmissionTargetContext, buildCuratorPrompt as buildAdmissionPrompt, curatorFitsSnapshotModelContext } from "../../src/knowledge/curator-contract.ts";
 
 const candidates: CuratorCandidateView[] = [{
   candidateId: "candidate-1",
@@ -50,6 +50,56 @@ test("curator target context is serialized-byte bounded and explicitly reports e
   assert.equal(bounded.length, targets.length);
   assert.ok(Buffer.byteLength(JSON.stringify(bounded), "utf8") <= 24_000);
   assert.equal(bounded.every((target) => target.summaryTruncated && target.documentsOmitted === 1_024), true);
+});
+
+test("curator admission rejects malformed model, target, prompt, and provenance branches", () => {
+  assert.equal(curatorFitsSnapshotModelContext({ staticTokens: 1, contextWindow: 100_000 }), true);
+  for (const model of [
+    { staticTokens: 1.5, contextWindow: 100_000 },
+    { staticTokens: -1, contextWindow: 100_000 },
+    { staticTokens: 1, contextWindow: 100_000.5 },
+    { staticTokens: 1, contextWindow: 0 },
+    { staticTokens: 1, contextWindow: 40_000 },
+  ]) assert.equal(curatorFitsSnapshotModelContext(model), false);
+
+  assert.deepEqual(boundAdmissionTargetContext([{
+    bundleId: "empty-summary", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: "", documentCount: 0,
+  }])[0], {
+    bundleId: "empty-summary", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: "", summaryTruncated: false, documentsOmitted: 0,
+  });
+  for (const targets of [
+    [],
+    [null],
+    [{ bundleId: "", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: "summary", documentCount: 1 }],
+    [{ bundleId: "project", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: 1, documentCount: 1 }],
+    [{ bundleId: "project", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: "summary", documentCount: 1.5 }],
+    [{ bundleId: "project", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: "summary", documentCount: -1 }],
+    [{ bundleId: "x".repeat(24_001), policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}`, currentSummary: "summary", documentCount: 1 }],
+  ]) assert.throws(() => boundAdmissionTargetContext(targets as never), /target|context|bound|invalid/i);
+
+  const base = { jobId: "job-1", scope: "shared", targets: [{ bundleId: "project", policy: "reviewed", expectedContentHash: `sha256:${"d".repeat(64)}` }], candidates } as const;
+  const invalidInputs: unknown[] = [
+    null,
+    { ...base, jobId: "" },
+    { ...base, scope: "global" },
+    { ...base, targets: [] },
+    { ...base, candidates: [] },
+    { ...base, candidates: Array.from({ length: 513 }, () => candidates[0]) },
+    { ...base, candidates: [{ ...candidates[0], candidateId: "" }] },
+    { ...base, candidates: [{ ...candidates[0], candidateId: "x".repeat(257) }] },
+    { ...base, candidates: [{ ...candidates[0], conclusion: 1 }] },
+    { ...base, candidates: [{ ...candidates[0], conclusion: "short" }] },
+    { ...base, candidates: [{ ...candidates[0], conclusion: "Unsafe conclusion\ntext" }] },
+    { ...base, candidates: [{ ...candidates[0], citations: [] }] },
+    { ...base, candidates: [{ ...candidates[0], sourceHashes: {} }] },
+    { ...base, candidates: [{ ...candidates[0], sourceHashes: Array.from({ length: 129 }, () => `sha256:${"c".repeat(64)}`) }] },
+  ];
+  for (const input of invalidInputs) assert.throws(() => buildAdmissionPrompt(input as never), /prompt|candidate|conclusion|provenance|bound|invalid/i);
+
+  const oversizedCandidates = Array.from({ length: 512 }, (_, index) => ({
+    ...candidates[0], candidateId: `candidate-${index}`, conclusion: "x".repeat(4_096),
+  }));
+  assert.throws(() => buildAdmissionPrompt({ ...base, candidates: oversizedCandidates }), /production input bound/i);
 });
 
 test("strict curator output requires exact candidate citations and rejects authority/config fields", () => {

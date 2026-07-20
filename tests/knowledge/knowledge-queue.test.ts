@@ -363,6 +363,56 @@ test("bounded preemption quarantines an abort-ignoring processor until true sett
   assert.equal(queue.restore().jobs["job-1"].state, "paused");
 });
 
+test("queue runtime fails closed for lost ownership, missing plan closure, and non-error processor faults", async () => {
+  {
+    const projectRoot = fixture();
+    const denied = new DurableKnowledgeQueue({
+      projectRoot, projectId: "project-1", sessionId: "session-1", hasOwnership: () => false, isIdle: () => true,
+      process: async () => { throw new Error("must not run"); },
+    });
+    await denied.wake();
+    assert.equal(denied.restore().jobs["job-1"].state, "queued");
+  }
+  {
+    const projectRoot = fixture();
+    let ownershipChecks = 0;
+    const lostBeforeStart = new DurableKnowledgeQueue({
+      projectRoot, projectId: "project-1", sessionId: "session-1", hasOwnership: () => ++ownershipChecks === 1, isIdle: () => true,
+      process: async () => { throw new Error("must not run"); },
+    });
+    await lostBeforeStart.wake();
+    assert.equal(lostBeforeStart.restore().jobs["job-1"].state, "queued");
+  }
+  {
+    const projectRoot = fixture();
+    const missingClosure = new DurableKnowledgeQueue({
+      projectRoot, projectId: "project-1", sessionId: "session-1", isIdle: () => true,
+      process: async () => undefined,
+    });
+    await missingClosure.wake();
+    const paused = missingClosure.restore().jobs["job-1"];
+    assert.equal(paused.state, "paused");
+    assert.match(paused.lastReason ?? "", /plan-effect closure/i);
+    await missingClosure.shutdown();
+    await missingClosure.shutdown();
+    await missingClosure.wake();
+    assert.equal(missingClosure.restore().jobs["job-1"].state, "paused");
+  }
+  {
+    const projectRoot = fixture();
+    const nonError = `processor fault ${"é".repeat(2_048)}`;
+    const faulting = new DurableKnowledgeQueue({
+      projectRoot, projectId: "project-1", sessionId: "session-1", isIdle: () => true,
+      process: async () => { throw nonError; },
+    });
+    await faulting.wake();
+    const paused = faulting.restore().jobs["job-1"];
+    assert.equal(paused.state, "paused");
+    assert.ok(Buffer.byteLength(paused.lastReason ?? "", "utf8") <= 2_048);
+    assert.equal((paused.lastReason ?? "").endsWith("�"), false);
+  }
+});
+
 test("bounded shutdown also retains live accounting for a processor that never settles", async () => {
   const projectRoot = fixture();
   let started!: () => void;

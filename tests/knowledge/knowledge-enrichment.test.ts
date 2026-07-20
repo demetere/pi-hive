@@ -156,6 +156,138 @@ test("durable candidate and job reducers reject unknown fields and out-of-bound 
   assert.throws(() => restoreKnowledgeEnrichmentState(readWorkflowJournal(malformedJob.projectRoot, "session-1")), /job|schema|field|target|model/i);
 });
 
+test("candidate and job reducers fail closed for independently malformed durable fields", () => {
+  const candidateFixture = fixture();
+  evidence(candidateFixture.projectRoot, "schema-evidence", "alpha");
+  candidateFixture.service.propose("alpha", "schema-attempt", {
+    scope: "agent", conclusion: "A valid candidate anchors independent fail-closed schema cases.", evidenceEventIds: ["schema-evidence"],
+  });
+  const candidateEvents = readWorkflowJournal(candidateFixture.projectRoot, "session-1");
+  const candidateIndex = candidateEvents.findIndex((event) => (event.payload as any).operation === "candidate-recorded");
+  const candidateEvent = candidateEvents[candidateIndex];
+  const validCandidate = structuredClone((candidateEvent.payload as any).candidate);
+  const candidateCases: ReadonlyArray<readonly [string, (candidate: any) => void]> = [
+    ["exact fields", (candidate) => { candidate.authority = true; }],
+    ["format version", (candidate) => { candidate.formatVersion = 2; }],
+    ["scope", (candidate) => { candidate.scope = "global"; }],
+    ["request hash type", (candidate) => { candidate.requestHash = 1; }],
+    ["request hash grammar", (candidate) => { candidate.requestHash = "z".repeat(64); }],
+    ["created time", (candidate) => { candidate.createdAt = "not-a-time"; }],
+    ["candidate ID", (candidate) => { candidate.candidateId = "bad/id"; }],
+    ["conclusion type", (candidate) => { candidate.conclusion = 1; }],
+    ["conclusion minimum", (candidate) => { candidate.conclusion = "short"; }],
+    ["conclusion maximum", (candidate) => { candidate.conclusion = "x".repeat(4_097); }],
+    ["conclusion control", (candidate) => { candidate.conclusion = "Unsafe conclusion\u0000text"; }],
+    ["citations type", (candidate) => { candidate.citations = {}; }],
+    ["citations empty", (candidate) => { candidate.citations = []; }],
+    ["citations bound", (candidate) => { candidate.citations = Array.from({ length: 65 }, () => candidate.citations[0]); }],
+    ["source hashes type", (candidate) => { candidate.sourceHashes = {}; }],
+    ["source hashes empty", (candidate) => { candidate.sourceHashes = []; }],
+    ["source hashes bound", (candidate) => { candidate.sourceHashes = Array.from({ length: 65 }, () => candidate.sourceHashes[0]); }],
+    ["source hash type", (candidate) => { candidate.sourceHashes = [1]; }],
+    ["source hash grammar", (candidate) => { candidate.sourceHashes = [`sha256:${"z".repeat(64)}`]; }],
+    ["citation object", (candidate) => { candidate.citations = [null]; }],
+    ["citation exactness", (candidate) => { candidate.citations[0].authority = true; }],
+    ["citation event type", (candidate) => { candidate.citations[0].type = "terminal.recorded"; }],
+    ["citation event hash type", (candidate) => { candidate.citations[0].eventHash = 1; }],
+    ["citation event hash grammar", (candidate) => { candidate.citations[0].eventHash = "z".repeat(64); }],
+    ["citation payload hash type", (candidate) => { candidate.citations[0].payloadHash = 1; }],
+    ["citation payload hash grammar", (candidate) => { candidate.citations[0].payloadHash = "z".repeat(64); }],
+    ["citation sequence integer", (candidate) => { candidate.citations[0].sequence = 1.5; }],
+    ["citation sequence positive", (candidate) => { candidate.citations[0].sequence = 0; }],
+    ["citation event ID", (candidate) => { candidate.citations[0].eventId = "bad/id"; }],
+  ];
+  assert.throws(() => restoreKnowledgeEnrichmentState(candidateEvents.map((event, index) => index === candidateIndex
+    ? { ...event, payload: { ...(event.payload as any), candidate: null } }
+    : event)), /candidate|schema/i, "candidate object");
+  for (const [label, mutate] of candidateCases) {
+    const candidate = structuredClone(validCandidate);
+    mutate(candidate);
+    const events = [...candidateEvents];
+    events[candidateIndex] = { ...candidateEvent, payload: { ...(candidateEvent.payload as any), candidate } };
+    assert.throws(() => restoreKnowledgeEnrichmentState(events), /candidate|conclusion|citation|hash|ID|schema|provenance/i, label);
+  }
+
+  const jobFixture = fixture();
+  evidence(jobFixture.projectRoot, "job-schema-evidence", "alpha");
+  jobFixture.service.propose("alpha", "job-schema-attempt", {
+    scope: "agent", conclusion: "A valid job anchors independent fail-closed schema cases.", evidenceEventIds: ["job-schema-evidence"],
+  });
+  jobFixture.service.enqueueTerminal(terminal(jobFixture.projectRoot, "completed"));
+  const jobEvents = readWorkflowJournal(jobFixture.projectRoot, "session-1");
+  const jobIndex = jobEvents.findIndex((event) => (event.payload as any).operation === "jobs-enqueued");
+  const jobEvent = jobEvents[jobIndex];
+  const validJob = structuredClone((jobEvent.payload as any).jobs[0]);
+  const jobCases: ReadonlyArray<readonly [string, (job: any) => void]> = [
+    ["exact fields", (job) => { job.authority = true; }],
+    ["format version", (job) => { job.formatVersion = 2; }],
+    ["scope", (job) => { job.scope = "global"; }],
+    ["state", (job) => { job.state = "running"; }],
+    ["terminal hash type", (job) => { job.terminalEventHash = 1; }],
+    ["terminal hash grammar", (job) => { job.terminalEventHash = "z".repeat(64); }],
+    ["attempt integer", (job) => { job.attemptCount = 1.5; }],
+    ["attempt positive", (job) => { job.attemptCount = -1; }],
+    ["reevaluation integer", (job) => { job.staleReevaluations = 1.5; }],
+    ["reevaluation positive", (job) => { job.staleReevaluations = -1; }],
+    ["reevaluation maximum", (job) => { job.staleReevaluations = 2; }],
+    ["fallback marker", (job) => { job.staleFallbackRequired = false; }],
+    ["fallback counter", (job) => { job.staleFallbackRequired = true; }],
+    ["created time", (job) => { job.createdAt = "not-a-time"; }],
+    ["updated time", (job) => { job.updatedAt = "not-a-time"; }],
+    ["job ID", (job) => { job.jobId = "bad/id"; }],
+    ["agent owner required", (job) => { delete job.agentId; }],
+    ["shared owner prohibited", (job) => { job.scope = "shared"; }],
+    ["agent owner grammar", (job) => { job.agentId = "Bad_Agent"; }],
+    ["candidate IDs type", (job) => { job.candidateIds = {}; }],
+    ["candidate IDs empty", (job) => { job.candidateIds = []; }],
+    ["candidate IDs bound", (job) => { job.candidateIds = Array.from({ length: 514 }, (_, index) => `candidate-${index}`); }],
+    ["candidate IDs unique", (job) => { job.candidateIds = [job.candidateIds[0], job.candidateIds[0]]; }],
+    ["candidate ID grammar", (job) => { job.candidateIds = ["bad/id"]; }],
+    ["targets type", (job) => { job.targets = {}; }],
+    ["targets empty", (job) => { job.targets = []; }],
+    ["targets bound", (job) => { job.targets = Array.from({ length: 129 }, () => job.targets[0]); }],
+    ["target object", (job) => { job.targets = [null]; }],
+    ["target exactness", (job) => { job.targets[0].authority = true; }],
+    ["target bundle type", (job) => { job.targets[0].bundleId = 1; }],
+    ["target provider type", (job) => { job.targets[0].providerId = 1; }],
+    ["target path type", (job) => { job.targets[0].path = 1; }],
+    ["target path empty", (job) => { job.targets[0].path = ""; }],
+    ["target path absolute", (job) => { job.targets[0].path = "/tmp/bundle"; }],
+    ["target path separator", (job) => { job.targets[0].path = ".pi\\hive"; }],
+    ["target path empty segment", (job) => { job.targets[0].path = ".pi//bundle"; }],
+    ["target path dot segment", (job) => { job.targets[0].path = ".pi/./bundle"; }],
+    ["target path parent segment", (job) => { job.targets[0].path = ".pi/../bundle"; }],
+    ["target bundle grammar", (job) => { job.targets[0].bundleId = "bad/id"; }],
+    ["target policy", (job) => { job.targets[0].policy = "mutable"; }],
+    ["target hash type", (job) => { job.targets[0].expectedContentHash = 1; }],
+    ["target hash grammar", (job) => { job.targets[0].expectedContentHash = `sha256:${"z".repeat(64)}`; }],
+    ["target identity unique", (job) => { job.targets = [job.targets[0], structuredClone(job.targets[0])]; }],
+    ["model object", (job) => { job.model = null; }],
+    ["model exactness", (job) => { job.model.authority = true; }],
+    ["model selection", (job) => { job.model.reason = "dynamic"; }],
+    ["model ID type", (job) => { job.model.modelId = 1; }],
+    ["model ID empty", (job) => { job.model.modelId = ""; }],
+    ["thinking type", (job) => { job.model.thinking = 1; }],
+    ["thinking empty", (job) => { job.model.thinking = ""; }],
+    ["model node ID", (job) => { job.model.nodeId = "bad/id"; }],
+    ["active owner required", (job) => { job.state = "active"; }],
+    ["active owner grammar", (job) => { job.state = "active"; job.activeOwnerNonce = "bad/owner"; }],
+    ["inactive owner prohibited", (job) => { job.activeOwnerNonce = "owner"; }],
+    ["reason type", (job) => { job.lastReason = 1; }],
+    ["reason bound", (job) => { job.lastReason = "x".repeat(2_049); }],
+  ];
+  assert.throws(() => restoreKnowledgeEnrichmentState(jobEvents.map((event, index) => index === jobIndex
+    ? { ...event, payload: { ...(event.payload as any), jobs: [null] } }
+    : event)), /job|schema/i, "job object");
+  for (const [label, mutate] of jobCases) {
+    const job = structuredClone(validJob);
+    mutate(job);
+    const events = [...jobEvents];
+    events[jobIndex] = { ...jobEvent, payload: { ...(jobEvent.payload as any), jobs: [job] } };
+    assert.throws(() => restoreKnowledgeEnrichmentState(events), /job|target|model|owner|reason|ID|schema/i, label);
+  }
+});
+
 test("reducers enforce one candidate per exact attempt, one terminal scope job, and plan-effect closure before completion", () => {
   {
     const f = fixture();

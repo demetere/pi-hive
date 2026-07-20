@@ -104,6 +104,52 @@ test("automatic OKF mutation requires Pi queue, optimistic hash, short-lock vali
   assert.equal(readFileSync(join(f.root, "curated.md"), "utf8"), content, "dedupe replay must not rewrite bytes");
 });
 
+test("consistent automatic mutation fails closed at queue, precondition, and pre-effect CAS boundaries", async () => {
+  const f = fixture();
+  const precondition = {
+    bundleId: "project", providerId: "okf", path: ".pi/hive/knowledge/project", policy: "automatic", expectedContentHash: f.expectedContentHash,
+  } as const;
+
+  const withoutQueue = new OkfKnowledgeMutator({ projectRoot: f.projectRoot, snapshot: snapshot() });
+  await assert.rejects(() => withoutQueue.apply(f.update), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "MUTATION_QUEUE_REQUIRED");
+  await assert.rejects(() => withoutQueue.applyConsistent([f.update], [precondition]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "MUTATION_QUEUE_REQUIRED");
+
+  const mutator = new OkfKnowledgeMutator({ projectRoot: f.projectRoot, snapshot: snapshot(), mutationQueue: mutationQueue([]) });
+  await assert.rejects(() => mutator.applyConsistent([], [precondition]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "MUTATION_QUEUE_REQUIRED");
+  await assert.rejects(() => mutator.applyConsistent([f.update], []), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "MUTATION_QUEUE_REQUIRED");
+  await assert.rejects(() => mutator.applyConsistent([f.update, f.update], [precondition]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "VALIDATION_FAILED");
+  await assert.rejects(() => mutator.applyConsistent([f.update], [precondition, precondition]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "VALIDATION_FAILED");
+  await assert.rejects(() => mutator.applyConsistent([f.update], [{ ...precondition, providerId: "other" }]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "BUNDLE_UNAVAILABLE");
+  await assert.rejects(() => mutator.applyConsistent([f.update], [{ ...precondition, path: ".pi/hive/knowledge/other" }]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "BUNDLE_UNAVAILABLE");
+  await assert.rejects(() => mutator.applyConsistent([f.update], [{ ...precondition, policy: "reviewed" }]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "BUNDLE_UNAVAILABLE");
+  await assert.rejects(() => mutator.applyConsistent([f.update], [{ ...precondition, expectedContentHash: `sha256:${"9".repeat(64)}` }]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "BUNDLE_UNAVAILABLE");
+
+  const queueFailure = new Error("mutation queue unavailable");
+  const rejectedByQueue = new OkfKnowledgeMutator({
+    projectRoot: f.projectRoot, snapshot: snapshot(), mutationQueue: async () => { throw queueFailure; },
+  });
+  await assert.rejects(() => rejectedByQueue.applyConsistent([f.update], [precondition]), queueFailure);
+  assert.equal(readWorkflowJournal(f.projectRoot, "session-1").some((event) => String((event.payload as any).operation).startsWith("mutation-")), false);
+  assert.equal(existsSync(join(f.root, "curated.md")), false);
+
+  const staleAtAdmission = new OkfKnowledgeMutator({
+    projectRoot: f.projectRoot, snapshot: snapshot(), mutationQueue: async (_path, _operationId, callback) => {
+      writeFileSync(join(f.root, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nChanged before the queued callback acquired its mutation boundary.\n");
+      return callback();
+    },
+  });
+  await assert.rejects(() => staleAtAdmission.applyConsistent([f.update], [precondition]), (error: unknown) => error instanceof KnowledgeMutationError && error.code === "STALE_HASH");
+  assert.equal(existsSync(join(f.root, "curated.md")), false);
+
+  const valid = fixture();
+  const result = await new OkfKnowledgeMutator({ projectRoot: valid.projectRoot, snapshot: snapshot(), mutationQueue: mutationQueue([]) }).applyConsistent([valid.update], [{
+    bundleId: "project", providerId: "okf", path: ".pi/hive/knowledge/project", policy: "automatic", expectedContentHash: valid.expectedContentHash,
+  }]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].changed, true);
+  assert.match(readFileSync(join(valid.root, "curated.md"), "utf8"), /deterministic/u);
+});
+
 test("concurrent optimistic writers allow one commit and return a stale-hash conflict for the loser", async () => {
   const f = fixture();
   const mutatorA = new OkfKnowledgeMutator({ projectRoot: f.projectRoot, snapshot: snapshot(), mutationQueue: mutationQueue([]) });
