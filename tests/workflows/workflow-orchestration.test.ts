@@ -9,7 +9,9 @@ import { RunOrchestrationService, type RunOrchestrationServiceOptions } from "..
 import { acquireRuntimeOwnership } from "../../src/workflows/ownership.ts";
 import { WorkflowRunLifecycle } from "../../src/workflows/runs.ts";
 import { QuestionService } from "../../src/workflows/questions.ts";
-import { readWorkflowJournal } from "../../src/workflows/journal.ts";
+import { appendWorkflowEvent, readWorkflowJournal } from "../../src/workflows/journal.ts";
+import { createWorkflowEvent } from "../../src/workflows/events.ts";
+import { hashAttemptInput } from "../../src/workflows/attempts.ts";
 import type { WorkerSessionFactory } from "../../src/workflows/workers.ts";
 import type { EffectiveRuntimeBudgetLimits } from "../../src/workflows/budgets.ts";
 import { analyzeCommand } from "../../src/capabilities/command.ts";
@@ -33,7 +35,7 @@ function snapshot(): ActivationSnapshotFileV1 {
       { id: "database", name: "Database", tags: ["schema"], prompt: "review schema" },
     ],
     skills: [], knowledge: [], models: [
-      { nodeId: "root", modelId: "root-model", thinking: "medium", staticTokens: 1, dynamicReserve: 1, contextWindow: 10 },
+      { nodeId: "root", modelId: "root-model", thinking: "medium", staticTokens: 1, dynamicReserve: 1, contextWindow: 100_000 },
       { nodeId: "worker", modelId: "worker-model", thinking: "low", staticTokens: 1, dynamicReserve: 1, contextWindow: 10 },
       { nodeId: "leaf", modelId: "leaf-model", thinking: "low", staticTokens: 1, dynamicReserve: 1, contextWindow: 10 },
     ], sources: [], versions: {} as never,
@@ -74,6 +76,32 @@ function deliverInitial(service: RunOrchestrationService, inputId: string) {
   return recorded.runId;
 }
 
+function seedCuratorJob(projectRoot: string): void {
+  const evidence = appendWorkflowEvent(projectRoot, createWorkflowEvent({
+    eventId: "curator-provider-evidence", projectId: "project-1", sessionId: "session-1", runId: "curator-run", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", sourceHashes: [`sha256:${"a".repeat(64)}`] },
+  }));
+  const conclusion = "A stable candidate exists for provider limit dispatch.";
+  const candidate = { formatVersion: 1, candidateId: "curator-provider-candidate", projectId: "project-1", sessionId: "session-1", runId: "curator-run", nodeId: "root", agentId: "lead", scope: "shared", conclusion,
+    requestHash: hashAttemptInput({ scope: "shared", conclusion, evidenceEventIds: [evidence.eventId] }), citations: [{ eventId: evidence.eventId, eventHash: evidence.eventHash, payloadHash: evidence.payloadHash, sequence: evidence.sequence, type: evidence.type }],
+    sourceHashes: [`sha256:${"a".repeat(64)}`], createdAt: "2026-01-01T00:00:00.000Z" };
+  appendWorkflowEvent(projectRoot, createWorkflowEvent({
+    projectId: "project-1", sessionId: "session-1", runId: "curator-run", type: "knowledge.transition", producer: "runtime", correlationId: "curator-provider-attempt", attemptId: "curator-provider-attempt",
+    payload: { formatVersion: 1, operation: "candidate-recorded", candidate } as never,
+  }));
+  const terminal = appendWorkflowEvent(projectRoot, createWorkflowEvent({
+    projectId: "project-1", sessionId: "session-1", runId: "curator-run", type: "terminal.recorded", producer: "harness", payload: { formatVersion: 1, status: "completed" },
+  }));
+  const job = { formatVersion: 1, jobId: "curator-provider-job", projectId: "project-1", sessionId: "session-1", runId: "curator-run", terminalEventHash: terminal.eventHash, scope: "shared", candidateIds: [candidate.candidateId],
+    targets: [{ bundleId: "provider-target", providerId: "okf", path: ".pi/hive/knowledge/provider-target", policy: "automatic", expectedContentHash: `sha256:${"b".repeat(64)}` }],
+    model: { nodeId: "root", modelId: "root-model", thinking: "medium", reason: "agent-lowest-participating-node;shared-workflow-root" }, state: "queued", attemptCount: 0, staleReevaluations: 0,
+    createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
+  appendWorkflowEvent(projectRoot, createWorkflowEvent({
+    projectId: "project-1", sessionId: "session-1", runId: "curator-run", type: "knowledge.transition", producer: "harness",
+    payload: { formatVersion: 1, operation: "jobs-enqueued", terminalEventHash: terminal.eventHash, preservedCancelled: false, jobs: [job] } as never,
+  }));
+}
+
 test("root model and pause/resume boundaries preserve exact immutable compaction markers", async () => {
   const { service } = fixture();
   deliverInitial(service, "first");
@@ -88,6 +116,134 @@ test("root model and pause/resume boundaries preserve exact immutable compaction
   assert.match(preservation, /run_id=run-1/);
   assert.equal(await service.pause("switch"), true);
   assert.equal(await service.resume(), true);
+});
+
+test("production knowledge takeover bridge binds death proof to the persisted owner nonce", async () => {
+  let provedNonce: string | undefined;
+  const { service } = fixture(undefined, { verifiedTakeover: async (ownerNonce) => { provedNonce = ownerNonce; return ownerNonce === "persisted-owner"; } });
+  const verified = await (service as any).knowledgeQueue.options.verifyOwnerDead("persisted-owner");
+  assert.equal(verified, true);
+  assert.equal(provedNonce, "persisted-owner");
+  await service.shutdown();
+});
+
+test("production terminal reconciliation starts on a later macrotask and never delays the awaited terminal return", async () => {
+  const { service } = fixture();
+  await new Promise((resolve) => setImmediate(resolve));
+  deliverInitial(service, "terminal-macrotask");
+  let reconciliationDone = false;
+  (service as any).reconcileTerminalEnrichment = () => {
+    const until = Date.now() + 150;
+    while (Date.now() < until) { /* simulate synchronous journal/provider consolidation */ }
+    reconciliationDone = true;
+  };
+  const before = Date.now();
+  const finished = await service.lifecycle.finish({ status: "completed", summary: "terminal is already durable" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] });
+  assert.equal(finished.ok, true);
+  const elapsed = Date.now() - before;
+  assert.equal(reconciliationDone, false, `heavy reconciliation ran before terminal return (${elapsed}ms)`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(reconciliationDone, true);
+  await service.shutdown();
+});
+
+test("active knowledge reconciliation remains live-accounted across bounded shutdown until safe settlement", async () => {
+  const { service } = fixture();
+  await new Promise((resolve) => setImmediate(resolve));
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  (service as any).reconcileTerminalEnrichment = async () => hold;
+  const reconciliation = (service as any).executeKnowledgeReconciliation() as Promise<void>;
+  assert.equal(service.hasLiveHandles(), true);
+  const before = Date.now();
+  await service.shutdown();
+  assert.ok(Date.now() - before < 500, "shutdown stays bounded while reconciliation remains honestly live-accounted");
+  assert.equal(service.hasLiveHandles(), true, "effect-capable reconciliation cannot disappear from lifecycle accounting");
+  release();
+  await reconciliation;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(service.hasLiveHandles(), false);
+});
+
+test("production curator dispatch carries exact provider token caps through factory and prompt and fails closed when unsupported", async () => {
+  let factoryLimits: unknown;
+  let promptLimits: unknown;
+  const supported: WorkerSessionFactory = async (input) => {
+    factoryLimits = (input as any).providerTokenLimits;
+    return {
+      linkedSessionId: "limited-curator",
+      enforcedTokenLimits: (input as any).providerTokenLimits,
+      async prompt(_text: string, _signal?: AbortSignal, _invocation?: unknown, options?: unknown) {
+        promptLimits = (options as any)?.providerTokenLimits;
+        return { output: JSON.stringify({ formatVersion: 1, conclusions: [] }), usage: { inputTokens: 4, outputTokens: 4, costMicroUsd: 1, precision: "provider-confirmed" } };
+      },
+      dispose() {},
+    } as any;
+  };
+  const first = fixture(supported);
+  (first.options.snapshot.payload.models[0] as any).staticTokens = 8_192;
+  (first.options.snapshot.payload.models[0] as any).contextWindow = 49_152;
+  seedCuratorJob(first.projectRoot);
+  const request = { jobId: "curator-provider-job", modelId: "root-model", thinking: "medium", prompt: "bounded curator prompt", maxInputTokens: 32_768, maxOutputTokens: 8_192, timeoutMs: 120_000, evaluation: 0, signal: new AbortController().signal };
+  await (first.service as any).runCuratorModel(request);
+  assert.deepEqual(factoryLimits, { maxInputTokens: 32_768, maxOutputTokens: 8_192 });
+  assert.deepEqual(promptLimits, factoryLimits);
+
+  let shortFactoryCalls = 0;
+  const short = fixture(async (input) => {
+    shortFactoryCalls++;
+    return { linkedSessionId: "short-context-curator", enforcedTokenLimits: input.providerTokenLimits, prompt: async () => "must not dispatch", dispose() {} } as any;
+  });
+  (short.options.snapshot.payload.models[0] as any).staticTokens = 8_192;
+  (short.options.snapshot.payload.models[0] as any).contextWindow = 49_151;
+  seedCuratorJob(short.projectRoot);
+  await assert.rejects(() => (short.service as any).runCuratorModel(request), /curator|context|static|input|output/i);
+  assert.equal(shortFactoryCalls, 0);
+
+  let unsupportedPromptCalls = 0;
+  const unsupported = fixture(async () => ({ linkedSessionId: "unsupported-curator", prompt: async () => { unsupportedPromptCalls++; return "must not dispatch"; }, dispose() {} }));
+  seedCuratorJob(unsupported.projectRoot);
+  await assert.rejects(() => (unsupported.service as any).runCuratorModel(request), /token limit|provider.*cap|unsupported/i);
+  assert.equal(unsupportedPromptCalls, 0);
+});
+
+test("production curator conservatively rejects an input that cannot fit before provider construction", async () => {
+  let factoryCalls = 0;
+  const { projectRoot, service } = fixture(async () => { factoryCalls++; return { linkedSessionId: "oversized-curator", enforcedTokenLimits: { maxInputTokens: 32_768, maxOutputTokens: 8_192 }, prompt: async () => "must not dispatch", dispose() {} } as any; });
+  seedCuratorJob(projectRoot);
+  await assert.rejects(() => (service as any).runCuratorModel({ jobId: "curator-provider-job", modelId: "root-model", thinking: "medium", prompt: "x".repeat(32_769), maxInputTokens: 32_768, maxOutputTokens: 8_192, timeoutMs: 120_000, evaluation: 0, signal: new AbortController().signal }), /input|fit|token|bound/i);
+  assert.equal(factoryCalls, 0);
+});
+
+test("provider-confirmed usage cannot omit cost and be converted to confirmed zero", async () => {
+  const { service } = fixture();
+  deliverInitial(service, "missing-provider-cost");
+  await service.rootServices().dispatch.model({
+    correlationId: "missing-provider-cost", operation: "root.prompt", input: {},
+    dispatch: () => ({ output: "provider omitted cost", usage: { inputTokens: 10, outputTokens: 4, precision: "provider-confirmed" } as any }),
+  });
+  const state = service.budgetState() as any;
+  assert.equal(state.run.providerConfirmedTokens, 0);
+  assert.ok(state.run.estimatedTokens >= 14, "missing cost downgrades the whole usage claim to explicit conservative estimated semantics");
+  await service.shutdown();
+});
+
+test("failed terminal reconciliation retries durably without another user wake", async () => {
+  const { service } = fixture();
+  await new Promise((resolve) => setImmediate(resolve));
+  deliverInitial(service, "terminal-retry");
+  const original = (service as any).reconcileTerminalEnrichment.bind(service);
+  let calls = 0;
+  (service as any).reconcileTerminalEnrichment = async (...args: unknown[]) => {
+    calls++;
+    if (calls === 1) throw new Error("transient reconciliation fault");
+    return original(...args);
+  };
+  const finished = await service.lifecycle.finish({ status: "completed", summary: "retry terminal reconciliation" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] });
+  assert.equal(finished.ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.ok(calls >= 2);
+  await service.shutdown();
 });
 
 test("run orchestration integrates descendants, route/delegate, durable delivery, and sequential runs", async () => {
@@ -183,7 +339,7 @@ test("W13 run orchestration enforces delegation/worker budgets and derives termi
   };
   const budgetedFactory: WorkerSessionFactory = async (input) => ({
     linkedSessionId: `linked-${input.nodeId}`,
-    async prompt() { return { output: "budgeted result", usage: { inputTokens: 3, outputTokens: 2, precision: "provider-confirmed" as const } }; },
+    async prompt() { return { output: "budgeted result", usage: { inputTokens: 3, outputTokens: 2, costMicroUsd: 0, precision: "provider-confirmed" as const } }; },
     dispose() {},
   });
   const { service, projectRoot } = fixture(budgetedFactory, { budgetLimits });
@@ -505,7 +661,7 @@ test("root trusted dispatch uses the same budget/attempt boundary and preserves 
   const { service } = fixture();
   deliverInitial(service, "root-dispatch");
   const root = service.rootServices();
-  const model = await root.dispatch.model({ correlationId: "root-model", operation: "root.prompt", input: { prompt: "finish" }, finalization: true, dispatch: async () => ({ output: "done", usage: { inputTokens: 1, outputTokens: 1, precision: "provider-confirmed" as const } }) });
+  const model = await root.dispatch.model({ correlationId: "root-model", operation: "root.prompt", input: { prompt: "finish" }, finalization: true, dispatch: async () => ({ output: "done", usage: { inputTokens: 1, outputTokens: 1, costMicroUsd: 0, precision: "provider-confirmed" as const } }) });
   assert.equal(typeof model, "object");
   const status = await root.dispatch.tool({ correlationId: "root-finish-tool", toolName: "workflow_finish", operation: "finish", input: {}, finalization: true, policyOutcome: "allowed", dispatch: async () => "ok" });
   assert.equal(status, "ok");
@@ -591,7 +747,7 @@ test("root finalization reserve remains usable after its bounded response crosse
   const root = service.rootServices();
   const response = await root.dispatch.model({
     correlationId: "finalization-overage-model", operation: "root.finalize", input: {}, finalization: true,
-    dispatch: async () => ({ output: "bounded final synthesis", usage: { inputTokens: 5, outputTokens: 5, precision: "provider-confirmed" as const } }),
+    dispatch: async () => ({ output: "bounded final synthesis", usage: { inputTokens: 5, outputTokens: 5, costMicroUsd: 0, precision: "provider-confirmed" as const } }),
   });
   assert.equal(typeof response, "object");
   assert.equal(await root.dispatch.tool({ correlationId: "finalization-overage-tool", toolName: "workflow_finish", operation: "finish", input: {}, finalization: true, policyOutcome: "allowed", dispatch: async () => "ok" }), "ok");
@@ -626,7 +782,7 @@ test("run-wide budget preparation freezes questions before descendant cancellati
         holder.questionId = holder.service!.questionControls().create({ nodeId: "worker", taskId: "task-1", definition: { prompt: "Budget race?", kind: "confirm", required: true }, provenance: { source: "human_question", toolCallId: `budget-question-${answerWins}` } }).questionId;
         return "suspend on question";
       }
-      return { output: "run budget exhausted", usage: { inputTokens: 20_000, outputTokens: 1, precision: "provider-confirmed" as const } };
+      return { output: "run budget exhausted", usage: { inputTokens: 20_000, outputTokens: 1, costMicroUsd: 0, precision: "provider-confirmed" as const } };
     }, dispose() {} }), {
       snapshot: active,
       budgetLimits: limits,
@@ -674,7 +830,7 @@ test("run-wide budget preparation freezes questions before descendant cancellati
 test("post-response token overage produces a budget-blocked worker result and closes ordinary admission", async () => {
   const factory: WorkerSessionFactory = async () => ({
     linkedSessionId: "overage-worker",
-    prompt: async () => ({ output: "over budget", usage: { inputTokens: 5, outputTokens: 5, precision: "provider-confirmed" as const } }),
+    prompt: async () => ({ output: "over budget", usage: { inputTokens: 5, outputTokens: 5, costMicroUsd: 0, precision: "provider-confirmed" as const } }),
     dispose() {},
   });
   const budgetLimits: EffectiveRuntimeBudgetLimits = {

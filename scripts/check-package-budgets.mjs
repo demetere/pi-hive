@@ -5,9 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+// Durable knowledge enrichment adds the shipped curator, queue/accounting, and
+// proposal runtime, including descriptor-rooted mutation staging with pinned
+// rollback/validation traversal. The existing 10% ceiling remains unchanged.
 export const PACKAGE_BASELINES = Object.freeze({
-  packedBytes: 629_600,
-  unpackedBytes: 2_418_600,
+  packedBytes: 676_280,
+  unpackedBytes: 2_665_841,
   reviewRawBytes: 12_625,
   reviewCompressedBytes: 4_304,
 });

@@ -27,6 +27,8 @@ import { acquireRuntimeOwnership } from "../../src/workflows/ownership.ts";
 import { appendWorkflowEvent, readWorkflowJournal } from "../../src/workflows/journal.ts";
 import { createWorkflowEvent } from "../../src/workflows/events.ts";
 import { AttemptRuntime, attemptDescriptorForModel, executeWithConservativeRetry } from "../../src/workflows/attempts.ts";
+import { KnowledgeEnrichmentService, restoreKnowledgeEnrichmentState } from "../../src/knowledge/enrichment.ts";
+import { DurableKnowledgeQueue } from "../../src/knowledge/queue.ts";
 import type { EffectiveRuntimeBudgetLimits } from "../../src/workflows/budgets.ts";
 
 function snapshot(): ActivationSnapshotFileV1 {
@@ -101,18 +103,24 @@ function fixture(
   factoryOverride?: WorkerSessionFactory,
   snapshotOverride: ActivationSnapshotFileV1 = snapshot(),
   presentLive?: any,
-  overrides: { runId?: string; initialInputText?: string; stagedHandoff?: HandoffPacket; cancellationReleaseLeases?: () => void | Promise<void>; questionJournalFault?: (eventType: "question.transition", stage: "beforeWrite" | "afterFileFsync" | "beforeRename" | "afterRename" | "beforeDirFsync") => void; budgetLimits?: EffectiveRuntimeBudgetLimits } = {},
+  overrides: { runId?: string; createRunId?: () => string; initialInputText?: string; stagedHandoff?: HandoffPacket; cancellationReleaseLeases?: () => void | Promise<void>; questionJournalFault?: (eventType: "question.transition", stage: "beforeWrite" | "afterFileFsync" | "beforeRename" | "afterRename" | "beforeDirFsync") => void; budgetLimits?: EffectiveRuntimeBudgetLimits; prepareProject?: (projectRoot: string) => void } = {},
 ) {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-tools-"));
+  overrides.prepareProject?.(projectRoot);
   const ownerNonce = "owner-1";
   assert.equal(acquireRuntimeOwnership(projectRoot, "session-1", { nonce: ownerNonce }).ok, true);
   let task = 0;
-  const factory: WorkerSessionFactory = factoryOverride ?? (async (input) => ({
+  const configuredFactory: WorkerSessionFactory = factoryOverride ?? (async (input) => ({
     linkedSessionId: `linked-${input.nodeId}`, prompt: async () => "ok", dispose() {},
   }));
+  const factory: WorkerSessionFactory = async (input) => {
+    const handle = await configuredFactory(input);
+    if (input.providerTokenLimits && !handle.enforcedTokenLimits) Object.defineProperty(handle, "enforcedTokenLimits", { value: input.providerTokenLimits, enumerable: true });
+    return handle;
+  };
   const options = {
     projectRoot, projectId: "project-1", sessionId: "session-1", snapshot: snapshotOverride, runtimeOwnerNonce: ownerNonce,
-    maxParallel: 1, workerFactory: factory, createRunId: () => overrides.runId ?? "run-1", createTaskId: () => `task-${++task}`, createAttemptId: () => `attempt-${task}`,
+    maxParallel: 1, workerFactory: factory, createRunId: overrides.createRunId ?? (() => overrides.runId ?? "run-1"), createTaskId: () => `task-${++task}`, createAttemptId: () => `attempt-${task}`,
     ...(overrides.budgetLimits ? { budgetLimits: overrides.budgetLimits } : {}),
     pauseAuthority: { captureState: () => ({}), releaseLeases: () => {}, releaseOwnership: () => {} },
     resumeAuthority: { acquireOwnership: () => {}, acquireLeases: () => {}, revalidateHashes: () => true, rollbackAuthority: () => {} },
@@ -143,6 +151,10 @@ test("generic TypeBox schemas are exact and reject unknown or oversized fields",
   assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_read, { bundleId: "shared", documentId: "api", path: "../../secret" }), false);
   assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_read, { bundleId: "shared", documentId: "x".repeat(1_716) }), true);
   assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_read, { bundleId: "shared", documentId: "x".repeat(1_717) }), false);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_propose, { scope: "agent", conclusion: "A stable evidence-backed conclusion.", evidenceEventIds: ["event-1"] }), true);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_propose, { scope: "agent", conclusion: "No citations", evidenceEventIds: [] }), false);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_propose, { scope: "agent", conclusion: "Transcript line\nsecond line", evidenceEventIds: ["event-1"] }), false);
+  assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).knowledge_propose, { scope: "agent", conclusion: "A stable evidence-backed conclusion.", evidenceEventIds: ["event-1"], authority: true }), false);
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.workflow_finish, { status: "cancelled", summary: "no" }), false);
 });
 
@@ -157,6 +169,7 @@ test("generic tool exposure follows frozen topology and reserves inactive subsys
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_status"), true);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "artifact_action"), true);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "knowledge_read"), true);
+  assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "knowledge_propose"), true);
   assert.equal(GENERIC_WORKFLOW_TOOL_CONTRACTS.some((entry) => entry.name === "human_question"), true, "the generic contract is registered while immutable authority still controls exposure");
   assert.equal(Value.Check((GENERIC_WORKFLOW_TOOL_SCHEMAS as any).human_question, {
     prompt: "Which database?", kind: "single", choices: [{ value: "postgres", label: "PostgreSQL" }], required: true,
@@ -213,6 +226,513 @@ test("knowledge tools are attached-only, locally retrieved, bounded, and journal
   assert.equal(readDetails.returnedContentHash, `sha256:${createHash("sha256").update(readDetails.content, "utf8").digest("hex")}`);
   const provenance = readWorkflowJournal(built.projectRoot, "session-1").filter((event) => event.type === "knowledge.transition");
   assert.deepEqual(provenance.map((event) => (event.payload as any).operation), ["search", "read"]);
+});
+
+test("knowledge_propose is capability-gated and persists only bounded citation-derived candidates", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const rootAuthority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  rootAuthority.capabilities.effective = { ...rootAuthority.capabilities.effective, knowledge: ["propose", "curate"] };
+  rootAuthority.capabilities.attachments.knowledge = ["shared"];
+  rootAuthority.tools = [...new Set([...rootAuthority.tools, "knowledge_propose"])].sort();
+  let curatorPrompts = 0;
+  const built = fixture(async (input) => ({
+    linkedSessionId: `knowledge-${input.nodeId}`,
+    async prompt(text) {
+      curatorPrompts++;
+      const candidateId = /"candidateId":"([^"]+)"/u.exec(text)?.[1];
+      assert.ok(candidateId, "production curator receives the durable candidate prompt");
+      return { output: JSON.stringify({ formatVersion: 1, conclusions: [{ text: "The project uses a deterministic build graph.", citationIds: [candidateId] }] }), usage: { inputTokens: 50, outputTokens: 20, costMicroUsd: 321, precision: "provider-confirmed" as const } };
+    },
+    abort() {}, dispose() {},
+  }), active, undefined, {
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "verified-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", operation: "verified-evidence", contentHash: `sha256:${"e".repeat(64)}` },
+  }));
+  const root = built.service.rootServices();
+  const result = await root.runWithToolRuntime(() => call("knowledge_propose", { scope: "shared", conclusion: "The project uses a deterministic build graph.", evidenceEventIds: ["verified-evidence"] }));
+  assert.equal((result.details as any).scope, "shared");
+  assert.deepEqual((result.details as any).sourceHashes, [`sha256:${"e".repeat(64)}`]);
+  assert.equal(readWorkflowJournal(built.projectRoot, "session-1").filter((event) => (event.payload as any).operation === "candidate-recorded").length, 1);
+
+  rootAuthority.tools = rootAuthority.tools.filter((name: string) => name !== "knowledge_propose");
+  await assert.rejects(() => root.runWithToolRuntime(() => call("knowledge_propose", { scope: "shared", conclusion: "This must be denied by frozen authority.", evidenceEventIds: ["verified-evidence"] })), /denied|not enabled/i);
+  rootAuthority.tools = [...rootAuthority.tools, "knowledge_propose"].sort();
+  const finished = await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Knowledge candidate recorded without waiting for curation.", artifactRefs: [], evidenceRefs: [] }));
+  assert.equal((finished.details as any).status, "completed");
+  await built.service.runKnowledgeEnrichment();
+  const jobs = readWorkflowJournal(built.projectRoot, "session-1").filter((event) => (event.payload as any).operation === "jobs-enqueued");
+  assert.equal(jobs.length, 1);
+  assert.equal((jobs[0].payload as any).jobs[0].state, "queued");
+  assert.equal(curatorPrompts, 1, "idle terminal enrichment executes through a dedicated production model handle");
+  const usage = readWorkflowJournal(built.projectRoot, "session-1").find((event) => (event.payload as any).operation === "curator-model-usage");
+  assert.equal((usage?.payload as any).usage.costMicroUsd, 321, "typed provider cost is durably charged in integer micro-USD");
+  assert.equal(built.service.knowledgeProposals().status({ projectId: "project-1", sessionId: "session-1", state: "pending", limit: 10 }).items.length, 1);
+  assert.equal(built.service.activeWorkerCount(), 0, "curation consumes no scheduler worker slot");
+  await built.service.shutdown();
+  assert.equal(built.service.hasLiveHandles(), false);
+});
+
+test("production automatic enrichment uses Pi's mutation queue without an injected test seam", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "automatic", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  const built = fixture(async (input) => ({
+    linkedSessionId: `knowledge-${input.nodeId}`,
+    async prompt(text) {
+      const candidateId = /"candidateId":"([^"]+)"/u.exec(text)?.[1];
+      return JSON.stringify({ formatVersion: 1, conclusions: [{ text: "Automatic production enrichment uses the Pi mutation queue.", citationIds: [candidateId] }] });
+    },
+    abort() {}, dispose() {},
+  }), active, undefined, {
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "automatic-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"5".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "automatic-candidate" })
+    .propose("root", "automatic-attempt", { scope: "shared", conclusion: "Automatic production enrichment uses the Pi mutation queue.", evidenceEventIds: [evidence.eventId] });
+  const root = built.service.rootServices();
+  await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Apply automatic knowledge.", artifactRefs: [], evidenceRefs: [] }));
+  await built.service.runKnowledgeEnrichment();
+  assert.match(readFileSync(join(built.projectRoot, ".pi/hive/knowledge/shared/curated.md"), "utf8"), /Pi mutation queue/u);
+  await built.service.shutdown();
+});
+
+test("active root user work preempts curation and prevents idle restart until the user model settles", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let curatorStarts = 0;
+  let firstStarted!: () => void;
+  const didFirstStart = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const built = fixture(async (input) => ({
+    linkedSessionId: `knowledge-${input.nodeId}`,
+    async prompt(text, signal) {
+      curatorStarts++;
+      const candidateId = /"candidateId":"([^"]+)"/u.exec(text)?.[1];
+      if (curatorStarts === 1) {
+        firstStarted();
+        await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
+      return JSON.stringify({ formatVersion: 1, conclusions: [{ text: "User work has strict priority over background curation.", citationIds: [candidateId] }] });
+    },
+    abort() {}, dispose() {},
+  }), active, undefined, {
+    createRunId: (() => { let run = 0; return () => `run-${++run}`; })(),
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "priority-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"4".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "priority-candidate" })
+    .propose("root", "priority-attempt", { scope: "shared", conclusion: "User work has strict priority over background curation.", evidenceEventIds: [evidence.eventId] });
+  const firstRoot = built.service.rootServices();
+  await firstRoot.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Queue priority curation.", artifactRefs: [], evidenceRefs: [] }));
+  await didFirstStart;
+
+  built.service.lifecycle.recordUserInput({ inputId: "input-2", text: "new user work", source: "interactive" });
+  const delivery = built.service.lifecycle.prepareInputDelivery("delivery-2");
+  built.service.lifecycle.confirmInputDelivery(delivery.requestId);
+  let rootStarted!: () => void;
+  let releaseRoot!: () => void;
+  const didRootStart = new Promise<void>((resolve) => { rootStarted = resolve; });
+  const rootHold = new Promise<void>((resolve) => { releaseRoot = resolve; });
+  const rootDispatch = built.service.rootServices().dispatch.model({
+    correlationId: "priority-root-model", operation: "workflow.root.model", input: { text: "new user work" },
+    dispatch: async () => { rootStarted(); await rootHold; return "root complete"; },
+  });
+  await didRootStart;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(curatorStarts, 1, "curation must not restart while root user work is active");
+  assert.equal(built.service.activeWorkerCount(), 0, "curation never consumes a normal worker slot");
+  releaseRoot();
+  await rootDispatch;
+  await built.service.runKnowledgeEnrichment();
+  assert.equal(curatorStarts, 2);
+  await built.service.shutdown();
+});
+
+test("a non-cooperative older curator cannot delay durable reconciliation of a newer terminal", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let oldStarted!: () => void;
+  const didStart = new Promise<void>((resolve) => { oldStarted = resolve; });
+  const never = new Promise<string>(() => undefined);
+  let run = 0;
+  const built = fixture(async (input) => ({
+    linkedSessionId: `older-${input.nodeId}`,
+    prompt: async () => { oldStarted(); return never; },
+    abort() {}, dispose() {},
+  }), active, undefined, {
+    createRunId: () => `run-${++run}`,
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const firstEvidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "older-curator-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"3".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "older-candidate" })
+    .propose("root", "older-attempt", { scope: "shared", conclusion: "Older curation may remain non-cooperative without blocking journal persistence.", evidenceEventIds: [firstEvidence.eventId] });
+  await built.service.rootServices().runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Start older curation.", artifactRefs: [], evidenceRefs: [] }));
+  await didStart;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  (built.service as any).knowledgeQueue.preemptForUserWork = async () => undefined;
+  built.service.lifecycle.recordUserInput({ inputId: "newer-input", text: "newer run", source: "interactive" });
+  const newerDelivery = built.service.lifecycle.prepareInputDelivery("newer-delivery");
+  built.service.lifecycle.confirmInputDelivery(newerDelivery.requestId);
+  const newerEvidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "newer-terminal-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-2", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"4".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-2", snapshot: active, createCandidateId: () => "newer-candidate" })
+    .propose("root", "newer-attempt", { scope: "shared", conclusion: "New terminal candidates become durable before any older queue drain.", evidenceEventIds: [newerEvidence.eventId] });
+  assert.equal((await built.service.lifecycle.finish({ status: "completed", summary: "Newer terminal is durable." }, { callerNodeId: "root", toolBatch: ["workflow_finish"] })).ok, true);
+  const newerTerminal = readWorkflowJournal(built.projectRoot, "session-1").find((event) => event.type === "terminal.recorded" && event.runId === "run-2")!;
+  const reconciled = await Promise.race([
+    (built.service as any).executeKnowledgeReconciliation().then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+  ]);
+  const completed = restoreKnowledgeEnrichmentState(readWorkflowJournal(built.projectRoot, "session-1")).terminalEnqueueCompleted[newerTerminal.eventHash] === true;
+  await built.service.shutdown();
+  assert.equal(reconciled, true, "terminal reconciliation must not await an older non-cooperative queue drain");
+  assert.equal(completed, true);
+});
+
+test("restart idle admission blocks curation while durable user delegation is runnable", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let run = 0;
+  let curatorStarts = 0;
+  const built = fixture(async (input) => ({
+    linkedSessionId: `idle-${input.nodeId}`,
+    prompt: async (text) => {
+      if (input.runId.startsWith("knowledge-")) {
+        curatorStarts++;
+        const candidateId = /"candidateId":"([^"]+)"/u.exec(text)?.[1];
+        return JSON.stringify({ formatVersion: 1, conclusions: [{ text: "Durable user work has priority over restart curation.", citationIds: [candidateId] }] });
+      }
+      return "user task complete";
+    },
+    dispose() {},
+  }), active, undefined, {
+    createRunId: () => `run-${++run}`,
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "restart-idle-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"4".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "restart-idle-candidate" })
+    .propose("root", "restart-idle-attempt", { scope: "shared", conclusion: "Durable user work has priority over restart curation.", evidenceEventIds: [evidence.eventId] });
+  assert.equal((await built.service.lifecycle.finish({ status: "completed", summary: "run one complete" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] })).ok, true);
+  built.service.lifecycle.recordUserInput({ inputId: "run-two-input", text: "run two", source: "interactive" });
+  const delivery = built.service.lifecycle.prepareInputDelivery("run-two-delivery");
+  built.service.lifecycle.confirmInputDelivery(delivery.requestId);
+  built.service.rootServices().delegate({ targetNodeId: "worker", objective: "durable queued user task", deliverables: [] });
+  const restarted = new RunOrchestrationService(built.options);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(curatorStarts, 0);
+  await restarted.shutdown();
+  await built.service.shutdown();
+});
+
+for (const durableBlocker of ["root-model-attempt", "tool-attempt", "active-budget"] as const) {
+  test(`restart idle admission inspects durable ${durableBlocker} work before curation`, async () => {
+    const active = snapshot() as any;
+    active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+    active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+    const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+    authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+    authority.capabilities.attachments.knowledge = ["shared"];
+    authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+    let run = 0;
+    let curatorStarts = 0;
+    const built = fixture(async (input) => ({
+      linkedSessionId: `durable-idle-${input.nodeId}`,
+      prompt: async (text) => {
+        if (input.runId.startsWith("knowledge-")) {
+          curatorStarts++;
+          const candidateId = /"candidateId":"([^"]+)"/u.exec(text)?.[1];
+          return JSON.stringify({ formatVersion: 1, conclusions: [{ text: "Durable recovery work blocks restart curation.", citationIds: [candidateId] }] });
+        }
+        return "user work";
+      },
+      dispose() {},
+    }), active, undefined, {
+      createRunId: () => `run-${++run}`,
+      prepareProject: (projectRoot) => {
+        const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+        mkdirSync(bundleRoot, { recursive: true });
+        writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+      },
+    });
+    const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+      eventId: `durable-idle-${durableBlocker}`, projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+      payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"4".repeat(64)}` },
+    }));
+    new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => `candidate-${durableBlocker}` })
+      .propose("root", `proposal-${durableBlocker}`, { scope: "shared", conclusion: "Durable recovery work blocks restart curation.", evidenceEventIds: [evidence.eventId] });
+    assert.equal((await built.service.lifecycle.finish({ status: "completed", summary: "run one complete" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] })).ok, true);
+    built.service.lifecycle.recordUserInput({ inputId: `input-${durableBlocker}`, text: "run two", source: "interactive" });
+    const delivery = built.service.lifecycle.prepareInputDelivery(`delivery-${durableBlocker}`);
+    built.service.lifecycle.confirmInputDelivery(delivery.requestId);
+    if (durableBlocker === "active-budget") {
+      assert.equal(built.service.budgetRuntime().beginActive("root", "interrupted-root-active").ok, true);
+    } else {
+      const attempts = new AttemptRuntime({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-2" });
+      attempts.begin({
+        attemptId: `unresolved-${durableBlocker}`, correlationId: `correlation-${durableBlocker}`, nodeId: "root",
+        operation: durableBlocker === "root-model-attempt" ? "workflow.root.model" : "workflow.tool.knowledge_propose", input: { interrupted: true },
+        descriptor: durableBlocker === "root-model-attempt" ? attemptDescriptorForModel() : { effect: "tool", readOnly: false, idempotent: false },
+      });
+    }
+    const restarted = new RunOrchestrationService(built.options);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(curatorStarts, 0, `startup curation must wait for ${durableBlocker} recovery`);
+    await restarted.shutdown();
+    await built.service.shutdown();
+  });
+}
+
+test("orchestration shutdown quarantines a non-cooperative curator factory in live-handle accounting", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let started!: () => void;
+  const didStart = new Promise<void>((resolve) => { started = resolve; });
+  const never = new Promise<void>(() => undefined);
+  const built = fixture(async () => {
+    started();
+    return await never as never;
+  }, active, undefined, {
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "noncoop-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"6".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "noncoop-candidate" })
+    .propose("root", "noncoop-attempt", { scope: "shared", conclusion: "Non-cooperative curator shutdown remains bounded.", evidenceEventIds: [evidence.eventId] });
+  const root = built.service.rootServices();
+  await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Start non-cooperative curation.", artifactRefs: [], evidenceRefs: [] }));
+  await didStart;
+  let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    built.service.shutdown().then(() => "settled" as const),
+    new Promise<"timeout">((resolve) => { shutdownTimer = setTimeout(() => resolve("timeout"), 6_000); }),
+  ]);
+  if (shutdownTimer) clearTimeout(shutdownTimer);
+  assert.equal(outcome, "settled");
+  assert.equal(built.service.hasLiveHandles(), true, "an unresolved effectful factory remains quarantined and owned");
+  const durable = Object.values(restoreKnowledgeEnrichmentState(readWorkflowJournal(built.projectRoot, "session-1")).jobs)[0];
+  assert.equal(durable.state, "active");
+});
+
+test("shutdown keeps a real non-cooperative curator handle live-accounted until provider disposal settles", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let promptStarted!: () => void;
+  const didPrompt = new Promise<void>((resolve) => { promptStarted = resolve; });
+  let releaseDispose!: () => void;
+  const disposeHold = new Promise<void>((resolve) => { releaseDispose = resolve; });
+  const never = new Promise<void>(() => undefined);
+  const built = fixture(async (input) => ({
+    linkedSessionId: `real-noncoop-${input.nodeId}`,
+    async prompt() { promptStarted(); await never; return "unreachable"; },
+    abort: () => never,
+    dispose: () => disposeHold,
+  }), active, undefined, {
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "real-noncoop-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"5".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "real-noncoop-candidate" })
+    .propose("root", "real-noncoop-attempt", { scope: "shared", conclusion: "Real model handles remain honestly accounted during shutdown.", evidenceEventIds: [evidence.eventId] });
+  const root = built.service.rootServices();
+  await root.runWithToolRuntime(() => call("workflow_finish", { status: "completed", summary: "Start real non-cooperative curation.", artifactRefs: [], evidenceRefs: [] }));
+  await didPrompt;
+  await built.service.shutdown();
+  assert.equal(built.service.hasLiveHandles(), true, "timed-out provider disposal must not be hidden");
+  const activeJob = Object.values(restoreKnowledgeEnrichmentState(readWorkflowJournal(built.projectRoot, "session-1")).jobs)[0];
+  assert.equal(activeJob.state, "active", "durable job ownership must remain quarantined until real provider disposal settles");
+  let duplicateStarts = 0;
+  const secondOwner = new DurableKnowledgeQueue({
+    projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", ownerNonce: "second-process-owner", isIdle: () => true,
+    verifyOwnerDead: async () => false, process: async () => { duplicateStarts++; },
+  });
+  await secondOwner.wake();
+  assert.equal(duplicateStarts, 0, "a second process cannot run the same job while the old provider handle is live");
+  assert.equal(secondOwner.restore().jobs[activeJob.jobId].state, "active");
+  releaseDispose();
+  for (let turn = 0; turn < 10 && built.service.hasLiveHandles(); turn++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(built.service.hasLiveHandles(), false);
+  assert.equal(secondOwner.restore().jobs[activeJob.jobId].state, "paused", "only verified handle settlement releases durable ownership");
+});
+
+test("explicit cancelled-run preservation survives nonblocking terminal scheduling and enqueues the durable job", async () => {
+  const active = snapshot() as any;
+  active.payload.workflow.team.nodes[0].knowledge = { resolved: ["shared"] };
+  active.payload.knowledge = [{ id: "shared", provider: "okf", path: ".pi/hive/knowledge/shared", updates: "reviewed", metadataFingerprint: "a".repeat(64), attachedNodeIds: ["root"] }];
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose", "curate"] };
+  authority.capabilities.attachments.knowledge = ["shared"];
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  const built = fixture(async (input) => ({
+    linkedSessionId: `knowledge-${input.nodeId}`,
+    async prompt() { return JSON.stringify({ formatVersion: 1, conclusions: [{ text: "Preserved cancellation evidence remains durable.", citationIds: ["preserve-candidate"] }] }); },
+    abort() {}, dispose() {},
+  }), active, undefined, {
+    prepareProject: (projectRoot) => {
+      const bundleRoot = join(projectRoot, ".pi/hive/knowledge/shared");
+      mkdirSync(bundleRoot, { recursive: true });
+      writeFileSync(join(bundleRoot, "existing.md"), "---\ntype: Knowledge\ntitle: Existing\n---\n\nExisting verified knowledge.\n");
+    },
+  });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "preserve-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"7".repeat(64)}` },
+  }));
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "preserve-candidate" })
+    .propose("root", "preserve-attempt", { scope: "shared", conclusion: "Preserved cancellation evidence remains durable.", evidenceEventIds: [evidence.eventId] });
+  const cancelled = await built.service.cancel("preserve evidence", { preserveKnowledge: true });
+  assert.equal(cancelled.envelope.status, "cancelled");
+  await new Promise((resolve) => setImmediate(resolve));
+  const events = readWorkflowJournal(built.projectRoot, "session-1");
+  const preservation = events.find((event) => (event.payload as any).operation === "cancel-preservation-requested")!;
+  const terminal = events.find((event) => event.type === "terminal.recorded")!;
+  const enqueue = events.find((event) => (event.payload as any).operation === "jobs-enqueued")!;
+  assert.ok(preservation.sequence < terminal.sequence && terminal.sequence < enqueue.sequence, "production preservation policy evidence must precede the exact cancelled terminal and enqueue");
+  assert.equal(events.filter((event) => (event.payload as any).operation === "jobs-enqueued").length, 1);
+  assert.equal(events.some((event) => (event.payload as any).reason === "cancelled-not-preserved"), false);
+  await built.service.shutdown();
+});
+
+test("restart reconciles knowledge_propose after candidate publication before attempt result", () => {
+  const active = snapshot() as any;
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose"] };
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  const built = fixture(undefined, active);
+  const firstEvidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "reconcile-evidence-first", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"9".repeat(64)}` },
+  }));
+  const secondEvidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "reconcile-evidence-second", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"8".repeat(64)}` },
+  }));
+  const input = {
+    scope: "shared" as const,
+    conclusion: "Published candidate proves its exact tool result on restart.",
+    evidenceEventIds: [secondEvidence.eventId, firstEvidence.eventId],
+  };
+  const attempts = new AttemptRuntime({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1" });
+  attempts.begin({ attemptId: "crash-attempt", correlationId: "crash-correlation", nodeId: "root", operation: "workflow.tool.knowledge_propose", input, descriptor: { effect: "tool", readOnly: false, idempotent: false } });
+  const candidate = new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "reconciled-candidate" }).propose("root", "crash-attempt", input);
+  assert.equal(attempts.restore().attempts["crash-attempt"].result, undefined, "fault boundary leaves only publication proof");
+
+  const restarted = new RunOrchestrationService(built.options);
+  restarted.rootServices();
+  const recovered = restarted.attemptRuntime().restore().attempts["crash-attempt"];
+  assert.equal(recovered.status, "completed");
+  assert.equal(recovered.reconciliation, "applied");
+  assert.deepEqual(recovered.result?.value, candidate);
+});
+
+test("knowledge_propose restart reconciliation cannot use a same-attempt publication from an earlier run", async () => {
+  const active = snapshot() as any;
+  const authority = active.payload.authority.nodes.find((node: any) => node.nodeId === "root");
+  authority.capabilities.effective = { ...authority.capabilities.effective, knowledge: ["propose"] };
+  authority.tools = [...new Set([...authority.tools, "knowledge_propose"])].sort();
+  let run = 0;
+  const built = fixture(undefined, active, undefined, { createRunId: () => `run-${++run}` });
+  const evidence = appendWorkflowEvent(built.projectRoot, createWorkflowEvent({
+    eventId: "cross-run-evidence", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "artifact.recorded", producer: "harness",
+    payload: { formatVersion: 1, nodeId: "root", contentHash: `sha256:${"7".repeat(64)}` },
+  }));
+  const input = { scope: "shared" as const, conclusion: "Attempt identities are scoped to their exact workflow run.", evidenceEventIds: [evidence.eventId] };
+  new KnowledgeEnrichmentService({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: active, createCandidateId: () => "run-one-candidate" })
+    .propose("root", "same-attempt", input);
+  const terminal = await built.service.lifecycle.finish({ status: "completed", summary: "complete run one" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] });
+  assert.equal(terminal.ok, true);
+  built.service.lifecycle.recordUserInput({ inputId: "input-2", text: "second run", source: "interactive" });
+  const delivery = built.service.lifecycle.prepareInputDelivery("delivery-2");
+  built.service.lifecycle.confirmInputDelivery(delivery.requestId);
+  const runTwoAttempts = new AttemptRuntime({ projectRoot: built.projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-2" });
+  runTwoAttempts.begin({ attemptId: "same-attempt", correlationId: "same-correlation", nodeId: "root", operation: "workflow.tool.knowledge_propose", input, descriptor: { effect: "tool", readOnly: false, idempotent: false } });
+
+  const restarted = new RunOrchestrationService(built.options);
+  assert.throws(() => restarted.rootServices(), /recovery|unknown-side-effect|unresolved/i);
+  const recovered = runTwoAttempts.restore().attempts["same-attempt"];
+  assert.equal(recovered.result, undefined);
+  assert.equal(recovered.status, "unknown_side_effect");
 });
 
 test("actual knowledge_read delivers escape-heavy pages within bounds and journals only returned pages", async () => {

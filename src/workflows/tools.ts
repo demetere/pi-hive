@@ -64,6 +64,7 @@ const EvidenceReference = Type.Object({
   claim: Type.String({ minLength: 1, maxLength: 2_048 }),
 }, strict);
 const SAFE_QUESTION_TEXT_PATTERN = "^[^\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F]*$";
+const SAFE_SINGLE_LINE_TEXT_PATTERN = "^[^\\u0000-\\u001F\\u007F]*$";
 const QuestionChoice = Type.Object({
   value: Type.String({ minLength: 1, maxLength: QUESTION_LIMITS.choiceValueBytes, pattern: SAFE_QUESTION_TEXT_PATTERN }),
   label: Type.String({ minLength: 1, maxLength: QUESTION_LIMITS.choiceLabelBytes, pattern: SAFE_QUESTION_TEXT_PATTERN }),
@@ -122,6 +123,11 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     documentId: Type.String({ minLength: 1, maxLength: KNOWLEDGE_IDENTITY_LIMITS.documentIdBytes }),
     cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048, pattern: "^[A-Za-z0-9_-]+$" })),
   }, strict),
+  knowledge_propose: Type.Object({
+    scope: Type.Union([Type.Literal("agent"), Type.Literal("shared")]),
+    conclusion: Type.String({ minLength: 8, maxLength: 4_096, pattern: SAFE_SINGLE_LINE_TEXT_PATTERN }),
+    evidenceEventIds: Type.Array(Id, { minItems: 1, maxItems: 32, uniqueItems: true }),
+  }, strict),
   human_question: Type.Union([
     Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("single"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), required: Type.Boolean() }, strict),
     Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("multi"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), validation: Type.Optional(QuestionMultiValidation), required: Type.Boolean() }, strict),
@@ -157,6 +163,7 @@ export interface WorkflowToolRuntimeBindingInput {
   readonly artifactAction?: (input: { readonly actionId: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expectedWorkspaceHash?: string }, attemptId: string, signal?: AbortSignal) => Promise<unknown>;
   readonly knowledgeSearch?: (input: { readonly query: string; readonly bundleIds?: readonly string[]; readonly limit?: number; readonly cursor?: string }, attemptId: string) => unknown;
   readonly knowledgeRead?: (input: { readonly bundleId: string; readonly documentId: string; readonly cursor?: string }, attemptId: string) => unknown;
+  readonly knowledgePropose?: (input: { readonly scope: "agent" | "shared"; readonly conclusion: string; readonly evidenceEventIds: readonly string[] }, attemptId: string) => unknown;
   readonly question?: (input: unknown, toolCallId: string, signal?: AbortSignal, batchCallIds?: readonly string[]) => Promise<unknown>;
   readonly finish: (input: unknown, toolBatch: readonly string[]) => Promise<unknown>;
 }
@@ -171,6 +178,7 @@ export interface WorkflowToolRuntimeBinding {
   readonly artifactAction?: WorkflowToolRuntimeBindingInput["artifactAction"];
   readonly knowledgeSearch?: WorkflowToolRuntimeBindingInput["knowledgeSearch"];
   readonly knowledgeRead?: WorkflowToolRuntimeBindingInput["knowledgeRead"];
+  readonly knowledgePropose?: WorkflowToolRuntimeBindingInput["knowledgePropose"];
   readonly question?: WorkflowToolRuntimeBindingInput["question"];
   readonly finish: WorkflowToolRuntimeBindingInput["finish"];
 }
@@ -236,6 +244,10 @@ function assertByteBounds(name: GenericWorkflowToolName, input: Record<string, u
     assertUtf8(input.bundleId, "knowledge_read bundleId", TOOL_CONTRACT_LIMITS.idBytes);
     assertUtf8(input.documentId, "knowledge_read documentId", KNOWLEDGE_IDENTITY_LIMITS.documentIdBytes);
     if (input.cursor !== undefined) assertUtf8(input.cursor, "knowledge_read cursor", 2_048);
+  }
+  if (name === "knowledge_propose") {
+    assertUtf8(input.conclusion, "knowledge_propose conclusion", 4_096);
+    for (const eventId of input.evidenceEventIds as unknown[]) assertUtf8(eventId, "knowledge_propose evidence event ID", TOOL_CONTRACT_LIMITS.idBytes);
   }
   if (name === "human_question") normalizeQuestionDefinition(input);
   if (name === "workflow_finish") {
@@ -404,6 +416,10 @@ async function executeTool(name: GenericWorkflowToolName, toolCallId: string, ra
         if (!runtime.binding.knowledgeRead) throw Object.assign(new Error("Knowledge read subsystem is not bound for this run"), { effectNotApplied: true });
         return runtime.binding.knowledgeRead(input as { bundleId: string; documentId: string; cursor?: string }, attemptContext.attemptId);
       }
+      if (name === "knowledge_propose") {
+        if (!runtime.binding.knowledgePropose) throw Object.assign(new Error("Knowledge enrichment subsystem is not bound for this run"), { effectNotApplied: true });
+        return runtime.binding.knowledgePropose(input as { scope: "agent" | "shared"; conclusion: string; evidenceEventIds: readonly string[] }, attemptContext.attemptId);
+      }
       if (name === "human_question") {
         if (!runtime.binding.question) throw Object.assign(new Error("Human question subsystem is not bound for this run"), { effectNotApplied: true });
         return runtime.binding.question(input, toolCallId, signal, toolBatch.callIds);
@@ -458,6 +474,7 @@ export const GENERIC_WORKFLOW_TOOL_CONTRACTS: readonly ToolDefinition<any, objec
   contract("artifact_action", "Artifact Action", "Invoke one exact active-profile action; workspace and operation identity come only from trusted run state."),
   contract("knowledge_search", "Knowledge Search", "Search only this node's attached local knowledge bundles with deterministic bounded lexical ranking."),
   contract("knowledge_read", "Knowledge Read", "Read one exact bounded page from an attached knowledge document with content-hash provenance."),
+  contract("knowledge_propose", "Knowledge Propose", "Persist one bounded durable conclusion candidate with exact same-run evidence-event citations; this does not directly mutate knowledge."),
   contract("human_question", "Human Question", "Persist one bounded typed human question. Pending questions suspend the current task rather than blocking an in-memory promise."),
   contract("workflow_finish", "Workflow Finish", "Root-only sole-call request for a validated terminal workflow outcome."),
 ]);

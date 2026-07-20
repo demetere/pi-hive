@@ -57,6 +57,27 @@ test("builder requires branded complete matching authority and produces stable r
   assert.throws(() => buildActivationSnapshot({ ...input, authority: testAuthority("debug", []) }), /node coverage/i);
 });
 
+test("curator topology accepts the exact frozen static plus fixed I/O context boundary and rejects one token less", () => {
+  const build = (contextWindow: number) => {
+    const base = fixture();
+    const node = authorityNode();
+    (node.capabilities.effective as any).knowledge = ["curate", "propose"];
+    node.tools = ["knowledge_propose"];
+    const authority = testAuthority("debug", [node]);
+    const boundaryModels = {
+      defaultModel: "provider/model", defaultThinking: "off",
+      find: (id: string) => id === "provider/model" ? { id, contextWindow, maxTokens: 8_192, thinking: ["off"] } : undefined,
+      canActivate: () => true,
+      estimateTokens: () => 0,
+    };
+    return buildActivationSnapshot({ ...base, authority, models: boundaryModels, packageVersion: "0.1.0" });
+  };
+  const exact = build(274_432);
+  assert.equal(exact.payload.models[0].contextWindow, 274_432);
+  assert.equal(exact.payload.models[0].staticTokens + exact.payload.models[0].dynamicReserve, 274_432);
+  assert.throws(() => build(274_431), /curator|context|input|output|static|preflight/i);
+});
+
 test("snapshot model preflight consumes frozen authority instead of re-resolving mutable source defaults", () => {
   const base = fixture();
   const authority = testAuthority();

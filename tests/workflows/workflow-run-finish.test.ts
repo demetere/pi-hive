@@ -89,6 +89,45 @@ test("workflow_finish is root-only, sole-call, rejects harness fields, and atomi
   assert.equal(racing.lifecycle.restore().latestRun?.status, "running");
 });
 
+test("terminal callback observes the already-durable exact terminal event without delaying model work", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-run-terminal-hook-"));
+  let observed: any;
+  const lifecycle = new WorkflowRunLifecycle({
+    projectRoot, projectId: "project-1", sessionId: "session-1", snapshotId: "snapshot-1", rootNodeId: "root", createRunId: () => "run-1",
+    onTerminalRecorded: (event: import("../../src/workflows/events.ts").WorkflowEventEnvelope) => {
+      observed = event;
+      assert.equal(readWorkflowJournal(projectRoot, "session-1").at(-1)?.eventHash, event.eventHash, "terminal must be durable before enrichment enqueue hook");
+    },
+  });
+  startAndDeliver(lifecycle);
+  const result = await lifecycle.finish(request, rootBatch);
+  assert.equal(result.ok, true);
+  assert.equal(observed?.type, "terminal.recorded");
+  assert.equal(observed?.eventHash, result.ok ? result.envelope.terminalEventHash : undefined);
+});
+
+test("terminal callback failures and pending enqueue work never fail or delay terminal transition", async () => {
+  for (const callback of [
+    () => { throw new Error("enqueue failed after terminal publication"); },
+    () => new Promise<void>(() => undefined),
+  ]) {
+    const projectRoot = mkdtempSync(join(tmpdir(), "hive-run-terminal-nonblocking-"));
+    const lifecycle = new WorkflowRunLifecycle({
+      projectRoot, projectId: "project-1", sessionId: "session-1", snapshotId: "snapshot-1", rootNodeId: "root", createRunId: () => "run-1",
+      onTerminalRecorded: callback,
+    });
+    startAndDeliver(lifecycle);
+    const result = await Promise.race([
+      lifecycle.finish(request, rootBatch),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
+    ]);
+    assert.notEqual(result, "timeout");
+    assert.equal(typeof result === "object" && result.ok, true);
+    assert.equal(lifecycle.restore().latestRun?.status, "completed");
+    assert.equal(readWorkflowJournal(projectRoot, "session-1").filter((event) => event.type === "terminal.recorded").length, 1);
+  }
+});
+
 test("completed finish persists one bounded authoritative envelope and the next message starts a fresh run", async () => {
   const f = fixture();
   startAndDeliver(f.lifecycle);

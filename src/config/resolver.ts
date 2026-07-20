@@ -162,6 +162,35 @@ export function resolveConfigWorkflows(project: ConfiguredProject, catalogs: Con
       resourceId: resource.id,
       dependencyChain: [`workflow:${resource.id}`, `node:${finding.nodeId}`],
     });
+    if (team.team && capabilities) {
+      const proposers = capabilities.policies.filter((policy) => policy.tools.includes("knowledge_propose"));
+      const eligible = (policy: EffectiveNodePolicy): boolean => policy.capabilities.knowledge.includes("curate") && Boolean(policy.model) && Boolean(policy.thinking);
+      if (proposers.length) {
+        const root = capabilities.policies.find((policy) => policy.nodeId === team.team!.rootId);
+        if (!root || !eligible(root)) local.add({
+          code: "WORKFLOW_KNOWLEDGE_CURATOR_UNREACHABLE",
+          severity: "error",
+          message: "Shared knowledge proposals require the workflow root to have curate authority and a resolved model/thinking selection.",
+          source: resource.source,
+          range: team.team.nodes.find((node) => node.id === team.team!.rootId)?.range ?? range(resource.sourceMap, "/team"),
+          resourceId: resource.id,
+          dependencyChain: [`workflow:${resource.id}`, "knowledge-scope:shared", `node:${team.team.rootId}`],
+        });
+        for (const agentId of [...new Set(proposers.map((policy) => policy.agentId))].sort(compare)) {
+          if (capabilities.policies.some((policy) => policy.agentId === agentId && eligible(policy))) continue;
+          const proposer = proposers.find((policy) => policy.agentId === agentId)!;
+          local.add({
+            code: "WORKFLOW_KNOWLEDGE_CURATOR_UNREACHABLE",
+            severity: "error",
+            message: `Agent-scoped knowledge proposals for ${agentId} require a same-agent node with curate authority and a resolved model/thinking selection.`,
+            source: resource.source,
+            range: team.team.nodes.find((node) => node.id === proposer.nodeId)?.range ?? range(resource.sourceMap, "/team"),
+            resourceId: resource.id,
+            dependencyChain: [`workflow:${resource.id}`, `knowledge-scope:agent:${agentId}`, `node:${proposer.nodeId}`],
+          });
+        }
+      }
+    }
     if (resolvedArtifact && capabilities) {
       for (const action of resolvedArtifact.profile.actions.filter((candidate) => candidate.completion === "mandatory")) {
         const reachable = capabilities.policies.some((policy) => action.requiredCapabilities.every((required) => policy.capabilities.artifact.includes(required)));

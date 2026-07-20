@@ -131,10 +131,10 @@ test("agent-owned knowledge is attached independently of defaults and enables re
   assert.equal(workflow.authority.nodes[0].tools.includes("knowledge_read"), true);
 });
 
-test("resolver, snapshot, and generic registration keep propose-only authority unadvertised until W23", () => {
+test("resolver, snapshot, and generic registration expose knowledge proposals only with propose authority", () => {
   const root = temp();
-  write(join(root, ".pi/hive/agents/proposer.md"), "---\nname: Proposer\nmodel: provider/model\ncapabilities:\n  knowledge: [propose]\nknowledge: [shared]\n---\npropose\n");
-  write(join(root, ".pi/hive/agents/reader.md"), "---\nname: Reader\nmodel: provider/model\ncapabilities:\n  knowledge: [read, propose]\nknowledge: [shared]\n---\nread\n");
+  write(join(root, ".pi/hive/agents/proposer.md"), "---\nname: Proposer\nmodel: provider/model\nthinking: off\ncapabilities:\n  knowledge: [propose, curate]\nknowledge: [shared]\n---\npropose\n");
+  write(join(root, ".pi/hive/agents/reader.md"), "---\nname: Reader\nmodel: provider/model\nthinking: off\ncapabilities:\n  knowledge: [read, propose, curate]\nknowledge: [shared]\n---\nread\n");
   write(join(root, ".pi/hive/knowledge/shared/doc.md"), "---\ntype: Reference\ntitle: Shared\n---\n\nShared facts.\n");
   write(join(root, ".pi/hive/workflows/chat.yaml"), "name: Chat\ndescription: Chat\nuse-when: Chat\nartifact: {adapter: none, profile: default, binding: none}\ninstructions: {root: Chat}\nteam:\n  id: root\n  agent: proposer\n  members:\n    - id: reader\n      agent: reader\n");
   write(join(root, ".pi/hive/hive-config.yaml"), "schema-version: 1\nagents: {proposer: agents/proposer.md, reader: agents/reader.md}\nworkflows: {chat: workflows/chat.yaml}\nknowledge:\n  shared: {provider: okf, path: knowledge/shared/}\n");
@@ -146,8 +146,8 @@ test("resolver, snapshot, and generic registration keep propose-only authority u
   assert.equal(workflow.status, "valid", workflow.status === "invalid" ? JSON.stringify(workflow.diagnostics) : undefined);
   if (workflow.status !== "valid") return;
   const knowledgeTools = (nodeId: string) => workflow.authority.nodes.find((node) => node.nodeId === nodeId)?.tools.filter((name) => name.startsWith("knowledge_"));
-  assert.deepEqual(knowledgeTools("root"), [], "propose-only frozen authority advertises no W22 knowledge tool");
-  assert.deepEqual(knowledgeTools("reader"), ["knowledge_read", "knowledge_search"], "read remains effective while propose has no W22 tool");
+  assert.deepEqual(knowledgeTools("root"), ["knowledge_propose"], "propose-only authority exposes only the bounded candidate tool");
+  assert.deepEqual(knowledgeTools("reader"), ["knowledge_propose", "knowledge_read", "knowledge_search"], "read and propose remain independently gated");
 
   const models = {
     defaultModel: "provider/model", defaultThinking: "off",
@@ -156,11 +156,27 @@ test("resolver, snapshot, and generic registration keep propose-only authority u
   };
   const activation = buildActivationSnapshot({ project: configured, catalogs, workflow, authority: workflow.authority, models, packageVersion: "0.1.0" });
   const frozenKnowledgeTools = (nodeId: string) => (activation.payload.authority.nodes.find((node) => node.nodeId === nodeId) as { tools: string[] } | undefined)?.tools.filter((name) => name.startsWith("knowledge_"));
-  assert.deepEqual(frozenKnowledgeTools("root"), []);
-  assert.deepEqual(frozenKnowledgeTools("reader"), ["knowledge_read", "knowledge_search"]);
-  assert.deepEqual(genericWorkflowToolContractsForNode(activation, "root").filter((tool) => tool.name.startsWith("knowledge_")).map((tool) => tool.name), []);
-  assert.deepEqual(genericWorkflowToolContractsForNode(activation, "reader").filter((tool) => tool.name.startsWith("knowledge_")).map((tool) => tool.name), ["knowledge_search", "knowledge_read"]);
-  assert.equal(JSON.stringify(activation.payload.authority).includes("knowledge_propose"), false);
+  assert.deepEqual(frozenKnowledgeTools("root"), ["knowledge_propose"]);
+  assert.deepEqual(frozenKnowledgeTools("reader"), ["knowledge_propose", "knowledge_read", "knowledge_search"]);
+  assert.deepEqual(genericWorkflowToolContractsForNode(activation, "root").filter((tool) => tool.name.startsWith("knowledge_")).map((tool) => tool.name), ["knowledge_propose"]);
+  assert.deepEqual(genericWorkflowToolContractsForNode(activation, "reader").filter((tool) => tool.name.startsWith("knowledge_")).map((tool) => tool.name), ["knowledge_search", "knowledge_read", "knowledge_propose"]);
+  assert.equal(JSON.stringify(activation.payload.authority).includes("knowledge_propose"), true);
+});
+
+test("resolver rejects knowledge_propose activation when either shared or agent scope has no eligible curator", () => {
+  const root = temp();
+  write(join(root, ".pi/hive/agents/proposer.md"), "---\nname: Proposer\nmodel: provider/model\nthinking: off\ncapabilities:\n  knowledge: [propose]\nknowledge: [shared]\n---\npropose\n");
+  write(join(root, ".pi/hive/agents/reader.md"), "---\nname: Reader\nmodel: provider/model\nthinking: off\ncapabilities:\n  knowledge: [read, propose]\nknowledge: [shared]\n---\nread\n");
+  write(join(root, ".pi/hive/knowledge/shared/doc.md"), "---\ntype: Reference\ntitle: Shared\n---\n\nShared facts.\n");
+  write(join(root, ".pi/hive/workflows/chat.yaml"), "name: Chat\ndescription: Chat\nuse-when: Chat\nartifact: {adapter: none, profile: default, binding: none}\ninstructions: {root: Chat}\nteam:\n  id: root\n  agent: proposer\n  members:\n    - id: reader\n      agent: reader\n");
+  write(join(root, ".pi/hive/hive-config.yaml"), "schema-version: 1\nagents: {proposer: agents/proposer.md, reader: agents/reader.md}\nworkflows: {chat: workflows/chat.yaml}\nknowledge:\n  shared: {provider: okf, path: knowledge/shared/}\n");
+  const configured = loadConfigProject(root);
+  assert.equal(configured.status, "configured");
+  if (configured.status !== "configured") return;
+  const workflow = resolveConfigWorkflows(configured, loadConfigCatalogs(configured)).workflows[0];
+  assert.equal(workflow.status, "invalid");
+  assert.equal(workflow.diagnosticCodes.includes("WORKFLOW_KNOWLEDGE_CURATOR_UNREACHABLE"), true);
+  assert.equal(workflow.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_KNOWLEDGE_CURATOR_UNREACHABLE").length, 3, "shared plus both proposer agent scopes are rejected deterministically");
 });
 
 test("resolver, snapshot builder, and persistence accept a catalog-valid foreign knowledge owner", () => {

@@ -21,6 +21,7 @@ export const TRUSTED_TOOL_DESCRIPTORS: readonly TrustedToolDescriptor[] = Object
   { name: "artifact_action", capability: { group: "artifact", any: ["write", "review"] }, topology: "any", subsystem: "artifact", mutability: "mutating", idempotency: "operation-bound", maxOutputBytes: OUTPUT, requiresMutationQueue: true },
   { name: "knowledge_search", capability: { group: "knowledge", any: ["read"] }, topology: "any", subsystem: "knowledge", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
   { name: "knowledge_read", capability: { group: "knowledge", any: ["read"] }, topology: "any", subsystem: "knowledge", mutability: "read-only", idempotency: "idempotent", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
+  { name: "knowledge_propose", capability: { group: "knowledge", any: ["propose"] }, topology: "any", subsystem: "knowledge", mutability: "mutating", idempotency: "operation-bound", maxOutputBytes: OUTPUT, requiresMutationQueue: false },
   { name: "human_question", capability: { group: "human-input" }, topology: "any", subsystem: "questions", mutability: "mutating", idempotency: "operation-bound", maxOutputBytes: OUTPUT, requiresMutationQueue: true },
 ] satisfies TrustedToolDescriptor[]).map(freezeDescriptor));
 
