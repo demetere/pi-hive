@@ -11,6 +11,7 @@ import { canonicalJson, hashActivationPayload } from "./snapshot-canonical";
 import { SNAPSHOT_CONTEXT_POLICY, validateSnapshotModels, type SnapshotModelAdapter, type SnapshotNodeModelValidation } from "./snapshot-model";
 import { CAPABILITY_CONTRACT_VERSION, SCHEMA_VERSION } from "./versions";
 import { buildDynamicPromptReserveForActivation, buildStaticPromptForActivation } from "../workflows/prompts";
+import { curatorFitsSnapshotModelContext } from "../knowledge/curator-contract";
 
 export const SNAPSHOT_FORMAT_VERSION = 1 as const;
 export const SNAPSHOT_PACKAGE_CONTRACT_VERSION = "pi-hive-package-contract-v1" as const;
@@ -59,6 +60,23 @@ function sourceTextHashes(source: string): Pick<SnapshotSourceV1, "hash" | "cano
 }
 function identityPayload(payload: ActivationSnapshotPayloadV1): unknown {
   return { ...payload, knowledge: payload.knowledge.map(({ metadataFingerprint: _fingerprint, ...entry }) => entry) };
+}
+function assertKnowledgeCuratorTopology(workflow: ValidWorkflowDefinition, authority: EffectiveAuthoritySnapshotV1, models: readonly SnapshotNodeModelValidation[]): void {
+  const proposers = authority.nodes.filter((node) => node.tools.includes("knowledge_propose"));
+  if (!proposers.length) return;
+  const agentByNode = new Map(workflow.team.nodes.map((node) => [node.id, node.agentId]));
+  const eligible = (node: EffectiveAuthoritySnapshotV1["nodes"][number]): boolean => {
+    const effective = node.capabilities.effective as Readonly<Record<string, unknown>>;
+    const model = models.find((entry) => entry.nodeId === node.nodeId);
+    if (!model) return false;
+    return Array.isArray(effective?.knowledge) && effective.knowledge.includes("curate") && Boolean(node.model) && Boolean(node.thinking)
+      && model.modelId === node.model && model.thinking === node.thinking && curatorFitsSnapshotModelContext(model);
+  };
+  const root = authority.nodes.find((node) => node.nodeId === workflow.team.rootId);
+  if (!root || !eligible(root)) throw new Error("Activation snapshot rejects knowledge_propose without an eligible shared-scope root curator.");
+  for (const agentId of new Set(proposers.map((node) => agentByNode.get(node.nodeId)!))) {
+    if (!authority.nodes.some((node) => agentByNode.get(node.nodeId) === agentId && eligible(node))) throw new Error(`Activation snapshot rejects knowledge_propose without an eligible agent-scope curator for ${agentId}.`);
+  }
 }
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
@@ -173,6 +191,7 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
   });
   const modelResult = validateSnapshotModels(staticByNode, input.models);
   if (!modelResult.ok) throw new Error(`Snapshot model preflight failed: ${modelResult.codes.join(",")}`);
+  assertKnowledgeCuratorTopology(workflow, authority, modelResult.nodes);
   const payload: ActivationSnapshotPayloadV1 = {
     versions: { snapshot: SNAPSHOT_FORMAT_VERSION, packageContract: SNAPSHOT_PACKAGE_CONTRACT_VERSION, schema: SCHEMA_VERSION, capability: CAPABILITY_CONTRACT_VERSION, catalogHash: SNAPSHOT_CATALOG_HASH_VERSION, artifact: ARTIFACT_CONTRACT_VERSION, contextPolicy: SNAPSHOT_CONTEXT_POLICY.version, package: input.packageVersion },
     project: { projectId: projectIdFromCanonicalRoot(project.projectRoot), rootRef: "." },

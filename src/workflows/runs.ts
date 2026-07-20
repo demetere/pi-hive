@@ -183,12 +183,16 @@ export interface WorkflowRunLifecycleOptions {
   readonly completion?: CompletionValidationHooks;
   /** Synchronous harness initialization after a durable run start (for baseline/counter services). */
   readonly onRunStarted?: (runId: string, startedAt: string) => void;
+  /** Nonblocking signal after a new exact user input is durable; low-priority work must preempt. */
+  readonly onUserInputRecorded?: (runId: string) => void | Promise<void>;
   /** Synchronous, side-effect-free binding factory; W16 uses it for none's logical record. */
   readonly createArtifactWorkspace?: (runId: string, startedAt: string) => ArtifactWorkspaceBinding;
   /** Generic checkpoint policy snapshot frozen by the same event that creates the run. */
   readonly checkpointSnapshots?: RunCheckpointSnapshotProvider;
   /** Synchronous projection hook after durable open-state transitions. */
   readonly onRunStatusChanged?: (runId: string, status: OpenRunStatus, timestamp: string) => void;
+  /** Runs only after the exact terminal event is durable; enrichment may append jobs but never model work here. */
+  readonly onTerminalRecorded?: (event: WorkflowEventEnvelope) => void | Promise<void>;
   /** Fault-injection seam used to verify durable journal publication recovery. */
   readonly journalFault?: (eventType: WorkflowEventType, stage: JournalFaultStage) => void;
 }
@@ -830,6 +834,7 @@ export class WorkflowRunLifecycle {
         throw error;
       }
       this.options.onRunStarted?.(runId, now);
+      this.notifyUserInputRecorded(runId);
       return Object.freeze({ runId, input: record, created: true, duplicate: false });
     }
     if (current.cancellationRequested || current.pendingTerminal) throw new Error("Run cancellation or terminal settlement is in progress; new input is rejected");
@@ -853,7 +858,15 @@ export class WorkflowRunLifecycle {
       if (concurrent) return duplicateInputResult(input, concurrent);
       throw error;
     }
+    this.notifyUserInputRecorded(current.runId);
     return Object.freeze({ runId: current.runId, input: record, created: false, duplicate: false });
+  }
+
+  private notifyUserInputRecorded(runId: string): void {
+    try {
+      const settlement = this.options.onUserInputRecorded?.(runId);
+      if (settlement && typeof settlement.then === "function") void settlement.catch(() => undefined);
+    } catch { /* durable input remains authoritative; the next admission preempts again */ }
   }
 
   bindArtifactWorkspace(binding: ArtifactWorkspaceBinding): ArtifactWorkspaceBinding {
@@ -1243,6 +1256,7 @@ export class WorkflowRunLifecycle {
       throw error;
     }
     const envelope = terminalEnvelopeFromEvent(event);
+    this.notifyTerminalRecorded(event);
     return Object.freeze({ envelope, rendered: canonicalJson(envelope) });
   }
 
@@ -1285,7 +1299,17 @@ export class WorkflowRunLifecycle {
       return Object.freeze({ ok: false, issues: Object.freeze([String(error instanceof Error ? error.message : error)]) });
     }
     const envelope = terminalEnvelopeFromEvent(terminalEvent);
+    this.notifyTerminalRecorded(terminalEvent);
     return Object.freeze({ ok: true, envelope, rendered: canonicalJson(envelope) });
+  }
+
+  private notifyTerminalRecorded(event: WorkflowEventEnvelope): void {
+    try {
+      const settlement = this.options.onTerminalRecorded?.(event);
+      if (settlement && typeof settlement.then === "function") void settlement.catch(() => undefined);
+    } catch {
+      // Terminal publication is authoritative. Enrichment is independently reconciled from the journal.
+    }
   }
 
   /** Harness-only, replay-safe terminal failure for an exhausted run-wide budget. */

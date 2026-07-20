@@ -40,9 +40,15 @@ import {
   type DynamicPromptInput,
 } from "./prompts";
 
+export interface WorkerProviderTokenLimits {
+  readonly maxInputTokens: number;
+  readonly maxOutputTokens: number;
+}
 export interface WorkerSessionFactoryInput {
   readonly sessionId: string; readonly runId: string; readonly nodeId: string; readonly agentId: string;
   readonly modelId: string; readonly thinking: string; readonly transcriptPath: string; readonly tools: readonly string[];
+  /** Required provider-enforced caps for dedicated bounded sessions such as the curator. */
+  readonly providerTokenLimits?: WorkerProviderTokenLimits;
   /** Pre-execution policy for every direct/re-enabled generic filesystem or Bash call in this linked node session. */
   readonly toolPolicy?: SnapshotNodeToolPolicy;
 }
@@ -103,15 +109,26 @@ export interface WorkerPromptInvocation {
   readonly dispatch?: WorkerTrustedDispatch;
   readonly runWithToolRuntime?: <T>(callback: () => T) => T;
 }
-export interface WorkerProviderUsage {
-  readonly inputTokens: number; readonly outputTokens: number; readonly precision: "estimated" | "provider-confirmed";
-}
+export type WorkerProviderUsage = Readonly<{
+  inputTokens: number; outputTokens: number;
+  /** Conservative cost may be omitted only while explicitly estimated. */
+  costMicroUsd?: number;
+  precision: "estimated";
+}> | Readonly<{
+  inputTokens: number; outputTokens: number;
+  /** Provider-confirmed means the provider supplied this exact integer cost. */
+  costMicroUsd: number;
+  precision: "provider-confirmed";
+}>;
 export interface WorkerPromptResponse { readonly output: string; readonly usage?: WorkerProviderUsage; readonly compactionSummary?: string }
 export interface WorkerCompactionBoundary { readonly preservation: string; validate(value: string): void }
+export interface WorkerPromptOptions { readonly providerTokenLimits?: WorkerProviderTokenLimits }
 export interface WorkerSessionHandle {
   readonly linkedSessionId: string;
+  /** Exact caps the provider confirms it mechanically enforces for this handle. */
+  readonly enforcedTokenLimits?: WorkerProviderTokenLimits;
   installCompactionBoundary?(boundary: WorkerCompactionBoundary): void;
-  prompt(text: string, signal?: AbortSignal, invocation?: WorkerPromptInvocation): string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
+  prompt(text: string, signal?: AbortSignal, invocation?: WorkerPromptInvocation, options?: WorkerPromptOptions): string | WorkerPromptResponse | Promise<string | WorkerPromptResponse>;
   abort?(): void | Promise<void>; dispose(): void | Promise<void>;
 }
 export type WorkerSessionFactory = (input: WorkerSessionFactoryInput) => WorkerSessionHandle | Promise<WorkerSessionHandle>;

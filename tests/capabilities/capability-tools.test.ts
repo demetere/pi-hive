@@ -11,8 +11,9 @@ const all = normalizeCapabilities({
 
 test("trusted descriptors are closed, bounded, and declare mutation queue requirements", () => {
   assert.equal(classifyTrustedTool("foreign_mcp_tool"), undefined);
-  assert.equal(classifyTrustedTool("knowledge_propose"), undefined, "W23 must explicitly register its mutation contract before this tool can be frozen");
-  assert.equal(TRUSTED_TOOL_DESCRIPTORS.some((item) => item.name === "knowledge_propose"), false);
+  assert.equal(classifyTrustedTool("knowledge_propose")?.capability?.group, "knowledge");
+  assert.equal(classifyTrustedTool("knowledge_propose")?.mutability, "mutating");
+  assert.equal(classifyTrustedTool("knowledge_propose")?.idempotency, "operation-bound");
   assert.equal(TRUSTED_TOOL_DESCRIPTORS.every((item) => item.maxOutputBytes > 0 && item.maxOutputBytes <= 262_144), true);
   assert.equal(classifyTrustedTool("write")?.requiresMutationQueue, true);
   assert.equal(classifyTrustedTool("artifact_action")?.requiresMutationQueue, true);
@@ -46,9 +47,9 @@ test("tool derivation follows root/direct-member/leaf topology and every prerequ
   assert.equal(deriveNodeTools({ capabilities: gitOnly, root: false, directMemberIds: [], artifactAvailable: false, knowledgeAvailable: false, knowledgeAttached: false, questionsAvailable: false }).includes("bash"), true);
 
   const proposeOnly = normalizeCapabilities({ knowledge: ["propose"] });
-  assert.deepEqual(deriveNodeTools({ capabilities: proposeOnly, root: false, directMemberIds: [], artifactAvailable: false, knowledgeAvailable: true, knowledgeAttached: true, questionsAvailable: false }), []);
+  assert.deepEqual(deriveNodeTools({ capabilities: proposeOnly, root: false, directMemberIds: [], artifactAvailable: false, knowledgeAvailable: true, knowledgeAttached: true, questionsAvailable: false }), ["knowledge_propose"]);
   const readAndPropose = normalizeCapabilities({ knowledge: ["read", "propose"] });
-  assert.deepEqual(deriveNodeTools({ capabilities: readAndPropose, root: false, directMemberIds: [], artifactAvailable: false, knowledgeAvailable: true, knowledgeAttached: true, questionsAvailable: false }), ["knowledge_read", "knowledge_search"]);
+  assert.deepEqual(deriveNodeTools({ capabilities: readAndPropose, root: false, directMemberIds: [], artifactAvailable: false, knowledgeAvailable: true, knowledgeAttached: true, questionsAvailable: false }), ["knowledge_propose", "knowledge_read", "knowledge_search"]);
 });
 
 test("trusted tool matrix independently requires capability, topology, attachment, and subsystem gates", () => {

@@ -9,6 +9,8 @@ import type { CommandAttemptMetadata } from "../capabilities/command";
 import { compileSnapshotNodeToolPolicies, type SnapshotNodeToolPolicy } from "../capabilities/runtime-policy";
 import {
   DelegationRuntime,
+  createDelegationState,
+  reduceDelegationState,
   type AcceptDelegationInput,
   type DelegationExecutionContext,
   type DelegationState,
@@ -37,6 +39,7 @@ import {
   type WorkerPromptResponse,
   type WorkerProviderUsage,
   type WorkerSessionFactory,
+  type WorkerSessionHandle,
   type WorkerTrustedDispatch,
   type WorkerTrustedToolDispatchRequest,
 } from "./workers";
@@ -91,6 +94,11 @@ import { QuestionService, deriveQuestionRunStatus, type AcceptedQuestionForRoot,
 import { QUESTION_LIMITS } from "./question-validation";
 import { utf8Prefix } from "./values";
 import { KnowledgeService } from "../knowledge/search";
+import { CURATOR_EXECUTION_POLICY, KnowledgeEnrichmentService, restoreKnowledgeEnrichmentState } from "../knowledge/enrichment";
+import { DurableKnowledgeQueue } from "../knowledge/queue";
+import { KnowledgeCuratorProcessor, type KnowledgeCuratorModelRequest, type KnowledgeCuratorModelResult } from "../knowledge/curator";
+import { curatorFitsSnapshotModelContext } from "../knowledge/curator-contract";
+import { KnowledgeProposalService, OkfKnowledgeMutator, type KnowledgeMutationQueue, type KnowledgeProposalControlRequest } from "../knowledge/proposals";
 import { createKnowledgeReferenceAuthorizer, knowledgeProtectedPathRoots } from "../knowledge/attachments";
 
 export interface RunOrchestrationServiceOptions {
@@ -107,6 +115,10 @@ export interface RunOrchestrationServiceOptions {
   readonly now?: () => string; readonly referenceAuthorizer?: DelegationRuntime["options"]["referenceAuthorizer"];
   /** Integration seam backed by Pi's withFileMutationQueue; required before any physical adapter mutation. */
   readonly artifactMutationQueue?: ArtifactMutationQueue;
+  /** Pi file-mutation queue for automatic knowledge updates; defaults to the artifact queue seam. */
+  readonly knowledgeMutationQueue?: KnowledgeMutationQueue;
+  /** Authenticated dashboard control dependency for reviewed knowledge proposals. */
+  readonly knowledgeControl?: Readonly<{ authenticateControl: (request: KnowledgeProposalControlRequest) => string | undefined }>;
   /** Package-internal dependency seam used to exercise physical adapters before their built-in implementation ships. */
   readonly artifactRuntime?: ResolvedArtifactProfile;
   /** Package-internal lease construction seam for deterministic lifecycle fault tests. */
@@ -115,7 +127,8 @@ export interface RunOrchestrationServiceOptions {
   readonly artifactOperationFault?: ArtifactOperationRuntimeOptions["fault"];
   /** Human control dependencies for the run-owned generic checkpoint authority. Omission denies every decision. */
   readonly checkpointApproval?: Partial<Pick<CheckpointApprovalServiceOptions, "authenticateControl" | "createRequestId" | "createDecisionId" | "fault">>;
-  readonly verifiedTakeover?: () => boolean | Promise<boolean>;
+  /** Proof may be bound to a persisted runtime-owner nonce when supplied. */
+  readonly verifiedTakeover?: (ownerNonce?: string) => boolean | Promise<boolean>;
   readonly completion?: Omit<CompletionValidationHooks, "descendants" | "questions" | "validateQuestionSet" | "validateRootQuestionDelivery">;
   readonly questionControl?: Readonly<{ authenticateControl: (request: QuestionControlAuthenticationRequest) => string | undefined; presentLive?: QuestionPresenter; journalFault?: QuestionService["options"]["journalFault"] }>;
   /** Fault-injection seam for workflow lifecycle crash-recovery tests. */
@@ -166,6 +179,7 @@ interface RunResources {
   readonly runId: string; readonly runtime: DelegationRuntime;
   readonly budgets: BudgetRuntime; readonly attempts: AttemptRuntime; readonly changes: ChangeAccountingRuntime;
   readonly knowledge: KnowledgeService;
+  readonly enrichment: KnowledgeEnrichmentService;
   readonly recoveryIssues: readonly string[];
   readonly dispatchRuntime: DispatchResources;
   readonly scheduler: DurableDelegationScheduler; readonly workers: WorkerSessionPool; readonly questions: QuestionService;
@@ -233,16 +247,25 @@ function responseUsage(value: string | WorkerPromptResponse, inputText: string):
     const usage = value.usage;
     if (!record(usage) || !Number.isSafeInteger(usage.inputTokens) || Number(usage.inputTokens) < 0
       || !Number.isSafeInteger(usage.outputTokens) || Number(usage.outputTokens) < 0
+      || (usage.costMicroUsd !== undefined && (!Number.isSafeInteger(usage.costMicroUsd) || Number(usage.costMicroUsd) < 0))
       || (usage.precision !== "estimated" && usage.precision !== "provider-confirmed")) {
       throw Object.assign(new Error("Model provider usage is invalid"), { assistantOutputObserved: true, effectNotApplied: true });
     }
-    return Object.freeze({ inputTokens: Number(usage.inputTokens), outputTokens: Number(usage.outputTokens), precision: usage.precision });
+    const tokens = { inputTokens: Number(usage.inputTokens), outputTokens: Number(usage.outputTokens) };
+    return usage.precision === "provider-confirmed" && usage.costMicroUsd !== undefined
+      ? Object.freeze({ ...tokens, costMicroUsd: Number(usage.costMicroUsd), precision: "provider-confirmed" as const })
+      : Object.freeze({ ...tokens, ...(usage.costMicroUsd === undefined ? {} : { costMicroUsd: Number(usage.costMicroUsd) }), precision: "estimated" as const });
   }
   return Object.freeze({ inputTokens: estimatedTokens(inputText), outputTokens: estimatedTokens(responseOutput(value)), precision: "estimated" });
 }
 function budgetError(reason: string, exhausted: readonly string[], scope: "node" | "run"): Error {
   return Object.assign(new Error(reason), { policyDenied: true, effectNotApplied: true, budgetExhausted: [...exhausted], budgetScope: scope });
 }
+const defaultKnowledgeMutationQueue: KnowledgeMutationQueue = async (canonicalPath, _operationId, callback) => {
+  // Keep the Pi dependency lazy so core policy/schema imports remain runtime-neutral.
+  const { withFileMutationQueue } = await import("@earendil-works/pi-coding-agent");
+  return withFileMutationQueue(canonicalPath, async () => callback());
+};
 
 export class RunOrchestrationService {
   readonly lifecycle: WorkflowRunLifecycle;
@@ -254,7 +277,20 @@ export class RunOrchestrationService {
   readonly checkpointApprovals?: CheckpointApprovalService;
   private current?: RunResources;
   private artifactAuthority?: Readonly<{ runId: string; authority: ArtifactWorkspaceAuthority }>;
+  private preserveCancelledEnrichment = false;
   private readonly cleanup = new Set<Promise<void>>();
+  private readonly knowledgeProposalsRuntime: KnowledgeProposalService;
+  private readonly knowledgeMutator: OkfKnowledgeMutator;
+  private readonly knowledgeProcessor: KnowledgeCuratorProcessor;
+  private readonly knowledgeQueue: DurableKnowledgeQueue;
+  private readonly curatorHandles = new Map<string, WorkerSessionHandle>();
+  private readonly curatorDisposals = new Map<string, Promise<void>>();
+  private knowledgeReconciliation?: Promise<void>;
+  private knowledgeReconcileImmediate?: ReturnType<typeof setTimeout>;
+  private knowledgeRetryTimer?: ReturnType<typeof setTimeout>;
+  private knowledgeRetryAttempt = 0;
+  private shuttingDown = false;
+  private userWorkDepth = 0;
 
   constructor(options: RunOrchestrationServiceOptions) {
     this.options = options;
@@ -380,13 +416,39 @@ export class RunOrchestrationService {
         options: (options.snapshot.payload.workflow.artifact as { options?: unknown }).options ?? {},
       }) : undefined,
       onRunStarted: (runId) => { this.changeAccountingFor(runId).captureBaseline(); },
+      onUserInputRecorded: () => this.knowledgeQueue?.preemptForUserWork(),
       onRunStatusChanged: (runId, status) => {
         const budgets = this.budgetRuntimeFor(runId);
         if (status === "paused" || status === "waiting_for_human") budgets.pauseActive(status);
         else budgets.resumeActive();
       },
+      onTerminalRecorded: (event) => {
+        const preserveCancelled = this.preserveCancelledEnrichment;
+        this.scheduleKnowledgeReconciliation(event, preserveCancelled);
+      },
       journalFault: options.journalFault,
     });
+    this.knowledgeProposalsRuntime = new KnowledgeProposalService({
+      projectRoot: options.projectRoot, projectId: options.projectId, sessionId: options.sessionId, now: options.now,
+      authenticateControl: options.knowledgeControl?.authenticateControl ?? (() => undefined),
+    });
+    this.knowledgeMutator = new OkfKnowledgeMutator({
+      projectRoot: options.projectRoot, snapshot: options.snapshot,
+      mutationQueue: options.knowledgeMutationQueue ?? options.artifactMutationQueue ?? defaultKnowledgeMutationQueue,
+    });
+    this.knowledgeProcessor = new KnowledgeCuratorProcessor({
+      projectRoot: options.projectRoot, projectId: options.projectId, sessionId: options.sessionId, snapshot: options.snapshot,
+      proposals: this.knowledgeProposalsRuntime, mutator: this.knowledgeMutator, now: options.now,
+      runModel: (request) => this.runCuratorModel(request),
+    });
+    this.knowledgeQueue = new DurableKnowledgeQueue({
+      projectRoot: options.projectRoot, projectId: options.projectId, sessionId: options.sessionId, ownerNonce: options.runtimeOwnerNonce,
+      hasOwnership: () => heartbeatCurrentRuntimeOwnership(options.projectRoot, options.sessionId, options.runtimeOwnerNonce),
+      isIdle: () => this.knowledgeIdle(), process: (job, signal) => this.knowledgeProcessor.process(job, signal),
+      verifyOwnerDead: async (ownerNonce) => await options.verifiedTakeover?.(ownerNonce) ?? false,
+      disposeActive: (jobId) => this.disposeCuratorHandle(jobId), now: options.now,
+    });
+    this.scheduleKnowledgeReconciliation();
   }
 
   toolPolicyForNode(nodeId: string): SnapshotNodeToolPolicy {
@@ -562,6 +624,230 @@ export class RunOrchestrationService {
     void promise.finally(() => { this.cleanup.delete(promise); }).catch(() => undefined);
   }
 
+  private async beginUserWork(): Promise<() => void> {
+    this.userWorkDepth++;
+    try { await this.knowledgeQueue.preemptForUserWork(); }
+    catch (error) { this.userWorkDepth--; throw error; }
+    let active = true;
+    return () => { if (active) { active = false; this.userWorkDepth--; } };
+  }
+
+  private knowledgeIdle(): boolean {
+    if (this.userWorkDepth > 0) return false;
+    const run = this.lifecycle.restore().latestRun;
+    if (!run || !isOpenRunStatus(run.status)) return true;
+    if (run.pendingTerminal || this.lifecycle.pendingInputs().length) return false;
+    const attempts = this.current?.runId === run.runId ? this.current.attempts
+      : new AttemptRuntime({ projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, now: this.options.now });
+    if (Object.values(attempts.restore().attempts).some((attempt) => !attempt.result)) return false;
+    const budgets = this.current?.runId === run.runId ? this.current.budgets : this.budgetRuntimeFor(run.runId);
+    if (budgets.restore().activeBatches.length) return false;
+    const changes = this.current?.runId === run.runId ? this.current.changes : this.changeAccountingFor(run.runId);
+    const changeState = changes.restore();
+    const completedMutations = new Set(changeState.mutations.map((mutation) => mutation.attemptId));
+    if (Object.values(changeState.intents).some((intent) => !changeState.notApplied[intent.attemptId] && !completedMutations.has(intent.attemptId))
+      || Object.values(changeState.commandAttempts).some((attempt) => attempt.status === "pending")) return false;
+    const artifactOperations = new ArtifactOperationRuntime({
+      projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId,
+    }).restore();
+    if (Object.values(artifactOperations.operations).some((operation) => !operation.result)) return false;
+    if (this.current?.runId === run.runId && this.current.recoveryIssues.length) return false;
+    const delegation = this.current?.runId === run.runId
+      ? this.current.runtime.restore()
+      : replayWorkflowJournal(
+        readWorkflowJournal(this.options.projectRoot, this.options.sessionId),
+        createDelegationState(this.options.sessionId, run.runId, this.options.snapshot),
+        reduceDelegationState,
+      ).state;
+    return !Object.values(delegation.tasks).some((task) => task.queueState === "queued" || task.queueState === "active"
+      || (task.queueState === "suspended" && (task.suspendedOn ?? []).some((taskId) => {
+        const dependency = delegation.tasks[taskId];
+        return dependency?.result !== undefined && dependency.resultAcceptedSequence === undefined;
+      })));
+  }
+
+  private curatorNode(jobId: string, nodeId: string): Readonly<{ agentId: string; modelId: string; thinking: string; transcriptPath: string }> {
+    const team = this.options.snapshot.payload.workflow.team as { nodes?: readonly unknown[] };
+    const node = Array.isArray(team.nodes) ? team.nodes.find((entry) => record(entry) && entry.id === nodeId) as Record<string, unknown> | undefined : undefined;
+    const authority = this.options.snapshot.payload.authority.nodes.find((entry) => entry.nodeId === nodeId);
+    if (!node || typeof node.agentId !== "string" || !authority || authority.model === undefined || authority.thinking === undefined) throw new Error("Dedicated curator model node is absent from immutable snapshot authority");
+    return Object.freeze({ agentId: node.agentId, modelId: String(authority.model), thinking: String(authority.thinking), transcriptPath: join(this.options.projectRoot, ".pi", "hive", "sessions", this.options.sessionId, "knowledge-curator", `${jobId}.jsonl`) });
+  }
+
+  private async settleWithin(promise: Promise<unknown>, milliseconds: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([promise.then(() => true, () => true), new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), milliseconds); })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
+  private curatorDisposal(jobId: string): Promise<void> {
+    const handle = this.curatorHandles.get(jobId);
+    if (!handle) return Promise.resolve();
+    let disposal = this.curatorDisposals.get(jobId);
+    if (!disposal) {
+      disposal = (async () => {
+        const abort = Promise.resolve().then(() => handle.abort?.());
+        void abort.catch(() => undefined);
+        await this.settleWithin(abort, 500);
+        try { await Promise.resolve(handle.dispose()); }
+        catch {
+          // A rejected disposal is not proof that the provider died. Preserve a
+          // permanently unsettled quarantine; only verified owner-death takeover
+          // may release this durable job in another process.
+          await new Promise<void>(() => undefined);
+        }
+        if (this.curatorHandles.get(jobId) === handle) this.curatorHandles.delete(jobId);
+        this.curatorDisposals.delete(jobId);
+      })();
+      this.curatorDisposals.set(jobId, disposal);
+      void disposal.catch(() => undefined);
+    }
+    return disposal;
+  }
+
+  private async disposeCuratorHandle(jobId: string): Promise<void> {
+    // Lifecycle callers remain bounded, but the processor awaits the underlying
+    // disposal separately so durable ownership cannot settle ahead of real death.
+    await this.settleWithin(this.curatorDisposal(jobId), 1_500);
+  }
+
+  private async runCuratorModel(request: KnowledgeCuratorModelRequest): Promise<KnowledgeCuratorModelResult> {
+    if (request.signal.aborted) throw request.signal.reason;
+    if (request.maxInputTokens !== CURATOR_EXECUTION_POLICY.maxInputTokens || request.maxOutputTokens !== CURATOR_EXECUTION_POLICY.maxOutputTokens
+      || !Number.isSafeInteger(request.maxInputTokens) || !Number.isSafeInteger(request.maxOutputTokens) || request.maxInputTokens < 1 || request.maxOutputTokens < 1) {
+      throw new Error("Curator provider token caps differ from the conservative execution policy");
+    }
+    // One UTF-8 byte per token is a deliberately conservative pre-dispatch
+    // upper bound; provider tokenization/generation remains mechanically capped.
+    if (Buffer.byteLength(request.prompt, "utf8") > request.maxInputTokens) throw new Error("Curator input cannot conservatively fit the provider token cap");
+    const providerTokenLimits = Object.freeze({ maxInputTokens: request.maxInputTokens, maxOutputTokens: request.maxOutputTokens });
+    const durableJob = restoreKnowledgeEnrichmentState(readWorkflowJournal(this.options.projectRoot, this.options.sessionId)).jobs[request.jobId];
+    if (!durableJob) throw new Error("Durable curator job is missing");
+    const selected = this.curatorNode(request.jobId, durableJob.model.nodeId);
+    const frozenModel = this.options.snapshot.payload.models.find((entry) => entry.nodeId === durableJob.model.nodeId);
+    if (selected.modelId !== request.modelId || selected.thinking !== request.thinking || !frozenModel
+      || frozenModel.modelId !== selected.modelId || frozenModel.thinking !== selected.thinking || !curatorFitsSnapshotModelContext(frozenModel)) throw new Error("Curator model request or fixed input/output plus static context differs from the immutable snapshot selection");
+    let rejectAbort!: (reason: unknown) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    let handle: WorkerSessionHandle | undefined;
+    const onAbort = (): void => { void Promise.resolve(handle?.abort?.()).catch(() => undefined); rejectAbort(request.signal.reason); };
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    const handlePromise = Promise.resolve(this.options.workerFactory({
+      sessionId: this.options.sessionId, runId: `knowledge-${request.jobId}`, nodeId: durableJob.model.nodeId,
+      agentId: selected.agentId, modelId: selected.modelId, thinking: selected.thinking, transcriptPath: selected.transcriptPath, tools: Object.freeze([]),
+      providerTokenLimits,
+    }));
+    try {
+      handle = await Promise.race([handlePromise, aborted]);
+      if (this.curatorHandles.has(request.jobId)) {
+        await Promise.resolve(handle.dispose());
+        handle = undefined;
+        throw new Error("Curator model handle is already active for this durable job");
+      }
+      this.curatorHandles.set(request.jobId, handle);
+      if (handle.enforcedTokenLimits?.maxInputTokens !== providerTokenLimits.maxInputTokens
+        || handle.enforcedTokenLimits.maxOutputTokens !== providerTokenLimits.maxOutputTokens) {
+        throw new Error("Curator provider does not confirm exact input/output token cap enforcement");
+      }
+      const provider = Promise.resolve(handle.prompt(request.prompt, request.signal, undefined, { providerTokenLimits }));
+      void provider.catch(() => undefined);
+      const response = await Promise.race([provider, aborted]);
+      const usage = responseUsage(response, request.prompt);
+      return Object.freeze({
+        output: responseOutput(response),
+        usage: Object.freeze(usage.costMicroUsd === undefined
+          ? { ...usage, precision: "estimated" as const, costMicroUsd: CURATOR_EXECUTION_POLICY.reservedCostMicroUsdPerCall }
+          : { ...usage, costMicroUsd: usage.costMicroUsd }),
+      });
+    } finally {
+      request.signal.removeEventListener("abort", onAbort);
+      if (handle) {
+        await this.curatorDisposal(request.jobId);
+      } else if (request.signal.aborted) {
+        // An abort can win before factory construction. That construction may
+        // still create an effectful provider, so keep the processor active and
+        // durably owned until the late handle is obtained and truly disposed.
+        const lateHandle = await handlePromise.catch(() => undefined);
+        if (lateHandle) {
+          const existing = this.curatorHandles.get(request.jobId);
+          if (existing && existing !== lateHandle) await Promise.resolve(lateHandle.dispose());
+          else {
+            if (!existing) this.curatorHandles.set(request.jobId, lateHandle);
+            await this.curatorDisposal(request.jobId);
+          }
+        }
+      }
+    }
+  }
+
+  private wakeKnowledgeQueue(): void {
+    if (!this.shuttingDown) void this.knowledgeQueue.wake().catch(() => undefined);
+  }
+
+  private executeKnowledgeReconciliation(): Promise<void> {
+    if (this.knowledgeReconciliation) return this.knowledgeReconciliation;
+    const work = (async () => {
+      // Persist every terminal-to-job disposition before model work. Queue
+      // draining is deliberately detached: an older non-cooperative provider
+      // must not hold the reconciliation lock needed by a newer terminal.
+      await this.reconcileTerminalEnrichment();
+      this.wakeKnowledgeQueue();
+    })();
+    this.knowledgeReconciliation = work;
+    void work.then(() => { this.knowledgeRetryAttempt = 0; }, () => {
+      if (this.shuttingDown || this.knowledgeRetryTimer) return;
+      const delay = Math.min(30_000, 250 * (2 ** Math.min(this.knowledgeRetryAttempt++, 7)));
+      this.knowledgeRetryTimer = setTimeout(() => {
+        this.knowledgeRetryTimer = undefined;
+        this.scheduleKnowledgeReconciliation();
+      }, delay);
+      this.knowledgeRetryTimer.unref?.();
+    }).finally(() => {
+      if (this.knowledgeReconciliation === work) this.knowledgeReconciliation = undefined;
+    }).catch(() => undefined);
+    return work;
+  }
+
+  private scheduleKnowledgeReconciliation(_terminal?: import("./events").WorkflowEventEnvelope, _preserveCancelled = false): void {
+    if (this.shuttingDown || this.knowledgeReconcileImmediate !== undefined) return;
+    // A macrotask boundary is deliberate: no journal/provider/enqueue work can
+    // run ahead of the caller awaiting the already-durable terminal result.
+    this.knowledgeReconcileImmediate = setTimeout(() => {
+      this.knowledgeReconcileImmediate = undefined;
+      const active = this.knowledgeReconciliation;
+      if (active) void active.finally(() => this.scheduleKnowledgeReconciliation()).catch(() => undefined);
+      else void this.executeKnowledgeReconciliation().catch(() => undefined);
+    });
+  }
+
+  private async reconcileTerminalEnrichment(terminal?: import("./events").WorkflowEventEnvelope, preserveCancelled = false): Promise<void> {
+    await Promise.resolve();
+    const events = readWorkflowJournal(this.options.projectRoot, this.options.sessionId);
+    const terminals = terminal ? [terminal] : events.filter((event) => event.type === "terminal.recorded");
+    let state = restoreKnowledgeEnrichmentState(events);
+    for (const event of terminals) {
+      if (!event.runId || state.terminalEnqueueCompleted[event.eventHash]) continue;
+      const preserveThisCancellation = terminal?.eventHash === event.eventHash && preserveCancelled;
+      new KnowledgeEnrichmentService({
+        projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId,
+        runId: event.runId, snapshot: this.options.snapshot, now: this.options.now,
+      }).enqueueTerminal(event, { preserveCancelled: preserveThisCancellation });
+      state = restoreKnowledgeEnrichmentState(readWorkflowJournal(this.options.projectRoot, this.options.sessionId));
+    }
+  }
+
+  async runKnowledgeEnrichment(): Promise<void> {
+    if (this.knowledgeReconcileImmediate !== undefined) {
+      clearTimeout(this.knowledgeReconcileImmediate);
+      this.knowledgeReconcileImmediate = undefined;
+    }
+    await this.executeKnowledgeReconciliation();
+    if (!this.shuttingDown) await this.knowledgeQueue.wake();
+  }
+
+  knowledgeProposals(): KnowledgeProposalService { return this.knowledgeProposalsRuntime; }
+
   private reconcileDurableNestedDeliveries(runtime: DelegationRuntime): void {
     for (;;) {
       const state = runtime.restore();
@@ -725,14 +1011,15 @@ export class RunOrchestrationService {
     request: RootModelDispatchRequest,
     inputText = this.modelInputText(request.input),
   ): Promise<string | WorkerPromptResponse> {
-    resources.assertAdmission();
-    const rootPrompt = nodeId === rootNodeId(this.options.snapshot) ? request.promptInvocation?.promptContext ?? this.rootPromptAssembly() : undefined;
-    const rootBoundary = rootPrompt ? Object.freeze({
-      preservation: buildCompactionPreservationBlock(rootPrompt),
-      validate: (value: string) => assertCompactionPreservation(value, rootPrompt),
-    }) : undefined;
-    if (rootBoundary) request.installCompactionBoundary?.(rootBoundary);
+    const finishUserWork = await this.beginUserWork();
     try {
+      resources.assertAdmission();
+      const rootPrompt = nodeId === rootNodeId(this.options.snapshot) ? request.promptInvocation?.promptContext ?? this.rootPromptAssembly() : undefined;
+      const rootBoundary = rootPrompt ? Object.freeze({
+        preservation: buildCompactionPreservationBlock(rootPrompt),
+        validate: (value: string) => assertCompactionPreservation(value, rootPrompt),
+      }) : undefined;
+      if (rootBoundary) request.installCompactionBoundary?.(rootBoundary);
       const attemptInput = request.consumerReceipt ? {
         requestInput: request.input,
         consumerReceipt: { deliveryIds: [...request.consumerReceipt.deliveryIds], promptHash: request.consumerReceipt.promptHash, transcriptRef: request.consumerReceipt.transcriptRef },
@@ -805,6 +1092,9 @@ export class RunOrchestrationService {
       await this.persistUnknownPauseIfSafe(resources, recovery);
       await this.terminalizeRunBudgetIfSafe(resources, error);
       throw error;
+    } finally {
+      finishUserWork();
+      if (this.knowledgeIdle()) this.scheduleKnowledgeReconciliation();
     }
   }
 
@@ -821,12 +1111,13 @@ export class RunOrchestrationService {
     nodeId: string,
     request: WorkerTrustedToolDispatchRequest<T>,
   ): Promise<T> {
-    resources.assertAdmission();
-    const descriptor = this.toolDescriptor(request.toolName, request.commandMetadata);
-    const tool = classifyTrustedTool(request.toolName)!;
-    const authority = this.options.snapshot.payload.authority.nodes.find((entry) => entry.nodeId === nodeId);
-    if (request.policyOutcome === "allowed" && (!authority || !Array.isArray(authority.tools) || !authority.tools.includes(request.toolName))) throw new Error(`Tool ${request.toolName} is not enabled for node ${nodeId}`);
+    const finishUserWork = await this.beginUserWork();
     try {
+      resources.assertAdmission();
+      const descriptor = this.toolDescriptor(request.toolName, request.commandMetadata);
+      const tool = classifyTrustedTool(request.toolName)!;
+      const authority = this.options.snapshot.payload.authority.nodes.find((entry) => entry.nodeId === nodeId);
+      if (request.policyOutcome === "allowed" && (!authority || !Array.isArray(authority.tools) || !authority.tools.includes(request.toolName))) throw new Error(`Tool ${request.toolName} is not enabled for node ${nodeId}`);
       const value = await executeWithConservativeRetry(resources.attempts, {
         correlationId: request.correlationId, nodeId, operation: request.operation, input: request.input, descriptor,
         dispatch: async ({ attemptId, ordinal }) => {
@@ -869,6 +1160,9 @@ export class RunOrchestrationService {
       await this.persistUnknownPauseIfSafe(resources, recovery);
       await this.terminalizeRunBudgetIfSafe(resources, error);
       throw error;
+    } finally {
+      finishUserWork();
+      if (this.knowledgeIdle()) this.scheduleKnowledgeReconciliation();
     }
   }
 
@@ -880,6 +1174,29 @@ export class RunOrchestrationService {
       authenticateControl: this.options.questionControl?.authenticateControl ?? (() => undefined),
       journalFault: this.options.questionControl?.journalFault,
     });
+  }
+
+  private reconcileKnowledgeProposalAttempts(attempts: AttemptRuntime): readonly string[] {
+    const issues: string[] = [];
+    const events = readWorkflowJournal(this.options.projectRoot, this.options.sessionId);
+    let state: ReturnType<typeof restoreKnowledgeEnrichmentState>;
+    try { state = restoreKnowledgeEnrichmentState(events); }
+    catch (error) { return Object.freeze([`knowledge proposal reconciliation failed closed: ${String(error instanceof Error ? error.message : error)}`]); }
+    const attemptState = attempts.restore();
+    for (const attempt of Object.values(attemptState.attempts)) {
+      if (attempt.result || attempt.operation !== "workflow.tool.knowledge_propose") continue;
+      const publication = events.find((event) => event.type === "knowledge.transition" && event.runId === attemptState.runId
+        && event.attemptId === attempt.attemptId && record(event.payload) && event.payload.operation === "candidate-recorded");
+      const candidate = publication && record(publication.payload) ? state.candidates[String((publication.payload.candidate as { candidateId?: unknown } | undefined)?.candidateId ?? "")] : undefined;
+      if (!candidate) continue;
+      if (candidate.runId !== attemptState.runId || candidate.nodeId !== attempt.nodeId || publication?.correlationId !== attempt.attemptId || candidate.requestHash !== attempt.inputHash) {
+        issues.push(`knowledge proposal attempt ${attempt.attemptId} publication does not match its exact input/node identity`);
+        continue;
+      }
+      try { attempts.reconcile(attempt.attemptId, "applied", { ok: true, value: candidate as unknown as JsonValue }); }
+      catch (error) { issues.push(`knowledge proposal attempt ${attempt.attemptId} reconciliation failed: ${String(error instanceof Error ? error.message : error)}`); }
+    }
+    return Object.freeze(issues);
   }
 
   private createResources(runId: string): RunResources {
@@ -913,6 +1230,7 @@ export class RunOrchestrationService {
         recoveryIssues.push(`artifact operation restart recovery failed closed: ${String(error instanceof Error ? error.message : error)}`);
       }
     }
+    recoveryIssues.push(...this.reconcileKnowledgeProposalAttempts(attempts));
     for (const attempt of Object.values(attempts.restore().attempts)) {
       if (!attempt.result && attempt.recovery === "reconcile-required" && attempt.status === "pending") {
         attempts.markUnknown(attempt.attemptId, "interrupted non-idempotent dispatch requires trusted reconciliation before admission");
@@ -920,6 +1238,10 @@ export class RunOrchestrationService {
     }
     const questions = this.questionRuntimeFor(runId);
     const knowledge = this.knowledgeService(runId);
+    const enrichment = new KnowledgeEnrichmentService({
+      projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId,
+      runId, snapshot: this.options.snapshot, now: this.options.now,
+    });
     const runtime = new DelegationRuntime({
       projectRoot: this.options.projectRoot,
       projectId: this.options.projectId,
@@ -1013,7 +1335,7 @@ export class RunOrchestrationService {
         workers.rebuildBoundaries(Object.values(runtime.restore().tasks));
       },
     });
-    const resources: RunResources = { runId, runtime, budgets, attempts, changes, knowledge, recoveryIssues: Object.freeze(recoveryIssues), dispatchRuntime: dispatchResources, scheduler, workers, questions };
+    const resources: RunResources = { runId, runtime, budgets, attempts, changes, knowledge, enrichment, recoveryIssues: Object.freeze(recoveryIssues), dispatchRuntime: dispatchResources, scheduler, workers, questions };
     const run = this.lifecycle.restore().latestRun;
     if (run?.runId === runId && run.pendingTerminal) this.failClosedForTerminal(resources);
     else this.reconcileDurableNestedDeliveries(runtime);
@@ -1286,6 +1608,10 @@ export class RunOrchestrationService {
             assertCurrent();
             return resources.knowledge.read(context.nodeId, input, attemptId);
           },
+          knowledgePropose: (input, attemptId) => {
+            assertCurrent();
+            return resources.enrichment.propose(context.nodeId, attemptId, input);
+          },
           question: async (input, toolCallId, signal, batchCallIds = [toolCallId]) => {
             assertQuestionBatchAdmission(toolCallId, batchCallIds);
             const request = { nodeId: context.nodeId, ...(context.taskId ? { taskId: context.taskId } : {}), definition: input, provenance: { source: "human_question" as const, toolCallId } };
@@ -1431,6 +1757,7 @@ export class RunOrchestrationService {
       if (!terminal.ok) throw new Error(`Run-wide budget exhaustion failed to settle: ${terminal.issues.join("; ")}`);
       throw budgetError(reason, runWideFailure.budgetExhausted!, "run");
     }
+    if (this.knowledgeIdle()) this.scheduleKnowledgeReconciliation();
   }
 
   private async suspendResources(reason: string): Promise<void> {
@@ -1443,6 +1770,7 @@ export class RunOrchestrationService {
   }
 
   async pause(reason: string): Promise<boolean> {
+    await this.knowledgeQueue.preemptForUserWork();
     const boundary = this.rootCompactionBoundary();
     return this.lifecycle.pause(reason, {
       ...this.options.pauseAuthority,
@@ -1576,11 +1904,20 @@ export class RunOrchestrationService {
     };
   }
 
-  async cancel(reason: string): Promise<CancellationResult> {
-    const result = await this.lifecycle.cancel(reason, this.cancellationCoordinator(reason));
-    this.artifactCallerIssuer?.revoke();
-    if (this.current) await this.current.workers.closeSessions();
-    return result;
+  async cancel(reason: string, options: { readonly preserveKnowledge?: boolean } = {}): Promise<CancellationResult> {
+    await this.knowledgeQueue.preemptForUserWork();
+    this.preserveCancelledEnrichment = options.preserveKnowledge === true;
+    if (this.preserveCancelledEnrichment) {
+      const run = this.lifecycle.restore().latestRun;
+      if (!run || !isOpenRunStatus(run.status)) throw new Error("Cancelled-run knowledge preservation requires a current open run");
+      new KnowledgeEnrichmentService({ projectRoot: this.options.projectRoot, projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, snapshot: this.options.snapshot, now: this.options.now }).requestCancelledPreservation();
+    }
+    try {
+      const result = await this.lifecycle.cancel(reason, this.cancellationCoordinator(reason));
+      this.artifactCallerIssuer?.revoke();
+      if (this.current) await this.current.workers.closeSessions();
+      return result;
+    } finally { this.preserveCancelledEnrichment = false; }
   }
 
   questionControls(): QuestionService {
@@ -1592,7 +1929,14 @@ export class RunOrchestrationService {
   activeWorkerCount(): number { return this.current?.scheduler.activeCount ?? 0; }
 
   async shutdown(reason = "process shutdown"): Promise<void> {
+    this.shuttingDown = true;
+    if (this.knowledgeReconcileImmediate !== undefined) { clearTimeout(this.knowledgeReconcileImmediate); this.knowledgeReconcileImmediate = undefined; }
+    if (this.knowledgeRetryTimer !== undefined) { clearTimeout(this.knowledgeRetryTimer); this.knowledgeRetryTimer = undefined; }
     this.artifactCallerIssuer?.revoke();
+    await this.knowledgeQueue.shutdown();
+    const reconciliation = this.knowledgeReconciliation;
+    if (reconciliation) await this.settleWithin(reconciliation, 100);
+    if (this.curatorHandles.size) await Promise.allSettled([...this.curatorHandles.keys()].map((jobId) => this.disposeCuratorHandle(jobId)));
     // Question tools may be the promise preventing a worker from reaching its
     // pause boundary, so abort and await their wrappers before worker settlement.
     if (this.current) await this.current.questions.shutdown();
@@ -1603,6 +1947,6 @@ export class RunOrchestrationService {
   }
 
   hasLiveHandles(): boolean {
-    return Boolean(this.current?.questions.hasLiveHandles() || this.current?.scheduler.hasLiveHandles() || this.current?.workers.hasLiveHandles() || this.cleanup.size);
+    return Boolean(this.knowledgeReconciliation || this.knowledgeQueue.hasLiveWork() || this.curatorHandles.size || this.current?.questions.hasLiveHandles() || this.current?.scheduler.hasLiveHandles() || this.current?.workers.hasLiveHandles() || this.cleanup.size);
   }
 }

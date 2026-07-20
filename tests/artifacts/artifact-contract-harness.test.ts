@@ -39,7 +39,10 @@ test("new generic runtime has no OpenSpec artifact-semantic branch or import", (
     "src/workflows/orchestration.ts",
   ]) {
     const source = readFileSync(resolve(path), "utf8");
-    assert.doesNotMatch(source, /(?:openspec|proposal|specs(?:\/|\b))/iu, `${path} contains OpenSpec-specific runtime semantics`);
+    // "proposal" alone is not an OpenSpec identity (knowledge proposals are a
+    // separate generic workflow subsystem). The boundary rejects the adapter
+    // name and OpenSpec's concrete specs path instead of unrelated vocabulary.
+    assert.doesNotMatch(source, /(?:\bopenspec\b|["'`]specs(?:\/|["'`]))/iu, `${path} contains OpenSpec-specific runtime semantics`);
   }
 });
 
