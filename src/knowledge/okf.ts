@@ -73,7 +73,6 @@ function utf8Prefix(value: string, bytes: number): string {
   }
   return output;
 }
-function boundedMessage(value: string, bytes: number): string { return utf8Prefix(value, bytes); }
 function plainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
     && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -81,7 +80,12 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
 class Diagnostics {
   readonly items: KnowledgeDiagnostic[] = [];
   private truncated = false;
-  constructor(private readonly bundleId: string, private readonly limits: OkfLimits) {}
+  private readonly bundleId: string;
+  private readonly limits: OkfLimits;
+  constructor(bundleId: string, limits: OkfLimits) {
+    this.bundleId = bundleId;
+    this.limits = limits;
+  }
   add(code: string, severity: "error" | "warning", message: string, documentId?: string): void {
     if (this.truncated) return;
     if (this.items.length >= this.limits.diagnostics - 1) {
@@ -89,7 +93,7 @@ class Diagnostics {
       this.items.push(Object.freeze({ code: "OKF_DIAGNOSTICS_TRUNCATED", severity: "error", message: "Additional OKF diagnostics were omitted.", bundleId: this.bundleId }));
       return;
     }
-    this.items.push(Object.freeze({ code, severity, message: boundedMessage(message, this.limits.diagnosticBytes), bundleId: this.bundleId, ...(documentId ? { documentId } : {}) }));
+    this.items.push(Object.freeze({ code, severity, message: utf8Prefix(message, this.limits.diagnosticBytes), bundleId: this.bundleId, ...(documentId ? { documentId } : {}) }));
   }
 }
 
