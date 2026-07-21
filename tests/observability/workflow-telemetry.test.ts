@@ -108,7 +108,7 @@ test("workflow telemetry envelope is generic, versioned, bounded, and omits raw 
   assert.equal(event.previousHash, source.previousHash);
   assert.equal(event.sourceEventHash, source.eventHash);
   assert.match(event.eventHash, /^[0-9a-f]{64}$/);
-  assert.partialDeepStrictEqual(event.dimensions, {
+  const expectedDimensions = {
     projectId: "project-1", projectRoot: "/work/project", piSessionId: "pi-session-1",
     workflowId: "delivery", snapshotId: "snapshot-1", runId: "run-1",
     agentId: "agent-1", agentName: "Builder", nodeId: "node-1", parentNodeId: "root", taskId: "task-1",
@@ -117,7 +117,10 @@ test("workflow telemetry envelope is generic, versioned, bounded, and omits raw 
     knowledgeJobId: "job-1", knowledgeUpdateId: "update-1", modelId: "provider/model",
     thinking: "high", toolName: "bash", capabilityId: "shell.mutate",
     attemptId: "attempt-1", operationId: "operation-1",
-  });
+  };
+  for (const [key, value] of Object.entries(expectedDimensions)) {
+    assert.equal((event.dimensions as unknown as Record<string, unknown>)[key], value, key);
+  }
   assert.ok(Buffer.byteLength(event.summary ?? "") <= 2_048);
   assert.deepEqual(event.metrics, { elapsedMs: 125, activeWallTimeMs: 100, budgetScope: "run", budgetUsed: 12, budgetLimit: 20, budgetRemaining: 8 });
   const persisted = JSON.stringify(event);
