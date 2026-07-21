@@ -111,7 +111,7 @@ jobs:
         run: node scripts/check-licenses.mjs
 
       - name: Audit root dependencies
-        run: npm audit --audit-level=high
+        run: node scripts/check-npm-audit.mjs
 
       - name: Audit dashboard dependencies
         run: npm audit --prefix ui/web --audit-level=high

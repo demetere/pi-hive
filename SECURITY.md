@@ -81,6 +81,10 @@ The following are deliberate limits of policy enforcement and are not approval o
 4. **Agent controls are not OS sandboxing.** Domain and command policy constrain registered Pi tools. They do not contain a hostile runtime, dependency, Pi extension, kernel exploit, or trusted human shell.
 5. **Telemetry is local but sensitive.** Prompts, outputs, paths, and usage metadata can contain confidential information. Pi-hive applies restrictive permissions, bounded retention/rotation, opt-in reasoning capture, and best-effort credential redaction, but pattern-based redaction cannot recognize every secret. Users must still protect the host account, source logs, exports, and backups.
 
+## Temporary audit exception
+
+Root CI allows only `GHSA-3jxr-9vmj-r5cp` / npm `1123898` for `brace-expansion@5.0.6` under Pi `0.80.7`, expiring **2026-08-20**. Drift and every other high/critical finding fail. Restore `npm audit --audit-level=high` after upstream fixes the tree.
+
 ## Audit baseline
 
 Recorded on **2026-07-14** at Git commit `2f6b42a`, using Node `v22.23.1` and Bun `1.3.14`:
