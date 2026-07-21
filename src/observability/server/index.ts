@@ -1,6 +1,6 @@
 import { HOST, IDLE_TIMEOUT_MS, PORT, REGISTRY_PATH } from "./config";
 import { createDashboardHttpHandler } from "./http-handler";
-import { sourcePaths, startTelemetryRuntime } from "./runtime";
+import { sourcePaths, startTelemetryRuntime, stopTelemetryRuntime } from "./runtime";
 import { broadcastPing, subscribers } from "./sse";
 
 void startTelemetryRuntime();
@@ -16,10 +16,14 @@ function scheduleServerStop(): void {
   setTimeout(() => {
     clearInterval(heartbeatTimer);
     clearInterval(idleTimer);
+    stopTelemetryRuntime();
     void server.stop(true);
     process.exit(0);
   }, 50);
 }
+
+process.once("SIGINT", scheduleServerStop);
+process.once("SIGTERM", scheduleServerStop);
 
 const handleRequest = createDashboardHttpHandler({
   onActivity() { lastActivityAt = Date.now(); },

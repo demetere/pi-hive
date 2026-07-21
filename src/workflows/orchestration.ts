@@ -70,7 +70,8 @@ import {
   losslessDynamicPromptInputs,
   type WorkflowPromptAssembly,
 } from "./prompts";
-import { appendWorkflowEvent, readWorkflowJournal } from "./journal";
+import { appendWorkflowEvent, configureWorkflowJournalRedaction, readWorkflowJournal } from "./journal";
+import type { WorkflowRedactionOptions } from "../observability/redaction";
 import { createWorkflowEvent } from "./events";
 import { handoffForRun, handoffPromptInput } from "./handoff";
 import {
@@ -105,6 +106,8 @@ export interface RunOrchestrationServiceOptions {
   readonly projectRoot: string; readonly projectId: string; readonly sessionId: string;
   readonly snapshot: ActivationSnapshotFileV1; readonly runtimeOwnerNonce: string; readonly maxParallel: number;
   readonly workerFactory: WorkerSessionFactory;
+  /** Runtime-configured secrets and protected roots applied centrally to every project journal writer. */
+  readonly journalRedaction?: WorkflowRedactionOptions;
   readonly budgetLimits?: EffectiveRuntimeBudgetLimits;
   readonly nowMs?: () => number;
   /** Required when taking over a run whose previous owner left an active budget clock. */
@@ -294,6 +297,7 @@ export class RunOrchestrationService {
 
   constructor(options: RunOrchestrationServiceOptions) {
     this.options = options;
+    if (options.journalRedaction) configureWorkflowJournalRedaction(options.projectRoot, options.journalRedaction);
     const selectedArtifact = runtimeArtifact(options.snapshot, options.artifactRuntime);
     this.selectedArtifact = selectedArtifact;
     this.artifactCallerIssuer = selectedArtifact ? createRunOrchestrationArtifactCallerIssuer(options.snapshot) : undefined;

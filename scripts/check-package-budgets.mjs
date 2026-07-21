@@ -5,12 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-// Durable knowledge enrichment adds the shipped curator, queue/accounting, and
-// proposal runtime, including descriptor-rooted mutation staging with pinned
-// rollback/validation traversal. The existing 10% ceiling remains unchanged.
+// W24 ships readable Node-safe projection/redaction/prune source plus the
+// Bun-isolated SQLite projection/runtime. These are measured package bytes;
+// the existing 10% regression tolerance remains unchanged.
 export const PACKAGE_BASELINES = Object.freeze({
-  packedBytes: 676_280,
-  unpackedBytes: 2_665_841,
+  packedBytes: 770_764,
+  unpackedBytes: 3_055_514,
   reviewRawBytes: 12_625,
   reviewCompressedBytes: 4_304,
 });

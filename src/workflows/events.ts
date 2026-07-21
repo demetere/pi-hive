@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
+import { redactJournalPayload } from "../observability/redaction";
 
 export const WORKFLOW_EVENT_FORMAT_VERSION = 1 as const;
 export const WORKFLOW_EVENT_LIMITS = Object.freeze({ payloadBytes: 262_144, eventBytes: 524_288, idBytes: 256, diagnosticsBytes: 4_096 });
@@ -87,7 +88,7 @@ function validateDraft(input: WorkflowEventDraft): void {
 }
 export function createWorkflowEvent(input: CreateWorkflowEventInput): WorkflowEventDraft {
   const timestamp = input.timestamp ?? new Date().toISOString();
-  const result = { eventId: boundedId(input.eventId ?? randomUUID(), "ID"), projectId: boundedId(input.projectId, "PROJECT"), sessionId: boundedId(input.sessionId, "SESSION"), ...(input.runId ? { runId: boundedId(input.runId, "RUN") } : {}), type: input.type, payload: deepFreeze(structuredClone(input.payload)), timestamp, producer: input.producer, ...(input.correlationId ? { correlationId: boundedId(input.correlationId, "CORRELATION") } : {}), ...(input.attemptId ? { attemptId: boundedId(input.attemptId, "ATTEMPT") } : {}) }; validateDraft(result); return Object.freeze(result);
+  const result = { eventId: boundedId(input.eventId ?? randomUUID(), "ID"), projectId: boundedId(input.projectId, "PROJECT"), sessionId: boundedId(input.sessionId, "SESSION"), ...(input.runId ? { runId: boundedId(input.runId, "RUN") } : {}), type: input.type, payload: deepFreeze(redactJournalPayload(input.payload)), timestamp, producer: input.producer, ...(input.correlationId ? { correlationId: boundedId(input.correlationId, "CORRELATION") } : {}), ...(input.attemptId ? { attemptId: boundedId(input.attemptId, "ATTEMPT") } : {}) }; validateDraft(result); return Object.freeze(result);
 }
 export function sealWorkflowEvent(draft: WorkflowEventDraft, sequence: number, previousHash: string | null): WorkflowEventEnvelope {
   validateDraft(draft);

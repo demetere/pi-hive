@@ -9,7 +9,8 @@ import type { AgentConfig, HiveTeam } from "../../core/types";
 import { withCrossProcessFileLock } from "../../core/file-lock";
 import { readJsonlPage } from "../../core/fs";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
-import { BOOT_SESSION_ID, CAPTURE_THINKING, CONVERSATION_LOG, DB_PATH, PROJECT_CWD, REGISTRY_PATH, RETENTION_DAYS, SINGLE_LOG_PATH } from "./config";
+import { BOOT_SESSION_ID, CAPTURE_THINKING, CONVERSATION_LOG, DB_PATH, PROJECT_CWD, REGISTRY_PATH, RETENTION_DAYS, SINGLE_LOG_PATH, WORKFLOW_DB_PATH } from "./config";
+import { createConfiguredWorkflowProjectionSynchronizer, workflowProjectionRootCandidates, type ConfiguredWorkflowProjectionSynchronizer } from "./workflow-runtime";
 import {
   db,
   dbEventRow,
@@ -1001,11 +1002,32 @@ export function readAgentLog(sessionId: string, agent: string, offset: number, r
   };
 }
 
+let workflowProjectionRuntimeDiagnostics: readonly Readonly<{ projectRoot: string; sessionId: string; diagnostic: string }>[] = Object.freeze([]);
+let workflowProjectionSynchronizer: ConfiguredWorkflowProjectionSynchronizer | undefined;
+let telemetryPruneTimer: ReturnType<typeof setInterval> | undefined;
+let telemetryPollTimer: ReturnType<typeof setInterval> | undefined;
+
+export function readWorkflowProjectionRuntimeDiagnostics(): readonly Readonly<{ projectRoot: string; sessionId: string; diagnostic: string }>[] {
+  return workflowProjectionRuntimeDiagnostics;
+}
+
+function syncWorkflowProjectionRuntime(): void {
+  const projectRoots = workflowProjectionRootCandidates(PROJECT_CWD, [...sources.values()].flatMap((source) => source.meta.project_root ? [source.meta.project_root] : source.meta.cwd ? [source.meta.cwd] : []));
+  try {
+    workflowProjectionSynchronizer ??= createConfiguredWorkflowProjectionSynchronizer({ databasePath: WORKFLOW_DB_PATH, legacyPaths: [DB_PATH, REGISTRY_PATH], retentionDays: RETENTION_DAYS });
+    const result = workflowProjectionSynchronizer.sync(projectRoots);
+    workflowProjectionRuntimeDiagnostics = Object.freeze([...(result.diagnostics ?? [])].slice(0, 256));
+  } catch (error) {
+    workflowProjectionRuntimeDiagnostics = Object.freeze([{ projectRoot: PROJECT_CWD.slice(0, 1_024), sessionId: "", diagnostic: String(error instanceof Error ? error.message : error).slice(0, 2_048) }]);
+  }
+}
+
 export function startTelemetryRuntime() {
   if (started) return;
   started = true;
   resumeIngestSources();
   readRegistry();
+  syncWorkflowProjectionRuntime();
   if (SINGLE_LOG_PATH) addSource(SINGLE_LOG_PATH, { cwd: PROJECT_CWD, conversation_log: CONVERSATION_LOG, session_id: BOOT_SESSION_ID });
   fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true, mode: 0o700 });
   fs.chmodSync(path.dirname(REGISTRY_PATH), 0o700);
@@ -1013,13 +1035,32 @@ export function startTelemetryRuntime() {
   fs.chmodSync(REGISTRY_PATH, 0o600);
   const automaticPrune = () => pruneTelemetry(new Date(Date.now() - RETENTION_DAYS * 86400_000).toISOString());
   automaticPrune();
-  setInterval(automaticPrune, 60 * 60 * 1000).unref?.();
+  telemetryPruneTimer = setInterval(automaticPrune, 60 * 60 * 1000);
+  telemetryPruneTimer.unref?.();
   fs.watchFile(REGISTRY_PATH, { interval: 1000 }, readRegistry);
-  setInterval(() => {
+  telemetryPollTimer = setInterval(() => {
     readRegistry();
+    syncWorkflowProjectionRuntime();
     for (const source of sources.values()) {
       readSource(source.logPath);
       readState(source.logPath);
     }
-  }, 2000).unref?.();
+  }, 2000);
+  telemetryPollTimer.unref?.();
+}
+
+export function stopTelemetryRuntime(): void {
+  if (!started && !workflowProjectionSynchronizer) return;
+  started = false;
+  if (telemetryPruneTimer) clearInterval(telemetryPruneTimer);
+  if (telemetryPollTimer) clearInterval(telemetryPollTimer);
+  telemetryPruneTimer = undefined;
+  telemetryPollTimer = undefined;
+  fs.unwatchFile(REGISTRY_PATH, readRegistry);
+  for (const source of sources.values()) {
+    fs.unwatchFile(source.logPath);
+    fs.unwatchFile(source.statePath);
+  }
+  workflowProjectionSynchronizer?.close();
+  workflowProjectionSynchronizer = undefined;
 }
