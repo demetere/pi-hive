@@ -1,7 +1,7 @@
 import { HOST, IDLE_TIMEOUT_MS, PORT, REGISTRY_PATH } from "./config";
 import { createDashboardHttpHandler } from "./http-handler";
 import { sourcePaths, startTelemetryRuntime, stopTelemetryRuntime } from "./runtime";
-import { broadcastPing, subscribers } from "./sse";
+import { broadcastPing, closeAllSubscribers, hasLiveSubscribers } from "./sse";
 
 void startTelemetryRuntime();
 
@@ -16,6 +16,8 @@ function scheduleServerStop(): void {
   setTimeout(() => {
     clearInterval(heartbeatTimer);
     clearInterval(idleTimer);
+    handleRequest.dispose();
+    closeAllSubscribers();
     stopTelemetryRuntime();
     void server.stop(true);
     process.exit(0);
@@ -42,7 +44,7 @@ const server = Bun.serve({
 // The daemon is shared across Pi sessions, so a single session shutdown cannot
 // terminate it. Stop only after bounded inactivity with no browser stream.
 const idleTimer: ReturnType<typeof setInterval> = setInterval(() => {
-  if (subscribers.size === 0 && Date.now() - lastActivityAt >= IDLE_TIMEOUT_MS) scheduleServerStop();
+  if (!hasLiveSubscribers() && Date.now() - lastActivityAt >= IDLE_TIMEOUT_MS) scheduleServerStop();
 }, Math.min(60_000, Math.max(1_000, Math.floor(IDLE_TIMEOUT_MS / 4))));
 
 console.log(`pi-hive telemetry dashboard: http://${HOST}:${PORT}`);

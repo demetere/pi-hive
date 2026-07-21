@@ -473,7 +473,7 @@ test("token reads and IPv6 dashboard URLs fail safely", () => {
   }
 });
 
-test("host and port validation fail closed; non-loopback requires dangerous opt-in", () => {
+test("host and port validation fail closed and non-loopback is always refused", () => {
   process.env.HIVE_TELEMETRY_PORT = "NaN";
   assert.throws(() => dashboardPort(), /Invalid HIVE_TELEMETRY_PORT/);
   process.env.HIVE_TELEMETRY_PORT = "70000";
@@ -483,7 +483,7 @@ test("host and port validation fail closed; non-loopback requires dangerous opt-
   process.env.HIVE_TELEMETRY_HOST = "0.0.0.0";
   assert.throws(() => dashboardHost(), /Refusing non-loopback/);
   process.env.HIVE_TELEMETRY_ALLOW_NON_LOOPBACK = "1";
-  assert.equal(dashboardHost(), "0.0.0.0");
+  assert.throws(() => dashboardHost(), /loopback-only|Refusing non-loopback/);
   delete process.env.HIVE_TELEMETRY_ALLOW_NON_LOOPBACK;
   process.env.HIVE_TELEMETRY_HOST = "http://evil";
   assert.throws(() => dashboardHost(), /Invalid HIVE_TELEMETRY_HOST/);

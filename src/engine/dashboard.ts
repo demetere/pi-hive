@@ -71,9 +71,7 @@ export function dashboardHost(): string {
   }
   const normalized = host.replace(/^\[(.*)\]$/, "$1").toLowerCase();
   const loopback = normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
-  if (!loopback && process.env.HIVE_TELEMETRY_ALLOW_NON_LOOPBACK !== "1") {
-    throw new Error(`Refusing non-loopback dashboard host "${host}". Set HIVE_TELEMETRY_ALLOW_NON_LOOPBACK=1 only if you accept network exposure.`);
-  }
+  if (!loopback) throw new Error(`Refusing non-loopback dashboard host "${host}"; first-release dashboard binding is loopback-only.`);
   return normalized;
 }
 

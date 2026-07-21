@@ -14,6 +14,22 @@ import type {
 
 export const WORKFLOW_DASHBOARD_API_VERSION = 1 as const;
 export const WORKFLOW_DASHBOARD_MAX_PAGE_SIZE = 500 as const;
+export const WORKFLOW_DASHBOARD_MAX_BODY_BYTES = 65_536 as const;
+
+export type WorkflowDashboardResource = "projects" | "workflows" | "sessions" | "runs" | "nodes" | "tasks" | "artifacts" | "checkpoints" | "questions" | "approvals" | "knowledge";
+
+export interface WorkflowDashboardResourcePage {
+  readonly apiVersion: 1;
+  readonly resource: WorkflowDashboardResource;
+  readonly items: readonly WorkflowProjectionCurrentRow[];
+  readonly nextCursor?: string;
+  readonly hasMore: boolean;
+}
+
+export interface WorkflowDashboardError {
+  readonly apiVersion: 1;
+  readonly error: Readonly<{ code: string; message: string }>;
+}
 
 export interface WorkflowDashboardHistoryPage {
   readonly apiVersion: 1;
@@ -52,6 +68,8 @@ export interface WorkflowDashboardProjectionMaintenance {
 
 export interface DashboardBootstrap {
   token: string | null;
+  /** The v1 browser client echoes this only in the custom CSRF header. */
+  csrfToken?: string | null;
   bootCwd: string | null;
 }
 

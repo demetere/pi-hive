@@ -200,22 +200,23 @@ test("reviewed proposals use authenticated exact CAS; approval, denial, replay, 
   });
   const pending = service.create(f.update);
   assert.equal(pending.state, "pending");
-  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "model-attempt", channel: "model" as never, claimedIdentity: "model", credential: "secret" }), /channel|dashboard|human/i);
-  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "unauth", channel: "dashboard", claimedIdentity: "human", credential: "wrong" }), /auth/i);
+  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "model-attempt", channel: "model" as never, claimedIdentity: "model", credential: "secret" }), /channel|dashboard|human/i);
+  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "unauth", channel: "dashboard", claimedIdentity: "human", credential: "wrong" }), /auth/i);
 
-  const approved = service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "decision-1", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", runId: "wrong-run", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "wrong-run-decision", channel: "dashboard", claimedIdentity: "human", credential: "secret" }), /exact|identity|missing/i);
+  const approved = service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "decision-1", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   assert.equal(approved.state, "approved");
   assert.equal(approved.decision?.identity, "human");
-  const replay = service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "decision-1", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  const replay = service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "decision-1", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   assert.deepEqual(replay, approved);
-  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "deny", operationId: "decision-2", channel: "dashboard", claimedIdentity: "other", credential: "secret" }), /CAS|decided|pending/i);
+  assert.throws(() => service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "deny", operationId: "decision-2", channel: "dashboard", claimedIdentity: "other", credential: "secret" }), /CAS|decided|pending/i);
   const applied = await service.applyApproved(pending.proposalId, new OkfKnowledgeMutator({ projectRoot: f.projectRoot, snapshot: snapshot("reviewed"), mutationQueue: mutationQueue([]) }));
   assert.equal(applied.state, "applied");
   assert.equal(applied.applied?.updateId, "update-1");
   assert.deepEqual(await service.applyApproved(pending.proposalId, new OkfKnowledgeMutator({ projectRoot: f.projectRoot, snapshot: snapshot("reviewed"), mutationQueue: mutationQueue([]) })), applied);
 
   const deniedPending = service.create(authorizeUpdate(f, "update-2", "job-2", "candidate-2", "A second reviewed conclusion can be denied independently."));
-  assert.equal(service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: deniedPending.proposalId, expectedState: "pending", decision: "deny", operationId: "decision-3", channel: "dashboard", claimedIdentity: "human", credential: "secret" }).state, "denied");
+  assert.equal(service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-2", proposalId: deniedPending.proposalId, expectedState: "pending", decision: "deny", operationId: "decision-3", channel: "dashboard", claimedIdentity: "human", credential: "secret" }).state, "denied");
   const restored = restoreKnowledgeProposalState(readWorkflowJournal(f.projectRoot, "session-1"));
   assert.deepEqual(Object.values(restored.proposals).map((entry) => entry.state), ["applied", "denied"]);
 });
@@ -225,7 +226,7 @@ test("proposal decision replay recomputes the authenticated request hash and rej
   const service = new KnowledgeProposalService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", createProposalId: () => "proposal-hash",
     authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined });
   const pending = service.create(f.update);
-  service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "hash-decision", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "hash-decision", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   const tampered = readWorkflowJournal(f.projectRoot, "session-1").map((event) => (event.payload as any).operation === "proposal-decided"
     ? ({ ...event, payload: { ...(event.payload as any), decision: { ...(event.payload as any).decision, requestHash: `sha256:${"9".repeat(64)}` } } })
     : event);
@@ -244,7 +245,7 @@ test("concurrent same-process exact applyApproved calls return the one durable a
     authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
   });
   service.create(f.update);
-  service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: "proposal-apply-race", expectedState: "pending", decision: "approve", operationId: "approve-apply-race", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: "proposal-apply-race", expectedState: "pending", decision: "approve", operationId: "approve-apply-race", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   const apply = () => service.applyApproved("proposal-apply-race", new OkfKnowledgeMutator({ projectRoot: f.projectRoot, snapshot: snapshot("reviewed"), mutationQueue: mutationQueue([]) }));
   const [first, second] = await Promise.all([apply(), apply()]);
   assert.equal(first.state, "applied");
@@ -263,7 +264,7 @@ test("proposal application publishes the authoritative mutation-committed result
     authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
   });
   service.create(f.update);
-  service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: "proposal-authoritative-result", expectedState: "pending", decision: "approve", operationId: "approve-authoritative-result", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: "proposal-authoritative-result", expectedState: "pending", decision: "approve", operationId: "approve-authoritative-result", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   let committed!: () => void;
   const didCommit = new Promise<void>((resolve) => { committed = resolve; });
   let release!: () => void;
@@ -293,7 +294,7 @@ test("concurrent cross-process exact applyApproved calls are idempotent by propo
     authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
   });
   service.create(f.update);
-  service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: "proposal-cross-apply", expectedState: "pending", decision: "approve", operationId: "approve-cross-apply", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: "proposal-cross-apply", expectedState: "pending", decision: "approve", operationId: "approve-cross-apply", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   const run = () => new Promise<{ code: number | null; output: string; error: string }>((resolve) => {
     const script = `
       import { KnowledgeProposalService, OkfKnowledgeMutator } from './src/knowledge/proposals.ts';
@@ -349,7 +350,7 @@ test("decision DTOs are exact and operation replay is session-wide", () => {
   });
   const first = service.create(f.update);
   const second = service.create(authorizeUpdate(f, "update-2", "job-2", "candidate-2", "A second stable proposal exists for replay checks."));
-  const request = { projectId: "project-1", sessionId: "session-1", proposalId: first.proposalId, expectedState: "pending" as const, decision: "approve" as const, operationId: "global-operation", channel: "dashboard" as const, claimedIdentity: "human", credential: "secret" };
+  const request = { projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: first.proposalId, expectedState: "pending" as const, decision: "approve" as const, operationId: "global-operation", channel: "dashboard" as const, claimedIdentity: "human", credential: "secret" };
   service.decide(request);
   assert.throws(() => service.decide({ ...request, proposalId: second.proposalId }), /operation.*replay|reuse|conflict/i);
   assert.throws(() => service.decide({ ...request, injectedAuthority: true } as never), /unknown|schema|field/i);
@@ -367,7 +368,9 @@ test("proposal status/detail DTOs are exact, bounded, and cursor paginated", () 
   assert.equal(first.total, 2);
   assert.ok(first.nextCursor);
   assert.equal(service.status({ projectId: "project-1", sessionId: "session-1", state: "pending", limit: 1, cursor: first.nextCursor }).items.length, 1);
-  assert.equal(service.detail({ projectId: "project-1", sessionId: "session-1", proposalId: first.items[0].proposalId }).proposalId, first.items[0].proposalId);
+  assert.equal(service.detail({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: first.items[0].proposalId }).proposalId, first.items[0].proposalId);
+  assert.throws(() => service.detail({ projectId: "project-1", sessionId: "session-1", runId: "wrong-run", proposalId: first.items[0].proposalId }), /exact|identity|missing/i);
+  assert.throws(() => service.detail({ projectId: "project-1", sessionId: "session-1", proposalId: first.items[0].proposalId } as never), /unknown|schema|field/i);
   assert.throws(() => service.status({ projectId: "project-1", sessionId: "session-1", limit: 1, authority: true } as never), /unknown|schema|field/i);
 });
 
@@ -376,7 +379,7 @@ test("cross-process approve/deny CAS elects one decision and replays only its ex
   const service = new KnowledgeProposalService({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: "session-1", createProposalId: () => "proposal-race", authenticateControl: () => undefined });
   service.create(f.update);
   const run = (decision: "approve" | "deny", operationId: string) => new Promise<{ code: number | null; output: string }>((resolve) => {
-    const request = { projectId: "project-1", sessionId: "session-1", proposalId: "proposal-race", expectedState: "pending", decision, operationId, channel: "dashboard", claimedIdentity: "human", credential: "secret" };
+    const request = { projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: "proposal-race", expectedState: "pending", decision, operationId, channel: "dashboard", claimedIdentity: "human", credential: "secret" };
     const script = `
       import { KnowledgeProposalService } from './src/knowledge/proposals.ts';
       const service = new KnowledgeProposalService({ projectRoot: ${JSON.stringify(f.projectRoot)}, projectId: 'project-1', sessionId: 'session-1', authenticateControl: (request) => request.credential === 'secret' ? request.claimedIdentity : undefined });
@@ -639,7 +642,7 @@ test("proposal-applied reducer independently requires the exact prior mutation c
     authenticateControl: (request) => request.credential === "secret" ? request.claimedIdentity : undefined,
   });
   const pending = service.create(f.update);
-  const approved = service.decide({ projectId: "project-1", sessionId: "session-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "approve-forged-application", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
+  const approved = service.decide({ projectId: "project-1", sessionId: "session-1", runId: "run-job-1", proposalId: pending.proposalId, expectedState: "pending", decision: "approve", operationId: "approve-forged-application", channel: "dashboard", claimedIdentity: "human", credential: "secret" });
   const forged = createWorkflowEvent({
     projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "knowledge.transition", producer: "harness", correlationId: f.update.updateId,
     payload: { formatVersion: 1, operation: "proposal-applied", proposalId: pending.proposalId, updateHash: approved.updateHash, decisionOperationId: approved.decision!.operationId,

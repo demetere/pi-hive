@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { withCrossProcessFileLock } from "../../core/file-lock";
@@ -19,6 +19,7 @@ import {
   type WorkflowProjectionCurrent,
   type WorkflowProjectionCurrentRow,
   type WorkflowProjectionUsageTotals,
+  type WorkflowUsageQuery,
   type WorkflowCurrentPage,
   type WorkflowCurrentPageQuery,
 } from "../projection";
@@ -148,9 +149,23 @@ CREATE TABLE workflow_prune_watermarks (
   cutoff TEXT NOT NULL,
   state_hash TEXT NOT NULL
 );
+CREATE TABLE workflow_operation_receipts (
+  scope TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('in_progress', 'completed', 'unknown')),
+  claimed_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  owner_token TEXT,
+  lease_expires_at TEXT,
+  response_json BLOB,
+  response_hash TEXT,
+  PRIMARY KEY(scope, operation_id)
+);
+CREATE INDEX workflow_operation_receipts_updated ON workflow_operation_receipts(updated_at, scope, operation_id);
 `;
 
-const PRUNE_SCHEMA = `CREATE TABLE IF NOT EXISTS workflow_prune_watermarks (
+const ADDITIVE_SCHEMA = `CREATE TABLE IF NOT EXISTS workflow_prune_watermarks (
   stream_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -159,7 +174,49 @@ const PRUNE_SCHEMA = `CREATE TABLE IF NOT EXISTS workflow_prune_watermarks (
   through_hash TEXT NOT NULL,
   cutoff TEXT NOT NULL,
   state_hash TEXT NOT NULL
-);`;
+);
+CREATE TABLE IF NOT EXISTS workflow_operation_receipts (
+  scope TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('in_progress', 'completed', 'unknown')),
+  claimed_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  owner_token TEXT,
+  lease_expires_at TEXT,
+  response_json BLOB,
+  response_hash TEXT,
+  PRIMARY KEY(scope, operation_id)
+);
+CREATE INDEX IF NOT EXISTS workflow_operation_receipts_updated ON workflow_operation_receipts(updated_at, scope, operation_id);`;
+
+export const WORKFLOW_OPERATION_RECEIPT_LIMITS = Object.freeze({
+  count: 4_096,
+  responseBytes: 1_024 * 1_024,
+  totalResponseBytes: 64 * 1_024 * 1_024,
+  retentionMs: 30 * 86_400_000,
+  leaseMs: 120_000,
+  heartbeatMs: 10_000,
+  concurrentWaitMs: 1_000,
+  pollMs: 10,
+});
+
+export interface WorkflowOperationReceiptLimits {
+  readonly count?: number;
+  readonly responseBytes?: number;
+  readonly totalResponseBytes?: number;
+  readonly retentionMs?: number;
+  readonly leaseMs?: number;
+  readonly heartbeatMs?: number;
+  readonly concurrentWaitMs?: number;
+  readonly pollMs?: number;
+}
+export interface WorkflowOperationRuntime {
+  readonly now?: () => number;
+  readonly setInterval?: (callback: () => void, delayMs: number) => unknown;
+  readonly clearInterval?: (timer: unknown) => void;
+}
+type EffectiveWorkflowOperationReceiptLimits = Required<WorkflowOperationReceiptLimits>;
 
 type CurrentKind = keyof WorkflowProjectionCurrent;
 const CURRENT_KINDS: readonly CurrentKind[] = ["sessions", "runs", "nodes", "tasks", "workspaces", "questions", "approvals", "knowledge"];
@@ -232,6 +289,23 @@ interface PruneWatermark {
 function watermarkHash(value: PruneWatermark): string {
   return createHash("sha256").update("pi-hive-workflow-prune-watermark-v1\0").update(canonicalJson(value)).digest("hex");
 }
+function operationResponseHash(value: unknown): string {
+  return createHash("sha256").update("pi-hive-workflow-operation-response-v1\0").update(canonicalJson(value)).digest("hex");
+}
+function operationError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { status: 409, code });
+}
+
+export type WorkflowOperationClaim = Readonly<
+  | { state: "claimed"; ownerToken: string }
+  | { state: "completed"; result: unknown }
+  | { state: "in_progress" }
+  | { state: "unknown" }
+>;
+export type WorkflowStreamCatchUp = Readonly<
+  | { state: "ready"; events: readonly WorkflowTelemetryEvent[] }
+  | { state: "resync-required"; reason: "cursor-invalid" | "cursor-expired" | "catch-up-limit-exceeded" }
+>;
 
 export class WorkflowProjectionIntegrityError extends Error {
   constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "WorkflowProjectionIntegrityError"; }
@@ -245,13 +319,32 @@ export class WorkflowProjectionSchemaError extends Error {
 export interface OpenWorkflowProjectionDatabaseOptions {
   readonly path: string;
   readonly legacyPaths?: readonly string[];
+  readonly operationLimits?: WorkflowOperationReceiptLimits;
+  readonly operationRuntime?: WorkflowOperationRuntime;
+}
+
+function effectiveOperationLimits(input: WorkflowOperationReceiptLimits | undefined): EffectiveWorkflowOperationReceiptLimits {
+  const limits = { ...WORKFLOW_OPERATION_RECEIPT_LIMITS, ...(input ?? {}) };
+  const positive = ["count", "responseBytes", "totalResponseBytes", "retentionMs", "leaseMs", "heartbeatMs", "concurrentWaitMs", "pollMs"] as const;
+  if (positive.some((key) => !Number.isSafeInteger(limits[key]) || limits[key] < 1 || limits[key] > WORKFLOW_OPERATION_RECEIPT_LIMITS[key])) throw new Error("Workflow operation receipt limits are invalid");
+  if (limits.responseBytes > limits.totalResponseBytes || limits.heartbeatMs >= limits.leaseMs) throw new Error("Workflow operation receipt lease or response limits are invalid");
+  return Object.freeze(limits);
 }
 
 export class WorkflowProjectionDatabase {
   readonly database: Database;
   readonly path: string;
+  private readonly operationLimits: EffectiveWorkflowOperationReceiptLimits;
+  private readonly operationNow: () => number;
+  private readonly operationSetInterval: (callback: () => void, delayMs: number) => unknown;
+  private readonly operationClearInterval: (timer: unknown) => void;
+  private readonly activeOperations = new Map<string, Readonly<{ requestHash: string; promise: Promise<unknown> }>>();
 
   constructor(options: OpenWorkflowProjectionDatabaseOptions) {
+    this.operationLimits = effectiveOperationLimits(options.operationLimits);
+    this.operationNow = options.operationRuntime?.now ?? Date.now;
+    this.operationSetInterval = options.operationRuntime?.setInterval ?? ((callback, delayMs) => setInterval(callback, delayMs));
+    this.operationClearInterval = options.operationRuntime?.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
     this.path = canonicalDatabasePath(options.path);
     if ((options.legacyPaths ?? []).some((path) => comparablePath(path) === this.path
       || (existsSync(path) && existsSync(this.path) && statSync(path).dev === statSync(this.path).dev && statSync(path).ino === statSync(this.path).ino))) throw new Error("Workflow projection must use a separate database and cannot open a legacy telemetry file or alias");
@@ -271,7 +364,10 @@ export class WorkflowProjectionDatabase {
           const version = database.query(`SELECT value FROM workflow_projection_metadata WHERE key = 'schema_version'`).get() as { value: string } | null;
           if (Number(version?.value ?? 0) !== WORKFLOW_SQLITE_SCHEMA_VERSION) throw new WorkflowProjectionSchemaError(`Unsupported workflow projection schema version ${version?.value ?? "missing"}`);
         }
-        database.exec(PRUNE_SCHEMA);
+        database.exec(ADDITIVE_SCHEMA);
+        const receiptColumns = new Set((database.query(`PRAGMA table_info(workflow_operation_receipts)`).all() as Array<{ name: string }>).map((column) => column.name));
+        if (!receiptColumns.has("owner_token")) database.run(`ALTER TABLE workflow_operation_receipts ADD COLUMN owner_token TEXT`);
+        if (!receiptColumns.has("lease_expires_at")) database.run(`ALTER TABLE workflow_operation_receipts ADD COLUMN lease_expires_at TEXT`);
         database.run("PRAGMA journal_mode = WAL");
         privateSqliteFiles(this.path);
         opened = database;
@@ -281,6 +377,9 @@ export class WorkflowProjectionDatabase {
     this.database = opened;
     try {
       if (this.schemaVersion() !== WORKFLOW_SQLITE_SCHEMA_VERSION) throw new WorkflowProjectionSchemaError("Unsupported workflow projection schema version");
+      const operationNow = this.operationNow();
+      if (!Number.isFinite(operationNow)) throw new Error("Workflow operation receipt clock is invalid");
+      this.pruneExpiredCompletedReceipts(new Date(operationNow));
       this.assertPersistedIntegrity();
     } catch (error) {
       this.database.close();
@@ -290,6 +389,29 @@ export class WorkflowProjectionDatabase {
   }
 
   private assertPersistedIntegrity(): void {
+    const receiptRows = this.database.query(`SELECT *, json(response_json) AS authenticated_response_json FROM workflow_operation_receipts ORDER BY scope, operation_id`).all() as any[];
+    let receiptResponseBytes = 0;
+    for (const row of receiptRows) {
+      const validIdentity = typeof row.scope === "string" && /^[a-z][a-z0-9-]{0,63}$/u.test(row.scope)
+        && typeof row.operation_id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(row.operation_id)
+        && /^[0-9a-f]{64}$/u.test(row.request_hash)
+        && Number.isFinite(Date.parse(row.claimed_at)) && Number.isFinite(Date.parse(row.updated_at));
+      const completed = row.state === "completed";
+      const leased = row.state === "in_progress" && typeof row.owner_token === "string" && /^[0-9a-f-]{36}$/u.test(row.owner_token)
+        && typeof row.lease_expires_at === "string" && Number.isFinite(Date.parse(row.lease_expires_at));
+      const legacyUnowned = row.state === "in_progress" && row.owner_token === null && row.lease_expires_at === null;
+      const inactiveOwnership = row.state !== "in_progress" && row.owner_token === null && row.lease_expires_at === null;
+      let validResponse = !completed && row.response_json === null && row.response_hash === null;
+      if (completed && typeof row.authenticated_response_json === "string" && /^[0-9a-f]{64}$/u.test(row.response_hash ?? "")) {
+        try {
+          const bytes = Buffer.byteLength(row.authenticated_response_json, "utf8");
+          receiptResponseBytes += bytes;
+          validResponse = bytes <= this.operationLimits.responseBytes && operationResponseHash(JSON.parse(row.authenticated_response_json)) === row.response_hash;
+        } catch { validResponse = false; }
+      }
+      if (!validIdentity || !["in_progress", "completed", "unknown"].includes(row.state) || (!leased && !legacyUnowned && !inactiveOwnership) || !validResponse) throw new Error("Workflow projection persisted operation-receipt integrity failure");
+    }
+    if (receiptRows.length > this.operationLimits.count || receiptResponseBytes > this.operationLimits.totalResponseBytes) throw new Error("Workflow projection persisted operation-receipt capacity exceeded");
     const watermarkRows = this.database.query(`SELECT * FROM workflow_prune_watermarks ORDER BY stream_id`).all() as any[];
     const watermarks = new Map<string, PruneWatermark>();
     for (const row of watermarkRows) {
@@ -408,6 +530,148 @@ export class WorkflowProjectionDatabase {
   }
   schemaSql(): string {
     return (this.database.query(`SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name`).all() as Array<{ sql: string }>).map((row) => row.sql).join("\n");
+  }
+
+  private operationDate(): Date {
+    const value = this.operationNow();
+    if (!Number.isFinite(value)) throw new Error("Workflow operation receipt clock is invalid");
+    return new Date(value);
+  }
+
+  private pruneExpiredCompletedReceipts(now: Date): number {
+    const cutoff = new Date(now.getTime() - this.operationLimits.retentionMs).toISOString();
+    return this.database.query(`DELETE FROM workflow_operation_receipts WHERE state = 'completed' AND updated_at < ?`).run(cutoff).changes;
+  }
+
+  private receiptCapacityError(message: string): Error {
+    return Object.assign(new Error(message), { status: 503, code: "OPERATION_RECEIPT_CAPACITY" });
+  }
+
+  private claimOperation(scope: string, operationId: string, requestHash: string, now: Date): WorkflowOperationClaim {
+    if (!/^[a-z][a-z0-9-]{0,63}$/u.test(scope) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(operationId) || !/^[0-9a-f]{64}$/u.test(requestHash)) {
+      throw new Error("Workflow operation receipt identity is invalid");
+    }
+    const nowIso = now.toISOString();
+    return this.database.transaction(() => {
+      const row = this.database.query(`SELECT request_hash, state, owner_token, lease_expires_at, json(response_json) AS response_json, response_hash
+        FROM workflow_operation_receipts WHERE scope = ? AND operation_id = ?`).get(scope, operationId) as any;
+      if (!row) {
+        this.pruneExpiredCompletedReceipts(now);
+        const count = Number((this.database.query(`SELECT COUNT(*) AS count FROM workflow_operation_receipts`).get() as { count: number }).count);
+        if (count >= this.operationLimits.count) throw this.receiptCapacityError("workflow operation receipt count capacity is exhausted");
+        const ownerToken = randomUUID();
+        const leaseExpiresAt = new Date(now.getTime() + this.operationLimits.leaseMs).toISOString();
+        this.database.query(`INSERT INTO workflow_operation_receipts
+          (scope, operation_id, request_hash, state, claimed_at, updated_at, owner_token, lease_expires_at, response_json, response_hash)
+          VALUES (?, ?, ?, 'in_progress', ?, ?, ?, ?, NULL, NULL)`).run(scope, operationId, requestHash, nowIso, nowIso, ownerToken, leaseExpiresAt);
+        return Object.freeze({ state: "claimed" as const, ownerToken });
+      }
+      if (row.request_hash !== requestHash) throw operationError("operation ID reuse conflicts with prior input", "OPERATION_CONFLICT");
+      if (row.state === "completed") {
+        let result: unknown;
+        try { result = JSON.parse(row.response_json); }
+        catch { throw new WorkflowProjectionIntegrityError("Workflow operation receipt response is corrupt"); }
+        if (operationResponseHash(result) !== row.response_hash) throw new WorkflowProjectionIntegrityError("Workflow operation receipt response integrity failure");
+        return Object.freeze({ state: "completed" as const, result });
+      }
+      if (row.state === "unknown") return Object.freeze({ state: "unknown" as const });
+      const leaseExpiresAt = Date.parse(row.lease_expires_at ?? "");
+      if (!row.owner_token || !Number.isFinite(leaseExpiresAt) || now.getTime() >= leaseExpiresAt) {
+        this.database.query(`UPDATE workflow_operation_receipts SET state = 'unknown', updated_at = ?, owner_token = NULL, lease_expires_at = NULL
+          WHERE scope = ? AND operation_id = ? AND request_hash = ? AND state = 'in_progress' AND owner_token IS ?`)
+          .run(nowIso, scope, operationId, requestHash, row.owner_token ?? null);
+        return Object.freeze({ state: "unknown" as const });
+      }
+      return Object.freeze({ state: "in_progress" as const });
+    }).immediate();
+  }
+
+  private renewOperation(scope: string, operationId: string, requestHash: string, ownerToken: string, now: Date): boolean {
+    const leaseExpiresAt = new Date(now.getTime() + this.operationLimits.leaseMs).toISOString();
+    return this.database.query(`UPDATE workflow_operation_receipts SET updated_at = ?, lease_expires_at = ?
+      WHERE scope = ? AND operation_id = ? AND request_hash = ? AND state = 'in_progress' AND owner_token = ?`)
+      .run(now.toISOString(), leaseExpiresAt, scope, operationId, requestHash, ownerToken).changes === 1;
+  }
+
+  private finalizeOperation(scope: string, operationId: string, requestHash: string, ownerToken: string, result: unknown, now: Date): unknown {
+    let serialized: string;
+    let stored: unknown;
+    try {
+      serialized = JSON.stringify(result);
+      if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > this.operationLimits.responseBytes) throw new Error();
+      stored = JSON.parse(serialized);
+    } catch { throw new Error("Workflow operation response is not bounded JSON"); }
+    const responseHash = operationResponseHash(stored);
+    this.database.transaction(() => {
+      this.pruneExpiredCompletedReceipts(now);
+      const receipt = this.database.query(`SELECT request_hash, state, owner_token FROM workflow_operation_receipts WHERE scope = ? AND operation_id = ?`).get(scope, operationId) as { request_hash: string; state: string; owner_token: string | null } | null;
+      if (!receipt || receipt.request_hash !== requestHash || receipt.state !== "in_progress" || receipt.owner_token !== ownerToken) throw operationError("operation receipt cannot be finalized from its current ownership state", "OPERATION_OUTCOME_UNKNOWN");
+      const persistedBytes = Number((this.database.query(`SELECT COALESCE(SUM(length(CAST(json(response_json) AS BLOB))), 0) AS bytes FROM workflow_operation_receipts WHERE state = 'completed'`).get() as { bytes: number }).bytes);
+      if (!Number.isSafeInteger(persistedBytes) || persistedBytes + Buffer.byteLength(serialized, "utf8") > this.operationLimits.totalResponseBytes) throw this.receiptCapacityError("workflow operation receipt response-byte capacity is exhausted");
+      this.database.query(`UPDATE workflow_operation_receipts SET state = 'completed', updated_at = ?, owner_token = NULL, lease_expires_at = NULL, response_json = jsonb(?), response_hash = ?
+        WHERE scope = ? AND operation_id = ? AND request_hash = ? AND state = 'in_progress' AND owner_token = ?`)
+        .run(now.toISOString(), serialized, responseHash, scope, operationId, requestHash, ownerToken);
+    }).immediate();
+    return stored;
+  }
+
+  private markOperationUnknown(scope: string, operationId: string, requestHash: string, ownerToken: string, now: Date): void {
+    this.database.query(`UPDATE workflow_operation_receipts SET state = 'unknown', updated_at = ?, owner_token = NULL, lease_expires_at = NULL
+      WHERE scope = ? AND operation_id = ? AND request_hash = ? AND state = 'in_progress' AND owner_token = ?`).run(now.toISOString(), scope, operationId, requestHash, ownerToken);
+  }
+
+  private async executeOperation<T>(scope: string, operationId: string, requestHash: string, invoke: () => T | Promise<T>): Promise<T> {
+    const waitUntil = this.operationNow() + this.operationLimits.concurrentWaitMs;
+    while (true) {
+      const claim = this.claimOperation(scope, operationId, requestHash, this.operationDate());
+      if (claim.state === "completed") return structuredClone(claim.result) as T;
+      if (claim.state === "unknown") throw operationError("operation outcome is unknown and cannot be retried safely", "OPERATION_OUTCOME_UNKNOWN");
+      if (claim.state === "claimed") {
+        let heartbeatError: unknown;
+        const timer = this.operationSetInterval(() => {
+          try {
+            if (!this.renewOperation(scope, operationId, requestHash, claim.ownerToken, this.operationDate())) heartbeatError = operationError("operation lease ownership was lost", "OPERATION_OUTCOME_UNKNOWN");
+          } catch (error) { heartbeatError = error; }
+        }, this.operationLimits.heartbeatMs);
+        try {
+          const result = await invoke();
+          if (heartbeatError) throw heartbeatError;
+          if (!this.renewOperation(scope, operationId, requestHash, claim.ownerToken, this.operationDate())) throw operationError("operation lease ownership was lost", "OPERATION_OUTCOME_UNKNOWN");
+          return this.finalizeOperation(scope, operationId, requestHash, claim.ownerToken, result, this.operationDate()) as T;
+        } catch (error) {
+          this.markOperationUnknown(scope, operationId, requestHash, claim.ownerToken, this.operationDate());
+          throw error;
+        } finally { this.operationClearInterval(timer); }
+      }
+      if (this.operationNow() >= waitUntil) throw operationError("identical operation is still in progress", "OPERATION_IN_PROGRESS");
+      await new Promise((resolve) => setTimeout(resolve, this.operationLimits.pollMs));
+    }
+  }
+
+  runOperation<T>(scope: string, operationId: string, requestHash: string, invoke: () => T | Promise<T>): Promise<T> {
+    const key = `${scope}\0${operationId}`;
+    const active = this.activeOperations.get(key);
+    if (active) {
+      if (active.requestHash !== requestHash) return Promise.reject(operationError("operation ID reuse conflicts with active input", "OPERATION_CONFLICT"));
+      return active.promise.then((result) => structuredClone(result) as T);
+    }
+    const executing = this.executeOperation(scope, operationId, requestHash, invoke);
+    const coordinated = executing.finally(() => { if (this.activeOperations.get(key)?.promise === coordinated) this.activeOperations.delete(key); });
+    this.activeOperations.set(key, Object.freeze({ requestHash, promise: coordinated }));
+    return coordinated.then((result) => structuredClone(result) as T);
+  }
+
+  streamCatchUp(cursor: string, limit: number): WorkflowStreamCatchUp {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > WORKFLOW_PROJECTION_PAGE_LIMIT) throw new Error("Workflow stream catch-up limit is invalid");
+    let decoded: readonly [string, string, number, string];
+    try { decoded = decodeWorkflowHistoryCursor(cursor); }
+    catch { return Object.freeze({ state: "resync-required", reason: "cursor-invalid" }); }
+    const retained = this.database.query(`SELECT event_id FROM workflow_events WHERE timestamp = ? AND stream_id = ? AND sequence = ? AND event_id = ?`)
+      .get(decoded[0], decoded[1], decoded[2], decoded[3]);
+    if (!retained) return Object.freeze({ state: "resync-required", reason: "cursor-expired" });
+    const page = this.history({ cursor, limit });
+    if (page.hasMore) return Object.freeze({ state: "resync-required", reason: "catch-up-limit-exceeded" });
+    return Object.freeze({ state: "ready", events: Object.freeze([...page.items]) });
   }
 
   streamStatus(streamId: string): ProjectionStreamStatus {
@@ -561,15 +825,60 @@ export class WorkflowProjectionDatabase {
     return Object.fromEntries(CURRENT_KINDS.map((kind) => [kind, this.currentPage({ kind, limit: WORKFLOW_PROJECTION_PAGE_LIMIT }).items])) as unknown as WorkflowProjectionCurrent;
   }
 
+  aggregateCurrentPage(resource: "projects" | "workflows", query: Omit<WorkflowCurrentPageQuery, "kind">): WorkflowCurrentPage {
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > WORKFLOW_PROJECTION_PAGE_LIMIT) throw new Error("Workflow aggregate page query is invalid");
+    const values = [query.cursor, query.projectId, query.sessionId, query.workflowId, query.status].filter((value): value is string => value !== undefined);
+    if (values.some((value) => Buffer.byteLength(value) > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow aggregate query exceeds its byte limit");
+    let cursorProject = "", cursorWorkflow = "";
+    if (query.cursor) {
+      try {
+        const parsed = JSON.parse(Buffer.from(query.cursor, "base64url").toString("utf8")) as unknown;
+        if (!Array.isArray(parsed) || parsed.length !== 3 || parsed[0] !== resource || typeof parsed[1] !== "string" || typeof parsed[2] !== "string"
+          || Buffer.from(JSON.stringify(parsed), "utf8").toString("base64url") !== query.cursor) throw new Error();
+        cursorProject = parsed[1]; cursorWorkflow = parsed[2];
+      } catch { throw new Error("Workflow aggregate cursor is invalid"); }
+    }
+    const where = ["kind = 'sessions'"];
+    const parameters: Record<string, string | number> = { $limit: query.limit + 1 };
+    const filters = [["project_id", "$project", query.projectId], ["session_id", "$session", query.sessionId], ["workflow_id", "$workflow", query.workflowId]] as const;
+    for (const [column, parameter, value] of filters) if (value) { where.push(`${column} = ${parameter}`); parameters[parameter] = value; }
+    if (resource === "workflows") where.push("workflow_id IS NOT NULL");
+    if (query.status) parameters.$status = query.status;
+    const workflowExpression = resource === "workflows" ? "workflow_id" : "''";
+    if (query.cursor) {
+      where.push(`(project_id > $cursor_project OR (project_id = $cursor_project AND ${workflowExpression} > $cursor_workflow))`);
+      parameters.$cursor_project = cursorProject; parameters.$cursor_workflow = cursorWorkflow;
+    }
+    const rows = this.database.query(`WITH ranked AS (
+      SELECT entity_key, current_hash, json(current_json) AS current_json, project_id, ${workflowExpression} AS aggregate_workflow,
+        ROW_NUMBER() OVER (PARTITION BY project_id, ${workflowExpression}
+          ORDER BY julianday(updated_at) DESC, updated_at DESC, current_order_key DESC) AS rank
+      FROM workflow_current WHERE ${where.join(" AND ")}
+    ) SELECT entity_key, current_hash, current_json, project_id, aggregate_workflow FROM ranked WHERE rank = 1
+      ${query.status ? "AND json_extract(current_json, '$.status') = $status" : ""}
+      ORDER BY project_id, aggregate_workflow LIMIT $limit`).all(parameters) as Array<{ entity_key: string; current_hash: string; current_json: string; project_id: string; aggregate_workflow: string }>;
+    const hasMore = rows.length > query.limit;
+    const selected = rows.slice(0, query.limit);
+    const items = selected.map((entry) => parseCurrent("sessions", entry.entity_key, entry.current_json, entry.current_hash));
+    const last = selected.at(-1);
+    const nextCursor = hasMore && last ? Buffer.from(JSON.stringify([resource, last.project_id, last.aggregate_workflow]), "utf8").toString("base64url") : undefined;
+    return { items, ...(nextCursor ? { nextCursor } : {}), hasMore };
+  }
+
   currentPage(query: WorkflowCurrentPageQuery): WorkflowCurrentPage {
     if (!CURRENT_KINDS.includes(query.kind) || !Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > WORKFLOW_PROJECTION_PAGE_LIMIT) throw new Error("Workflow current page query is invalid");
-    if (query.cursor && Buffer.byteLength(query.cursor) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow current cursor exceeds its byte limit");
+    const values = [query.cursor, query.projectId, query.sessionId, query.workflowId, query.runId, query.nodeId, query.taskId, query.status].filter((value): value is string => value !== undefined);
+    if (values.some((value) => Buffer.byteLength(value) > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow current query exceeds its byte limit");
     const where: string[] = ["kind = $kind"];
     const parameters: Record<string, string | number> = { $kind: query.kind, $limit: query.limit + 1 };
     if (query.cursor) {
       where.push(`current_order_key > $current_order_key`);
       parameters.$current_order_key = workflowProjectionCurrentCursorOrderKey(query.cursor);
     }
+    const filters = [["project_id", "$project", query.projectId], ["session_id", "$session", query.sessionId], ["workflow_id", "$workflow", query.workflowId],
+      ["run_id", "$run", query.runId], ["node_id", "$node", query.nodeId], ["task_id", "$task", query.taskId]] as const;
+    for (const [column, parameter, value] of filters) if (value) { where.push(`${column} = ${parameter}`); parameters[parameter] = value; }
+    if (query.status) { where.push(`json_extract(current_json, '$.status') = $status`); parameters.$status = query.status; }
     const rows = this.database.query(`SELECT entity_key, current_hash, json(current_json) AS current_json FROM workflow_current
       WHERE ${where.join(" AND ")} ORDER BY current_order_key LIMIT $limit`).all(parameters) as Array<{ entity_key: string; current_hash: string; current_json: string }>;
     const hasMore = rows.length > query.limit;
@@ -578,9 +887,15 @@ export class WorkflowProjectionDatabase {
     return { items: selected.map((entry) => entry.value), ...(hasMore && last ? { nextCursor: encodeWorkflowCurrentCursor(last.value, last.entity_key) } : {}), hasMore };
   }
 
-  usage(): WorkflowProjectionUsageTotals {
+  usage(query: WorkflowUsageQuery = {}): WorkflowProjectionUsageTotals {
+    const values = Object.values(query).filter((value): value is string => value !== undefined);
+    if (values.some((value) => Buffer.byteLength(value) > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow usage query exceeds its byte limit");
     const output: WorkflowProjectionUsageTotals = { estimated: { inputTokens: 0, outputTokens: 0, costMicroUsd: 0 }, providerConfirmed: { inputTokens: 0, outputTokens: 0, costMicroUsd: 0 } };
-    const rows = this.database.query(`SELECT precision, input_tokens, output_tokens, cost_micro_usd FROM workflow_usage ORDER BY event_id`).all() as Array<{ precision: string; input_tokens: number; output_tokens: number; cost_micro_usd: number }>;
+    const where: string[] = [];
+    const parameters: Record<string, string> = {};
+    const filters = [["project_id", "$project", query.projectId], ["session_id", "$session", query.sessionId], ["workflow_id", "$workflow", query.workflowId], ["run_id", "$run", query.runId], ["node_id", "$node", query.nodeId]] as const;
+    for (const [column, parameter, value] of filters) if (value) { where.push(`${column} = ${parameter}`); parameters[parameter] = value; }
+    const rows = this.database.query(`SELECT precision, input_tokens, output_tokens, cost_micro_usd FROM workflow_usage ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY event_id`).all(parameters) as Array<{ precision: string; input_tokens: number; output_tokens: number; cost_micro_usd: number }>;
     for (const row of rows) {
       const key = row.precision === "provider-confirmed" ? "providerConfirmed" : "estimated";
       const bucket = output[key] as { inputTokens: number; outputTokens: number; costMicroUsd: number };
@@ -598,18 +913,33 @@ export class WorkflowProjectionDatabase {
       this.database.run(`DELETE FROM workflow_usage`); this.database.run(`DELETE FROM workflow_current`); this.database.run(`DELETE FROM workflow_events`); this.database.run(`DELETE FROM workflow_event_identities`); this.database.run(`DELETE FROM workflow_streams`); this.database.run(`DELETE FROM workflow_prune_watermarks`);
     })();
   }
+  /** Publishes a complete replacement in one SQLite write transaction. Any failure restores the prior valid projection. */
+  replaceProjectionAtomically<T>(build: () => T): T {
+    return this.database.transaction(() => {
+      this.reset();
+      const result = build();
+      this.assertPersistedIntegrity();
+      return result;
+    }).immediate();
+  }
+  /** Rebuild one authoritative stream without retaining any other stream in memory. */
+  rebuildStream(stream: readonly WorkflowTelemetryEvent[]): Readonly<{ streamId: string; diagnostic: string }> | undefined {
+    if (!stream[0]) return undefined;
+    try { this.database.transaction(() => { for (const event of stream) this.ingest(event); })(); }
+    catch (error) {
+      const diagnostic = String(error instanceof Error ? error.message : error).slice(0, 2_048);
+      this.markStreamBlocked(stream[0].streamId, stream[0].dimensions.projectId, stream[0].dimensions.sessionId, diagnostic, stream[0].dimensions.projectRoot);
+      return Object.freeze({ streamId: stream[0].streamId, diagnostic });
+    }
+    return undefined;
+  }
   rebuild(streams: readonly (readonly WorkflowTelemetryEvent[])[]): Readonly<{ diagnostics: readonly Readonly<{ streamId: string; diagnostic: string }>[] }> {
     this.reset();
     const diagnostics: Array<Readonly<{ streamId: string; diagnostic: string }>> = [];
     const ordered = [...streams].map((events) => [...events].sort((a, b) => a.sequence - b.sequence)).sort((a, b) => String(a[0]?.streamId ?? "").localeCompare(String(b[0]?.streamId ?? "")));
     for (const stream of ordered) {
-      if (!stream[0]) continue;
-      try { this.database.transaction(() => { for (const event of stream) this.ingest(event); })(); }
-      catch (error) {
-        const diagnostic = String(error instanceof Error ? error.message : error).slice(0, 2_048);
-        this.markStreamBlocked(stream[0].streamId, stream[0].dimensions.projectId, stream[0].dimensions.sessionId, diagnostic, stream[0].dimensions.projectRoot);
-        diagnostics.push(Object.freeze({ streamId: stream[0].streamId, diagnostic }));
-      }
+      const diagnostic = this.rebuildStream(stream);
+      if (diagnostic) diagnostics.push(diagnostic);
     }
     return Object.freeze({ diagnostics: Object.freeze(diagnostics) });
   }

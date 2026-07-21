@@ -74,6 +74,12 @@ export function isAuthorizedWrite(req: Request, token: string): boolean {
   return match ? timingSafeEqualStr(match[1].trim(), token) : false;
 }
 
+/** Browser mutation proof. A custom header plus exact same-origin metadata prevents form CSRF. */
+export function isAuthorizedCsrf(req: Request, token: string): boolean {
+  const value = req.headers.get("x-pi-hive-csrf")?.trim() ?? "";
+  return Boolean(token) && timingSafeEqualStr(value, token);
+}
+
 // The method-based write gate (J7/Decision 3), factored out of the server's
 // fetch handler so it is unit-testable in isolation (M8c). Any method other than
 // GET/HEAD is a mutation and must clear same-origin + the bearer token, exactly
