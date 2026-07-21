@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadConfigProject } from "../../config/manifest";
+import { withCrossProcessFileLock } from "../../core/file-lock";
 import { readWorkflowJournal, readWorkflowJournalFrom, workflowJournalDirectory } from "../../workflows/journal";
+import { listSessionLinks, type WorkflowSessionLink } from "../../workflows/sessions";
 import { toWorkflowTelemetryEvent, type WorkflowTelemetryEvent } from "../events";
 import { WorkflowProjectionIntegrityError, openWorkflowProjectionDatabase } from "./workflow-db";
 
@@ -19,6 +21,7 @@ export interface ConfiguredWorkflowProjectionSynchronizerOptions {
   readonly retentionDays?: number;
   readonly now?: () => Date;
   readonly pruneIntervalMs?: number;
+  readonly onEvent?: (event: WorkflowTelemetryEvent) => void;
 }
 export interface WorkflowProjectionSyncDiagnostic { readonly projectRoot: string; readonly sessionId: string; readonly diagnostic: string }
 export interface SyncConfiguredWorkflowProjectionResult { readonly active: boolean; readonly events: number; readonly streams: number; readonly diagnostics?: readonly WorkflowProjectionSyncDiagnostic[] }
@@ -27,7 +30,7 @@ export interface ConfiguredWorkflowProjectionSynchronizer {
   close(): void;
 }
 
-interface JournalReference { readonly projectRoot: string; readonly sessionId: string; readonly journalPath: string }
+interface JournalReference { readonly projectRoot: string; readonly sessionId: string; readonly journalPath: string; readonly link?: WorkflowSessionLink }
 interface JournalFingerprint {
   readonly directory: string;
   readonly eventCount: number;
@@ -60,6 +63,7 @@ function journalReferences(projectRoot: string): Readonly<{ references: JournalR
   if (!existsSync(sessionsRoot) || !lstatSync(sessionsRoot).isDirectory() || lstatSync(sessionsRoot).isSymbolicLink()) return { references: [], diagnostics: [] };
   const references: JournalReference[] = [];
   const diagnostics: WorkflowProjectionSyncDiagnostic[] = [];
+  const workflowLinks = listSessionLinks(projectRoot).filter((entry): entry is WorkflowSessionLink => entry.kind === "workflow");
   for (const sessionId of readdirSync(sessionsRoot).sort()) {
     try {
       const sessionPath = join(sessionsRoot, sessionId);
@@ -67,7 +71,9 @@ function journalReferences(projectRoot: string): Readonly<{ references: JournalR
       if (!lstatSync(sessionPath).isDirectory() || lstatSync(sessionPath).isSymbolicLink() || !existsSync(journalPath)) continue;
       const journalStat = lstatSync(journalPath);
       if (!journalStat.isDirectory() || journalStat.isSymbolicLink()) throw new Error("Workflow journal path invalid");
-      references.push(Object.freeze({ projectRoot, sessionId, journalPath }));
+      const links = workflowLinks.filter((entry) => entry.workflowSessionId === sessionId);
+      if (links.length > 1) throw new Error("Workflow journal has ambiguous session-link context");
+      references.push(Object.freeze({ projectRoot, sessionId, journalPath, ...(links[0] ? { link: links[0] } : {}) }));
     } catch (error) {
       diagnostics.push(Object.freeze({ projectRoot, sessionId: sessionId.slice(0, 256), diagnostic: boundedDiagnostic(error) }));
     }
@@ -112,10 +118,17 @@ function priorEventsUnchanged(prior: JournalFingerprint | undefined, current: Jo
 }
 
 function telemetry(events: readonly import("../../workflows/events").WorkflowEventEnvelope[], reference: JournalReference): WorkflowTelemetryEvent[] {
+  const link = reference.link;
   return events.map((event) => toWorkflowTelemetryEvent(event, {
     projectRoot: reference.projectRoot,
     projectLabel: basename(reference.projectRoot),
-    workflowConfigVersion: "1",
+    ...(link ? {
+      piSessionId: link.piSessionId,
+      workflowId: link.workflowId,
+      snapshotId: link.activationHash,
+      workflowConfigHash: link.activationHash,
+      workflowConfigVersion: String(link.formatVersion),
+    } : {}),
   }));
 }
 
@@ -162,6 +175,7 @@ class PersistentConfiguredWorkflowProjectionSynchronizer implements ConfiguredWo
     const roots = configuredRoots(projectRoots);
     if (!roots.length) return Object.freeze({ active: false, events: 0, streams: 0 });
     const projection = this.openProjection();
+    return withCrossProcessFileLock(`${projection.path}.projection`, () => {
     const discovered = roots.map(journalReferences);
     const references = discovered.flatMap((entry) => entry.references);
     const diagnostics = discovered.flatMap((entry) => entry.diagnostics);
@@ -197,7 +211,7 @@ class PersistentConfiguredWorkflowProjectionSynchronizer implements ConfiguredWo
           continue;
         }
         try {
-          for (const event of events.slice(existing?.status.lastSequence ?? 0)) if (projection.ingest(event) === "inserted") processed += 1;
+          for (const event of events.slice(existing?.status.lastSequence ?? 0)) if (projection.ingest(event) === "inserted") { processed += 1; this.options.onEvent?.(event); }
         } catch (error) {
           const diagnostic = boundedDiagnostic(error);
           diagnostics.push(Object.freeze({ projectRoot: reference.projectRoot, sessionId: reference.sessionId, diagnostic }));
@@ -231,7 +245,7 @@ class PersistentConfiguredWorkflowProjectionSynchronizer implements ConfiguredWo
           if (existing?.status.state === "blocked") {
             diagnostics.push(Object.freeze({ projectRoot: reference.projectRoot, sessionId: reference.sessionId, diagnostic: existing.status.diagnostic ?? "Workflow projection stream is blocked" }));
           } else {
-            for (const event of events) if (projection.ingest(event) === "inserted") processed += 1;
+            for (const event of events) if (projection.ingest(event) === "inserted") { processed += 1; this.options.onEvent?.(event); }
           }
           const after = fingerprint(reference, currentFingerprint);
           if (sameFingerprint(currentFingerprint, after)) this.fingerprints.set(reference.journalPath, after);
@@ -246,6 +260,7 @@ class PersistentConfiguredWorkflowProjectionSynchronizer implements ConfiguredWo
 
     this.pruneIfDue(projection);
     return Object.freeze({ active: true, events: processed, streams: references.length, ...(diagnostics.length ? { diagnostics: Object.freeze(diagnostics.slice(0, 256)) } : {}) });
+    }, { timeoutMs: 30_000, staleMs: 120_000 });
   }
 
   close(): void {

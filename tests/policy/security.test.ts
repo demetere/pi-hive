@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyBrowserSecurityHeaders, hasExpectedHost, isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite, writeGateResponse } from "../../src/observability/security.ts";
+import { applyBrowserSecurityHeaders, hasExpectedHost, isAuthorizedCsrf, isAuthorizedWrite, isSameOriginRequest, isSameOriginWrite, writeGateResponse } from "../../src/observability/security.ts";
 
 function req(headers: Record<string, string> = {}): Request {
   return new Request("http://127.0.0.1:43191/events", { headers });
@@ -31,6 +31,14 @@ test("dashboard same-origin guard blocks cross-origin browser requests", () => {
   assert.equal(isSameOriginRequest(req({ origin: "https://evil.example" }), url), false);
   assert.equal(isSameOriginRequest(req({ "sec-fetch-site": "cross-site" }), url), false);
   assert.equal(isSameOriginWrite(req({ origin: "https://evil.example" }), url), false);
+});
+
+test("browser CSRF proof uses the daemon secret and fails closed", () => {
+  const token = "a".repeat(64);
+  assert.equal(isAuthorizedCsrf(req({ "x-pi-hive-csrf": token }), token), true);
+  assert.equal(isAuthorizedCsrf(req({ "x-pi-hive-csrf": "wrong" }), token), false);
+  assert.equal(isAuthorizedCsrf(req(), token), false);
+  assert.equal(isAuthorizedCsrf(req({ "x-pi-hive-csrf": token }), ""), false);
 });
 
 test("write auth requires the daemon token (Phase D)", () => {

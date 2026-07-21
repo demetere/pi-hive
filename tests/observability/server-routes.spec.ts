@@ -15,7 +15,7 @@ mkdirSync(fallbackAgentDir, { recursive: true });
 const fallbackEnv: Record<string, string> = {
   HIVE_TELEMETRY_HOST: "127.0.0.1",
   HIVE_TELEMETRY_PORT: "43217",
-  HIVE_TELEMETRY_TOKEN: "dashboard-handler-test-token",
+  HIVE_TELEMETRY_TOKEN: "dashboard-handler-test-token-with-entropy",
   HIVE_DAEMON_STARTUP_NONCE: "dashboard-handler-startup",
   HIVE_PROJECT_CWD: fallbackProject,
   HIVE_TELEMETRY_DB: join(root, "telemetry.db"),

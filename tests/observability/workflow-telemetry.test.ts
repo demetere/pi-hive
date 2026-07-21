@@ -805,5 +805,5 @@ test("projection query cursors and in-memory limits reject each malformed bounda
   for (const limit of [0, 1.5, WORKFLOW_PROJECTION_IN_MEMORY_EVENT_LIMIT + 1]) assert.throws(() => new WorkflowTelemetryProjection({ eventLimit: limit }), /event limit is invalid/i);
   for (const limit of [0, 1.5, 501]) assert.throws(() => projection.currentPage({ kind: "sessions", limit }), /current limit/i);
   assert.throws(() => projection.currentPage({ kind: "invalid" as never, limit: 1 }), /kind is invalid/i);
-  assert.throws(() => projection.currentPage({ kind: "sessions", limit: 1, cursor: "x".repeat(8_193) }), /cursor exceeds/i);
+  assert.throws(() => projection.currentPage({ kind: "sessions", limit: 1, cursor: "x".repeat(8_193) }), /byte limit|cursor exceeds/i);
 });

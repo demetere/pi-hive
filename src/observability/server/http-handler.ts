@@ -5,7 +5,7 @@ import {
   PACKAGE_VERSION, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH,
   STARTUP_NONCE, expectedHostHeader,
 } from "./config";
-import { encoder, eventFrame, SSE_BUFFER_BYTES, subscribers } from "./sse";
+import { encoder, eventFrame, registerSubscriber, removeSubscriber, SSE_BUFFER_BYTES } from "./sse";
 import type { Subscriber } from "./types";
 import {
   allSnapshots,
@@ -34,6 +34,8 @@ import { resolveProjectCwd } from "./plan-bridge";
 import { handlePlanReview, isAuthorizedPlanReviewMutation } from "./review-wiring";
 import { clearProjectOverride, listProjectOverrides, setProjectOverride } from "./db";
 import { OpenSpecCommandError } from "../../engine/openspec";
+import { createWorkflowApi, type WorkflowApiOptions } from "./workflow-routes";
+import { createProductionWorkflowApiOptions } from "./workflow-service";
 import type {
   DashboardBootstrap,
   DashboardDelegationsResponse,
@@ -74,11 +76,14 @@ function fleetPage(url: URL): { offset: number; limit: number } {
 export interface DashboardHttpHandlerOptions {
   onActivity?: () => void;
   scheduleServerStop?: () => void;
+  workflowApiOptions?: WorkflowApiOptions;
 }
+export type DashboardHttpHandler = ((req: Request) => Promise<Response>) & Readonly<{ dispose(): void }>;
 
 /** Create the dashboard request handler without binding a port or starting timers. */
-export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions = {}) {
-  return async function handleDashboardRequest(req: Request): Promise<Response> {
+export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions = {}): DashboardHttpHandler {
+  const workflowApi = createWorkflowApi(options.workflowApiOptions ?? createProductionWorkflowApiOptions());
+  const handleDashboardRequest = async function handleDashboardRequest(req: Request): Promise<Response> {
     options.onActivity?.();
     const url = new URL(req.url);
 
@@ -99,12 +104,16 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
     const gated = writeGateResponse(req, url, DAEMON_TOKEN, (error, status) => json({ error }, status), reviewCapability);
     if (gated) return gated;
 
+    const workflowResponse = await workflowApi.handle(req, url);
+    if (workflowResponse) return workflowResponse;
+
     if (req.method === "POST" && url.pathname === "/shutdown") {
       let body: any;
       try { body = await req.json(); } catch { return json({ error: "invalid json body" }, 400); }
       if (body?.startupNonce !== STARTUP_NONCE) return json({ error: "daemon identity mismatch" }, 409);
       // Return the acknowledgement before closing the listener. The bearer token
       // and startup nonce jointly prove authority over this exact daemon instance.
+      workflowApi.dispose();
       options.scheduleServerStop?.();
       return json({ ok: true, pid: process.pid, startupNonce: STARTUP_NONCE }, 202);
     }
@@ -209,7 +218,7 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
     // a same-origin GET — the token never appears in a URL or in cached HTML.
     // The browser attaches it as the Bearer header on POST/DELETE.
     if (url.pathname === "/bootstrap.json") {
-      const response = json({ token: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null } satisfies DashboardBootstrap);
+      const response = json({ token: DAEMON_TOKEN || null, csrfToken: DAEMON_TOKEN || null, bootCwd: PROJECT_CWD || null } satisfies DashboardBootstrap);
       response.headers.set("cache-control", "no-store");
       return response;
     }
@@ -361,10 +370,14 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
       return applyBrowserSecurityHeaders(new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           sub = controller;
-          subscribers.add(controller);
+          if (!registerSubscriber("legacy", controller)) {
+            controller.enqueue(encoder.encode(eventFrame("resync-required", { reason: "subscriber-capacity" })));
+            controller.close();
+            return;
+          }
           controller.enqueue(encoder.encode(eventFrame("hello", { mode: "global", registry: REGISTRY_PATH, cursor: maxEventCursor() })));
         },
-        cancel() { if (sub) subscribers.delete(sub); },
+        cancel() { if (sub) removeSubscriber(sub); },
       }, {
         highWaterMark: SSE_BUFFER_BYTES,
         size(chunk) { return chunk?.byteLength ?? 0; },
@@ -389,4 +402,5 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
 
     return json({ error: "not found" }, 404);
   };
+  return Object.assign(handleDashboardRequest, { dispose(): void { workflowApi.dispose(); } });
 }

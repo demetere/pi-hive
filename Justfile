@@ -351,6 +351,7 @@ test-node-compat:
     tests/knowledge/okf-provider.test.ts \
     tests/orchestration/governance.test.ts \
     tests/observability/workflow-dashboard-api.test.ts \
+    tests/observability/workflow-daemon-security.test.ts \
     tests/observability/workflow-telemetry.test.ts \
     tests/core/limits.test.ts \
     tests/core/project-identity.test.ts \

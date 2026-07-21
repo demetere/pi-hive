@@ -90,6 +90,7 @@ export interface KnowledgeProposalState { readonly proposals: Readonly<Record<st
 export interface KnowledgeProposalControlRequest {
   readonly projectId: string;
   readonly sessionId: string;
+  readonly runId: string;
   readonly proposalId: string;
   readonly expectedState: "pending";
   readonly decision: "approve" | "deny";
@@ -105,7 +106,7 @@ export interface KnowledgeProposalStatusRequest {
   readonly limit?: number;
   readonly cursor?: string;
 }
-export interface KnowledgeProposalDetailRequest { readonly projectId: string; readonly sessionId: string; readonly proposalId: string }
+export interface KnowledgeProposalDetailRequest { readonly projectId: string; readonly sessionId: string; readonly runId: string; readonly proposalId: string }
 export interface KnowledgeProposalSummary {
   readonly proposalId: string; readonly runId: string; readonly updateId: string; readonly bundleId: string;
   readonly state: DurableKnowledgeProposal["state"]; readonly createdAt: string; readonly updateHash: string;
@@ -880,11 +881,15 @@ export function restoreKnowledgeProposalState(events: readonly WorkflowEventEnve
         || typeof raw.operationId !== "string" || typeof raw.requestHash !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(raw.requestHash) || typeof raw.decidedAt !== "string" || !Number.isFinite(Date.parse(raw.decidedAt))) throw new Error("Knowledge proposal decision provenance is invalid");
       validId(raw.operationId, "Knowledge proposal decision operation ID");
       const expectedRequestHash = sha256("pi-hive-knowledge-proposal-control-v1", {
+        projectId: current.projectId, sessionId: current.sessionId, runId: current.runId, proposalId, expectedState: "pending",
+        decision: raw.decision, operationId: raw.operationId, channel: "dashboard", identity: raw.identity,
+      });
+      const legacyRequestHash = sha256("pi-hive-knowledge-proposal-control-v1", {
         projectId: current.projectId, sessionId: current.sessionId, proposalId, expectedState: "pending",
         decision: raw.decision, operationId: raw.operationId, channel: "dashboard", identity: raw.identity,
       });
       if (event.projectId !== current.projectId || event.sessionId !== current.sessionId || event.runId !== current.runId || event.correlationId !== raw.operationId
-        || raw.requestHash !== expectedRequestHash || Object.values(proposals).some((proposal) => proposal.decision?.operationId === raw.operationId)) throw new Error("Knowledge proposal decision event, authenticated request hash, or session-wide operation identity is invalid");
+        || (raw.requestHash !== expectedRequestHash && raw.requestHash !== legacyRequestHash) || Object.values(proposals).some((proposal) => proposal.decision?.operationId === raw.operationId)) throw new Error("Knowledge proposal decision event, authenticated request hash, or session-wide operation identity is invalid");
       const decision = raw as unknown as KnowledgeProposalDecision;
       proposals[proposalId] = Object.freeze({ ...current, state: decision.decision === "approve" ? "approved" : "denied", decision });
     } else if (event.payload.operation === "proposal-applied") {
@@ -939,22 +944,24 @@ export class KnowledgeProposalService {
     return proposal;
   }
   decide(request: KnowledgeProposalControlRequest): DurableKnowledgeProposal {
-    if (!record(request) || !exact(request, ["projectId", "sessionId", "proposalId", "expectedState", "decision", "operationId", "channel", "claimedIdentity", "credential"]) || request.channel !== "dashboard") throw new Error("Knowledge proposal decision request schema requires the exact authenticated dashboard human-control DTO");
+    if (!record(request) || !exact(request, ["projectId", "sessionId", "runId", "proposalId", "expectedState", "decision", "operationId", "channel", "claimedIdentity", "credential"]) || request.channel !== "dashboard") throw new Error("Knowledge proposal decision request schema requires the exact authenticated dashboard human-control DTO");
     if (Buffer.byteLength(canonicalJson(request), "utf8") > KNOWLEDGE_PROPOSAL_LIMITS.controlRequestBytes || typeof request.claimedIdentity !== "string" || Buffer.byteLength(request.claimedIdentity, "utf8") > 512
       || typeof request.credential !== "string" || Buffer.byteLength(request.credential, "utf8") > 8_192) throw new Error("Knowledge proposal control request exceeds its aggregate byte bound");
     if (request.projectId !== this.options.projectId || request.sessionId !== this.options.sessionId || request.expectedState !== "pending" || (request.decision !== "approve" && request.decision !== "deny")) throw new Error("Knowledge proposal control identity or expected CAS state is invalid");
-    validId(request.proposalId, "Knowledge proposal ID"); validId(request.operationId, "Knowledge proposal operation ID");
+    validId(request.runId, "Knowledge proposal run ID"); validId(request.proposalId, "Knowledge proposal ID"); validId(request.operationId, "Knowledge proposal operation ID");
     const identity = this.options.authenticateControl(request);
     if (!identity || typeof identity !== "string" || Buffer.byteLength(identity, "utf8") > 512) throw new Error("Knowledge proposal control authentication failed");
-    const requestHash = sha256("pi-hive-knowledge-proposal-control-v1", { projectId: request.projectId, sessionId: request.sessionId, proposalId: request.proposalId, expectedState: request.expectedState, decision: request.decision, operationId: request.operationId, channel: request.channel, identity });
+    const requestHash = sha256("pi-hive-knowledge-proposal-control-v1", { projectId: request.projectId, sessionId: request.sessionId, runId: request.runId, proposalId: request.proposalId, expectedState: request.expectedState, decision: request.decision, operationId: request.operationId, channel: request.channel, identity });
     const before = restoreKnowledgeProposalState(readWorkflowJournal(this.options.projectRoot, this.options.sessionId));
     const operationReplay = Object.values(before.proposals).find((proposal) => proposal.decision?.operationId === request.operationId);
     if (operationReplay) {
-      if (operationReplay.proposalId !== request.proposalId || operationReplay.decision?.requestHash !== requestHash) throw new Error("Knowledge proposal decision operation replay conflicts session-wide");
+      const legacyRequestHash = sha256("pi-hive-knowledge-proposal-control-v1", { projectId: request.projectId, sessionId: request.sessionId, proposalId: request.proposalId, expectedState: request.expectedState, decision: request.decision, operationId: request.operationId, channel: request.channel, identity });
+      if (operationReplay.proposalId !== request.proposalId || operationReplay.runId !== request.runId
+        || (operationReplay.decision?.requestHash !== requestHash && operationReplay.decision?.requestHash !== legacyRequestHash)) throw new Error("Knowledge proposal decision operation replay conflicts session-wide");
       return operationReplay;
     }
     const existing = before.proposals[request.proposalId];
-    if (!existing) throw new Error("Knowledge proposal is missing");
+    if (!existing || existing.runId !== request.runId) throw new Error("Exact knowledge proposal project/session/run identity is missing");
     if (existing.state !== "pending") throw new Error("Knowledge proposal exact pending CAS was already decided");
     const decision: KnowledgeProposalDecision = Object.freeze({ decision: request.decision, identity, operationId: request.operationId, requestHash, decidedAt: this.options.now?.() ?? new Date().toISOString() });
     try {
@@ -967,7 +974,7 @@ export class KnowledgeProposalService {
         const reused = Object.values(state.proposals).find((proposal) => proposal.decision?.operationId === request.operationId);
         if (reused) throw new Error("Knowledge proposal decision operation ID is already used session-wide");
         const current = state.proposals[request.proposalId];
-        if (!current || current.state !== "pending") throw new Error("Knowledge proposal exact pending CAS was already decided");
+        if (!current || current.runId !== request.runId || current.state !== "pending") throw new Error("Knowledge proposal exact pending CAS was already decided");
       });
     } catch (error) {
       const raced = restoreKnowledgeProposalState(readWorkflowJournal(this.options.projectRoot, this.options.sessionId)).proposals[request.proposalId];
@@ -996,10 +1003,11 @@ export class KnowledgeProposalService {
   }
 
   detail(request: KnowledgeProposalDetailRequest): DurableKnowledgeProposal {
-    if (!record(request) || !exact(request, ["projectId", "sessionId", "proposalId"]) || request.projectId !== this.options.projectId || request.sessionId !== this.options.sessionId) throw new Error("Knowledge proposal detail request has an unknown field or wrong service identity");
+    if (!record(request) || !exact(request, ["projectId", "sessionId", "runId", "proposalId"]) || request.projectId !== this.options.projectId || request.sessionId !== this.options.sessionId) throw new Error("Knowledge proposal detail request has an unknown field or wrong service identity");
+    const runId = validId(request.runId, "Knowledge proposal run ID");
     const proposalId = validId(request.proposalId, "Knowledge proposal ID");
     const proposal = restoreKnowledgeProposalState(readWorkflowJournal(this.options.projectRoot, this.options.sessionId)).proposals[proposalId];
-    if (!proposal) throw new Error("Knowledge proposal is missing");
+    if (!proposal || proposal.runId !== runId) throw new Error("Exact knowledge proposal project/session/run identity is missing");
     return proposal;
   }
 

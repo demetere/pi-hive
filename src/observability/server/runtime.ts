@@ -11,6 +11,8 @@ import { readJsonlPage } from "../../core/fs";
 import type { HiveStateSnapshot, HiveTelemetryEvent, TelemetryRegistryRow, TelemetrySessionSummary, TopologyNode } from "../../shared/telemetry";
 import { BOOT_SESSION_ID, CAPTURE_THINKING, CONVERSATION_LOG, DB_PATH, PROJECT_CWD, REGISTRY_PATH, RETENTION_DAYS, SINGLE_LOG_PATH, WORKFLOW_DB_PATH } from "./config";
 import { createConfiguredWorkflowProjectionSynchronizer, workflowProjectionRootCandidates, type ConfiguredWorkflowProjectionSynchronizer } from "./workflow-runtime";
+import { encodeWorkflowHistoryCursor } from "../projection";
+import { broadcastWorkflowEvent } from "./sse";
 import {
   db,
   dbEventRow,
@@ -1014,7 +1016,10 @@ export function readWorkflowProjectionRuntimeDiagnostics(): readonly Readonly<{ 
 function syncWorkflowProjectionRuntime(): void {
   const projectRoots = workflowProjectionRootCandidates(PROJECT_CWD, [...sources.values()].flatMap((source) => source.meta.project_root ? [source.meta.project_root] : source.meta.cwd ? [source.meta.cwd] : []));
   try {
-    workflowProjectionSynchronizer ??= createConfiguredWorkflowProjectionSynchronizer({ databasePath: WORKFLOW_DB_PATH, legacyPaths: [DB_PATH, REGISTRY_PATH], retentionDays: RETENTION_DAYS });
+    workflowProjectionSynchronizer ??= createConfiguredWorkflowProjectionSynchronizer({
+      databasePath: WORKFLOW_DB_PATH, legacyPaths: [DB_PATH, REGISTRY_PATH], retentionDays: RETENTION_DAYS,
+      onEvent: (event) => broadcastWorkflowEvent(event, encodeWorkflowHistoryCursor(event)),
+    });
     const result = workflowProjectionSynchronizer.sync(projectRoots);
     workflowProjectionRuntimeDiagnostics = Object.freeze([...(result.diagnostics ?? [])].slice(0, 256));
   } catch (error) {

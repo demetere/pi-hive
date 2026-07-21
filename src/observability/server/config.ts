@@ -17,9 +17,7 @@ function validatedHost(): string {
   if (!raw || raw.includes("://") || /[\s/?#]/.test(raw) || raw.length > 253) throw new Error(`Invalid HIVE_TELEMETRY_HOST: ${raw || "<empty>"}`);
   const host = raw.replace(/^\[(.*)\]$/, "$1").toLowerCase();
   const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
-  if (!loopback && process.env.HIVE_TELEMETRY_ALLOW_NON_LOOPBACK !== "1") {
-    throw new Error(`Refusing non-loopback dashboard host "${raw}" without HIVE_TELEMETRY_ALLOW_NON_LOOPBACK=1`);
-  }
+  if (!loopback) throw new Error(`Refusing non-loopback dashboard host "${raw}"; first-release dashboard binding is loopback-only`);
   return host;
 }
 

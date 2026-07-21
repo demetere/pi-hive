@@ -60,8 +60,26 @@ export interface WorkflowHistoryPage {
   readonly hasMore: boolean;
 }
 
-export interface WorkflowCurrentPageQuery { readonly kind: keyof WorkflowProjectionCurrent; readonly limit: number; readonly cursor?: string }
+export interface WorkflowCurrentPageQuery {
+  readonly kind: keyof WorkflowProjectionCurrent;
+  readonly limit: number;
+  readonly cursor?: string;
+  readonly projectId?: string;
+  readonly sessionId?: string;
+  readonly workflowId?: string;
+  readonly runId?: string;
+  readonly nodeId?: string;
+  readonly taskId?: string;
+  readonly status?: string;
+}
 export interface WorkflowCurrentPage { readonly items: readonly WorkflowProjectionCurrentRow[]; readonly nextCursor?: string; readonly hasMore: boolean }
+export interface WorkflowUsageQuery {
+  readonly projectId?: string;
+  readonly sessionId?: string;
+  readonly workflowId?: string;
+  readonly runId?: string;
+  readonly nodeId?: string;
+}
 
 export class ProjectionStreamError extends Error {
   readonly streamId: string;
@@ -300,19 +318,36 @@ export class WorkflowTelemetryProjection {
   currentPage(query: WorkflowCurrentPageQuery): WorkflowCurrentPage {
     if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > WORKFLOW_PROJECTION_PAGE_LIMIT) throw new Error(`Workflow current limit must be 1..${WORKFLOW_PROJECTION_PAGE_LIMIT}`);
     if (!(query.kind in this.materialized)) throw new Error("Workflow current kind is invalid");
-    if (query.cursor && Buffer.byteLength(query.cursor, "utf8") > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow current cursor exceeds its byte limit");
+    const values = [query.cursor, query.projectId, query.sessionId, query.workflowId, query.runId, query.nodeId, query.taskId, query.status].filter((value): value is string => value !== undefined);
+    if (values.some((value) => Buffer.byteLength(value, "utf8") > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow current query exceeds its byte limit");
     const cursorOrder = query.cursor ? workflowProjectionCurrentCursorOrderKey(query.cursor) : undefined;
     const entries = [...this.materialized[query.kind]].map(([key, value]) => ({ key, value, order: workflowProjectionCurrentOrderKey(value, key) }))
       .sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0)
-      .filter((entry) => !cursorOrder || entry.order > cursorOrder);
+      .filter((entry) => (!cursorOrder || entry.order > cursorOrder)
+        && (!query.projectId || entry.value.projectId === query.projectId)
+        && (!query.sessionId || entry.value.sessionId === query.sessionId)
+        && (!query.workflowId || entry.value.workflowId === query.workflowId)
+        && (!query.runId || entry.value.runId === query.runId)
+        && (!query.nodeId || entry.value.nodeId === query.nodeId)
+        && (!query.taskId || entry.value.taskId === query.taskId)
+        && (!query.status || entry.value.status === query.status));
     const selected = entries.slice(0, query.limit + 1);
     const hasMore = selected.length > query.limit;
     const page = selected.slice(0, query.limit);
     return Object.freeze({ items: Object.freeze(page.map((entry) => entry.value)), ...(hasMore && page.length ? { nextCursor: encodeWorkflowCurrentCursor(page.at(-1)!.value, page.at(-1)!.key) } : {}), hasMore });
   }
 
-  usage(): WorkflowProjectionUsageTotals {
-    return structuredClone(this.totals);
+  usage(query: WorkflowUsageQuery = {}): WorkflowProjectionUsageTotals {
+    const values = Object.values(query).filter((value): value is string => value !== undefined);
+    if (values.some((value) => Buffer.byteLength(value, "utf8") > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow usage query exceeds its byte limit");
+    if (!values.length) return structuredClone(this.totals);
+    const output: WorkflowProjectionUsageTotals = { estimated: { inputTokens: 0, outputTokens: 0, costMicroUsd: 0 }, providerConfirmed: { inputTokens: 0, outputTokens: 0, costMicroUsd: 0 } };
+    for (const event of this.events) {
+      const d = event.dimensions;
+      if (event.usage && (!query.projectId || d.projectId === query.projectId) && (!query.sessionId || d.sessionId === query.sessionId)
+        && (!query.workflowId || d.workflowId === query.workflowId) && (!query.runId || d.runId === query.runId) && (!query.nodeId || d.nodeId === query.nodeId)) usageBucket(event.usage, output);
+    }
+    return output;
   }
 
   history(query: WorkflowHistoryQuery): WorkflowHistoryPage {
