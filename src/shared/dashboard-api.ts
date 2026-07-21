@@ -4,6 +4,51 @@ import type {
   HiveTopology,
   TelemetrySessionSummary,
 } from "./telemetry";
+import type { WorkflowTelemetryEvent } from "../observability/events";
+import type {
+  ProjectionStreamStatus,
+  WorkflowProjectionCurrent,
+  WorkflowProjectionCurrentRow,
+  WorkflowProjectionUsageTotals,
+} from "../observability/projection";
+
+export const WORKFLOW_DASHBOARD_API_VERSION = 1 as const;
+export const WORKFLOW_DASHBOARD_MAX_PAGE_SIZE = 500 as const;
+
+export interface WorkflowDashboardHistoryPage {
+  readonly apiVersion: 1;
+  readonly items: readonly WorkflowTelemetryEvent[];
+  readonly nextCursor?: string;
+  readonly hasMore: boolean;
+}
+
+export interface WorkflowDashboardCurrentResponse {
+  readonly apiVersion: 1;
+  /** Compatibility bootstrap only; every entity collection is capped at WORKFLOW_DASHBOARD_MAX_PAGE_SIZE. */
+  readonly current: WorkflowProjectionCurrent;
+  readonly streams: readonly ProjectionStreamStatus[];
+}
+
+export interface WorkflowDashboardCurrentPage {
+  readonly apiVersion: 1;
+  readonly kind: keyof WorkflowProjectionCurrent;
+  readonly items: readonly WorkflowProjectionCurrentRow[];
+  readonly nextCursor?: string;
+  readonly hasMore: boolean;
+}
+
+export interface WorkflowDashboardUsageResponse {
+  readonly apiVersion: 1;
+  readonly usage: WorkflowProjectionUsageTotals;
+}
+
+export interface WorkflowDashboardProjectionMaintenance {
+  readonly apiVersion: 1;
+  readonly operation: "rebuild" | "prune";
+  readonly events: number;
+  readonly streams: number;
+  readonly completedAt: string;
+}
 
 export interface DashboardBootstrap {
   token: string | null;

@@ -350,6 +350,8 @@ test-node-compat:
     tests/knowledge/knowledge-search.test.ts \
     tests/knowledge/okf-provider.test.ts \
     tests/orchestration/governance.test.ts \
+    tests/observability/workflow-dashboard-api.test.ts \
+    tests/observability/workflow-telemetry.test.ts \
     tests/core/limits.test.ts \
     tests/core/project-identity.test.ts \
     tests/core/safe-path.test.ts \
