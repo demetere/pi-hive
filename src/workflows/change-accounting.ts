@@ -337,6 +337,16 @@ export class ChangeAccountingRuntime {
     this.append("change.mutation.started", { attemptId: boundedId(attemptId, "Change attempt ID"), path: normalized, ...(before ? { beforeHash: before.hash, beforeKind: before.kind } : {}) });
     return this.restore().intents[attemptId];
   }
+  recordTrustedCreation(attemptId: string, path: string): MutationRecord {
+    const id = boundedId(attemptId, "Change attempt ID");
+    const normalized = normalizedPath(path);
+    const state = this.restore();
+    if (!state.baseline) throw new Error("Trusted creation accounting requires a run baseline");
+    if (state.baseline.entries[normalized] || Object.keys(state.baseline.entries).some((entry) => pathInsideScope(entry, normalized))) throw new Error("Trusted creation accounting cannot overwrite baseline state");
+    if (!this.currentState(normalized)) throw new Error("Trusted creation accounting requires a current file or directory");
+    this.append("change.mutation.started", { attemptId: id, path: normalized });
+    return this.completeMutation(this.restore().intents[id], normalized);
+  }
   completeMutation(intent: MutationIntent, path = intent.path): MutationRecord {
     const normalized = normalizedPath(path);
     if (normalized !== intent.path) throw new Error("Mutation completion path differs from its intent");

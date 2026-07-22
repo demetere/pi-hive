@@ -1,0 +1,18 @@
+name: Markdown Plan Delivery
+description: Author and execute a Git-friendly Markdown plan in one workflow.
+use-when: The task benefits from a durable plan without OpenSpec.
+artifact:
+  adapter: markdown-plan
+  profile: lifecycle
+  binding: either
+  options: {}
+approvals:
+  plan: required
+  execution: required
+  review: optional
+team:
+  id: root
+  agent: planner
+instructions:
+  root: |
+    Author a bounded plan, execute its tasks, record verified evidence, and finish only after enabled checkpoints pass.

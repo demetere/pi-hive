@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sandbox = mkdtempSync(join(tmpdir(), "pi-hive-packed-install-"));
-const project = join(sandbox, "project");
+const project = join(sandbox, "unconfigured-project");
+const configuredProject = join(sandbox, "configured-project");
 const piConfig = join(sandbox, "pi-agent");
 
 function run(command, args, options = {}) {
@@ -48,6 +50,15 @@ try {
   const tarball = resolve(sandbox, tarballName);
   if (!existsSync(tarball)) throw new Error(`npm pack did not create ${tarballName}`);
 
+  const npmRoot = run("npm", ["root", "--global"]).trim();
+  const { checkPlatform } = createRequire(import.meta.url)(join(npmRoot, "npm", "node_modules", "npm-install-checks"));
+  const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  checkPlatform(packageManifest, false, { os: "linux", cpu: process.arch });
+  let unsupportedCode;
+  try { checkPlatform(packageManifest, false, { os: "win32", cpu: "x64" }); }
+  catch (error) { unsupportedCode = error?.code; }
+  if (unsupportedCode !== "EBADPLATFORM") throw new Error("npm's platform checker did not reject the package for Windows");
+
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball], {
     cwd: sandbox,
   });
@@ -62,7 +73,8 @@ try {
   for (const relativePath of [
     "index.ts",
     "ui/web/dist/index.html",
-    "ui/review/dist/manifest.json",
+    "schemas/hive-manifest-v1.schema.json",
+    "examples/artifact-free-debug/.pi/hive/hive-config.yaml",
   ]) {
     if (!existsSync(join(installedRoot, relativePath))) {
       throw new Error(`installed package is missing ${relativePath}`);
@@ -77,7 +89,7 @@ try {
   );
 
   const piCli = join(sandbox, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-  run(
+  const loadInstalledExtension = (cwd) => run(
     process.execPath,
     [
       piCli,
@@ -90,7 +102,7 @@ try {
       "--list-models",
     ],
     {
-      cwd: project,
+      cwd,
       env: {
         PI_CODING_AGENT_DIR: piConfig,
         PI_OFFLINE: "1",
@@ -98,9 +110,15 @@ try {
       },
     },
   );
+  loadInstalledExtension(project);
+  if (readdirSync(project).join(",") !== ".keep") throw new Error("unconfigured packed load mutated the project");
+
+  mkdirSync(configuredProject);
+  cpSync(join(installedRoot, "examples", "artifact-free-debug", ".pi"), join(configuredProject, ".pi"), { recursive: true });
+  loadInstalledExtension(configuredProject);
 
   console.log(
-    `✓ installed ${installedPackage.name}@${installedPackage.version} from its packed tarball and loaded it in a clean, non-opted Pi environment`,
+    `✓ verified npm rejects Windows, installed ${installedPackage.name}@${installedPackage.version} on Linux, and loaded it in inert unconfigured and schema-v1 configured projects`,
   );
 } finally {
   rmSync(sandbox, { recursive: true, force: true });

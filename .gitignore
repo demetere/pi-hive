@@ -37,3 +37,5 @@ coverage/
 
 # Local Claude Code workspace (skills, scheduled tasks, etc.)
 .claude/
+!examples/**/.pi/
+!examples/**/.pi/**

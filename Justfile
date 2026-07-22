@@ -51,7 +51,6 @@ alias dtc := dashboard-test-coverage
 alias de2e := dashboard-test-e2e
 alias dv := dashboard-verify
 alias ds := dashboard-serve
-alias rb := review-build
 
 # pi-*
 alias pd := pi-dev
@@ -91,8 +90,7 @@ install:
   cd {{dashboard_dir}} && npm install
   @printf "{{GREEN}}Install complete.{{NC}}\n"
 
-# Project the dashboard points at when run standalone. Defaults to the demo
-# playground so `just run` shows the seeded OpenSpec changes out of the box.
+# Configured project whose workflow journals the standalone dashboard projects.
 project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-playground")
 
 # Run this checkout as a temporary Pi extension for manual testing.
@@ -100,10 +98,10 @@ project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-pl
 pi-dev:
   pi -e .
 
-# Vite proxies /api, /plans, /pl-review, /stream, … to the Bun server; edit
+# Vite proxies authenticated /api/v1 requests to the Bun server; edit
 # ui/web/src/** and see changes live (Ctrl+C stops both). Vite binds to
-# localhost/::1, not 127.0.0.1. Usage: `just run`  or  `PROJECT=/path just run`.
-# Run EVERYTHING: Bun server (API + /pl-review) + Vite HMR frontend. Open http://localhost:43192.
+# localhost/::1, not 127.0.0.1. Usage: `just run` or `PROJECT=/path just run`.
+# Run the workflow API and Vite HMR frontend. Open http://localhost:43192.
 # The server always mints/reuses a bearer credential; manual development never
 # disables mutation authentication.
 [group('dashboard')]
@@ -114,19 +112,17 @@ run:
   @printf "  frontend: http://localhost:43192  (HMR — open this)\n"
   @printf "  api:      http://{{telemetry_host}}:{{telemetry_port}} (authenticated writes)\n"
   npx concurrently --kill-others --names "api,web" --prefix-colors "blue,green" \
-    "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} HIVE_TELEMETRY_DB={{project}}/.telemetry/telemetry.db bun src/observability/server/index.ts" \
+    "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} bun src/observability/server/index.ts" \
     "cd {{dashboard_dir}} && HIVE_TELEMETRY_PORT={{telemetry_port}} npm run dev"
 
-# Serve the dashboard standalone: ONE authenticated Bun process (API + built
-# dist/ + /pl-review), no Vite/HMR. For a quick check of the built UI.
+# Serve the workflow dashboard as one authenticated Bun process with built dist.
 [group('dashboard')]
 dashboard-serve:
   @printf "{{BLUE}}pi-hive dashboard (serve){{NC}}\n"
   @printf "  project:   %s\n" "{{project}}"
   @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (authenticated writes)\n"},{
   HIVE_TELEMETRY_HOST="{{telemetry_host}}" HIVE_TELEMETRY_PORT="{{telemetry_port}}" \
-    HIVE_PROJECT_CWD="{{project}}" HIVE_TELEMETRY_DB="{{project}}/.telemetry/telemetry.db" \
-    bun src/observability/server/index.ts
+    HIVE_PROJECT_CWD="{{project}}" bun src/observability/server/index.ts
 
 # Restart the dashboard so it serves the synced bundle; then run /reload in Pi.
 # Sync this checkout into the user extension dir + reload.
@@ -210,16 +206,6 @@ dashboard-install:
 dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
 
-# Verify the review-only source against the pinned Plannotator package.
-[group('dashboard')]
-review-vendor-verify:
-  node scripts/check-review-vendor.mjs
-
-# Build the committed, review-only UI and deterministic gzip artifacts.
-[group('dashboard')]
-review-build: review-vendor-verify
-  node scripts/build-review-bundle.mjs
-
 # Regenerate the committed schema-v1 editor artifacts from TypeBox.
 [group('quality')]
 config-schema-build:
@@ -281,10 +267,9 @@ dashboard-test-e2e:
 dashboard-verify:
   node scripts/check-dashboard-fresh.mjs
 
-# Rebuild every committed UI artifact and reject any uncommitted output.
+# Rebuild generated assets and verify their source hashes. CI separately rejects drift.
 [group('quality')]
-generated-verify: dashboard-build review-build config-schema-verify
-  git diff --exit-code -- ui/web/dist ui/review/dist schemas
+generated-verify: dashboard-build config-schema-verify dashboard-verify
 
 # Start the dashboard Vite dev server.
 [group('dashboard')]
@@ -346,14 +331,11 @@ test-node-compat:
     tests/config/config-team.test.ts \
     tests/config/config-workflows.test.ts \
     tests/config/config-yaml.test.ts \
-    tests/dashboard/dashboard-event-ring.test.ts \
     tests/knowledge/knowledge-search.test.ts \
     tests/knowledge/okf-provider.test.ts \
-    tests/orchestration/governance.test.ts \
     tests/observability/workflow-dashboard-api.test.ts \
     tests/observability/workflow-daemon-security.test.ts \
     tests/observability/workflow-telemetry.test.ts \
-    tests/core/limits.test.ts \
     tests/core/project-identity.test.ts \
     tests/core/safe-path.test.ts \
     tests/workflows/session-links.test.ts \
@@ -365,7 +347,6 @@ test-node-compat:
     tests/workflows/workflow-tools.test.ts \
     tests/workflows/workflow-selector.test.ts \
     tests/workflows/workflow-sessions.test.ts \
-    tests/config/yaml.test.ts
 
 # Separate from `test` because db.ts uses bun:sqlite and the core must load
 # without Bun (*.spec.ts so the Node runner never picks them up).
@@ -399,7 +380,7 @@ coverage: coverage-core coverage-db dashboard-test-coverage
 verify-package: config-schema-verify
   node scripts/verify-package-files.mjs
 
-# Enforce packed/unpacked package and review-bundle byte budgets.
+# Enforce package-tree and committed dashboard byte budgets.
 [group('quality')]
 verify-budgets:
   node scripts/check-package-budgets.mjs
@@ -416,7 +397,7 @@ verify-packed-install:
 
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses
+verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
@@ -430,7 +411,7 @@ ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated
 
 # Rebuild committed UIs and run package verification, matching package prepack.
 [group('package')]
-prepack: dashboard-build review-build verify-package verify-budgets verify-licenses
+prepack: dashboard-build verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}Prepack checks passed.{{NC}}\n"
 
 # Verify that the checkout is the clean, tagged, reproducible release commit.
@@ -445,7 +426,7 @@ release-artifacts:
 
 # Run publish-time checks, including checks required for direct local publish.
 [group('package')]
-prepublish: typecheck test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses release-verify
+prepublish: typecheck test test-db dashboard-verify verify-package verify-budgets verify-licenses release-verify
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.

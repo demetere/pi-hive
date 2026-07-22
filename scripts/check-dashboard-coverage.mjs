@@ -4,15 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const CRITICAL_DASHBOARD_MODULES = [
-  "ui/web/src/components/ConfirmModal.tsx",
-  "ui/web/src/components/Sidebar.tsx",
-  "ui/web/src/store/event-ring.ts",
-  "ui/web/src/store/history.ts",
-  "ui/web/src/store/identity.ts",
-  "ui/web/src/store/status.ts",
-  "ui/web/src/store/topology.ts",
-];
+export const CRITICAL_DASHBOARD_MODULES = ["ui/web/src/workflow-dashboard.tsx"];
 
 export const DASHBOARD_LINE_THRESHOLD = 90;
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,7 +16,7 @@ import { createWorkflowEvent } from "../../src/workflows/events";
 import { createHandoffPacket, readHandoffState } from "../../src/workflows/handoff";
 import { appendWorkflowEvent, readWorkflowJournal } from "../../src/workflows/journal";
 import { QuestionService } from "../../src/workflows/questions";
-import { terminalEnvelopeFromEvent } from "../../src/workflows/runs";
+import { terminalEnvelopeFromEvent, WorkflowRunLifecycle } from "../../src/workflows/runs";
 import { RunOrchestrationService } from "../../src/workflows/orchestration";
 import { initializeNormalParent, markMissingPiSession, listSessionLinks, type WorkflowSessionLink } from "../../src/workflows/sessions";
 
@@ -93,37 +93,24 @@ test("actual schema-v1 index wiring has unique commands, no mode-cycle shortcut,
   } finally {
     process.chdir(previousCwd);
   }
-  const workflowCommands = ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"];
-  const legacyOwnedCommands = ["hive:doctor", "hive:observe", "hive:observe-prune", "hive:observe-stop"];
-  assert.deepEqual([...commands.keys()].sort(), [...workflowCommands, ...legacyOwnedCommands].sort());
+  const workflowCommands = ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"];
+  assert.deepEqual([...commands.keys()].sort(), workflowCommands.sort());
   assert.equal(shortcuts.length, 0);
   assert.equal(widgets.some(([id]) => id === "hive-tree"), false);
   assert.equal(statuses.some(([id]) => id === "hive"), false);
   assert.equal(widgets.some(([, value]) => value !== undefined), false, "normal chat renders no workflow widget");
 });
 
-test("actual legacy index wiring keeps the pre-W27 command and mode-cycle surfaces", async () => {
+test("pre-1.0 config fails before any partial registration or telemetry mutation", async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-index-legacy-"));
   mkdirSync(join(projectRoot, ".pi/hive"), { recursive: true });
-  writeFileSync(join(projectRoot, ".pi/hive/hive-config.yaml"), "orchestrator: legacy\nagents: []\n");
-  const previousCwd = process.cwd();
-  const commands = new Map<string, unknown>();
-  const shortcuts: unknown[] = [];
-  const pi: any = {
-    registerTool() {},
-    registerCommand(name: string, value: unknown) { commands.set(name, value); },
-    registerShortcut(...input: unknown[]) { shortcuts.push(input); },
-    on() {},
-    getActiveTools: () => ["read"], getAllTools: () => [{ name: "read" }], setActiveTools() {}, getThinkingLevel: () => "medium",
-  };
-  try {
-    process.chdir(projectRoot);
-    await hiveExtension(pi);
-  } finally {
-    process.chdir(previousCwd);
-  }
-  assert.deepEqual([...commands.keys()].sort(), ["hive", "hive:doctor", "hive:execute", "hive:normal", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:plan", "hive:plan-mode", "hive:toggle"].sort());
-  assert.equal(shortcuts.length, 1);
+  writeFileSync(join(projectRoot, ".pi/hive/hive-config.yaml"), "planning:\n  main: legacy-planner\nhive:\n  main: legacy-builder\n");
+  const previousCwd = process.cwd(); const registrations: string[] = [];
+  const pi: any = { registerTool() { registrations.push("tool"); }, registerCommand() { registrations.push("command"); }, registerShortcut() { registrations.push("shortcut"); }, on() { registrations.push("hook"); } };
+  try { process.chdir(projectRoot); await assert.rejects(() => hiveExtension(pi), /schema-v1.*Manual migration.*SCHEMA_VERSION_MISSING/i); }
+  finally { process.chdir(previousCwd); }
+  assert.deepEqual(registrations, []);
+  assert.equal(existsSync(join(projectRoot, ".pi/hive/sessions")), false);
 });
 
 test("index production wiring constructs real linked services and runtime command authority", async () => {
@@ -131,7 +118,7 @@ test("index production wiring constructs real linked services and runtime comman
   const pi = { registerCommand(name: string, value: unknown) { commands.set(name, value); } } as any;
   let refreshes = 0;
   await registerLinkedWorkflowCommandSurfaces(pi, "/project", "project-1", () => { refreshes += 1; });
-  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
   const notices: string[] = [];
   await (commands.get("hive:status") as any).handler("", { mode: "print", hasUI: false, sessionManager: { getSessionId: () => "normal" } });
   assert.equal(refreshes, 1);
@@ -143,7 +130,7 @@ test("real linked production services register every exact operation with bound 
   const pi = { registerCommand(name: string, value: unknown) { commands.set(name, value); } } as any;
   const services = createLinkedWorkflowCommandServices(pi, "/project", "project-1", createPiWorkflowRuntimeCommandAuthority());
   registerWorkflowCommands(pi, services);
-  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
 });
 
 test("real index wiring executes select, status, checkpoints, answer, cancel, exit, and recover with valid Pi context", async () => {
@@ -184,7 +171,7 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   const projectId = resolveProjectIdentity(projectRoot).projectId;
   initializeNormalParent({ configured: true, projectRoot, projectId, piSessionId: "normal", piSessionFile: sessionFile, model: "provider/model", thinking: "medium", activeTools: [] });
   await registerLinkedWorkflowCommandSurfaces(pi, projectRoot, projectId);
-  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
   const services = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority());
   await commands.get("hive:status").handler("", ctx);
   const normalStatus = notices.at(-1)?.[0] ?? "";
@@ -334,9 +321,19 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   const beforeFresh = listSessionLinks(projectRoot).map((link) => JSON.stringify(link));
   await assert.rejects(() => services.select({ workflowId: stale.workflowId, fresh: true }, ctx), /fresh|unavailable|invalid|stale/i);
   assert.deepEqual(listSessionLinks(projectRoot).map((link) => JSON.stringify(link)), beforeFresh, "stale fresh block has no partial archive or link");
+
+  const fallbackLink = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId)!;
+  const fallbackSnapshot = readActivationSnapshot(projectRoot, fallbackLink.activationHash);
+  const fallbackRoot = String((fallbackSnapshot.payload.workflow.team as { rootId: string }).rootId);
+  const fallbackOwnerPath = join(projectRoot, ".pi", "hive", "sessions", fallbackLink.workflowSessionId, "runtime-owner.json");
+  const fallbackOwnerNonce = String(JSON.parse(readFileSync(fallbackOwnerPath, "utf8")).ownerNonce);
+  const offlineLifecycle = new WorkflowRunLifecycle({ projectRoot, projectId, sessionId: fallbackLink.workflowSessionId, snapshotId: fallbackLink.activationHash, rootNodeId: fallbackRoot, runtimeOwnerNonce: fallbackOwnerNonce });
+  offlineLifecycle.recordUserInput({ inputId: "offline-command-open", text: "open an idle fallback cancellation run", source: "interactive" });
+  assert.match(await services.cancel!("offline command fallback", ctx), /^Cancelled /u);
+  assert.equal(offlineLifecycle.restore().latestRun?.status, "cancelled", "command authority settles a durably idle run without a live runtime");
 });
 
-test("registers exactly the schema-v1 workflow command surface only when configured", () => {
+test("registers exactly the bound schema-v1 workflow command surface only when configured", () => {
   const off = harness({ configured: false });
   assert.deepEqual([...off.commands], []);
   const { commands } = harness();

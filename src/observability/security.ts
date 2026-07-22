@@ -1,4 +1,4 @@
-export type BrowserSecurityProfile = "dashboard" | "review" | "api";
+export type BrowserSecurityProfile = "dashboard" | "api";
 
 const DASHBOARD_CSP = [
   "default-src 'self'",
@@ -16,36 +16,15 @@ const DASHBOARD_CSP = [
   "worker-src 'self' blob:",
 ].join("; ");
 
-// The production review-only bundle uses external same-origin script/style
-// assets; legacy custom single-file surfaces may still supply a nonce. Handler
-// attributes, external network, nested frames, forms, and objects stay blocked.
-function reviewCsp(scriptNonce?: string, connectOrigin?: string): string {
-  return [
-    "default-src 'none'",
-    "base-uri 'none'",
-    "object-src 'none'",
-    "frame-ancestors 'self'",
-    "form-action 'none'",
-    `script-src ${scriptNonce ? `'nonce-${scriptNonce}' 'strict-dynamic'` : connectOrigin || "'none'"}`,
-    "script-src-attr 'none'",
-    `style-src ${scriptNonce ? "'unsafe-inline'" : connectOrigin || "'none'"}`,
-    "img-src 'self' data: blob:",
-    "font-src 'self' data:",
-    `connect-src ${connectOrigin || "'none'"}`,
-    "frame-src 'none'",
-    "worker-src blob:",
-  ].join("; ");
-}
-
-export function applyBrowserSecurityHeaders(response: Response, profile: BrowserSecurityProfile, scriptNonce?: string, connectOrigin?: string): Response {
-  response.headers.set("content-security-policy", profile === "review" ? reviewCsp(scriptNonce, connectOrigin) : DASHBOARD_CSP);
+export function applyBrowserSecurityHeaders(response: Response, _profile: BrowserSecurityProfile): Response {
+  response.headers.set("content-security-policy", DASHBOARD_CSP);
   response.headers.set("x-content-type-options", "nosniff");
-  response.headers.set("referrer-policy", profile === "review" ? "no-referrer" : "same-origin");
+  response.headers.set("referrer-policy", "same-origin");
   response.headers.set("cross-origin-opener-policy", "same-origin");
-  response.headers.set("cross-origin-resource-policy", profile === "review" ? "cross-origin" : "same-origin");
+  response.headers.set("cross-origin-resource-policy", "same-origin");
   response.headers.set("x-frame-options", "SAMEORIGIN");
   response.headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
-  if (profile === "api" && !response.headers.has("cache-control")) response.headers.set("cache-control", "no-store");
+  if (_profile === "api" && !response.headers.has("cache-control")) response.headers.set("cache-control", "no-store");
   return response;
 }
 
@@ -95,10 +74,6 @@ export function writeGateResponse(
 ): Response | null {
   const isWrite = req.method !== "GET" && req.method !== "HEAD";
   if (!isWrite) return null;
-  // A review iframe deliberately runs with an opaque sandbox origin. Its narrow,
-  // content-bound capability performs its own Host/origin/nonce checks and may
-  // therefore pass without the dashboard bearer. All ordinary writes still
-  // require both same-origin metadata and the bearer token.
   if (!capabilityAuthorized && !isSameOriginWrite(req, url)) return reject("cross-origin write blocked", 403);
   if (!capabilityAuthorized && !isAuthorizedWrite(req, token)) return reject("unauthorized", 401);
   return null;

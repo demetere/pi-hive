@@ -6,15 +6,12 @@ import { fileURLToPath } from "node:url";
 
 export const BUN_LINE_THRESHOLDS = {
   "src/observability/server/config.ts": 90,
-  "src/observability/server/db.ts": 90,
   "src/observability/server/http-handler.ts": 90,
-  "src/observability/server/jsonl-reader.ts": 90,
-  "src/observability/server/plan-bridge.ts": 90,
-  "src/observability/server/plan-routes.ts": 90,
-  "src/observability/server/review-wiring.ts": 90,
-  "src/observability/server/runtime.ts": 90,
   "src/observability/server/sse.ts": 90,
-  "src/observability/server/topology-hash.ts": 90,
+  "src/observability/server/workflow-db.ts": 90,
+  "src/observability/server/workflow-routes.ts": 90,
+  "src/observability/server/workflow-runtime.ts": 90,
+  "src/observability/server/workflow-service.ts": 90,
 };
 
 export function parseLcovLines(lcov) {

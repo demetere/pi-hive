@@ -1,0 +1,19 @@
+schema-version: 1
+
+agents:
+  orchestrator: agents/orchestrator.md
+  planner: agents/planner.md
+  coder: agents/coder.md
+  tester: agents/tester.md
+
+workflows:
+  feature-delivery: workflows/feature-delivery.yaml
+
+skills:
+  orchestration: skills/orchestration/
+
+knowledge:
+  project-architecture:
+    provider: okf
+    path: knowledge/project-architecture/
+    updates: reviewed

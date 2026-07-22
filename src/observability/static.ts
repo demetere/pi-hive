@@ -27,7 +27,7 @@ export function dashboardFile(relPath: string): Response | null {
   // Resolve safely inside DASHBOARD_DIR (no path traversal).
   const requested = path.resolve(DASHBOARD_DIR, "." + (relPath.startsWith("/") ? relPath : "/" + relPath));
   const safeTarget = resolveContainedPath(DASHBOARD_DIR, requested);
-  if (!safeTarget || !fs.statSync(safeTarget.canonicalPath).isFile()) return null;
+  if (!safeTarget || !fs.existsSync(safeTarget.canonicalPath) || !fs.statSync(safeTarget.canonicalPath).isFile()) return null;
   const target = safeTarget.canonicalPath;
   const body = fs.readFileSync(target);
   const ext = path.extname(target).toLowerCase();

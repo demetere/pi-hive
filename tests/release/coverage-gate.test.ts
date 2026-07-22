@@ -7,12 +7,12 @@ import { test } from "node:test";
 
 const SCRIPT = resolve("scripts/check-critical-coverage.mjs");
 const MODULES = [
-  "src/engine/dashboard.ts",
-  "src/engine/process.ts",
-  "src/engine/review.ts",
-  "src/integration/commands.ts",
-  "src/integration/hooks.ts",
-  "src/observability/agent-log.ts",
+  "src/integration/run-lifecycle.ts",
+  "src/integration/workflow-command-service.ts",
+  "src/integration/workflow-commands.ts",
+  "src/integration/workflow-tools.ts",
+  "src/workflows/runs.ts",
+  "src/workflows/tools.ts",
 ];
 
 function runCoverageGate(percentages: Record<string, number>) {
@@ -33,12 +33,12 @@ test("critical coverage gate accepts every required module at 90 percent", () =>
 });
 
 test("critical coverage gate rejects low and missing modules", () => {
-  const low = Object.fromEntries(MODULES.map((file) => [file, file.endsWith("review.ts") ? 89.99 : 100]));
+  const low = Object.fromEntries(MODULES.map((file) => [file, file.endsWith("workflow-commands.ts") ? 89.99 : 100]));
   const failed = runCoverageGate(low);
   assert.equal(failed.status, 1);
-  assert.match(failed.stderr, /review\.ts: 89\.99% lines/);
+  assert.match(failed.stderr, /workflow-commands\.ts: 89\.99% lines/);
 
   const missing = runCoverageGate(Object.fromEntries(MODULES.slice(1).map((file) => [file, 100])));
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /dashboard\.ts: missing/);
+  assert.match(missing.stderr, /run-lifecycle\.ts: missing/);
 });

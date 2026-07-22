@@ -91,7 +91,7 @@ import { heartbeatCurrentRuntimeOwnership } from "./ownership";
 import { registerLiveWorkflowCancellationAuthority } from "./live-cancellation";
 import { resolveContainedPath } from "../core/safe-path";
 import { CheckpointApprovalService, type CheckpointApprovalServiceOptions } from "../artifacts/approvals";
-import type { CheckpointPolicy } from "../artifacts/checkpoints";
+import { resolveCheckpointDigest, type CheckpointPolicy } from "../artifacts/checkpoints";
 import { QuestionService, deriveQuestionRunStatus, type AcceptedQuestionForRoot, type QuestionControlAuthenticationRequest, type QuestionPresenter, type RootQuestionAnswerDelivery } from "./questions";
 import { QUESTION_LIMITS } from "./question-validation";
 import { utf8Prefix } from "./values";
@@ -138,7 +138,7 @@ export interface RunOrchestrationServiceOptions {
   /** Fault-injection seam for workflow lifecycle crash-recovery tests. */
   readonly journalFault?: WorkflowRunLifecycleOptions["journalFault"];
   readonly pauseAuthority: PauseCoordinator; readonly resumeAuthority: ResumeCoordinator;
-  readonly cancellationAuthority: Pick<CancellationCoordinator, "terminateProcessTrees" | "capturePartialState" | "releaseLeases">;
+  readonly cancellationAuthority: Pick<CancellationCoordinator, "waitForSettlement" | "terminateProcessTrees" | "capturePartialState" | "releaseLeases">;
 }
 export interface RootModelInvocation {
   readonly promptContext: WorkflowPromptAssembly;
@@ -375,6 +375,28 @@ export class RunOrchestrationService {
         if (builtin.state === "unsatisfied" || upstream.state === "unsatisfied") return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([...(("issues" in builtin && builtin.issues) || []), ...(("issues" in upstream && upstream.issues) || [])]) });
         return Object.freeze({ state: builtin.state === "satisfied" || upstream.state === "satisfied" ? "satisfied" as const : "not-present" as const });
       },
+      artifacts: async (references) => {
+        const run = this.lifecycle.restore().latestRun;
+        const binding = run?.artifactWorkspace;
+        const issues: string[] = [];
+        if (references.length) {
+          if (!selectedArtifact?.adapter.checkpointDescriptor || !binding || binding.workspace.kind !== "physical" || !binding.path) issues.push("artifact references require a bound physical workspace with checkpoint descriptors");
+          else {
+            const hashes = hashArtifactWorkspace(binding.path);
+            for (const reference of references) {
+              if (reference.workspaceId !== binding.workspace.id || !binding.checkpointIds.includes(reference.checkpoint)) { issues.push(`artifact reference ${reference.workspaceId}/${reference.checkpoint} does not match the bound workspace`); continue; }
+              try {
+                const descriptor = selectedArtifact.adapter.checkpointDescriptor({ binding, checkpointId: reference.checkpoint, hashes });
+                if (resolveCheckpointDigest(descriptor, hashes).digest !== reference.digest) issues.push(`artifact reference ${reference.workspaceId}/${reference.checkpoint} is stale`);
+              } catch (error) { issues.push(`artifact reference ${reference.workspaceId}/${reference.checkpoint} is invalid: ${String(error instanceof Error ? error.message : error).slice(0, 1_024)}`); }
+            }
+          }
+        }
+        const builtin = issues.length ? Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze(issues) }) : Object.freeze({ state: references.length ? "satisfied" as const : "not-present" as const });
+        const upstream = options.completion?.artifacts ? await options.completion.artifacts(references) : Object.freeze({ state: "not-present" as const });
+        if (builtin.state === "unsatisfied" || upstream.state === "unsatisfied") return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze([...(("issues" in builtin && builtin.issues) || []), ...(("issues" in upstream && upstream.issues) || [])]) });
+        return Object.freeze({ state: builtin.state === "satisfied" || upstream.state === "satisfied" ? "satisfied" as const : "not-present" as const });
+      },
       projectState: async () => {
         const run = this.lifecycle.restore().latestRun;
         if (!run) return Object.freeze({ state: "unsatisfied" as const, issues: Object.freeze(["project state: no workflow run is active"]) });
@@ -505,6 +527,13 @@ export class RunOrchestrationService {
       runId: run.runId, configuredBinding: configured.binding as never, options: configured.options, selection,
       ...(handoffReference ? { handoffReference } : {}),
     });
+    if (selection.mode === "new" && binding.path) {
+      const workspacePath = relative(this.options.projectRoot, binding.path).split("\\").join("/");
+      const changes = this.changeAccountingFor(run.runId);
+      hashArtifactWorkspace(binding.path).entries.filter((entry) => entry.kind === "file").forEach((entry, index) => {
+        changes.recordTrustedCreation(`${run.runId}:artifact-bind:${index + 1}`, `${workspacePath}/${entry.path}`);
+      });
+    }
     return this.lifecycle.bindArtifactWorkspace(binding);
   }
 
@@ -1607,7 +1636,25 @@ export class RunOrchestrationService {
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
             if (!workspace) throw new Error("Artifact action requires a trusted run workspace binding");
             const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
-            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
+            let mutationOrdinal = 0;
+            const baseMutationQueue = this.options.artifactMutationQueue;
+            const mutationQueue: ArtifactMutationQueue | undefined = baseMutationQueue ? async (target, operationId, callback) => {
+              const relativeTarget = relative(this.options.projectRoot, target).split("\\").join("/");
+              if (!relativeTarget || relativeTarget.startsWith("../") || relativeTarget === "..") throw new Error("Artifact mutation accounting target escaped the project");
+              const accountingId = `${operationId}:artifact:${++mutationOrdinal}`;
+              const recorder = resources.changes.mutationRecorder();
+              const intent = recorder.begin(accountingId, relativeTarget);
+              try {
+                const result = await baseMutationQueue!(target, operationId, callback);
+                recorder.complete(intent, relativeTarget);
+                return result;
+              } catch (error) {
+                try { recorder.complete(intent, relativeTarget); }
+                catch { recorder.notApplied?.(accountingId, relativeTarget, String(error instanceof Error ? error.message : error)); }
+                throw error;
+              }
+            } : undefined;
+            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
             return facade.action(caller, input, {
               attemptId,
@@ -1893,11 +1940,12 @@ export class RunOrchestrationService {
         await resources.workers.closeSessions();
       },
       waitForSettlement: async (timeoutMs) => {
-        const [schedulerSettled, workersSettled] = await Promise.all([
+        const [schedulerSettled, workersSettled, processTreesSettled] = await Promise.all([
           resources.scheduler.waitForSettlement(timeoutMs),
           resources.workers.waitForSettlement(timeoutMs),
+          this.options.cancellationAuthority.waitForSettlement?.(timeoutMs) ?? true,
         ]);
-        return schedulerSettled && workersSettled;
+        return schedulerSettled && workersSettled && processTreesSettled;
       },
       terminateProcessTrees: this.options.cancellationAuthority.terminateProcessTrees,
       capturePartialState: async () => {

@@ -11,7 +11,7 @@ import { createDashboardHttpHandler } from "../../src/observability/server/http-
 import { createProductionWorkflowApiOptions, type ProductionWorkflowServiceOptions } from "../../src/observability/server/workflow-service";
 import { createConfiguredWorkflowProjectionSynchronizer } from "../../src/observability/server/workflow-runtime";
 import { broadcastWorkflowEvent, closeAllSubscribers, hasLiveSubscribers } from "../../src/observability/server/sse";
-import { DAEMON_TOKEN, expectedHostHeader } from "../../src/observability/server/config";
+import { DAEMON_TOKEN, STARTUP_NONCE, expectedHostHeader } from "../../src/observability/server/config";
 import { toWorkflowTelemetryEvent } from "../../src/observability/events";
 import { encodeWorkflowHistoryCursor } from "../../src/observability/projection";
 import { CheckpointApprovalService } from "../../src/artifacts/approvals";
@@ -179,13 +179,13 @@ async function readAvailableStream(response: Response): Promise<string> {
   return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
-test("production dashboard handler closes the control boundary over journals, SQLite, replay, SSE, and legacy routes", async () => {
+test("production dashboard handler closes the control boundary over journals, SQLite, replay, SSE, and daemon health", async () => {
   const fixture = await setup();
   let handler = fixture.makeHandler();
 
-  const legacy = await handler(request("/health"));
-  expect(legacy.status).toBe(200);
-  expect(await legacy.json()).toMatchObject({ ok: true });
+  const health = await handler(request("/health"));
+  expect(health.status).toBe(200);
+  expect(await health.json()).toMatchObject({ ok: true, mode: "workflow" });
 
   const rebuilt = await json(handler, "/api/v1/maintenance/projection/rebuild", write({ operationId: "rebuild-production" }));
   expect(rebuilt.response.status).toBe(200);
@@ -278,6 +278,19 @@ test("production dashboard handler closes the control boundary over journals, SQ
   expect(journalReplay.body).toEqual(journalPruned.body);
   handler.dispose();
   fixture.approvalLease.release();
+});
+
+test("workflow daemon shutdown rejects malformed and mismatched requests before authenticated exact-instance teardown", async () => {
+  const fixture = await setup(); let scheduled = 0;
+  const handler = createDashboardHttpHandler({ workflowApiOptions: createProductionWorkflowApiOptions({ token: DAEMON_TOKEN, databasePath: fixture.databasePath, legacyPaths: [], projectCwd: fixture.projectRoot, diagnostics: () => [] }), scheduleServerStop: () => { scheduled += 1; } });
+  const malformed = await handler(request("/shutdown", { method: "POST", headers: { origin: `http://${expectedHostHeader()}`, "content-type": "application/json" }, body: "{" }));
+  expect(malformed.status).toBe(400);
+  const mismatch = await json(handler, "/shutdown", write({ startupNonce: "wrong-instance" }));
+  expect(mismatch.response.status).toBe(409);
+  const accepted = await json(handler, "/shutdown", write({ startupNonce: STARTUP_NONCE }));
+  expect(accepted.response.status).toBe(202);
+  expect(accepted.body).toMatchObject({ ok: true, startupNonce: STARTUP_NONCE });
+  expect(scheduled).toBe(1);
 });
 
 test("successful production projection maintenance invalidates already-open workflow streams with bounded resync reasons", async () => {
@@ -428,14 +441,12 @@ test("production workflow synchronizer broadcasts live events with bounded subsc
 
   handler.dispose();
 
-  // Exercise the production legacy stream's shared global cap as well; both
-  // channels participate in the daemon's idle/live-handle decision.
+  // The fixed telemetry stream is removed at cutover. Subscriber capacity and
+  // idle/live-handle behavior remain covered above through authenticated API v1.
   handler = fixture.makeHandler();
-  const legacyStreams: Response[] = [];
-  for (let index = 0; index < 64; index += 1) legacyStreams.push(await handler(request("/stream")));
-  const legacyCapped = await handler(request("/stream"));
-  expect(await legacyCapped.text()).toContain("subscriber-capacity");
-  await Promise.all(legacyStreams.map((response) => response.body!.cancel()));
+  const legacyStream = await handler(request("/stream"));
+  expect(legacyStream.status).toBe(404);
+  expect(await legacyStream.json()).toEqual({ error: "not found" });
   expect(hasLiveSubscribers()).toBe(false);
 
   handler.dispose();

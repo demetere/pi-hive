@@ -1,24 +1,23 @@
 # Changelog
 
-All notable changes to pi-hive are documented here. Release headings match the
-version in `package.json`; the release workflow refuses to publish a version
-without a corresponding section.
+## 1.0.0
 
-## [Unreleased]
+### Breaking
 
-### Changed
-
-- Hardened release publishing with protected-environment approval, npm trusted
-  publishing, reproducibility checks, and attached software bills of materials.
-
-## [0.1.0] - 2026-07-05
+- Replaced the fixed pre-1.0 runtime with schema-v1 config-first workflows.
+- Removed fixed mode switching, dual-team configuration, semantic agent enforcement, planner stages, fixed artifact commands, keyboard cycling, and plan-specific dashboard routes.
+- Removed automatic loading of pre-1.0 configuration and durable YAML memory. Migration is manual; see README and SETUP.
+- Started a separate workflow telemetry projection. Historical telemetry files remain untouched and are not displayed or migrated.
 
 ### Added
 
-- Hierarchical multi-agent orchestration for opted-in Pi projects.
-- OpenSpec-backed planning, review, approval, and execution gates.
-- Local-only telemetry collection and a prebuilt React dashboard.
-- Project-scoped policy enforcement, lifecycle management, and privacy controls.
+- Strict YAML registries, reusable agents, recursive workflow teams, immutable activation snapshots, and capability narrowing.
+- Linked workflow sessions with multi-run chat semantics, explicit handoff, recovery, cancellation, budgets, and change accounting.
+- Generic artifact adapters for `none`, Markdown plans, and OpenSpec with leases, checkpoints, and exact approvals.
+- Durable questions, attached local OKF knowledge, bounded enrichment, workflow telemetry, authenticated API v1, and the workflow dashboard.
+- Checked-in combined, split-handoff, Markdown lifecycle, artifact-free, and invalid migration examples.
 
-[Unreleased]: https://github.com/demetere/pi-hive/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/demetere/pi-hive/releases/tag/v0.1.0
+### Security
+
+- Preserved unconfigured inertness, Node-compatible core loading, loopback-only dashboard binding, authenticated exact-object controls, bounded output/pagination, and Pi mutation-queue participation.
+- Documented that capability enforcement is not an OS sandbox, network denial is best effort, and delegation prose is not DLP.

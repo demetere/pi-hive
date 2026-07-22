@@ -6,15 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 const SCRIPT = resolve("scripts/check-dashboard-coverage.mjs");
-const MODULES = [
-  "ui/web/src/components/ConfirmModal.tsx",
-  "ui/web/src/components/Sidebar.tsx",
-  "ui/web/src/store/event-ring.ts",
-  "ui/web/src/store/history.ts",
-  "ui/web/src/store/identity.ts",
-  "ui/web/src/store/status.ts",
-  "ui/web/src/store/topology.ts",
-];
+const MODULES = ["ui/web/src/workflow-dashboard.tsx"];
 
 function run(percentages: Record<string, number>) {
   const dir = mkdtempSync(join(tmpdir(), "pi-hive-dashboard-coverage-"));
@@ -27,19 +19,18 @@ function run(percentages: Record<string, number>) {
   return spawnSync(process.execPath, [SCRIPT, path], { encoding: "utf8" });
 }
 
-test("dashboard coverage gate accepts critical stores and components at 90 percent", () => {
+test("dashboard coverage gate accepts the workflow-only application at 90 percent", () => {
   const result = run(Object.fromEntries(MODULES.map((file) => [file, 90])));
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Critical dashboard coverage gate passed/);
 });
 
 test("dashboard coverage gate rejects low and missing critical modules", () => {
-  const low = Object.fromEntries(MODULES.map((file) => [file, file.endsWith("status.ts") ? 89.99 : 100]));
-  const failed = run(low);
+  const failed = run({ "ui/web/src/workflow-dashboard.tsx": 89.99 });
   assert.equal(failed.status, 1);
-  assert.match(failed.stderr, /status\.ts: 89\.99% lines/);
+  assert.match(failed.stderr, /workflow-dashboard\.tsx: 89\.99% lines/);
 
-  const missing = run(Object.fromEntries(MODULES.slice(1).map((file) => [file, 100])));
+  const missing = run({});
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /ConfirmModal\.tsx: missing/);
+  assert.match(missing.stderr, /workflow-dashboard\.tsx: missing/);
 });
