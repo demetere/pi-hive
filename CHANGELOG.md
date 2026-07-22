@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## [1.0.0] - 2026-07-22
 
 ### Breaking
 
@@ -16,6 +16,12 @@
 - Generic artifact adapters for `none`, Markdown plans, and OpenSpec with leases, checkpoints, and exact approvals.
 - Durable questions, attached local OKF knowledge, bounded enrichment, workflow telemetry, authenticated API v1, and the workflow dashboard.
 - Checked-in combined, split-handoff, Markdown lifecycle, artifact-free, and invalid migration examples.
+
+### Fixed
+
+- Added lazy, bind-once artifact workspace discovery and explicit `workspace-bind` dispatch through the generic artifact tools, so production combined, Markdown, and split workflows no longer require out-of-band runtime binding.
+- Packaged the combined and split OpenSpec examples with a minimal initialized `openspec/` layout, so copied examples can scaffold their first workspace without hidden setup.
+- Made idle normal and workflow Pi 0.80 sessions safely persistable, precreated linked sessions through Pi's public `SessionManager`, and committed replacement authority before the single native switch so the first target `session_start` restores the exact runtime without a follow-up reload.
 
 ### Security
 

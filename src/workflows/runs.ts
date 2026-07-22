@@ -170,6 +170,13 @@ export interface RunCheckpointSnapshotProvider {
   validate(snapshot: RunCheckpointSnapshotV1, events: readonly WorkflowEventEnvelope[]): void;
 }
 
+export interface ArtifactWorkspaceBindReceipt {
+  readonly attemptId: string;
+  readonly actionId: "workspace-bind";
+  readonly attemptInputHash: string;
+  readonly result: JsonValue;
+}
+
 export interface WorkflowRunLifecycleOptions {
   readonly projectRoot: string;
   readonly projectId: string;
@@ -869,16 +876,24 @@ export class WorkflowRunLifecycle {
     } catch { /* durable input remains authoritative; the next admission preempts again */ }
   }
 
-  bindArtifactWorkspace(binding: ArtifactWorkspaceBinding): ArtifactWorkspaceBinding {
+  bindArtifactWorkspace(binding: ArtifactWorkspaceBinding, receipt?: ArtifactWorkspaceBindReceipt): ArtifactWorkspaceBinding {
     const validated = validateArtifactWorkspaceBinding(binding);
+    if (receipt && (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(receipt.attemptId)
+      || receipt.actionId !== "workspace-bind" || !/^[0-9a-f]{64}$/u.test(receipt.attemptInputHash))) {
+      throw new Error("Artifact workspace bind receipt identity is invalid");
+    }
     if (validated.workspace.kind !== "physical") throw new Error("Only a physical artifact workspace can bind after run creation");
     const run = this.restore().latestRun;
     if (!run || !isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal) throw new Error("Artifact workspace requires a current open run");
     if (run.artifactWorkspace) throw new Error("Artifact workspace is already bound; rebinding is denied");
     appendWorkflowEventChecked(this.options.projectRoot, createWorkflowEvent({
       projectId: this.options.projectId, sessionId: this.options.sessionId, runId: run.runId, type: "artifact.recorded",
-      payload: asJson({ formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, subsystem: "workspace", operation: "bind", workspace: validated }),
+      payload: asJson({
+        formatVersion: RUN_LIFECYCLE_FORMAT_VERSION, subsystem: "workspace", operation: "bind", workspace: validated,
+        ...(receipt ? { toolReceipt: receipt } : {}),
+      }),
       producer: "harness", timestamp: this.options.now?.() ?? new Date().toISOString(),
+      ...(receipt ? { attemptId: receipt.attemptId, correlationId: receipt.attemptId } : {}),
     }), (events) => {
       const locked = replayWorkflowJournal(events, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
       if (!locked || locked.runId !== run.runId || !isOpenRunStatus(locked.status) || locked.cancellationRequested || locked.pendingTerminal || locked.artifactWorkspace) {

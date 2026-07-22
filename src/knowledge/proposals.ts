@@ -379,6 +379,10 @@ function entryExistsAt(directoryDescriptor: number, name: string): boolean {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
+function isKnowledgeMutationLockArtifact(name: string): boolean {
+  return name === "curated.md.lock" || /^curated\.md\.lock\.generation-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(name);
+}
+
 function descriptorBundleHash(rootDescriptor: number, override?: Readonly<{ path: string; content: string }>): string {
   const files: Array<{ path: string; hash: string }> = [];
   let aggregateBytes = 0;
@@ -386,6 +390,10 @@ function descriptorBundleHash(rootDescriptor: number, override?: Readonly<{ path
     try {
       const entries = readdirSync(`/proc/self/fd/${directoryDescriptor}`, { withFileTypes: true }).sort((left, right) => compare(left.name, right.name));
       for (const entry of entries) {
+        // The cross-process mutation lock lives beside curated.md and can be
+        // removed between readdir and lstat by the winning writer. It is
+        // harness control state, never bundle content or hash input.
+        if (!prefix && isKnowledgeMutationLockArtifact(entry.name)) continue;
         const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
         const path = `/proc/self/fd/${directoryDescriptor}/${entry.name}`;
         const named = lstatSync(path, { bigint: true });

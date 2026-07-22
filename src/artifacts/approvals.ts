@@ -16,9 +16,28 @@ import {
 import { hashArtifactWorkspace, isArtifactHash, requireExpectedArtifactHash, type ArtifactWorkspaceHashesV1 } from "./hashes";
 import { withWorkspaceLeaseRunValidation } from "./leases";
 import type { ArtifactWorkspaceBinding } from "./types";
+import { providerArtifactArgumentContract, type ProviderArtifactArgumentContractV1 } from "./action-contracts";
 
 export const CHECKPOINT_APPROVAL_FORMAT_VERSION = 1 as const;
-export const CHECKPOINT_APPROVAL_LIMITS = Object.freeze({ requests: 4_096, decisions: 4_096, feedbackBytes: 8_192, outputBytes: 65_536 });
+export const CHECKPOINT_REQUEST_ACTION_ID = "checkpoint-request" as const;
+export const CHECKPOINT_APPROVAL_LIMITS = Object.freeze({ requests: 4_096, decisions: 4_096, feedbackBytes: 8_192, outputBytes: 65_536, statusCheckpointItems: 32, statusPendingIds: 32 });
+
+export interface CheckpointRequestActionArguments { readonly checkpointId: string }
+export function checkpointRequestProviderContract(checkpointIds: readonly string[]): ProviderArtifactArgumentContractV1 {
+  if (checkpointIds.length > CHECKPOINT_APPROVAL_LIMITS.statusCheckpointItems || new Set(checkpointIds).size !== checkpointIds.length) throw new Error("Checkpoint request argument contract IDs exceed their bound or are duplicated");
+  return providerArtifactArgumentContract("1", {
+    type: "object",
+    required: ["checkpointId"],
+    properties: { checkpointId: { type: "string", enum: [...checkpointIds] } },
+    additionalProperties: false,
+  });
+}
+/** Strict harness-owned arguments; this action is never dispatched to an adapter. */
+export function parseCheckpointRequestActionArguments(value: unknown): CheckpointRequestActionArguments {
+  if (!plainRecord(value)) throw new Error("checkpoint-request arguments must be an object");
+  exactKeys(value, ["checkpointId"], [], "checkpoint-request arguments");
+  return Object.freeze({ checkpointId: identifier(value.checkpointId, "checkpoint-request checkpoint ID") });
+}
 
 export type CheckpointDecisionValue = "approved" | "denied";
 export type CheckpointControlChannel = "dashboard" | "tui";
@@ -506,8 +525,9 @@ export class CheckpointApprovalService {
         }
         return this.replayRequestOperation(this.restore().operations[operationId], requestInputHash);
       }
-      const pending = state.requestOrder.map((id) => state.requests[id]).find((request) => request.runId === current.runId && request.checkpointId === checkpointId && !request.decision);
-      if (pending) throw new Error("Checkpoint already has a pending exact-digest request");
+      // A workspace revision may supersede an undecided stale digest. The old
+      // request remains immutable/auditable, while this exact current digest
+      // receives a new request. Exact-digest replay was handled above.
       const requestId = identifier(this.options.createRequestId?.() ?? `checkpoint-request-${randomUUID()}`, "Checkpoint request ID");
       const draft = createWorkflowEvent({
         projectId: this.options.projectId, sessionId: this.options.sessionId, runId: current.runId, type: "approval.recorded", producer: "harness", timestamp: this.time(), attemptId: operationId,
@@ -527,8 +547,8 @@ export class CheckpointApprovalService {
           if (operation) throw new Error("Checkpoint request operation was recorded concurrently");
           const locked = this.resolveCurrent(events, checkpointId, rawInput.expectedWorkspaceHash, current.runId);
           if (locked.resolved.digest !== current.resolved.digest) throw new Error("Checkpoint digest changed before request publication");
-          const active = lockedState.requestOrder.map((id) => lockedState.requests[id]).find((request) => request.runId === current.runId && request.checkpointId === checkpointId && !request.decision);
-          if (active) throw new Error("Checkpoint request state changed before publication");
+          const active = lockedState.requestOrder.map((id) => lockedState.requests[id]).find((request) => request.runId === current.runId && request.checkpointId === checkpointId && request.digest === locked.resolved.digest && !request.decision);
+          if (active) throw new Error("Checkpoint exact-digest request state changed before publication");
         });
       } catch (error) {
         const replayed = this.restore().operations[operationId];

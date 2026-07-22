@@ -12,6 +12,7 @@ import {
 } from "./contracts";
 import { isPackageArtifactCaller, type PackageArtifactCallerContext } from "./internal/caller";
 import { isArtifactHash, type ArtifactWorkspaceHashesV1 } from "./hashes";
+import { providerArtifactArgumentContract } from "./action-contracts";
 import type { WorkspaceLeaseRuntime } from "./leases";
 import { recoverArtifactOperation, type ArtifactOperationRuntime } from "./operations";
 import type {
@@ -56,6 +57,17 @@ export class ArtifactFacadeError extends Error {
 }
 
 export type ArtifactMutationQueue = <T>(target: string, operationId: string, callback: () => T | Promise<T>) => Promise<T>;
+
+function removeUntrustedNotAppliedClaim(error: unknown): unknown {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return error;
+  const detail = error as { effectNotApplied?: unknown };
+  if (detail.effectNotApplied !== true) return error;
+  try { delete detail.effectNotApplied; } catch { /* wrap immutable provider/adapter failures below */ }
+  if (detail.effectNotApplied !== true) return error;
+  return Object.assign(new Error(String(error instanceof Error ? error.message : error), { cause: error }), {
+    name: error instanceof Error ? error.name : "ArtifactActionUncertainError",
+  });
+}
 export interface ArtifactWorkspaceAuthority {
   readonly readHashes: () => ArtifactWorkspaceHashesV1;
   readonly lease: WorkspaceLeaseRuntime;
@@ -177,7 +189,22 @@ function validateView(view: unknown, adapter: ArtifactAdapter, profile: Artifact
   const cursorMatches = request.cursor === undefined ? view.page.cursor === undefined : view.page.cursor === request.cursor;
   if (view.page.limit !== request.limit || !cursorMatches || (view.page.nextCursor !== undefined && !validCursor(view.page.nextCursor))) throw new ArtifactFacadeError("VIEW_INVALID", "Artifact status pagination is invalid");
   validateRefs(view.refs, "VIEW_INVALID");
-  return Object.freeze(structuredClone(view)) as unknown as ArtifactStatusViewV1;
+  let enriched: ArtifactStatusViewV1;
+  try {
+    const cloned = structuredClone(view) as unknown as ArtifactStatusViewV1;
+    enriched = Object.freeze({
+      ...cloned,
+      actions: Object.freeze(cloned.actions.map((actionView) => {
+        const action = profile.actions.find((candidate) => candidate.id === actionView.id)!;
+        return Object.freeze({ ...actionView, ...providerArtifactArgumentContract(action.argumentsSchemaVersion, action.argumentsSchema) });
+      })),
+    });
+    boundJson(enriched, "Artifact status view with action contracts", ARTIFACT_CONTRACT_LIMITS.viewBytes, "VIEW_LIMIT_EXCEEDED");
+  } catch (error) {
+    if (error instanceof ArtifactFacadeError) throw error;
+    throw new ArtifactFacadeError("VIEW_LIMIT_EXCEEDED", String(error instanceof Error ? error.message : error));
+  }
+  return enriched;
 }
 function validateResult(result: unknown, actionId: string, operationId: string): ArtifactActionResultV1 {
   boundJson(result, "Artifact action result", ARTIFACT_CONTRACT_LIMITS.resultBytes, "RESULT_LIMIT_EXCEEDED");
@@ -334,28 +361,45 @@ export class ArtifactFacade {
     readonly signal?: AbortSignal;
     readonly verifyEvidence?: (references: readonly ArtifactEvidenceReferenceV1[]) => readonly VerifiedArtifactEvidenceV1[];
   }): Promise<ArtifactActionResultV1> {
-    const caller = requireCaller(rawCaller, this.binding);
-    requireTool(caller, "artifact_action");
-    if (!plainRecord(rawRequest)) throw new ArtifactFacadeError("REQUEST_INVALID", "Artifact action request must be an object");
-    exactDto(rawRequest, ["actionId", "arguments"], ["expectedWorkspaceHash"], "REQUEST_INVALID", "Artifact action request");
-    const actionId = validateId(rawRequest.actionId, "Artifact action ID");
-    const action = this.profile.actions.find((candidate) => candidate.id === actionId);
-    if (!action || !this.binding.actionIds.includes(actionId) || !this.adapter.executeAction) throw new ArtifactFacadeError("ACTION_UNKNOWN", `Artifact action ${actionId} is not supported by the active profile`);
-    if (!plainRecord(rawRequest.arguments)) throw new ArtifactFacadeError("ARGUMENTS_INVALID", "Artifact action arguments must be an object");
-    try { boundedJson(rawRequest.arguments, "Artifact action arguments", { bytes: ARTIFACT_CONTRACT_LIMITS.argumentsBytes, depth: ARTIFACT_CONTRACT_LIMITS.jsonDepth, nodes: ARTIFACT_CONTRACT_LIMITS.jsonNodes, rootRecord: true }); }
-    catch (error) { throw new ArtifactFacadeError("ARGUMENTS_INVALID", String(error instanceof Error ? error.message : error)); }
-    if (containsWorkspaceSpoof(rawRequest.arguments) || !Value.Check(action.argumentsSchema, rawRequest.arguments)) throw new ArtifactFacadeError("ARGUMENTS_INVALID", "Artifact action arguments contain unknown, invalid, or workspace-spoofing fields");
-    for (const capability of action.requiredCapabilities) requireCapability(caller, capability);
-    const operationId = validateId(execution?.attemptId, "Artifact operation/attempt ID", "ATTEMPT_INVALID");
-    const physicalMutation = action.mutability === "mutating" && this.binding.workspace.kind === "physical";
+    let caller!: PackageArtifactCallerContext;
+    let action!: ArtifactRuntimeProfile["actions"][number];
+    let actionId!: string;
+    let operationId!: string;
+    let physicalMutation = false;
+    try {
+      caller = requireCaller(rawCaller, this.binding);
+      requireTool(caller, "artifact_action");
+      if (!plainRecord(rawRequest)) throw new ArtifactFacadeError("REQUEST_INVALID", "Artifact action request must be an object");
+      exactDto(rawRequest, ["actionId", "arguments"], ["expectedWorkspaceHash"], "REQUEST_INVALID", "Artifact action request");
+      actionId = validateId(rawRequest.actionId, "Artifact action ID");
+      const selected = this.profile.actions.find((candidate) => candidate.id === actionId);
+      if (!selected || !this.binding.actionIds.includes(actionId) || !this.adapter.executeAction) throw new ArtifactFacadeError("ACTION_UNKNOWN", `Artifact action ${actionId} is not supported by the active profile`);
+      action = selected;
+      if (!plainRecord(rawRequest.arguments)) throw new ArtifactFacadeError("ARGUMENTS_INVALID", "Artifact action arguments must be an object");
+      try { boundedJson(rawRequest.arguments, "Artifact action arguments", { bytes: ARTIFACT_CONTRACT_LIMITS.argumentsBytes, depth: ARTIFACT_CONTRACT_LIMITS.jsonDepth, nodes: ARTIFACT_CONTRACT_LIMITS.jsonNodes, rootRecord: true }); }
+      catch (error) { throw new ArtifactFacadeError("ARGUMENTS_INVALID", String(error instanceof Error ? error.message : error)); }
+      if (containsWorkspaceSpoof(rawRequest.arguments) || !Value.Check(action.argumentsSchema, rawRequest.arguments)) throw new ArtifactFacadeError("ARGUMENTS_INVALID", "Artifact action arguments contain unknown, invalid, or workspace-spoofing fields");
+      for (const capability of action.requiredCapabilities) requireCapability(caller, capability);
+      operationId = validateId(execution?.attemptId, "Artifact operation/attempt ID", "ATTEMPT_INVALID");
+      physicalMutation = action.mutability === "mutating" && this.binding.workspace.kind === "physical";
+    } catch (error) {
+      const conclusivelyPreEffect = error instanceof ArtifactFacadeError && new Set<ArtifactFacadeErrorCode>([
+        "UNTRUSTED_CALLER", "CAPABILITY_DENIED", "REQUEST_INVALID", "ACTION_UNKNOWN", "ARGUMENTS_INVALID",
+        "WORKSPACE_MISMATCH", "ATTEMPT_INVALID", "EXPECTED_HASH_REQUIRED",
+      ]).has(error.code);
+      if (conclusivelyPreEffect) Object.assign(error, { effectNotApplied: true });
+      throw error;
+    }
     if (physicalMutation && !this.workspaceAuthority) throw new ArtifactFacadeError("WORKSPACE_AUTHORITY_REQUIRED", "Every physical mutating artifact action requires workspace authority");
     if (action.mutability === "mutating" && (!this.mutationQueue || !this.binding.path || !this.binding.workspaceHash)) throw new ArtifactFacadeError("MUTATION_QUEUE_REQUIRED", "Mutating artifact actions require a trusted workspace path/hash and Pi mutation queue");
+    if (physicalMutation && !isArtifactHash(rawRequest.expectedWorkspaceHash)) {
+      throw Object.assign(new ArtifactFacadeError("EXPECTED_HASH_REQUIRED", "Mutating artifact action requires the current reader workspace hash"), { effectNotApplied: true });
+    }
     if (physicalMutation) {
       const authority = this.workspaceAuthority!;
-      if (!isArtifactHash(rawRequest.expectedWorkspaceHash)) throw new ArtifactFacadeError("EXPECTED_HASH_REQUIRED", "Mutating artifact action requires the current reader workspace hash");
       const existing = authority.operations.restore().operations[operationId];
       if (existing) {
-        const replay = authority.operations.begin({ operationId, actionId, arguments: rawRequest.arguments, expectedWorkspaceHash: rawRequest.expectedWorkspaceHash });
+        const replay = authority.operations.begin({ operationId, actionId, arguments: rawRequest.arguments, expectedWorkspaceHash: String(rawRequest.expectedWorkspaceHash) });
         if (replay.state === "completed") return replay.result;
         const lease = authority.lease.acquire();
         if (!lease.ok) throw new ArtifactFacadeError("WRITER_LEASE_CONFLICT", lease.reason);
@@ -459,15 +503,14 @@ export class ArtifactFacade {
     if (failure !== undefined) {
       if (physicalMutation) {
         try {
-          const recovery = this.recoverOperation(operationId);
-          if (recovery.state === "not-applied" && failure && (typeof failure === "object" || typeof failure === "function")) Object.assign(failure, { effectNotApplied: true });
+          this.recoverOperation(operationId);
         } catch (recoveryError) {
           this.workspaceAuthority!.operations.markUnknown(operationId, `Artifact operation recovery failed: ${String(recoveryError instanceof Error ? recoveryError.message : recoveryError)}`);
         }
       }
-      throw failure;
+      throw removeUntrustedNotAppliedClaim(failure);
     }
-    if (adapterExecution.status === "rejected") throw adapterExecution.reason;
+    if (adapterExecution.status === "rejected") throw removeUntrustedNotAppliedClaim(adapterExecution.reason);
     if (adapterExecution.result.changed && queued === 0) throw new ArtifactFacadeError("MUTATION_QUEUE_REQUIRED", "Artifact action reported mutation without using the trusted mutation queue");
     if (physicalMutation) {
       const authority = this.workspaceAuthority!;

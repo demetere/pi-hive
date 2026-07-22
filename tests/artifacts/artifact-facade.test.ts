@@ -37,7 +37,7 @@ const action = Object.freeze({
   id: "update-title",
   label: "Update title",
   argumentsSchemaVersion: "1" as const,
-  argumentsSchema: Type.Object({ title: Type.String({ minLength: 1, maxLength: 128 }) }, strict),
+  argumentsSchema: Type.Object({ title: Type.String({ minLength: 1, maxLength: 128, description: "authority-secret must not cross the provider DTO" }) }, strict),
   requiredCapabilities: Object.freeze(["write"] as const),
   completion: "mandatory" as const,
   mutability: "mutating" as const,
@@ -158,15 +158,21 @@ test("package caller issuer rejects absent or untrusted authority and revokes wi
 
 test("facade requires minted caller authority, exact profile action, closed bounded arguments, and trusted workspace state", async () => {
   const facade = new ArtifactFacade({ adapter: adapter(async (context) => result(context.operationId)), profile, binding });
-  await assert.rejects(() => facade.action({} as any, { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), (error) => code(error, "UNTRUSTED_CALLER"));
-  await assert.rejects(() => facade.action(caller(["read"]), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), (error) => code(error, "CAPABILITY_DENIED"));
-  await assert.rejects(() => facade.action(caller(["write"], binding, ["artifact_status"]), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), (error) => code(error, "UNTRUSTED_CALLER"));
-  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "missing", arguments: {} }, { attemptId: "attempt-1" }), (error) => code(error, "ACTION_UNKNOWN"));
-  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x", extra: true } }, { attemptId: "attempt-1" }), (error) => code(error, "ARGUMENTS_INVALID"));
-  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x" }, workspaceId: "spoof" } as any, { attemptId: "attempt-1" }), (error) => code(error, "REQUEST_INVALID"));
-  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x", workspacePath: "/spoof" } } as any, { attemptId: "attempt-1" }), (error) => code(error, "ARGUMENTS_INVALID"));
-  await assert.rejects(() => facade.action(caller(["write"], { ...binding, workspace: { id: "spoof", kind: "physical" } }), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), (error) => code(error, "WORKSPACE_MISMATCH"));
-  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x".repeat(ARTIFACT_CONTRACT_LIMITS.argumentsBytes + 1) } }, { attemptId: "attempt-1" }), (error) => code(error, "ARGUMENTS_INVALID"));
+  const preEffect = (expected: string) => (error: unknown): boolean => code(error, expected) && (error as { effectNotApplied?: unknown }).effectNotApplied === true;
+  await assert.rejects(() => facade.action({} as any, { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), preEffect("UNTRUSTED_CALLER"));
+  await assert.rejects(() => facade.action(caller(["read"]), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), preEffect("CAPABILITY_DENIED"));
+  await assert.rejects(() => facade.action(caller(["write"], binding, ["artifact_status"]), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), preEffect("UNTRUSTED_CALLER"));
+  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "missing", arguments: {} }, { attemptId: "attempt-1" }), preEffect("ACTION_UNKNOWN"));
+  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x", extra: true } }, { attemptId: "attempt-1" }), preEffect("ARGUMENTS_INVALID"));
+  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x" }, workspaceId: "spoof" } as any, { attemptId: "attempt-1" }), preEffect("REQUEST_INVALID"));
+  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x", workspacePath: "/spoof" } } as any, { attemptId: "attempt-1" }), preEffect("ARGUMENTS_INVALID"));
+  await assert.rejects(() => facade.action(caller(["write"], { ...binding, workspace: { id: "spoof", kind: "physical" } }), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "attempt-1" }), preEffect("WORKSPACE_MISMATCH"));
+  await assert.rejects(() => facade.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x".repeat(ARTIFACT_CONTRACT_LIMITS.argumentsBytes + 1) } }, { attemptId: "attempt-1" }), preEffect("ARGUMENTS_INVALID"));
+
+  const authority = workspaceAuthority();
+  const physical = new ArtifactFacade({ adapter: adapter(async (context) => result(context.operationId)), profile, binding, mutationQueue: async (_target, _operationId, callback) => callback(), workspaceAuthority: authority });
+  await assert.rejects(() => physical.action(caller(["write"]), { actionId: "update-title", arguments: { title: "x" } }, { attemptId: "missing-hash" }), preEffect("EXPECTED_HASH_REQUIRED"));
+  assert.equal(authority.operations.restore().operations["missing-hash"], undefined, "pre-effect rejection must precede artifact operation intent");
 });
 
 test("mutating actions receive the W13 attempt as operation ID and can mutate only through the bounded workspace queue", async () => {
@@ -245,8 +251,9 @@ test("facade awaits every queued mutation and propagates failures in enqueue ord
   assert.equal(actionSettled, false, "an early rejection must not skip settlement of another queued mutation");
 
   releaseSecond();
-  await assert.rejects(actionPromise, (error) => error === firstFailure);
+  await assert.rejects(actionPromise, (error) => error === firstFailure && (error as { effectNotApplied?: unknown }).effectNotApplied !== true);
   assert.deepEqual(settled, ["first", "second"]);
+  assert.ok(workspaceAuthority().operations.restore().operations["attempt-queued"], "queued mutation failure occurs after artifact operation intent");
 });
 
 test("facade boundary validators fail closed for malformed pages, attempts, mutation targets, and adapter DTOs", async () => {
@@ -340,6 +347,22 @@ test("facade validates bounded standard status/action views and explicit paginat
   const view = await good.status(caller(["read"]), { limit: 5 });
   assert.equal(view.page.limit, 5);
   assert.equal(view.workspace.id, binding.workspace.id);
+  assert.equal(JSON.stringify(view).includes("authority-secret"), false, "schema annotations and authority metadata must be sanitized");
+  assert.deepEqual(view.actions[0], {
+    id: "update-title",
+    label: "Update title",
+    available: true,
+    argumentsSchemaVersion: "1",
+    argumentsSchema: {
+      type: "object",
+      required: ["title"],
+      properties: { title: { type: "string", minLength: 1, maxLength: 128 } },
+      additionalProperties: false,
+    },
+    required: ["title"],
+    optional: [],
+    variants: [{ required: ["title"], optional: [] }],
+  });
 
   const oversizedAdapter = adapter(async (context) => result(context.operationId, false, "x".repeat(ARTIFACT_CONTRACT_LIMITS.resultBytes + 1)));
   const oversized = new ArtifactFacade({ adapter: oversizedAdapter, profile, binding, mutationQueue: async (_target, _operationId, callback) => callback(), workspaceAuthority: workspaceAuthority() });

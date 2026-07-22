@@ -57,6 +57,7 @@ import {
   attemptDescriptorFromCommandMetadata,
   attemptDescriptorFromTrustedTool,
   executeWithConservativeRetry,
+  hashAttemptInput,
   type AttemptConsumerReceiptBinding,
   type TrustedAttemptDescriptor,
 } from "./attempts";
@@ -84,13 +85,29 @@ import { ArtifactFacade, type ArtifactMutationQueue, type ArtifactOperationRecov
 import { hashArtifactWorkspace } from "../artifacts/hashes";
 import { WorkspaceLeaseRuntime, type WorkspaceLeaseRuntimeOptions } from "../artifacts/leases";
 import { ArtifactOperationRuntime, type ArtifactOperationRuntimeOptions } from "../artifacts/operations";
-import { bindPhysicalArtifactWorkspace, listPhysicalArtifactWorkspaces, type PhysicalWorkspaceSelection } from "../artifacts/workspaces";
+import {
+  ARTIFACT_WORKSPACE_BIND_ACTION_ID,
+  bindPhysicalArtifactWorkspace,
+  listPhysicalArtifactWorkspaces,
+  parseArtifactWorkspaceBindArguments,
+  unboundArtifactWorkspaceStatus,
+  type PhysicalWorkspaceSelection,
+} from "../artifacts/workspaces";
 import { createRunOrchestrationArtifactCallerIssuer, type RunOrchestrationArtifactCallerIssuer } from "../artifacts/internal/caller";
-import type { ArtifactEvidenceReferenceV1, ArtifactWorkspaceBinding, VerifiedArtifactEvidenceV1 } from "../artifacts/types";
+import type { ArtifactActionResultV1, ArtifactEvidenceReferenceV1, ArtifactStatusViewV1, ArtifactWorkspaceBinding, VerifiedArtifactEvidenceV1 } from "../artifacts/types";
+import { ARTIFACT_ACTION_VERSION } from "../artifacts/contracts";
 import { heartbeatCurrentRuntimeOwnership } from "./ownership";
 import { registerLiveWorkflowCancellationAuthority } from "./live-cancellation";
 import { resolveContainedPath } from "../core/safe-path";
-import { CheckpointApprovalService, type CheckpointApprovalServiceOptions } from "../artifacts/approvals";
+import {
+  CHECKPOINT_APPROVAL_LIMITS,
+  CHECKPOINT_REQUEST_ACTION_ID,
+  CheckpointApprovalService,
+  checkpointRequestProviderContract,
+  parseCheckpointRequestActionArguments,
+  type CheckpointApprovalRequestRecord,
+  type CheckpointApprovalServiceOptions,
+} from "../artifacts/approvals";
 import { resolveCheckpointDigest, type CheckpointPolicy } from "../artifacts/checkpoints";
 import { QuestionService, deriveQuestionRunStatus, type AcceptedQuestionForRoot, type QuestionControlAuthenticationRequest, type QuestionPresenter, type RootQuestionAnswerDelivery } from "./questions";
 import { QUESTION_LIMITS } from "./question-validation";
@@ -190,6 +207,7 @@ interface RunResources {
 }
 interface DispatchResources extends Pick<RunResources, "budgets" | "attempts" | "changes"> {
   readonly assertAdmission: () => void;
+  readonly assertWaitingForHumanAdmission: () => void;
   readonly pauseUnknown: (reason: string) => void;
   readonly blockRunBudget: (nodeId: string, reason: string) => void;
   readonly canTerminalizeRunBudget: () => boolean;
@@ -265,11 +283,12 @@ function responseUsage(value: string | WorkerPromptResponse, inputText: string):
 function budgetError(reason: string, exhausted: readonly string[], scope: "node" | "run"): Error {
   return Object.assign(new Error(reason), { policyDenied: true, effectNotApplied: true, budgetExhausted: [...exhausted], budgetScope: scope });
 }
-const defaultKnowledgeMutationQueue: KnowledgeMutationQueue = async (canonicalPath, _operationId, callback) => {
+const defaultArtifactMutationQueue: ArtifactMutationQueue = async (canonicalPath, _operationId, callback) => {
   // Keep the Pi dependency lazy so core policy/schema imports remain runtime-neutral.
   const { withFileMutationQueue } = await import("@earendil-works/pi-coding-agent");
   return withFileMutationQueue(canonicalPath, async () => callback());
 };
+const defaultKnowledgeMutationQueue: KnowledgeMutationQueue = defaultArtifactMutationQueue;
 
 export class RunOrchestrationService {
   readonly lifecycle: WorkflowRunLifecycle;
@@ -500,6 +519,174 @@ export class RunOrchestrationService {
     return Object.freeze({ binding: String(artifact.binding ?? ""), options });
   }
 
+  private artifactMutationQueue(): ArtifactMutationQueue {
+    return this.options.artifactMutationQueue ?? defaultArtifactMutationQueue;
+  }
+
+  private artifactCapabilitiesForNode(nodeId: string): readonly string[] {
+    const authority = this.options.snapshot.payload.authority.nodes.find((entry) => entry.nodeId === nodeId);
+    const capabilities = record(authority?.capabilities) && record(authority.capabilities.effective)
+      ? authority.capabilities.effective.artifact
+      : record(authority?.capabilities) ? authority.capabilities.artifact : undefined;
+    return Array.isArray(capabilities) ? capabilities.filter((entry): entry is string => typeof entry === "string") : Object.freeze([]);
+  }
+
+  private workspaceBindResult(attemptId: string, binding: ArtifactWorkspaceBinding): ArtifactActionResultV1 {
+    return Object.freeze({
+      schemaVersion: ARTIFACT_ACTION_VERSION,
+      operationId: attemptId,
+      actionId: ARTIFACT_WORKSPACE_BIND_ACTION_ID,
+      status: "completed",
+      summary: `Bound exact ${binding.selection} artifact workspace ${binding.workspace.id}.`,
+      changed: true,
+      ...(binding.workspaceHash ? { workspaceHash: binding.workspaceHash } : {}),
+      data: Object.freeze({
+        configuredBinding: binding.binding,
+        selection: binding.selection!,
+        workspace: Object.freeze({ id: binding.workspace.id, kind: binding.workspace.kind }),
+        next: Object.freeze({ tool: "artifact_status" }),
+      }),
+      refs: Object.freeze([]),
+    });
+  }
+
+  private checkpointRequestResult(attemptId: string, request: CheckpointApprovalRequestRecord): ArtifactActionResultV1 {
+    return Object.freeze({
+      schemaVersion: ARTIFACT_ACTION_VERSION,
+      operationId: attemptId,
+      actionId: CHECKPOINT_REQUEST_ACTION_ID,
+      status: "completed",
+      summary: `Human approval request ${request.requestId} is pending for checkpoint ${request.checkpointId}.`,
+      changed: true,
+      workspaceHash: request.requestWorkspaceHash,
+      data: Object.freeze({
+        requestId: request.requestId,
+        checkpointId: request.checkpointId,
+        digest: request.digest,
+        requestSequence: request.requestSequence,
+        state: "pending",
+      }),
+      refs: Object.freeze([{ id: request.checkpointId, kind: "checkpoint", digest: request.digest }]),
+    });
+  }
+
+  private artifactStatusWithHarnessActions(nodeId: string, view: ArtifactStatusViewV1): ArtifactStatusViewV1 & Readonly<{ harnessActions?: readonly unknown[]; checkpointRequests?: unknown }> {
+    if (nodeId !== rootNodeId(this.options.snapshot) || view.workspace.kind !== "physical" || !this.checkpointApprovals) return view;
+    const run = this.lifecycle.restore().latestRun;
+    const binding = run?.artifactWorkspace;
+    const snapshot = run?.checkpointSnapshot;
+    if (!run || !isOpenRunStatus(run.status) || !binding || binding.workspace.kind !== "physical" || !snapshot) return view;
+    const eligible = view.checkpoints.filter((checkpoint) => binding.checkpointIds.includes(checkpoint.id) && snapshot.enabledCheckpointIds.includes(checkpoint.id));
+    if (!eligible.length) return view;
+    const approvalState = this.checkpointApprovals.restore();
+    let remainingIds = CHECKPOINT_APPROVAL_LIMITS.statusPendingIds;
+    let totalPending = 0;
+    const items = eligible.slice(0, CHECKPOINT_APPROVAL_LIMITS.statusCheckpointItems).map((checkpoint) => {
+      const requests = approvalState.requestOrder.map((id) => approvalState.requests[id])
+        .filter((request) => request.runId === run.runId && request.checkpointId === checkpoint.id);
+      const pending = requests.filter((request) => !request.decision);
+      totalPending += pending.length;
+      const pendingRequestIds = pending.slice(0, remainingIds).map((request) => request.requestId);
+      remainingIds -= pendingRequestIds.length;
+      const exact = "digest" in checkpoint ? requests.find((request) => request.digest === checkpoint.digest) : undefined;
+      const requestable = checkpoint.state === "ready" && !exact?.decision;
+      const reason = checkpoint.state !== "ready"
+        ? "Checkpoint is not ready for an exact-digest request."
+        : exact?.decision?.decision === "approved"
+          ? "The exact current digest is already approved."
+          : exact?.decision?.decision === "denied"
+            ? "The exact current digest was denied; revise the checkpoint before requesting again."
+            : undefined;
+      return Object.freeze({
+        checkpointId: checkpoint.id,
+        state: checkpoint.state,
+        ...(checkpoint.digest ? { digest: checkpoint.digest } : {}),
+        requestable,
+        pendingRequestCount: pending.length,
+        pendingRequestIds: Object.freeze(pendingRequestIds),
+        ...(pendingRequestIds.length < pending.length ? { pendingRequestIdsTruncated: true } : {}),
+        ...(reason ? { reason } : {}),
+      });
+    });
+    const requestableCheckpointIds = items.filter((item) => item.requestable).map((item) => item.checkpointId);
+    return Object.freeze({
+      ...view,
+      harnessActions: Object.freeze([Object.freeze({
+        id: CHECKPOINT_REQUEST_ACTION_ID,
+        label: "Request human checkpoint approval",
+        available: requestableCheckpointIds.length > 0,
+        ...checkpointRequestProviderContract(requestableCheckpointIds),
+        checkpointIds: Object.freeze(requestableCheckpointIds),
+      })]),
+      checkpointRequests: Object.freeze({
+        items: Object.freeze(items),
+        total: eligible.length,
+        itemsTruncated: items.length < eligible.length,
+        pendingRequestCount: totalPending,
+        pendingRequestIdsTruncated: totalPending > CHECKPOINT_APPROVAL_LIMITS.statusPendingIds,
+      }),
+    });
+  }
+
+  private async requestCheckpointFromTool(nodeId: string, input: Readonly<{ actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }>, attemptId: string, signal?: AbortSignal): Promise<ArtifactActionResultV1> {
+    const failNotApplied = (message: string): never => { throw Object.assign(new Error(message), { effectNotApplied: true }); };
+    if (nodeId !== rootNodeId(this.options.snapshot)) return failNotApplied("checkpoint-request is root-only harness authority");
+    if (input.expectedWorkspaceHash !== undefined) return failNotApplied("checkpoint-request does not accept expectedWorkspaceHash; the harness derives the exact current hash");
+    let requestArguments;
+    try { requestArguments = parseCheckpointRequestActionArguments(input.arguments); }
+    catch (error) { return failNotApplied(String(error instanceof Error ? error.message : error)); }
+    const run = this.lifecycle.restore().latestRun;
+    const binding = run?.artifactWorkspace;
+    if (!run || !isOpenRunStatus(run.status) || !binding || binding.workspace.kind !== "physical" || !binding.path) return failNotApplied("checkpoint-request requires the current open run and a bound physical workspace");
+    if (!this.checkpointApprovals || !run.checkpointSnapshot) return failNotApplied("checkpoint-request requires a frozen human checkpoint policy");
+    if (!binding.checkpointIds.includes(requestArguments.checkpointId)) return failNotApplied(`Checkpoint ${requestArguments.checkpointId} is not published by the bound adapter profile`);
+    if (!run.checkpointSnapshot.enabledCheckpointIds.includes(requestArguments.checkpointId)) return failNotApplied(`Checkpoint ${requestArguments.checkpointId} is disabled for this frozen run and has no human gate`);
+    const authority = this.workspaceAuthority(binding, run.runId);
+    if (!authority) return failNotApplied("checkpoint-request requires physical workspace authority");
+    const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter, profile: this.selectedArtifact!.profile, binding, mutationQueue: this.artifactMutationQueue(), workspaceAuthority: authority });
+    const caller = this.artifactCallerIssuer!.issue(nodeId, binding);
+    const view = await facade.status(caller, { limit: 1 }, { ...(signal ? { signal } : {}) });
+    const checkpoint = view.checkpoints.find((candidate) => candidate.id === requestArguments.checkpointId);
+    if (!checkpoint || checkpoint.state !== "ready" || !checkpoint.digest) return failNotApplied(`Checkpoint ${requestArguments.checkpointId} is not ready for an exact-digest approval request`);
+    const approvalState = this.checkpointApprovals.restore();
+    const prior = approvalState.requestOrder.map((id) => approvalState.requests[id])
+      .find((request) => request.runId === run.runId && request.checkpointId === requestArguments.checkpointId && request.digest === checkpoint.digest);
+    if (prior?.decision) return failNotApplied(prior.decision.decision === "approved"
+      ? `Checkpoint ${requestArguments.checkpointId} exact current digest is already approved`
+      : `Checkpoint ${requestArguments.checkpointId} exact current digest was denied; revise it before requesting again`);
+    const expectedWorkspaceHash = authority.readHashes().workspaceHash;
+    try {
+      const request = await this.checkpointApprovals.requestApproval({ operationId: attemptId, checkpointId: requestArguments.checkpointId, expectedWorkspaceHash });
+      if (request.digest !== checkpoint.digest || request.requestWorkspaceHash !== expectedWorkspaceHash || request.decision) {
+        throw new Error("checkpoint-request publication does not match the exact current pending request identity");
+      }
+      return this.checkpointRequestResult(attemptId, request);
+    } catch (error) {
+      const operation = this.checkpointApprovals.restore().operations[attemptId];
+      if (!operation && error && (typeof error === "object" || typeof error === "function")) Object.assign(error, { effectNotApplied: true });
+      throw error;
+    }
+  }
+
+  private unboundArtifactStatus(input: Readonly<{ limit?: number; cursor?: string }>) {
+    if (!this.selectedArtifact?.adapter || this.selectedArtifact.profile.adapterId === "none") throw new Error("Active artifact profile has no unbound physical workspace discovery");
+    const run = this.lifecycle.restore().latestRun;
+    if (!run || !isOpenRunStatus(run.status) || run.artifactWorkspace) throw new Error("Unbound artifact discovery requires a current unbound run");
+    const handoff = run.handoffPacketHash ? handoffForRun(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), run.runId) : undefined;
+    if (run.handoffPacketHash && handoff?.packetHash !== run.handoffPacketHash) throw new Error("Consumed handoff packet is missing or does not match the run marker");
+    const configured = this.artifactSelection();
+    return unboundArtifactWorkspaceStatus({
+      projectRoot: this.options.projectRoot,
+      adapter: this.selectedArtifact.adapter,
+      profile: this.selectedArtifact.profile,
+      configuredBinding: configured.binding as never,
+      options: configured.options,
+      limit: input.limit ?? 20,
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      handoffWorkspaceIds: Object.freeze([...new Set((handoff?.artifactRefs ?? []).map((reference) => reference.workspaceId))].sort()),
+    });
+  }
+
   listArtifactWorkspaces(input: Readonly<{ limit: number; cursor?: string }>) {
     if (!this.selectedArtifact?.adapter || this.selectedArtifact.profile.adapterId === "none") throw new Error("Active artifact profile has no physical workspace listing");
     return listPhysicalArtifactWorkspaces({
@@ -508,12 +695,13 @@ export class RunOrchestrationService {
     });
   }
 
-  bindArtifactWorkspace(selection: PhysicalWorkspaceSelection, handoffWorkspaceId?: string) {
+  bindArtifactWorkspace(selection: PhysicalWorkspaceSelection, handoffWorkspaceId?: string, execution?: Readonly<{ attemptId: string; input: unknown }>) {
     if (!this.selectedArtifact?.adapter || this.selectedArtifact.profile.adapterId === "none") throw new Error("Active artifact profile has no physical workspace binding");
     const run = this.lifecycle.restore().latestRun;
     if (!run || !isOpenRunStatus(run.status)) throw new Error("Artifact workspace binding requires a current open run");
     if (run.artifactWorkspace) throw new Error("Artifact workspace is already bound; rebinding is denied");
     const handoff = run.handoffPacketHash ? handoffForRun(readWorkflowJournal(this.options.projectRoot, this.options.sessionId), run.runId) : undefined;
+    if (run.handoffPacketHash && handoff?.packetHash !== run.handoffPacketHash) throw new Error("Consumed handoff packet is missing or does not match the run marker");
     let handoffReference: ArtifactReference | undefined;
     if (handoffWorkspaceId !== undefined) {
       if (!handoff || handoffWorkspaceId !== selection.workspaceId) throw new Error("Requested handoff artifact reference is not attached to this run");
@@ -531,10 +719,68 @@ export class RunOrchestrationService {
       const workspacePath = relative(this.options.projectRoot, binding.path).split("\\").join("/");
       const changes = this.changeAccountingFor(run.runId);
       hashArtifactWorkspace(binding.path).entries.filter((entry) => entry.kind === "file").forEach((entry, index) => {
-        changes.recordTrustedCreation(`${run.runId}:artifact-bind:${index + 1}`, `${workspacePath}/${entry.path}`);
+        const prefix = execution?.attemptId ?? `${run.runId}:artifact-bind`;
+        changes.recordTrustedCreation(`${prefix}:create:${index + 1}`, `${workspacePath}/${entry.path}`);
       });
     }
-    return this.lifecycle.bindArtifactWorkspace(binding);
+    const result = execution ? this.workspaceBindResult(execution.attemptId, binding) : undefined;
+    const bound = this.lifecycle.bindArtifactWorkspace(binding, result ? {
+      attemptId: execution!.attemptId,
+      actionId: ARTIFACT_WORKSPACE_BIND_ACTION_ID,
+      attemptInputHash: hashAttemptInput(execution!.input),
+      result: result as unknown as JsonValue,
+    } : undefined);
+    if (selection.mode === "new") {
+      const lease = this.workspaceAuthority(bound, run.runId)!.lease.acquire();
+      if (!lease.ok) throw new Error(`Artifact writer lease conflict during workspace creation: ${lease.reason}`);
+    }
+    return bound;
+  }
+
+  private async bindArtifactWorkspaceFromTool(nodeId: string, input: Readonly<{ actionId: string; arguments: Readonly<Record<string, unknown>>; expectedWorkspaceHash?: string }>, attemptId: string): Promise<ArtifactActionResultV1> {
+    const failNotApplied = (message: string): never => { throw Object.assign(new Error(message), { effectNotApplied: true }); };
+    if (input.actionId !== ARTIFACT_WORKSPACE_BIND_ACTION_ID) return failNotApplied(`Artifact action ${input.actionId} is unavailable until a workspace is bound`);
+    if (input.expectedWorkspaceHash !== undefined) return failNotApplied("workspace-bind does not accept expectedWorkspaceHash");
+    let request;
+    try { request = parseArtifactWorkspaceBindArguments(input.arguments); }
+    catch (error) { return failNotApplied(String(error instanceof Error ? error.message : error)); }
+    const configured = this.artifactSelection();
+    if (configured.binding !== "either" && configured.binding !== request.mode) {
+      return failNotApplied(`Configured artifact binding ${configured.binding} cannot select ${request.mode} mode`);
+    }
+    const capabilities = this.artifactCapabilitiesForNode(nodeId);
+    if (request.mode === "new" && !capabilities.includes("write")) return failNotApplied("workspace-bind new mode requires artifact write capability");
+    if (request.mode === "existing" && !capabilities.some((capability) => capability === "write" || capability === "review")) {
+      return failNotApplied("workspace-bind existing mode requires artifact write or review capability");
+    }
+    const run = this.lifecycle.restore().latestRun;
+    if (!run || !isOpenRunStatus(run.status) || run.runId === undefined) return failNotApplied("workspace-bind requires a current open run");
+    if (run.artifactWorkspace) return failNotApplied("Artifact workspace is already bound; rebinding is denied");
+    let enteredMutationQueue = false;
+    try {
+      const binding = await this.artifactMutationQueue()(this.options.projectRoot, attemptId, () => {
+        enteredMutationQueue = true;
+        if (request.mode === "new") {
+          try {
+            const existing = this.selectedArtifact?.adapter.workspaceLifecycle?.resolve({
+              projectRoot: this.options.projectRoot,
+              profileId: this.selectedArtifact.profile.id,
+              workspaceId: request.workspaceId,
+              options: configured.options,
+            });
+            if (existing) return failNotApplied(`Artifact workspace ${request.workspaceId} already exists; create collision refused`);
+          } catch (error) { return failNotApplied(String(error instanceof Error ? error.message : error)); }
+        }
+        return this.bindArtifactWorkspace(
+          { mode: request.mode, workspaceId: request.workspaceId }, request.handoffWorkspaceId, { attemptId, input },
+        );
+      });
+      return this.workspaceBindResult(attemptId, binding);
+    } catch (error) {
+      if ((!enteredMutationQueue || request.mode === "existing") && !this.lifecycle.restore().latestRun?.artifactWorkspace
+        && error && (typeof error === "object" || typeof error === "function")) Object.assign(error, { effectNotApplied: true });
+      throw error;
+    }
   }
 
   private workspaceAuthority(binding: ArtifactWorkspaceBinding | undefined, runId: string): ArtifactWorkspaceAuthority | undefined {
@@ -601,6 +847,66 @@ export class RunOrchestrationService {
     }));
   }
 
+  private reconcileArtifactWorkspaceBindAttempts(attempts: AttemptRuntime): readonly string[] {
+    const issues: string[] = [];
+    const events = readWorkflowJournal(this.options.projectRoot, this.options.sessionId);
+    const attemptState = attempts.restore();
+    for (const attempt of Object.values(attemptState.attempts)) {
+      if (attempt.result || attempt.operation !== "workflow.tool.artifact_action") continue;
+      const publication = events.find((event) => event.type === "artifact.recorded" && event.runId === attemptState.runId
+        && event.attemptId === attempt.attemptId && event.correlationId === attempt.attemptId
+        && record(event.payload) && event.payload.subsystem === "workspace" && event.payload.operation === "bind");
+      if (!publication || !record(publication.payload) || !record(publication.payload.toolReceipt)) continue;
+      const receipt = publication.payload.toolReceipt;
+      const workspace = publication.payload.workspace;
+      let binding: ArtifactWorkspaceBinding;
+      try {
+        if (!record(workspace)) throw new Error("workspace is absent");
+        binding = this.lifecycle.restore().latestRun?.artifactWorkspace as ArtifactWorkspaceBinding;
+        if (!binding || canonicalJson(binding) !== canonicalJson(workspace)) throw new Error("workspace does not match current run state");
+      } catch (error) {
+        issues.push(`workspace-bind attempt ${attempt.attemptId} publication is invalid: ${String(error instanceof Error ? error.message : error)}`);
+        continue;
+      }
+      const expected = this.workspaceBindResult(attempt.attemptId, binding);
+      if (receipt.attemptId !== attempt.attemptId || receipt.actionId !== ARTIFACT_WORKSPACE_BIND_ACTION_ID
+        || receipt.attemptInputHash !== attempt.inputHash || canonicalJson(receipt.result) !== canonicalJson(expected)) {
+        issues.push(`workspace-bind attempt ${attempt.attemptId} publication does not match its exact input/result identity`);
+        continue;
+      }
+      try { attempts.reconcile(attempt.attemptId, "applied", { ok: true, value: expected as unknown as JsonValue }); }
+      catch (error) { issues.push(`workspace-bind attempt ${attempt.attemptId} reconciliation failed: ${String(error instanceof Error ? error.message : error)}`); }
+    }
+    return Object.freeze(issues);
+  }
+
+  private reconcileCheckpointRequestAttempts(attempts: AttemptRuntime): readonly string[] {
+    if (!this.checkpointApprovals) return Object.freeze([]);
+    const issues: string[] = [];
+    const attemptState = attempts.restore();
+    const approvalState = this.checkpointApprovals.restore();
+    for (const attempt of Object.values(attemptState.attempts)) {
+      if (attempt.result || attempt.operation !== "workflow.tool.artifact_action") continue;
+      const request = Object.values(approvalState.requests).find((candidate) => candidate.operationId === attempt.attemptId);
+      if (!request) continue;
+      const expectedInput = { actionId: CHECKPOINT_REQUEST_ACTION_ID, arguments: { checkpointId: request.checkpointId } };
+      const identityMatches = request.runId === attemptState.runId
+        && attempt.nodeId === rootNodeId(this.options.snapshot)
+        && attempt.descriptor.effect === "artifact" && !attempt.descriptor.readOnly && !attempt.descriptor.idempotent
+        && attempt.inputHash === hashAttemptInput(expectedInput);
+      if (!identityMatches) {
+        issues.push(`checkpoint-request attempt ${attempt.attemptId} does not match its pending request and root W13 identity`);
+        continue;
+      }
+      try {
+        attempts.reconcile(attempt.attemptId, "applied", { ok: true, value: this.checkpointRequestResult(attempt.attemptId, request) as unknown as JsonValue });
+      } catch (error) {
+        issues.push(`checkpoint-request attempt ${attempt.attemptId} reconciliation failed: ${String(error instanceof Error ? error.message : error)}`);
+      }
+    }
+    return Object.freeze(issues);
+  }
+
   private reconcileArtifactAttemptResults(attempts: AttemptRuntime, authority: ArtifactWorkspaceAuthority): readonly string[] {
     const issues: string[] = [];
     const operations = Object.values(authority.operations.restore().operations)
@@ -640,7 +946,7 @@ export class RunOrchestrationService {
     authority.lease.assertOwned();
     return new ArtifactFacade({
       adapter: this.selectedArtifact.adapter, profile: this.selectedArtifact.profile, binding,
-      mutationQueue: this.options.artifactMutationQueue, workspaceAuthority: authority,
+      mutationQueue: this.artifactMutationQueue(), workspaceAuthority: authority,
     }).recoverUnresolvedOperations();
   }
 
@@ -1154,10 +1460,15 @@ export class RunOrchestrationService {
     resources: DispatchResources,
     nodeId: string,
     request: WorkerTrustedToolDispatchRequest<T>,
+    allowWaitingForHuman = false,
   ): Promise<T> {
+    const assertDispatchAdmission = (): void => {
+      if (!allowWaitingForHuman) return resources.assertAdmission();
+      resources.assertWaitingForHumanAdmission();
+    };
     const finishUserWork = await this.beginUserWork();
     try {
-      resources.assertAdmission();
+      assertDispatchAdmission();
       const descriptor = this.toolDescriptor(request.toolName, request.commandMetadata);
       const tool = classifyTrustedTool(request.toolName)!;
       const authority = this.options.snapshot.payload.authority.nodes.find((entry) => entry.nodeId === nodeId);
@@ -1165,7 +1476,7 @@ export class RunOrchestrationService {
       const value = await executeWithConservativeRetry(resources.attempts, {
         correlationId: request.correlationId, nodeId, operation: request.operation, input: request.input, descriptor,
         dispatch: async ({ attemptId, ordinal }) => {
-          resources.assertAdmission();
+          assertDispatchAdmission();
           const admitted = resources.budgets.recordToolAttempt(nodeId, `${request.correlationId}-tool-${ordinal}`, {
             toolName: request.toolName, policyOutcome: request.policyOutcome, finalization: request.finalization,
           });
@@ -1174,7 +1485,7 @@ export class RunOrchestrationService {
             throw Object.assign(new Error(request.denialReason?.slice(0, 2_048) || `Policy denied ${request.toolName}`), { policyDenied: true, effectNotApplied: true });
           }
           const activityId = `${attemptId}-active`;
-          const ownsActivity = !resources.budgets.restore().activeBatches.some((activity) => activity.nodeId === nodeId);
+          const ownsActivity = !allowWaitingForHuman && !resources.budgets.restore().activeBatches.some((activity) => activity.nodeId === nodeId);
           if (ownsActivity) {
             const active = resources.budgets.beginActive(nodeId, activityId);
             if (!active.ok) this.throwBudgetAdmission(resources, nodeId, active);
@@ -1191,7 +1502,9 @@ export class RunOrchestrationService {
             if (recovery) throw recovery;
             return result;
           } finally {
-            if (ownsActivity) resources.budgets.endActive(activityId);
+            // A durable human-wait transition pauses and closes active clocks
+            // before this dispatch unwinds. Do not publish a stale second stop.
+            if (ownsActivity && resources.budgets.restore().activeBatches.some((activity) => activity.activityId === activityId)) resources.budgets.endActive(activityId);
           }
         },
       });
@@ -1257,6 +1570,10 @@ export class RunOrchestrationService {
       }
     }
     const recoveryRun = this.lifecycle.restore().latestRun;
+    if (recoveryRun?.runId === runId && recoveryRun.artifactWorkspace?.workspace.kind === "physical") {
+      recoveryIssues.push(...this.reconcileArtifactWorkspaceBindAttempts(attempts));
+      recoveryIssues.push(...this.reconcileCheckpointRequestAttempts(attempts));
+    }
     if (recoveryRun?.runId === runId && recoveryRun.artifactWorkspace?.workspace.kind === "physical" && this.selectedArtifact?.adapter) {
       try {
         const authority = this.workspaceAuthority(recoveryRun.artifactWorkspace, runId)!;
@@ -1315,6 +1632,14 @@ export class RunOrchestrationService {
     const dispatchResources: DispatchResources = {
       budgets, attempts, changes,
       assertAdmission: assertDispatchAdmission,
+      assertWaitingForHumanAdmission: () => {
+        const run = this.lifecycle.restore().latestRun;
+        const delegation = resources.runtime.restore();
+        if (!run || run.runId !== runId || run.status !== "waiting_for_human" || run.cancellationRequested || run.pendingTerminal || !delegation.admissionOpen) {
+          throw new Error("Human-wait artifact control requires the current waiting recovered workflow run");
+        }
+        this.assertRecoveredForAdmission(resources);
+      },
       pauseUnknown: (reason) => this.pauseForUnknownSideEffect(resources, reason),
       blockRunBudget: (nodeId, reason) => this.blockRunForBudget(resources, nodeId, reason),
       canTerminalizeRunBudget: () => resources.scheduler.activeCount === 0,
@@ -1566,12 +1891,18 @@ export class RunOrchestrationService {
         return value;
       },
       tool: <T>(input: WorkerTrustedToolDispatchRequest<T>) => {
+        const actionInput = record(input.input) ? input.input : undefined;
+        const humanWaitArtifactControl = isRootContext && this.lifecycle.restore().latestRun?.status === "waiting_for_human"
+          && (input.toolName === "artifact_status" || (input.toolName === "artifact_action" && actionInput?.actionId === CHECKPOINT_REQUEST_ACTION_ID));
         if (input.toolName === "human_question" && input.questionBatchCallIds && input.questionBatchCurrentCallId) assertQuestionBatchAdmission(input.questionBatchCurrentCallId, input.questionBatchCallIds);
-        else {
+        else if (humanWaitArtifactControl) {
+          assertCurrent();
+          this.assertRecoveredForAdmission(resources);
+        } else {
           assertAdmission();
           assertRootQuestionAdmission();
         }
-        return this.dispatchTool(resources.dispatchRuntime, context.nodeId, input);
+        return this.dispatchTool(resources.dispatchRuntime, context.nodeId, input, humanWaitArtifactControl);
       },
     });
     const bound: BoundDelegationServices = Object.freeze({
@@ -1625,27 +1956,30 @@ export class RunOrchestrationService {
           artifactStatus: this.selectedArtifact?.adapter ? async (input, signal) => {
             assertCurrent();
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
-            if (!workspace) throw new Error("Artifact status requires a trusted run workspace binding");
+            if (!workspace) return this.unboundArtifactStatus(input);
             const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
-            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.options.artifactMutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
+            const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue: this.artifactMutationQueue(), ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
-            return facade.status(caller, input, { ...(signal ? { signal } : {}) });
+            const view = await facade.status(caller, input, { ...(signal ? { signal } : {}) });
+            return this.artifactStatusWithHarnessActions(context.nodeId, view);
           } : undefined,
           artifactAction: this.selectedArtifact?.adapter ? async (input, attemptId, signal) => {
             assertCurrent();
             const workspace = this.lifecycle.restore().latestRun?.artifactWorkspace;
-            if (!workspace) throw new Error("Artifact action requires a trusted run workspace binding");
+            if (!workspace) return this.bindArtifactWorkspaceFromTool(context.nodeId, input, attemptId);
+            if (input.actionId === ARTIFACT_WORKSPACE_BIND_ACTION_ID) throw Object.assign(new Error("Artifact workspace is already bound; workspace-bind rebinding is denied"), { effectNotApplied: true });
+            if (input.actionId === CHECKPOINT_REQUEST_ACTION_ID) return this.requestCheckpointFromTool(context.nodeId, input, attemptId, signal);
             const workspaceAuthority = this.workspaceAuthority(workspace, resources.runId);
             let mutationOrdinal = 0;
-            const baseMutationQueue = this.options.artifactMutationQueue;
-            const mutationQueue: ArtifactMutationQueue | undefined = baseMutationQueue ? async (target, operationId, callback) => {
+            const baseMutationQueue = this.artifactMutationQueue();
+            const mutationQueue: ArtifactMutationQueue = async (target, operationId, callback) => {
               const relativeTarget = relative(this.options.projectRoot, target).split("\\").join("/");
               if (!relativeTarget || relativeTarget.startsWith("../") || relativeTarget === "..") throw new Error("Artifact mutation accounting target escaped the project");
               const accountingId = `${operationId}:artifact:${++mutationOrdinal}`;
               const recorder = resources.changes.mutationRecorder();
               const intent = recorder.begin(accountingId, relativeTarget);
               try {
-                const result = await baseMutationQueue!(target, operationId, callback);
+                const result = await baseMutationQueue(target, operationId, callback);
                 recorder.complete(intent, relativeTarget);
                 return result;
               } catch (error) {
@@ -1653,7 +1987,7 @@ export class RunOrchestrationService {
                 catch { recorder.notApplied?.(accountingId, relativeTarget, String(error instanceof Error ? error.message : error)); }
                 throw error;
               }
-            } : undefined;
+            };
             const facade = new ArtifactFacade({ adapter: this.selectedArtifact!.adapter!, profile: this.selectedArtifact!.profile, binding: workspace, mutationQueue, ...(workspaceAuthority ? { workspaceAuthority } : {}) });
             const caller = this.artifactCallerIssuer!.issue(context.nodeId, workspace);
             return facade.action(caller, input, {

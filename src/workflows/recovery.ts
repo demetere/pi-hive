@@ -7,10 +7,10 @@ import { validateSnapshotResumeCompatibility, type SnapshotCompatibilityRuntime 
 import { readActivationSnapshot } from "../config/snapshot-store";
 import { type AttemptEffect, type AttemptResult, type AttemptRuntime, type PersistedAttempt } from "./attempts";
 import { deepFreeze, utf8Prefix } from "./values";
-import { createWorkflowEvent, type WorkflowEventEnvelope } from "./events";
+import { createWorkflowEvent, type WorkflowEventDraft, type WorkflowEventEnvelope } from "./events";
 import { appendWorkflowEventChecked, readWorkflowJournal, workflowSessionDirectory, type JournalFaultStage } from "./journal";
-import type { SessionNavigationAdapter } from "./navigation";
-import { acquireRuntimeOwnership, releaseRuntimeOwnership, type AcquireOwnershipOptions } from "./ownership";
+import { isUnprovenSessionRestoration, type SessionNavigationAdapter } from "./navigation";
+import { acquireRuntimeOwnership, settleRuntimeOwnershipRelease, type AcquireOwnershipOptions } from "./ownership";
 import { commitWorkflowRecovery, listSessionLinks, markMissingPiSession, prepareWorkflowRecoveryLink, recordWorkflowRecoveryBlocked, rollbackWorkflowRecovery, sameWorkflowLinkGeneration, workflowLinkGenerationHash, type WorkflowSessionLink } from "./sessions";
 
 export type SideEffectReconciliation =
@@ -257,7 +257,12 @@ function commitRecoverySettlement(input: { projectRoot: string; projectId: strin
   if (recoveredLinkMatches(current, input.prepared, committed)) return current;
   recoveryInvariant(preparedLinkMatches(current, input.prepared, parsed), "Prepared workflow link changed before recovery commit");
   if (!committed) {
-    committed = appendRecoveryCommit({ ...input, preparedLink: current });
+    try { committed = appendRecoveryCommit({ ...input, preparedLink: current }); }
+    catch (error) {
+      events = readWorkflowJournal(input.projectRoot, input.prepared.sessionId);
+      committed = committedFor(events, input.prepared.eventHash);
+      if (!committed) throw error;
+    }
     events = readWorkflowJournal(input.projectRoot, input.prepared.sessionId);
     committed = committedFor(events, input.prepared.eventHash) ?? committed;
     input.afterCommitPublished?.();
@@ -288,12 +293,6 @@ function rollbackRecoverySettlement(input: { projectRoot: string; projectId: str
   appendRecoveryRollback({ projectRoot: input.projectRoot, projectId: input.projectId, sessionId: input.prepared.sessionId, prepared: input.prepared, candidate: parsed, reason: input.reason });
   return undefined;
 }
-async function restorePriorPiSession(input: RecoverOrphanedWorkflowSessionInput, created: { readonly compensate?: () => void | Promise<void> }): Promise<void> {
-  if (created.compensate) return created.compensate();
-  const restored = await input.adapter.switch({ piSessionFile: input.restorePiSessionFile, withSession: async () => {} });
-  if (restored.cancelled) throw new Error("Pi recovery compensation was cancelled");
-}
-
 /** Resolve durable recovery preparations left by a terminated process before orphan status is reported. */
 export function reconcilePreparedWorkflowRecoveries(input: { projectRoot: string; projectId: string }): void {
   for (const initial of listSessionLinks(input.projectRoot)) {
@@ -356,44 +355,67 @@ export async function recoverOrphanedWorkflowSession(input: RecoverOrphanedWorkf
     throw new Error(`Recovery blocked by unsupported activation/runtime contract: ${validation.codes.join(",")}`);
   }
   const ownership = acquireRuntimeOwnership(input.projectRoot, link.workflowSessionId, input.owner);
-  recoveryInvariant(ownership.ok, `Recovery refuses a live owner: ${ownership.reason}`);
-  let created: Awaited<ReturnType<SessionNavigationAdapter["create"]>>;
+  recoveryInvariant(ownership.ok && ownership.owner, `Recovery refuses a live owner: ${ownership.reason}`);
+  let prepared: WorkflowEventEnvelope | undefined;
+  let preparedDraft: WorkflowEventDraft | undefined;
+  let preparedGeneration: Readonly<{ workflowSessionId: string; linkGenerationHash: string }> | undefined;
+  let created: Readonly<{ piSessionId: string; piSessionFile: string }> | undefined;
   try {
     created = await input.adapter.create({
-      parentSession: link.normalParentFile, restoreSession: input.restorePiSessionFile, name: `${link.name}:recovered`, workflowId: link.workflowId, activationHash: link.activationHash,
+      projectRoot: input.projectRoot,
+      parentSession: link.normalParentFile,
+      name: `${link.name}:recovered`,
+      workflowId: link.workflowId,
+      activationHash: link.activationHash,
       recovery: { workflowSessionId: link.workflowSessionId, previousPiSessionId: link.piSessionId, previousPiSessionFile: link.piSessionFile },
     });
-  } catch (error) {
-    releaseRuntimeOwnership(input.projectRoot, link.workflowSessionId, input.owner.nonce);
-    throw error;
-  }
-  const preparedAt = new Date().toISOString();
-  const preparedDraft = createWorkflowEvent({
-    projectId: input.projectId, sessionId: link.workflowSessionId, type: "session.recovery.prepared", producer: "recovery", timestamp: preparedAt,
-    payload: {
-      expectedLinkHash: workflowLinkGenerationHash(link), expectedLink: link as unknown as JsonValue,
-      previousPiSessionId: link.piSessionId, previousPiSessionFile: link.piSessionFile,
-      piSessionId: created.piSessionId, piSessionFile: created.piSessionFile, activationHash: link.activationHash, preparedAt,
-    },
-  });
-  let prepared: WorkflowEventEnvelope | undefined;
-  try {
-    prepared = appendWorkflowEventChecked(input.projectRoot, preparedDraft, (events) => {
-      const unresolved = events.filter((event) => event.type === "session.recovery.prepared").some((event) => !committedFor(events, event.eventHash) && !events.some((candidate) => isPublishedRecoveryRollback(candidate, event.eventHash)));
+    const preparedAt = new Date().toISOString();
+    const draft = createWorkflowEvent({
+      projectId: input.projectId, sessionId: link.workflowSessionId, type: "session.recovery.prepared", producer: "recovery", timestamp: preparedAt,
+      payload: {
+        expectedLinkHash: workflowLinkGenerationHash(link), expectedLink: link as unknown as JsonValue,
+        previousPiSessionId: link.piSessionId, previousPiSessionFile: link.piSessionFile,
+        piSessionId: created.piSessionId, piSessionFile: created.piSessionFile, activationHash: link.activationHash, preparedAt,
+      },
+    });
+    preparedDraft = draft;
+    prepared = appendWorkflowEventChecked(input.projectRoot, draft, (events) => {
+      const unresolved = events.filter((event) => event.type === "session.recovery.prepared").some((event) => !committedFor(events, event.eventHash) && !events.some((entry) => isPublishedRecoveryRollback(entry, event.eventHash)));
       recoveryInvariant(!unresolved, "Another workflow recovery preparation is unresolved");
     });
     input.recoveryFault?.("afterPrepared");
-    prepareWorkflowRecoveryLink(input.projectRoot, link, { ...created, preparedAt, preparedEventHash: prepared.eventHash });
+    const preparedLink = prepareWorkflowRecoveryLink(input.projectRoot, link, { ...created, preparedAt, preparedEventHash: prepared.eventHash });
+    preparedGeneration = Object.freeze({ workflowSessionId: preparedLink.workflowSessionId, linkGenerationHash: workflowLinkGenerationHash(preparedLink) });
     input.recoveryFault?.("afterLinkPrepared");
-    return withRecoverySettlementLock(input.projectRoot, link.workflowSessionId, () => commitRecoverySettlement({
-      projectRoot: input.projectRoot, projectId: input.projectId, prepared: prepared!, recoveredAt: new Date().toISOString(), fault: input.journalFault,
-      afterCommitPublished: () => input.recoveryFault?.("afterCommitted"),
-    }));
+    let recovered: WorkflowSessionLink | undefined;
+    const switched = await input.adapter.switch({
+      piSessionFile: created.piSessionFile,
+      withSession: async () => {
+        recoveryInvariant(prepared, "Workflow recovery preparation was not committed before Pi session replacement");
+        recovered = withRecoverySettlementLock(input.projectRoot, link.workflowSessionId, () => commitRecoverySettlement({
+          projectRoot: input.projectRoot, projectId: input.projectId, prepared: prepared!, recoveredAt: new Date().toISOString(), fault: input.journalFault,
+          afterCommitPublished: () => input.recoveryFault?.("afterCommitted"),
+        }));
+      },
+      replacement: {
+        projectRoot: input.projectRoot,
+        projectId: input.projectId,
+        piSessionId: created.piSessionId,
+        restoreSession: input.restorePiSessionFile,
+        generation: preparedGeneration,
+      },
+    });
+    recoveryInvariant(!switched.cancelled, "Workflow recovery Pi session switch was cancelled");
+    recoveryInvariant(recovered, "Workflow recovery settlement did not complete inside the replacement session");
+    return recovered;
   } catch (error) {
+    // A prepared generation is the restart-reconciliation authority when Pi's
+    // active session could not be restored with proof.
+    if (prepared && isUnprovenSessionRestoration(error)) throw error;
     const cleanupErrors: unknown[] = [];
     try {
       const events = readWorkflowJournal(input.projectRoot, link.workflowSessionId);
-      prepared = prepared ?? events.find((event) => event.eventId === preparedDraft.eventId && event.type === "session.recovery.prepared");
+      prepared = prepared ?? (preparedDraft ? events.find((event) => event.eventId === preparedDraft!.eventId && event.type === "session.recovery.prepared") : undefined);
       if (prepared) {
         const recovered = withRecoverySettlementLock(input.projectRoot, link.workflowSessionId, () => rollbackRecoverySettlement({
           projectRoot: input.projectRoot, projectId: input.projectId, prepared: prepared!, reason: "recovery transaction rolled back",
@@ -401,9 +423,11 @@ export async function recoverOrphanedWorkflowSession(input: RecoverOrphanedWorkf
         if (recovered) return recovered;
       }
     } catch (cleanupError) { cleanupErrors.push(new Error(`Recovery protocol rollback failed: ${boundedDiagnostic(cleanupError)}`)); }
-    try { await restorePriorPiSession(input, created); }
-    catch (cleanupError) { cleanupErrors.push(new Error(`Pi session compensation failed: ${boundedDiagnostic(cleanupError)}`)); }
-    if (!releaseRuntimeOwnership(input.projectRoot, link.workflowSessionId, input.owner.nonce)) cleanupErrors.push(new Error("Recovery ownership release failed"));
+    if (!settleRuntimeOwnershipRelease(input.projectRoot, link.workflowSessionId, ownership.owner)) cleanupErrors.push(new Error("Recovery ownership release failed"));
+    if (created && input.adapter.cleanup) {
+      try { await input.adapter.cleanup({ projectRoot: input.projectRoot, created }); }
+      catch (cleanupError) { cleanupErrors.push(new Error(`precreated recovery Pi session cleanup failed: ${boundedDiagnostic(cleanupError)}`)); }
+    }
     if (cleanupErrors.length) throw new AggregateError([error, ...cleanupErrors], "Workflow recovery failed and compensation was incomplete");
     throw error;
   }

@@ -164,6 +164,49 @@ test("generic TypeBox schemas are exact and reject unknown or oversized fields",
   assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.workflow_finish, { status: "cancelled", summary: "no" }), false);
 });
 
+test("flattened human_question and team_status schemas retain exact conditional runtime validation", async () => {
+  const active = snapshot() as any;
+  const rootAuthority = active.payload.authority.nodes.find((entry: any) => entry.nodeId === "root");
+  rootAuthority.capabilities.effective = { ...rootAuthority.capabilities.effective, "human-input": true };
+  rootAuthority.tools = [...new Set([...rootAuthority.tools, "human_question"])].sort();
+  const built = fixture(undefined, active);
+  const root = built.service.rootServices();
+  const choice = { value: "yes", label: "Yes" };
+
+  const invalidQuestions = [
+    { prompt: "Single?", kind: "single", required: true },
+    { prompt: "Single?", kind: "single", choices: [choice], validation: {}, required: true },
+    { prompt: "Multi?", kind: "multi", required: true },
+    { prompt: "Multi?", kind: "multi", choices: [choice], validation: { pattern: "^yes$" }, required: true },
+    { prompt: "Text?", kind: "text", choices: [choice], required: true },
+    { prompt: "Text?", kind: "text", validation: { minItems: 1 }, required: true },
+    { prompt: "Confirm?", kind: "confirm", choices: [choice], required: true },
+    { prompt: "Confirm?", kind: "confirm", validation: {}, required: true },
+  ];
+  for (const input of invalidQuestions) {
+    assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.human_question, input), true, "the flat provider schema exposes all conditional fields");
+    await assert.rejects(
+      () => root.runWithToolRuntime(() => call("human_question", input)),
+      /question|choices|validation/i,
+    );
+  }
+
+  const invalidTeamStatus = [
+    { action: "deliver-results" },
+    { action: "deliver-results", deliveryId: "delivery-1", cursor: "0" },
+    { deliveryId: "delivery-1" },
+  ];
+  for (const input of invalidTeamStatus) {
+    assert.equal(Value.Check(GENERIC_WORKFLOW_TOOL_SCHEMAS.team_status, input), true, "the flat provider schema exposes both status modes");
+    await assert.rejects(
+      () => root.runWithToolRuntime(() => call("team_status", input)),
+      /team_status|delivery|cursor/i,
+    );
+  }
+
+  assert.equal(readWorkflowJournal(built.projectRoot, "session-1").some((event) => event.type === "question.transition"), false);
+});
+
 test("generic tool exposure follows frozen topology and reserves inactive subsystem names", () => {
   assert.deepEqual(genericWorkflowToolContractsForNode(snapshot(), "root").map((entry) => entry.name).sort(), [
     "delegate_agent", "route_agent", "team_status", "workflow_finish", "workflow_status",

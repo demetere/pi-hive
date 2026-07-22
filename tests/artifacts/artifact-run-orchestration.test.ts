@@ -14,6 +14,7 @@ import {
   ARTIFACT_VIEW_VERSION,
 } from "../../src/artifacts/contracts.ts";
 import { hashArtifactWorkspace } from "../../src/artifacts/hashes.ts";
+import { resolveCheckpointDigest } from "../../src/artifacts/checkpoints.ts";
 import { WorkspaceLeaseRuntime, type WorkspaceLeaseRuntimeOptions } from "../../src/artifacts/leases.ts";
 import { ArtifactOperationRuntime } from "../../src/artifacts/operations.ts";
 import type {
@@ -23,6 +24,8 @@ import type {
   ArtifactActionResultV1,
   ArtifactAdapter,
   ArtifactRuntimeProfile,
+  ArtifactStatusContext,
+  ArtifactStatusPageRequest,
 } from "../../src/artifacts/types.ts";
 import { readWorkflowJournal } from "../../src/workflows/journal.ts";
 import { RunOrchestrationService, type RunOrchestrationServiceOptions } from "../../src/workflows/orchestration.ts";
@@ -155,6 +158,7 @@ interface FixtureOptions {
   readonly leaseFactory?: (options: WorkspaceLeaseRuntimeOptions) => WorkspaceLeaseRuntime;
   readonly pauseReleaseOwnership?: boolean;
   readonly resumeOrder?: string[];
+  readonly bind?: boolean;
 }
 function fixture(label: string, input: FixtureOptions = {}) {
   const projectRoot = mkdtempSync(join(tmpdir(), `hive-artifact-service-${label}-`));
@@ -194,7 +198,7 @@ function fixture(label: string, input: FixtureOptions = {}) {
   };
   const service = new RunOrchestrationService(options);
   service.lifecycle.recordUserInput({ inputId: `input-${label}`, text: "work", source: "interactive" });
-  service.bindArtifactWorkspace({ mode: "existing", workspaceId: "shared" });
+  if (input.bind !== false) service.bindArtifactWorkspace({ mode: "existing", workspaceId: "shared" });
   const delivery = service.lifecycle.prepareInputDelivery(`delivery-${label}`);
   service.lifecycle.confirmInputDelivery(delivery.requestId);
   return { projectRoot, workspacePath, sessionId, ownerNonce, service, options, order };
@@ -214,10 +218,27 @@ test("RunOrchestrationService freezes adapter checkpoint defaults and enforces i
   mkdirSync(workspacePath);
   writeFileSync(join(workspacePath, "state.txt"), "approved content");
   const approvalProfile: ArtifactRuntimeProfile = Object.freeze({ ...profile, checkpointIds: Object.freeze(["completion", "review"]) });
+  let checkpointReady = true;
   const base = physicalAdapter(workspacePath);
   const adapter: ArtifactAdapter = Object.freeze({
     ...base,
     profiles: Object.freeze([approvalProfile]),
+    status(context: ArtifactStatusContext, page: ArtifactStatusPageRequest) {
+      assert.ok(context.hashes);
+      const checkpoints = approvalProfile.checkpointIds.map((checkpointId) => {
+        if (!checkpointReady) return Object.freeze({ id: checkpointId, state: "pending" as const });
+        const descriptor = adapter.checkpointDescriptor!({ binding: context.binding, checkpointId, hashes: context.hashes! });
+        const resolved = resolveCheckpointDigest(descriptor, context.hashes!);
+        return Object.freeze({ id: checkpointId, state: "ready" as const, digest: resolved.digest });
+      });
+      return {
+        schemaVersion: ARTIFACT_VIEW_VERSION, contractVersion: ARTIFACT_CONTRACT_VERSION,
+        adapter: { id: "fixture", version: "1" }, profile: { id: "author", version: "1" },
+        workspace: { id: "shared", kind: "physical" as const, binding: "existing" as const, path: workspacePath, hash: context.hashes.workspaceHash },
+        status: "ready" as const, summary: "ready", checkpoints, actions: [{ id: "set-title", label: "Set title", available: true }],
+        items: [], page: { limit: page.limit }, refs: checkpoints.filter((entry): entry is Readonly<{ id: string; state: "ready"; digest: string }> => "digest" in entry).map((entry) => ({ id: entry.id, kind: "checkpoint", digest: entry.digest })),
+      };
+    },
     checkpointDescriptor: ({ binding, checkpointId }: ArtifactCheckpointDescriptorInput) => ({
       formatVersion: 1 as const, adapterId: binding.adapterId, adapterVersion: binding.adapterVersion,
       profileId: binding.profileId, profileVersion: binding.profileVersion, profileSchemaVersion: approvalProfile.optionsSchemaVersion,
@@ -262,16 +283,217 @@ test("RunOrchestrationService freezes adapter checkpoint defaults and enforces i
   const lease = new WorkspaceLeaseRuntime({ projectRoot, adapterId: "fixture", workspaceId: "shared", sessionId, runId: run.runId });
   assert.equal(lease.acquire().ok, true);
   const currentHash = hashArtifactWorkspace(workspacePath).workspaceHash;
-  const request = await service.checkpointApprovals.requestApproval({ operationId: "request-completion", checkpointId: "completion", expectedWorkspaceHash: currentHash });
+  const root = service.rootServices();
+  const status = await root.runWithToolRuntime(() => callToolWithId("artifact_status", {}, "approval-status"));
+  assert.deepEqual(status.details.harnessActions, [{
+    id: "checkpoint-request",
+    label: "Request human checkpoint approval",
+    available: true,
+    argumentsSchemaVersion: "1",
+    argumentsSchema: {
+      type: "object",
+      required: ["checkpointId"],
+      properties: { checkpointId: { type: "string", enum: ["completion"] } },
+      additionalProperties: false,
+    },
+    required: ["checkpointId"],
+    optional: [],
+    variants: [{ required: ["checkpointId"], optional: [] }],
+    checkpointIds: ["completion"],
+  }]);
+  assert.equal(status.details.checkpointRequests.items[0].checkpointId, "completion");
+  assert.equal(status.details.checkpointRequests.items[0].requestable, true);
+  assert.deepEqual(status.details.checkpointRequests.items[0].pendingRequestIds, []);
+  assert.equal(JSON.stringify(status.details).includes("human-secret"), false);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "completion", extra: true } }, "request-extra")), /unknown|unsupported|fields|exact/i);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "review" } }, "request-disabled")), /disabled|frozen run|human gate/i);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "missing" } }, "request-unknown")), /unknown|published|checkpoint/i);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "completion" }, expectedWorkspaceHash: currentHash }, "request-hash")), /does not accept expectedWorkspaceHash/i);
+  await assert.rejects(() => (service as unknown as { requestCheckpointFromTool(nodeId: string, input: unknown, attemptId: string): Promise<unknown> }).requestCheckpointFromTool("worker", { actionId: "checkpoint-request", arguments: { checkpointId: "completion" } }, "worker-request"), /root-only/i);
+  checkpointReady = false;
+  const notReadyStatus = await root.runWithToolRuntime(() => callToolWithId("artifact_status", {}, "approval-not-ready-status"));
+  assert.equal(notReadyStatus.details.checkpointRequests.items[0].requestable, false);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "completion" } }, "request-not-ready")), /not ready/i);
+  checkpointReady = true;
+  const requested = await root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "completion" } }, "request-completion"));
+  const request = service.checkpointApprovals.restore().requests[requested.details.data.requestId];
+  assert.ok(request);
+  assert.equal(request.operationId, requested.details.operationId);
+  assert.equal(request.decision, undefined);
+  assert.equal(request.requestWorkspaceHash, currentHash);
   assert.equal(service.lifecycle.restore().latestRun?.status, "waiting_for_human");
+  const pendingStatus = await root.runWithToolRuntime(() => callToolWithId("artifact_status", {}, "approval-pending-status"));
+  assert.deepEqual(pendingStatus.details.checkpointRequests.items[0].pendingRequestIds, [request.requestId]);
+  const replay = await root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "completion" } }, "request-completion"));
+  assert.deepEqual(replay.details, requested.details);
   await service.checkpointApprovals.decide({
     operationId: "decide-completion", requestId: request.requestId, expectedRequestSequence: request.requestSequence,
     digest: request.digest, expectedWorkspaceHash: currentHash, decision: "approved",
   }, { channel: "dashboard", mode: "headless", dashboardAvailable: true, credential: "human-secret" });
   assert.equal(service.lifecycle.restore().latestRun?.status, "running");
+  const decided = service.checkpointApprovals.restore().requests[request.requestId].decision!;
+  assert.deepEqual(decided.provenance, { authenticationId: "auth-1", mechanism: "test-control" });
+  const approvedStatus = await root.runWithToolRuntime(() => callToolWithId("artifact_status", {}, "approval-decided-status"));
+  assert.equal(approvedStatus.details.checkpointRequests.pendingRequestCount, 0);
+  assert.equal(approvedStatus.details.checkpointRequests.items[0].requestable, false);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId: "completion" } }, "request-approved")), /already approved/i);
   assert.equal(lease.release(), true);
   const completed = await service.lifecycle.finish({ status: "completed", summary: "approved" }, { callerNodeId: "root", toolBatch: ["workflow_finish"] });
   assert.equal(completed.ok, true, completed.ok ? "" : completed.issues.join(" "));
+});
+
+test("generic artifact tools discover and bind one exact existing workspace before exposing adapter actions", async () => {
+  const f = fixture("lazy-binding", { bind: false });
+  const root = f.service.rootServices();
+  const status = await root.runWithToolRuntime(() => callTool("artifact_status", { limit: 1 }));
+  assert.equal(status.details.workspace.state, "unbound");
+  assert.equal(status.details.workspace.configuredBinding, "existing");
+  assert.deepEqual(status.details.workspace.allowedModes, ["existing"]);
+  assert.equal(status.details.bindingAction.id, "workspace-bind");
+  assert.deepEqual(status.details.harnessActions, [{
+    id: "workspace-bind",
+    label: "Bind artifact workspace",
+    available: true,
+    argumentsSchemaVersion: "1",
+    argumentsSchema: {
+      anyOf: [
+        {
+          type: "object", required: ["mode", "workspaceId"],
+          properties: { mode: { type: "string", const: "new" }, workspaceId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$", maxLength: 256 } },
+          additionalProperties: false,
+        },
+        {
+          type: "object", required: ["mode", "workspaceId"],
+          properties: {
+            mode: { type: "string", const: "existing" },
+            workspaceId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$", maxLength: 256 },
+            handoffWorkspaceId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$", maxLength: 256 },
+          },
+          additionalProperties: false,
+        },
+      ],
+    },
+    required: ["mode", "workspaceId"],
+    optional: ["handoffWorkspaceId"],
+    variants: [
+      { required: ["mode", "workspaceId"], optional: [] },
+      { required: ["mode", "workspaceId"], optional: ["handoffWorkspaceId"] },
+    ],
+  }]);
+  assert.deepEqual(status.details.candidates.items, [{ id: "shared", label: "Shared fixture" }]);
+  assert.equal(JSON.stringify(status.details).includes(f.projectRoot), false);
+
+  const bound = await root.runWithToolRuntime(() => callToolWithId("artifact_action", {
+    actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared" },
+  }, "lazy-binding-call"));
+  assert.equal(bound.details.actionId, "workspace-bind");
+  assert.equal(bound.details.data.workspace.id, "shared");
+  assert.equal(f.service.lifecycle.restore().latestRun?.artifactWorkspace?.workspace.id, "shared");
+  const adapterStatus = await root.runWithToolRuntime(() => callTool("artifact_status", { limit: 1 }));
+  assert.equal(adapterStatus.details.workspace.id, "shared");
+  assert.equal(adapterStatus.details.workspace.hash, hashArtifactWorkspace(f.workspacePath).workspaceHash);
+});
+
+test("pre-effect adapter argument rejection records a stable failed attempt and a corrected call remains admissible", async () => {
+  const f = fixture("adapter-arguments-recovery");
+  const root = f.service.rootServices();
+  const invalid = { actionId: "set-title", arguments: { title: "wrong", extra: true }, expectedWorkspaceHash: hashArtifactWorkspace(f.workspacePath).workspaceHash };
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", invalid, "invalid-adapter-arguments")), /invalid|unknown|arguments/i);
+  const failed = Object.values(f.service.attemptRuntime().restore().attempts).find((attempt) => attempt.operation === "workflow.tool.artifact_action" && attempt.result?.error?.includes("arguments"));
+  assert.ok(failed);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.result?.effectNotApplied, true);
+  assert.equal(f.service.lifecycle.restore().latestRun?.status, "running");
+  assert.equal(Object.keys(new ArtifactOperationRuntime({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: f.sessionId, runId: f.service.lifecycle.restore().latestRun!.runId }).restore().operations).length, 0);
+
+  const stable = structuredClone(failed);
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", invalid, "invalid-adapter-arguments")), /invalid|unknown|arguments/i);
+  assert.deepEqual(f.service.attemptRuntime().restore().attempts[failed.attemptId], stable, "failed replay must not redispatch or alter its durable result");
+
+  const status = await root.runWithToolRuntime(() => callToolWithId("artifact_status", {}, "corrected-status"));
+  const corrected = await root.runWithToolRuntime(() => callToolWithId("artifact_action", {
+    actionId: "set-title", arguments: { title: "corrected" }, expectedWorkspaceHash: status.details.workspace.hash,
+  }, "corrected-adapter-arguments"));
+  assert.equal(corrected.details.status, "completed");
+  assert.equal(readFileSync(join(f.workspacePath, "state.txt"), "utf8"), "corrected");
+});
+
+test("an adapter throw after artifact operation intent remains unresolved and is never classified not-applied", async () => {
+  const thrown = Object.assign(new Error("adapter execution became uncertain"), { effectNotApplied: true });
+  const f = fixture("adapter-throw-boundary", { onExecute: () => { throw thrown; } });
+  const root = f.service.rootServices();
+  const status = await root.runWithToolRuntime(() => callToolWithId("artifact_status", {}, "adapter-throw-status"));
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", {
+    actionId: "set-title", arguments: { title: "uncertain" }, expectedWorkspaceHash: status.details.workspace.hash,
+  }, "adapter-throw-action")), (error) => error === thrown && (error as { effectNotApplied?: unknown }).effectNotApplied !== true);
+  const attempt = Object.values(f.service.attemptRuntime().restore().attempts).find((candidate) => candidate.operation === "workflow.tool.artifact_action");
+  assert.equal(attempt?.status, "unknown_side_effect");
+  const operations = new ArtifactOperationRuntime({ projectRoot: f.projectRoot, projectId: "project-1", sessionId: f.sessionId, runId: f.service.lifecycle.restore().latestRun!.runId }).restore().operations;
+  assert.ok(Object.values(operations).some((operation) => operation.actionId === "set-title"));
+});
+
+test("workspace-bind rejects unknown fields, modes, hashes, actions, and rebinding without poisoning the run", async () => {
+  const f = fixture("lazy-binding-negative", { bind: false });
+  const root = f.service.rootServices();
+  for (const [id, request, pattern] of [
+    ["bind-extra", { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared", latest: true } }, /unknown|fields/i],
+    ["bind-mode", { actionId: "workspace-bind", arguments: { mode: "latest", workspaceId: "shared" } }, /mode.*new.*existing/i],
+    ["bind-hash", { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared" }, expectedWorkspaceHash: `sha256:${"0".repeat(64)}` }, /does not accept expected/i],
+    ["bind-unknown-action", { actionId: "fixture.bind", arguments: {} }, /unavailable.*bound/i],
+  ] as const) {
+    await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", request, id)), pattern);
+    assert.equal(f.service.lifecycle.restore().latestRun?.status, "running");
+    assert.equal(f.service.lifecycle.restore().latestRun?.artifactWorkspace, undefined);
+  }
+  await root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared" } }, "bind-once"));
+  await assert.rejects(() => root.runWithToolRuntime(() => callToolWithId("artifact_action", { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared" } }, "bind-twice")), /already bound|rebinding/i);
+  assert.equal(f.service.lifecycle.restore().latestRun?.status, "running");
+});
+
+test("an interrupted workspace-bind receipt reconciles its exact W13 result after restart without redispatch", () => {
+  const f = fixture("lazy-binding-interrupted", { bind: false });
+  const request = { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared" } };
+  const attempts = f.service.attemptRuntime();
+  attempts.begin({
+    attemptId: "interrupted-workspace-bind",
+    correlationId: "interrupted-workspace-bind-call",
+    nodeId: "root",
+    operation: "workflow.tool.artifact_action",
+    input: request,
+    descriptor: { effect: "artifact", readOnly: false, idempotent: false },
+  });
+  f.service.bindArtifactWorkspace({ mode: "existing", workspaceId: "shared" }, undefined, { attemptId: "interrupted-workspace-bind", input: request });
+  assert.equal(attempts.restore().attempts["interrupted-workspace-bind"].result, undefined);
+
+  const restarted = new RunOrchestrationService(f.options);
+  restarted.rootServices();
+  const reconciled = restarted.attemptRuntime().restore().attempts["interrupted-workspace-bind"];
+  assert.equal(reconciled.status, "completed");
+  assert.equal(reconciled.reconciliation, "applied");
+  assert.equal((reconciled.result?.value as { actionId?: string }).actionId, "workspace-bind");
+});
+
+test("workspace-bind is bind-once under a race and its durable result replays across restart", async () => {
+  const f = fixture("lazy-binding-race", { bind: false });
+  const root = f.service.rootServices();
+  const request = { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "shared" } };
+  const raced = await Promise.allSettled([
+    root.runWithToolRuntime(() => callToolWithId("artifact_action", request, "bind-race-a")),
+    root.runWithToolRuntime(() => callToolWithId("artifact_action", request, "bind-race-b")),
+  ]);
+  assert.equal(raced.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(raced.filter((result) => result.status === "rejected").length, 1);
+  assert.equal(readWorkflowJournal(f.projectRoot, f.sessionId).filter((event) => event.type === "artifact.recorded"
+    && (event.payload as Record<string, unknown>).operation === "bind").length, 1);
+
+  const successfulCallId = raced[0].status === "fulfilled" ? "bind-race-a" : "bind-race-b";
+  const first = raced.find((result): result is PromiseFulfilledResult<any> => result.status === "fulfilled")!.value;
+  const replay = await root.runWithToolRuntime(() => callToolWithId("artifact_action", request, successfulCallId));
+  assert.deepEqual(replay.details, first.details);
+  const restarted = new RunOrchestrationService(f.options);
+  const restartedReplay = await restarted.rootServices().runWithToolRuntime(() => callToolWithId("artifact_action", request, successfulCallId));
+  assert.deepEqual(restartedReplay.details, first.details);
+  assert.equal(restarted.lifecycle.restore().latestRun?.artifactWorkspace?.workspace.id, "shared");
 });
 
 test("RunOrchestrationService binds an injected physical adapter and carries fresh status hash through queued action commit", async () => {

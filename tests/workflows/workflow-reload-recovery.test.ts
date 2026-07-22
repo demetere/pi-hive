@@ -49,16 +49,16 @@ function fixture(snapshot = recoverySnapshot()) {
   let failCreate = false;
   let activeSessionFile = normalFile;
   const adapter = {
-    async create(input: { recovery?: unknown; restoreSession?: string }) {
+    async create(input: { recovery?: unknown }) {
       calls.push(input.recovery ? "recover-create" : "create");
       if (failCreate) throw new Error("injected create fault");
       next += 1;
       const piSessionFile = join(piRoot, `workflow-${next}.jsonl`);
       writeFileSync(piSessionFile, "workflow\n");
-      activeSessionFile = piSessionFile;
-      return { piSessionId: `pi-${next}`, piSessionFile, ...(input.restoreSession ? { compensate: () => { calls.push("compensate"); activeSessionFile = input.restoreSession!; } } : {}) };
+      return { piSessionId: `pi-${next}`, piSessionFile };
     },
-    async switch(input: { piSessionFile: string; withSession: (ctx: unknown) => Promise<void> | void }) { calls.push(`switch:${input.piSessionFile}`); await input.withSession({}); return { cancelled: false }; },
+    cleanup(input: { created: { piSessionFile: string } }) { if (existsSync(input.created.piSessionFile)) unlinkSync(input.created.piSessionFile); },
+    async switch(input: { piSessionFile: string; withSession: (ctx: unknown) => Promise<void> | void }) { calls.push(`switch:${input.piSessionFile}`); activeSessionFile = input.piSessionFile; await input.withSession({}); return { cancelled: false }; },
   };
   return { projectRoot, piRoot, normalFile, adapter, calls, activationHash: snapshot.snapshotHash, snapshot, activeSessionFile: () => activeSessionFile, setFailCreate(value: boolean) { failCreate = value; } };
 }
@@ -93,7 +93,11 @@ function runRecoveryProcess(f: ReturnType<typeof fixture>, workflowSessionId: st
       ${crashStage ? `recoveryFault: (stage) => { if (stage === ${JSON.stringify(crashStage)}) process.exit(86); },` : ""}
     });
   `;
-  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: process.cwd(), encoding: "utf8" });
+  // Keep the tsx subprocess's transformed source maps out of c8's native
+  // strip-types report; merging the two maps misattributes parent coverage.
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    cwd: process.cwd(), env: { ...process.env, NODE_V8_COVERAGE: "" }, encoding: "utf8",
+  });
   if (result.status === 86 && crashStage === "afterCommitted") {
     unlinkSync(join(f.projectRoot, ".pi", "hive", "sessions", workflowSessionId, "recovery-settlement.lock"));
   }
@@ -209,8 +213,8 @@ test("reload rechecks run state after async preparation and compensates a post-c
   }), /run|journal|compare-and-swap/i);
   const current = listSessionLinks(commitRace.projectRoot).filter((entry): entry is Extract<typeof entry, { kind: "workflow" }> => entry.kind === "workflow" && entry.status === "current");
   assert.deepEqual(current.map((entry) => entry.workflowSessionId), [commitOriginal.link.workflowSessionId]);
-  assert.equal(commitRace.activeSessionFile(), commitOriginal.link.piSessionFile, "failed CAS compensates the Pi replacement session");
-  assert.equal(commitRace.calls.includes("compensate"), true);
+  assert.equal(commitRace.activeSessionFile(), commitOriginal.link.piSessionFile, "failed CAS occurs before Pi replacement");
+  assert.equal(commitRace.calls.some((call) => call.startsWith("switch:") && call !== `switch:${commitOriginal.link.piSessionFile}`), false);
   assert.equal(current.some((entry) => readHandoffState(commitRace.projectRoot, entry.workflowSessionId).staged !== undefined), false);
 });
 
@@ -281,6 +285,68 @@ test("recovery refuses a live owner, blocks corrupt/unsupported contracts, then 
   const orphanEvents = readWorkflowJournal(f.projectRoot, original.link.workflowSessionId).filter((event) => event.type === "session.orphaned");
   assert.equal(orphanEvents.length, 2, "a recovered Pi-link generation receives its own orphan event");
   assert.deepEqual(orphanEvents.map((event) => (event.payload as Record<string, unknown>).piSessionId), [original.link.piSessionId, recovered.piSessionId]);
+});
+
+test("recovery settles its durable generation inside the fresh protected callback", async () => {
+  const f = fixture();
+  const original = await selected(f, "live-protected");
+  unlinkSync(original.link.piSessionFile);
+  detectOrphanedWorkflowSessions({ projectRoot: f.projectRoot, projectId: "project-1" });
+  assert.equal(releaseRuntimeOwnership(f.projectRoot, original.link.workflowSessionId, "live-protected"), true);
+  let settlementObservedInsideCallback = false;
+  const protectedAdapter = {
+    ...f.adapter,
+    async switch(input: { piSessionFile: string; withSession: (ctx: unknown) => Promise<void> | void; replacement?: { restoreSession?: string } }) {
+      await input.withSession({});
+      const settled = listSessionLinks(f.projectRoot).find((entry) => entry.kind === "workflow" && entry.workflowSessionId === original.link.workflowSessionId);
+      settlementObservedInsideCallback = settled?.kind === "workflow" && settled.recovery?.state === "recovered" && settled.orphaned === false;
+      return { cancelled: false };
+    },
+  };
+  const recovered = await recoverOrphanedWorkflowSession({
+    projectRoot: f.projectRoot, projectId: "project-1", workflowSessionId: original.link.workflowSessionId,
+    adapter: protectedAdapter, owner: owner("protected"), ...recoveryDependencies(f),
+  });
+  assert.equal(settlementObservedInsideCallback, true);
+  assert.equal(recovered.recovery?.state, "recovered");
+});
+
+test("recovery settlement failure restores the active Pi session before rollback and candidate cleanup", async () => {
+  const f = fixture();
+  const original = await selected(f, "live-restore");
+  unlinkSync(original.link.piSessionFile);
+  detectOrphanedWorkflowSessions({ projectRoot: f.projectRoot, projectId: "project-1" });
+  assert.equal(releaseRuntimeOwnership(f.projectRoot, original.link.workflowSessionId, "live-restore"), true);
+  let active = f.normalFile;
+  let candidate = "";
+  const restoringAdapter = {
+    ...f.adapter,
+    async create(input: Parameters<typeof f.adapter.create>[0]) {
+      const created = await f.adapter.create(input);
+      candidate = created.piSessionFile;
+      return created;
+    },
+    async switch(input: { piSessionFile: string; withSession: (ctx: unknown) => Promise<void> | void; replacement?: { restoreSession?: string } }) {
+      active = input.piSessionFile;
+      try {
+        await input.withSession({});
+      } catch (error) {
+        assert.equal(input.replacement?.restoreSession, f.normalFile);
+        active = input.replacement!.restoreSession!;
+        throw error;
+      }
+      return { cancelled: false };
+    },
+  };
+  await assert.rejects(() => recoverOrphanedWorkflowSession({
+    projectRoot: f.projectRoot, projectId: "project-1", workflowSessionId: original.link.workflowSessionId,
+    adapter: restoringAdapter, owner: owner("restore"), ...recoveryDependencies(f),
+    journalFault: (stage) => { if (stage === "beforeWrite") throw new Error("settlement write failed"); },
+  }), /settlement write failed/i);
+  assert.equal(active, f.normalFile, "active Pi session is restored before recovery returns");
+  const rolledBack = listSessionLinks(f.projectRoot).find((entry) => entry.kind === "workflow" && entry.workflowSessionId === original.link.workflowSessionId);
+  assert.equal(rolledBack?.kind === "workflow" && rolledBack.piSessionId, original.link.piSessionId);
+  assert.equal(existsSync(candidate), false, "exact unlinked recovery candidate is cleaned up after rollback");
 });
 
 test("recovery creation faults leave the orphan link unchanged and release acquired ownership", async () => {
@@ -405,7 +471,9 @@ test("multiprocess restart reconciliation serializes one commit decision with no
     import { detectOrphanedWorkflowSessions } from "./src/workflows/recovery.ts";
     detectOrphanedWorkflowSessions({ projectRoot: ${JSON.stringify(f.projectRoot)}, projectId: "project-1" });
   `;
-  const children = ["one", "two"].map(() => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] }));
+  const children = ["one", "two"].map(() => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    cwd: process.cwd(), env: { ...process.env, NODE_V8_COVERAGE: "" }, stdio: ["ignore", "pipe", "pipe"],
+  }));
   const completed = children.map((child) => new Promise<{ code: number | null; output: string }>((resolve) => {
     let output = "";
     child.stdout?.on("data", (chunk) => { output += String(chunk); });
@@ -485,11 +553,10 @@ test("recovery rollback refuses a concurrently changed complete link generation"
   const racingAdapter = {
     ...f.adapter,
     async create(input: Parameters<typeof f.adapter.create>[0]) {
-      const created = await f.adapter.create(input);
       replaceSessionLinks(f.projectRoot, listSessionLinks(f.projectRoot).map((entry) => entry.kind === "workflow" && entry.workflowSessionId === original.link.workflowSessionId
         ? { ...entry, updatedAt: "2027-01-01T00:00:00.000Z" }
         : entry));
-      return created;
+      return f.adapter.create(input);
     },
   };
   await assert.rejects(() => recoverOrphanedWorkflowSession({
@@ -500,7 +567,7 @@ test("recovery rollback refuses a concurrently changed complete link generation"
   assert.ok(link?.kind === "workflow" && link.orphaned === true);
   assert.equal(link?.kind === "workflow" && link.piSessionId, original.link.piSessionId);
   assert.equal(link?.kind === "workflow" && link.updatedAt, "2027-01-01T00:00:00.000Z", "rollback never overwrites an unrelated complete-generation change");
-  assert.equal(f.activeSessionFile(), f.normalFile, "failed link CAS restores the previously active Pi session");
+  assert.equal(f.activeSessionFile(), original.link.piSessionFile, "failed link CAS occurs before Pi replacement and leaves the active context unchanged");
   const events = readWorkflowJournal(f.projectRoot, original.link.workflowSessionId);
   const prepared = events.find((event) => event.type === "session.recovery.prepared");
   assert.ok(prepared);

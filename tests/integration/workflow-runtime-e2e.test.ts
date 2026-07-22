@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -138,10 +138,8 @@ test("production registry creates a real Pi worker session with its inline polic
 
 test("checked-in split example completes planning and build through a production handoff", async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-example-handoff-e2e-"));
-  cpSync(join(process.cwd(), "examples/split-openspec-handoff/.pi"), join(projectRoot, ".pi"), { recursive: true });
-  mkdirSync(join(projectRoot, "openspec", "changes"), { recursive: true });
+  cpSync(join(process.cwd(), "examples/split-openspec-handoff"), projectRoot, { recursive: true });
   mkdirSync(join(projectRoot, "src"));
-  writeFileSync(join(projectRoot, "openspec", "config.yaml"), "schema: spec-driven\n");
   const project = loadConfigProject(projectRoot);
   assert.equal(project.status, "configured");
   if (project.status !== "configured") throw new Error("split example did not configure");
@@ -164,7 +162,7 @@ test("checked-in split example completes planning and build through a production
   writeFileSync(normalFile, "normal\n");
   initializeNormalParent({ configured: true, projectRoot, projectId, piSessionId: "normal", piSessionFile: normalFile, model: "test/model", thinking: "medium", activeTools: ["read"] });
   const adapter = {
-    async create(input: { workflowId: string }) { const piSessionId = `pi-${input.workflowId}-${randomUUID()}`; const piSessionFile = join(projectRoot, `${piSessionId}.jsonl`); writeFileSync(piSessionFile, "workflow\n"); return { piSessionId, piSessionFile }; },
+    async create(input: any) { const piSessionId = `pi-${input.workflowId}-${randomUUID()}`; const piSessionFile = join(projectRoot, `${piSessionId}.jsonl`); writeFileSync(piSessionFile, "workflow\n"); return { piSessionId, piSessionFile }; },
     async switch() { return { cancelled: false }; },
   };
   const nonce = randomUUID();
@@ -206,7 +204,10 @@ test("checked-in split example completes planning and build through a production
     const decisions = new Map<string, Awaited<ReturnType<typeof approvals.requestApproval>>>();
     for (const checkpointId of runtime.lifecycle.restore().latestRun!.checkpointSnapshot!.enabledCheckpointIds) {
       const workspaceHash = currentHash(runtime);
-      const request = await approvals.requestApproval({ operationId: `${prefix}-request-${checkpointId}`, checkpointId, expectedWorkspaceHash: workspaceHash });
+      const result = await executeTool(runtime, "artifact_action", { actionId: "checkpoint-request", arguments: { checkpointId } }, `${prefix}-request-${checkpointId}`);
+      const requestId = (result.details as { data: { requestId: string } }).data.requestId;
+      const request = approvals.restore().requests[requestId];
+      assert.ok(request);
       await approvals.decide({ operationId: `${prefix}-decide-${checkpointId}`, requestId: request.requestId, expectedRequestSequence: request.requestSequence, digest: request.digest, expectedWorkspaceHash: workspaceHash, decision: "approved" }, { channel: "dashboard", mode: "headless", dashboardAvailable: true, credential: "trusted-split-e2e" });
       decisions.set(checkpointId, request);
     }
@@ -216,7 +217,9 @@ test("checked-in split example completes planning and build through a production
     const planSelection = await selectWorkflowSession({ projectRoot, projectId, currentPiSessionId: "normal", workflow: selectable("feature-plan"), adapter, owner: { nonce, pid: process.pid, processMarker: `e2e-${process.pid}`, verifyDead: () => false } });
     const planRuntime = registry.select(planSelection.link, context(planSelection.link.piSessionId, modelRegistry))!;
     planRuntime.lifecycle.recordUserInput({ inputId: "plan-chat-input", text: "plan the checked-in split example", source: "interactive" });
-    planRuntime.service.bindArtifactWorkspace({ mode: "new", workspaceId: "reviewed-feature" });
+    const planDiscovery = await executeTool(planRuntime, "artifact_status", { limit: 20 }, "plan-workspace-status");
+    assert.equal((planDiscovery.details as { workspace: { state: string } }).workspace.state, "unbound");
+    await executeTool(planRuntime, "artifact_action", { actionId: "workspace-bind", arguments: { mode: "new", workspaceId: "reviewed-feature" } }, "plan-workspace-bind");
     planRuntime.rootServices().delegate({ targetNodeId: "planner", objective: "produce the implementation-ready feature plan", deliverables: ["OpenSpec plan"] });
     await planRuntime.service.runWorkers();
     assert.equal(Object.values(planRuntime.service.delegationState().tasks).every((task) => task.queueState === "terminal"), true);
@@ -244,7 +247,10 @@ test("checked-in split example completes planning and build through a production
     buildRuntime.lifecycle.recordUserInput({ inputId: "build-chat-input", text: "implement the approved plan handoff", source: "interactive" });
     assert.equal(buildRuntime.lifecycle.restore().latestRun?.handoffPacketHash, packet.packetHash);
     assert.equal(readHandoffState(projectRoot, buildSelection.link.workflowSessionId).staged, undefined);
-    buildRuntime.service.bindArtifactWorkspace({ mode: "existing", workspaceId: "reviewed-feature" }, "reviewed-feature");
+    const buildDiscovery = await executeTool(buildRuntime, "artifact_status", { limit: 20 }, "build-workspace-status");
+    assert.equal((buildDiscovery.details as { workspace: { state: string }; bindingAction: { handoffWorkspaceIds: string[] } }).workspace.state, "unbound");
+    assert.deepEqual((buildDiscovery.details as { bindingAction: { handoffWorkspaceIds: string[] } }).bindingAction.handoffWorkspaceIds, ["reviewed-feature"]);
+    await executeTool(buildRuntime, "artifact_action", { actionId: "workspace-bind", arguments: { mode: "existing", workspaceId: "reviewed-feature", handoffWorkspaceId: "reviewed-feature" } }, "build-workspace-bind");
     for (const targetNodeId of ["builder", "tester"]) buildRuntime.rootServices().delegate({ targetNodeId, objective: targetNodeId === "builder" ? "implement the approved task" : "verify the implementation", deliverables: ["bounded evidence"] });
     await buildRuntime.service.runWorkers();
     assert.equal(Object.values(buildRuntime.service.delegationState().tasks).every((task) => task.queueState === "terminal"), true);
@@ -266,6 +272,7 @@ test("checked-in split example completes planning and build through a production
   } finally {
     await registry.shutdown();
     await new Promise<void>((resolve, reject) => provider.close((error) => error ? reject(error) : resolve()));
+    rmSync(projectRoot, { recursive: true, force: true });
   }
 });
 

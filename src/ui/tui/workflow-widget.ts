@@ -86,18 +86,17 @@ export function renderWorkflowStatusLines(summary: WorkflowStatusSummary): reado
   return [title, work, budget].filter(Boolean).slice(0, MAX_LINES).map((line) => line.slice(0, MAX_LINE_CHARS));
 }
 
-export function clearWorkflowStatusUi(ctx: ExtensionContext): void {
-  if (ctx.mode !== "tui" || !ctx.hasUI) return;
-  try { ctx.ui.setWidget(WIDGET_ID, undefined); } catch { /* Best-effort cleanup must not reject a Pi lifecycle hook. */ }
-  try { ctx.ui.setStatus(WIDGET_ID, undefined); } catch { /* Attempt both cleanup operations independently. */ }
+export function clearWorkflowStatusUi(ctx: ExtensionContext): boolean {
+  if (ctx.mode !== "tui" || !ctx.hasUI) return true;
+  let restored = true;
+  try { ctx.ui.setWidget(WIDGET_ID, undefined); } catch { restored = false; }
+  try { ctx.ui.setStatus(WIDGET_ID, undefined); } catch { restored = false; }
+  return restored;
 }
 
-export function updateWorkflowStatusUi(ctx: ExtensionContext, summary: WorkflowStatusSummary | undefined): void {
-  if (ctx.mode !== "tui" || !ctx.hasUI) return;
-  if (!summary) {
-    clearWorkflowStatusUi(ctx);
-    return;
-  }
+export function updateWorkflowStatusUi(ctx: ExtensionContext, summary: WorkflowStatusSummary | undefined): boolean {
+  if (ctx.mode !== "tui" || !ctx.hasUI) return true;
+  if (!summary) return clearWorkflowStatusUi(ctx);
   try {
     const lines = renderWorkflowStatusLines(summary);
     ctx.ui.setStatus(WIDGET_ID, `${summary.workflowId}: ${summary.runStatus || "idle"}`);
@@ -107,7 +106,9 @@ export function updateWorkflowStatusUi(ctx: ExtensionContext, summary: WorkflowS
         return lines.map((line, index) => truncateToWidth(index === 0 ? theme.fg("accent", theme.bold(line)) : theme.fg("dim", line), Math.max(0, width)));
       },
     }));
+    return true;
   } catch {
     clearWorkflowStatusUi(ctx);
+    return false;
   }
 }

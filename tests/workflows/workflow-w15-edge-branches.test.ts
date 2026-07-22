@@ -30,8 +30,9 @@ function fixture() {
   const adapter = {
     async create() {
       next += 1;
-      return { piSessionId: `pi-${next}`, piSessionFile: `/pi/${next}.jsonl`, compensate: () => { compensations += 1; } };
+      return { piSessionId: `pi-${next}`, piSessionFile: `/pi/${next}.jsonl` };
     },
+    cleanup() { compensations += 1; },
     async switch(input: { withSession: (ctx: unknown) => Promise<void> | void }) {
       await input.withSession({});
       return { cancelled: false };

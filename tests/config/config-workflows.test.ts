@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildWorkflowSelectorSummary, loadConfigCatalogs, loadConfigProject, loadWorkflowResources, parseConfigYaml, resolveConfigWorkflows, WORKFLOW_LIMITS, type WorkflowDefinition } from "../../src/config/index.ts";
+import { buildWorkflowSelector } from "../../src/workflows/registry.ts";
 import { copyWorkflowFixture } from "../helpers/workflow-fixtures.ts";
 
 function resolveFixture(name: string) {
@@ -290,6 +291,30 @@ test("self suggested-next is a valid non-executable hint", () => {
     const result = resolveConfigWorkflows(project, loadConfigCatalogs(project));
     assert.equal(result.workflows[0].status, "valid");
     assert.equal(result.edges.some((edge) => edge.target === "workflow:debug-chat"), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("suggested-next positively changes selector presentation only, never runtime status or authority", () => {
+  const fixture = copyWorkflowFixture("artifact-free-debug");
+  try {
+    const projectBefore = loadConfigProject(fixture.projectRoot); assert.equal(projectBefore.status, "configured");
+    if (projectBefore.status !== "configured") throw new Error("fixture invalid");
+    const before = resolveConfigWorkflows(projectBefore, loadConfigCatalogs(projectBefore));
+    const beforeWorkflow = before.workflows[0];
+    assert.equal(before.summary.items[0]?.suggestedNext?.length, 0);
+
+    const path = join(fixture.projectRoot, ".pi/hive/workflows/debug-chat.yaml");
+    writeFileSync(path, `suggested-next: [debug-chat]\n${readFileSync(path, "utf8")}`);
+    const projectAfter = loadConfigProject(fixture.projectRoot); assert.equal(projectAfter.status, "configured");
+    if (projectAfter.status !== "configured") throw new Error("fixture invalid after presentation edit");
+    const after = resolveConfigWorkflows(projectAfter, loadConfigCatalogs(projectAfter));
+    const afterWorkflow = after.workflows[0];
+    assert.deepEqual(after.summary.items[0]?.suggestedNext, ["debug-chat"], "the selector summary presents the configured navigation hint");
+    assert.deepEqual(afterWorkflow.status === "valid" ? afterWorkflow.authority : undefined, beforeWorkflow.status === "valid" ? beforeWorkflow.authority : undefined, "presentation metadata cannot change effective authority");
+    assert.equal(after.edges.some((edge) => edge.target === "workflow:debug-chat"), false, "presentation metadata creates no executable dependency edge");
+
+    const statusInput = { workflowId: "debug-chat", source: "current" as const, resumable: false, freshEnabled: true, diagnostics: [] };
+    assert.deepEqual(buildWorkflowSelector([{ ...statusInput, suggestedNext: [] }]), buildWorkflowSelector([{ ...statusInput, suggestedNext: ["debug-chat"] }]), "runtime status remains inert to the navigation hint");
   } finally { fixture.cleanup(); }
 });
 

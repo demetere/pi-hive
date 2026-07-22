@@ -28,7 +28,7 @@ jobs:
   publish:
     environment: npm
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Resolve release tag
         id: tag
@@ -99,23 +99,30 @@ jobs:
           fi
 
       - name: Run release gates
-        run: just ci
+        run: just release-gate
 
       - name: Verify tagged release state
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: just release-verify
 
-      - name: Publish to npm with trusted publishing
-        env:
-          RELEASE_TAG: ${{ steps.tag.outputs.value }}
-        run: npm publish --provenance --access public
-
       - name: Generate release SBOMs and dependency manifest
         run: just release-artifacts
+
+      - name: Validate release artifacts
+        run: just release-artifacts-verify
 
       - name: Attach release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.tag.outputs.value }}
         run: gh release upload "$RELEASE_TAG" release-artifacts/* --clobber
+
+      # The aggregate above is the authoritative workflow gate. Ignoring npm
+      # lifecycle scripts here avoids rerunning the same full gate recursively;
+      # direct local npm publish still executes prepublishOnly, including artifact
+      # generation and validation after the unchanged tagged-state check.
+      - name: Publish to npm with trusted publishing
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+        run: npm publish --provenance --access public --ignore-scripts

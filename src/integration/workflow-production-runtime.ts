@@ -18,8 +18,10 @@ import { RunOrchestrationService, type BoundDelegationServices, type RunOrchestr
 import { CANCELLATION_TIMING } from "../workflows/runs";
 import {
   acquireRuntimeOwnership,
+  captureRuntimeOwnership,
   heartbeatCurrentRuntimeOwnership,
-  releaseRuntimeOwnership,
+  settleRuntimeOwnershipRelease,
+  type RuntimeOwner,
 } from "../workflows/ownership";
 import type { WorkflowSessionLink } from "../workflows/sessions";
 import type { WorkerPromptInvocation, WorkerPromptResponse, WorkerSessionFactory, WorkerSessionHandle } from "../workflows/workers";
@@ -151,6 +153,7 @@ interface RuntimeRecord {
   readonly ownedProcesses: OwnedProcessRegistry;
   readonly service: RunOrchestrationService;
   ownerHeld: boolean;
+  ownerGeneration?: RuntimeOwner;
   heartbeat?: ReturnType<typeof setInterval>;
 }
 
@@ -162,14 +165,14 @@ export class WorkflowProductionRuntimeRegistry {
   private readonly projectId: string;
   private readonly ownedProcessRegistryFactory: () => OwnedProcessRegistry;
   private readonly runtimeOwnerNonce: string;
-  private readonly serviceDependencies: Pick<RunOrchestrationServiceOptions, "artifactMutationQueue" | "checkpointApproval">;
+  private readonly serviceDependencies: Pick<RunOrchestrationServiceOptions, "artifactMutationQueue" | "checkpointApproval" | "completion">;
 
   constructor(
     projectRoot: string,
     projectId: string,
     ownedProcessRegistryFactory: () => OwnedProcessRegistry = () => new OwnedProcessRegistry(),
     runtimeOwnerNonce: string = randomUUID(),
-    serviceDependencies: Pick<RunOrchestrationServiceOptions, "artifactMutationQueue" | "checkpointApproval"> = {},
+    serviceDependencies: Pick<RunOrchestrationServiceOptions, "artifactMutationQueue" | "checkpointApproval" | "completion"> = {},
   ) {
     this.projectRoot = projectRoot;
     this.projectId = projectId;
@@ -186,6 +189,10 @@ export class WorkflowProductionRuntimeRegistry {
     if (!alreadyOwned) {
       const acquired = acquireRuntimeOwnership(this.projectRoot, record.link.workflowSessionId, { nonce: record.ownerNonce });
       if (!acquired.ok || acquired.owner?.ownerNonce !== record.ownerNonce) throw new Error(`Workflow runtime ownership denied: ${acquired.reason}`);
+      record.ownerGeneration = acquired.owner;
+    } else {
+      record.ownerGeneration = captureRuntimeOwnership(this.projectRoot, record.link.workflowSessionId, record.ownerNonce);
+      if (!record.ownerGeneration) throw new Error("Workflow runtime ownership changed after heartbeat");
     }
     record.ownerHeld = true;
     record.heartbeat = setInterval(() => {
@@ -197,10 +204,11 @@ export class WorkflowProductionRuntimeRegistry {
   private release(record: RuntimeRecord): void {
     if (record.heartbeat) clearInterval(record.heartbeat);
     record.heartbeat = undefined;
-    if (record.ownerHeld && !releaseRuntimeOwnership(this.projectRoot, record.link.workflowSessionId, record.ownerNonce)) {
+    if (record.ownerHeld && (!record.ownerGeneration || !settleRuntimeOwnershipRelease(this.projectRoot, record.link.workflowSessionId, record.ownerGeneration))) {
       throw new Error("Workflow runtime ownership release was denied");
     }
     record.ownerHeld = false;
+    record.ownerGeneration = undefined;
   }
 
   select(link: WorkflowSessionLink | undefined, ctx: ExtensionContext): SelectedProductionWorkflowRuntime | undefined {

@@ -5,6 +5,7 @@ import type { ProtectedPathRoot } from "../capabilities/reserved-paths";
 import type { ArtifactReference } from "../workflows/runs";
 import type { ArtifactWorkspaceHashesV1 } from "./hashes";
 import type { CheckpointDescriptorV1 } from "./checkpoints";
+import type { ProviderArtifactArgumentContractV1 } from "./action-contracts";
 import type {
   ARTIFACT_ACTION_VERSION,
   ARTIFACT_CONTRACT_VERSION,
@@ -120,7 +121,8 @@ export interface ArtifactStatusViewV1 {
   readonly status: "ready" | "blocked" | "complete";
   readonly summary: string;
   readonly checkpoints: readonly Readonly<{ id: string; state: "pending" | "ready" | "approved" | "not-applicable"; digest?: string }>[];
-  readonly actions: readonly Readonly<{ id: string; label: string; available: boolean; reason?: string }>[];
+  /** Facade output always supplies the provider contract; adapter-owned raw views omit it. */
+  readonly actions: readonly Readonly<{ id: string; label: string; available: boolean; reason?: string } & Partial<ProviderArtifactArgumentContractV1>>[];
   readonly items: readonly Readonly<{ id: string; kind: string; label: string; state: string; summary?: string; ref?: string }>[];
   readonly page: Readonly<{ limit: number; cursor?: string; nextCursor?: string }>;
   readonly refs: readonly ArtifactViewRefV1[];

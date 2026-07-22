@@ -210,6 +210,134 @@ test("failed current-session resume rolls back authority and blocks workflow inp
   assert.equal(rollbackCount, 4, "each blocked callback must roll back its failed authority attempt");
 });
 
+test("a current root model tool call confirms its exact prepared input before tool policy and finish execution", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-run-tool-delivery-"));
+  let tick = 0;
+  const lifecycle = new WorkflowRunLifecycle({
+    projectRoot,
+    projectId: "p",
+    sessionId: "tool-delivery",
+    snapshotId: "snap",
+    rootNodeId: "root",
+    createRunId: () => "run-tool-delivery",
+    now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(),
+  });
+  const order: string[] = [];
+  const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+  const pi = {
+    on(name: string, handler: (event: any, ctx: any) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+    async fire(name: string, event: any, ctx: any = {}) {
+      let result;
+      for (const handler of handlers.get(name) ?? []) result = await handler(event, ctx);
+      return result;
+    },
+  } as any;
+  registerWorkflowRunHooks(pi, {
+    resolveLifecycle: () => lifecycle,
+    nextInputId: () => "first-ordinary-input",
+    pauseCoordinator: {},
+    resumeCoordinator: {
+      acquireOwnership: async () => {},
+      acquireLeases: async () => {},
+      revalidateHashes: async () => true,
+      rollbackAuthority: async () => {},
+    },
+  });
+  pi.on("tool_call", async () => {
+    order.push("tool-policy");
+    assert.equal(lifecycle.restore().latestRun?.deliveredThrough, 1, "delivery must be durable before tool policy runs");
+  });
+
+  order.push("input");
+  await pi.fire("input", { text: "finish this ordinary request", source: "interactive" });
+  order.push("context");
+  await pi.fire("context", { messages: [{ role: "user", content: "finish this ordinary request", timestamp: 0 }] });
+  const prepared = lifecycle.preparedInputDelivery();
+  assert.ok(prepared);
+  order.push("provider-dispatch");
+  await pi.fire("before_provider_request", { payload: {} });
+
+  const red = await lifecycle.finish(
+    { status: "completed", summary: "The ordinary request is complete." },
+    { callerNodeId: "root", toolBatch: ["workflow_finish"] },
+  );
+  assert.equal(red.ok, false);
+  if (!red.ok) assert.match(red.issues.join("\n"), /every input is delivered/i);
+
+  order.push("model-tool-call");
+  await pi.fire("tool_call", { type: "tool_call", toolCallId: "finish-current-attempt", toolName: "workflow_finish", input: { status: "completed", summary: "The ordinary request is complete." } });
+  order.push("tool-execute");
+  const finished = await lifecycle.finish(
+    { status: "completed", summary: "The ordinary request is complete." },
+    { callerNodeId: "root", toolBatch: ["workflow_finish"] },
+  );
+  assert.equal(finished.ok, true, finished.ok ? undefined : finished.issues.join("\n"));
+  assert.equal(lifecycle.restore().latestRun?.status, "completed");
+  await pi.fire("after_provider_response", { status: 200, headers: {} });
+  assert.deepEqual(order, ["input", "context", "provider-dispatch", "model-tool-call", "tool-policy", "tool-execute"]);
+});
+
+test("tool-call delivery proof rejects foreign lifecycle, wrong request, and replayed call identities", async () => {
+  const first = fixture("tool-proof-first");
+  const second = fixture("tool-proof-second");
+  let lifecycle: WorkflowRunLifecycle | undefined = first;
+  const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+  const pi = {
+    on(name: string, handler: (event: any, ctx: any) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+    async fire(name: string, event: any, ctx: any = {}) { for (const handler of handlers.get(name) ?? []) await handler(event, ctx); },
+  } as any;
+  registerWorkflowRunHooks(pi, {
+    resolveLifecycle: () => lifecycle,
+    pauseCoordinator: {},
+    resumeCoordinator: { acquireOwnership: async () => {}, acquireLeases: async () => {}, revalidateHashes: async () => true, rollbackAuthority: async () => {} },
+  });
+
+  await pi.fire("context", { messages: [] });
+  await pi.fire("before_provider_request", { payload: {} });
+  lifecycle = second;
+  const foreign = { type: "tool_call", toolCallId: "foreign-or-replayed", toolName: "workflow_finish", input: {} };
+  await pi.fire("tool_call", foreign);
+  assert.equal(first.restore().latestRun?.deliveredThrough, 0, "a call under foreign lifecycle authority cannot confirm delivery");
+  lifecycle = first;
+  await pi.fire("tool_call", { ...foreign });
+  assert.equal(first.restore().latestRun?.deliveredThrough, 0, "replaying a previously rejected call cannot forge delivery");
+
+  const originalRequest = first.preparedInputDelivery()!;
+  first.confirmInputDelivery(originalRequest.requestId);
+  first.recordUserInput({ inputId: "replacement-input", text: "new pending input", source: "interactive" });
+  first.prepareInputDelivery("replacement-request");
+  await pi.fire("tool_call", { type: "tool_call", toolCallId: "stale-attempt-new-call", toolName: "workflow_finish", input: {} });
+  assert.equal(first.restore().latestRun?.deliveredThrough, 1, "a stale attempt cannot confirm a different prepared request");
+  assert.equal(first.preparedInputDelivery()?.requestId, "replacement-request");
+});
+
+test("a policy-denied current model call still proves delivery but cannot be replayed for a later request", async () => {
+  const lifecycle = fixture("denied-tool-proof");
+  const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+  const pi = {
+    on(name: string, handler: (event: any, ctx: any) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+    async fire(name: string, event: any, ctx: any = {}) { let result; for (const handler of handlers.get(name) ?? []) result = await handler(event, ctx); return result; },
+  } as any;
+  registerWorkflowRunHooks(pi, {
+    resolveLifecycle: () => lifecycle,
+    pauseCoordinator: {},
+    resumeCoordinator: { acquireOwnership: async () => {}, acquireLeases: async () => {}, revalidateHashes: async () => true, rollbackAuthority: async () => {} },
+  });
+  pi.on("tool_call", async () => ({ block: true, reason: "denied by immutable policy" }));
+
+  await pi.fire("context", { messages: [] });
+  await pi.fire("before_provider_request", { payload: {} });
+  const denied = { type: "tool_call", toolCallId: "denied-current-call", toolName: "write", input: { path: "outside" } };
+  assert.deepEqual(await pi.fire("tool_call", denied), { block: true, reason: "denied by immutable policy" });
+  assert.equal(lifecycle.restore().latestRun?.deliveredThrough, 1, "model emission proves provider delivery even when policy blocks execution");
+
+  lifecycle.recordUserInput({ inputId: "later-input", text: "later work", source: "interactive" });
+  await pi.fire("context", { messages: [] });
+  await pi.fire("before_provider_request", { payload: {} });
+  await pi.fire("tool_call", { ...denied });
+  assert.equal(lifecycle.restore().latestRun?.deliveredThrough, 1, "a denied call identity cannot be replayed to confirm later input");
+});
+
 test("schema-v1 integration hooks dynamically resolve linked sessions and confirm only accepted provider requests", async () => {
   const first = fixture("first");
   const second = fixture("second");
@@ -244,7 +372,8 @@ test("schema-v1 integration hooks dynamically resolve linked sessions and confir
   await pi.fire("before_provider_request", { payload: {} });
   assert.equal(current().restore().latestRun?.deliveredThrough, 0, "building a provider request is not durable acceptance");
   await pi.fire("after_provider_response", { status: 503, headers: {} });
-  assert.equal(current().restore().latestRun?.deliveredThrough, 0, "a rejected request must remain pending");
+  await pi.fire("tool_call", { type: "tool_call", toolCallId: "call-after-provider-failure", toolName: "workflow_finish", input: {} });
+  assert.equal(current().restore().latestRun?.deliveredThrough, 0, "a rejected provider attempt and any late call must remain pending");
 
   const replayedContext = await pi.fire("context", { messages: context.messages });
   assert.ok(replayedContext.messages.some((message: any) => message.customType === "pi-hive-run-input-v1"));
