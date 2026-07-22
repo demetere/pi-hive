@@ -18,7 +18,12 @@ export function verifyRelease(root, requestedTag) {
   if (lock.version !== pkg.version || lock.packages?.[""]?.version !== pkg.version) failures.push(`package-lock.json version must match package.json version ${pkg.version}`);
   const changelogPath = join(root, "CHANGELOG.md");
   if (!existsSync(changelogPath)) failures.push("CHANGELOG.md is missing");
-  else if (!new RegExp(`^## (?:\\[)?${escapeRegExp(pkg.version)}(?:\\])?(?:\\s|$)`, "m").test(readFileSync(changelogPath, "utf8"))) failures.push(`CHANGELOG.md has no release notes for ${pkg.version}`);
+  else {
+    const match = readFileSync(changelogPath, "utf8").match(new RegExp(`^## \\[${escapeRegExp(pkg.version)}\\] - (\\d{4}-\\d{2}-\\d{2})$`, "m"));
+    const date = match?.[1];
+    const validDate = date && Number.isFinite(Date.parse(`${date}T00:00:00Z`)) && new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date;
+    if (!validDate) failures.push(`CHANGELOG.md release notes for ${pkg.version} require a bracketed version and ISO date: ## [${pkg.version}] - YYYY-MM-DD`);
+  }
   const webDir = join(root, "ui", "web"); const stampPath = dashboardStampPath(webDir); const stampedHash = existsSync(stampPath) ? readFileSync(stampPath, "utf8").trim() : "";
   if (!stampedHash || stampedHash !== dashboardSourceHash(webDir)) failures.push("dashboard build hash is missing or stale");
   try { if (releaseTag === expectedTag && /^v\d/.test(releaseTag)) { const head = git(root, ["rev-parse", "HEAD"]); const tagged = git(root, ["rev-parse", `refs/tags/${releaseTag}^{commit}`]); if (head !== tagged) failures.push(`tag ${releaseTag} does not point at HEAD`); } if (git(root, ["status", "--porcelain=v1", "--untracked-files=all"])) failures.push("Git index and worktree must be clean before publishing"); }

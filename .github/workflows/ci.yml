@@ -45,7 +45,7 @@ jobs:
         run: npm ci --prefix ui/web
 
       - name: Run Node.js compatibility gates
-        run: just typecheck-core test-node-compat dashboard-typecheck dashboard-test-unit
+        run: just typecheck-core test-node-compat dashboard-typecheck dashboard-test-unit verify-node-package-compat
 
   verify:
     runs-on: ubuntu-latest

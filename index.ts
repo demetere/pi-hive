@@ -8,19 +8,60 @@ import { createLinkedWorkflowCommandServices, createPiWorkflowRuntimeCommandAuth
 import { registerWorkflowCommands } from "./src/integration/workflow-commands";
 import { registerWorkflowRunHooks } from "./src/integration/run-lifecycle";
 import { createSelectedWorkflowToolPolicyHook } from "./src/integration/workflow-tool-policy";
+import { startWorkflowDashboard } from "./src/integration/workflow-dashboard-service";
+import { materializeNormalSession } from "./src/integration/session-links";
+import { acknowledgeSessionReplacementStart, observeSessionReplacementStart } from "./src/integration/session-replacement-acknowledgement";
+import { publishSessionContext } from "./src/integration/session-context";
 import { WorkflowProductionRuntimeRegistry, type SelectedProductionWorkflowRuntime } from "./src/integration/workflow-production-runtime";
 import { clearWorkflowStatusUi, restoreWorkflowStatusSummary, updateWorkflowStatusUi } from "./src/ui/tui/workflow-widget";
-import { initializeNormalParent, listSessionLinks, type NormalSessionLink, type WorkflowSessionLink } from "./src/workflows/sessions";
+import { initializeNormalParent, listSessionLinks, workflowLinkGenerationHash, type NormalSessionLink, type WorkflowSessionLink } from "./src/workflows/sessions";
 
 export const WORKFLOW_UI_REFRESH_BOUNDARIES = Object.freeze(["session_start", "input", "message_end", "turn_end", "command-settled"] as const);
+
+// Pi cache-busts extension modules during session replacement. Keep ownership
+// truly process-scoped so the committed target can reacquire the live runtime.
+const RUNTIME_OWNER_NONCE_KEY = Symbol.for("pi-hive.runtime-owner-nonce.v1");
+const processRuntimeState = globalThis as typeof globalThis & { [RUNTIME_OWNER_NONCE_KEY]?: string };
+const runtimeOwnerNonce = processRuntimeState[RUNTIME_OWNER_NONCE_KEY] ??= randomUUID();
 
 function configurationFailure(result: Exclude<ReturnType<typeof loadConfigProject>, { status: "configured" | "unconfigured" }>): Error {
   const details = result.diagnostics.slice(0, 20).map((entry) => `${entry.code}: ${entry.message}`).join("; ");
   return new Error(`pi-hive schema-v1 configuration is invalid. Manual migration is required; pre-1.0 configuration is not loaded. ${details}`);
 }
 
+export type WorkflowDashboardStartMode = "session" | "workflow" | "manual";
+export interface WorkflowDashboardStartLifecycle<Context = unknown> {
+  sessionStarted(context: Context, workflowSelected: boolean): Promise<void>;
+  workflowSelected(context: Context): Promise<void>;
+}
+
+/** One-shot, injectable dashboard lifecycle. It has no side effects until an explicit hook boundary. */
+export function createWorkflowDashboardStartLifecycle<Context>(
+  configuredMode: WorkflowDashboardStartMode | undefined,
+  start: (context: Context, open: boolean) => Promise<unknown>,
+): WorkflowDashboardStartLifecycle<Context> {
+  const mode = configuredMode ?? "workflow";
+  let started = false;
+  let pending: Promise<void> | undefined;
+  const startOnce = async (context: Context): Promise<void> => {
+    if (started) return;
+    pending ??= Promise.resolve(start(context, false)).then(() => { started = true; }).finally(() => { pending = undefined; });
+    await pending;
+  };
+  return Object.freeze({
+    async sessionStarted(context: Context, selected: boolean) {
+      if (mode === "session" || (mode === "workflow" && selected)) await startOnce(context);
+    },
+    async workflowSelected(context: Context) { if (mode === "workflow") await startOnce(context); },
+  });
+}
+
+export interface HiveExtensionDependencies {
+  readonly startDashboard?: (ctx: ExtensionContext, open: boolean) => Promise<unknown>;
+}
+
 /** Testable production wiring seam; constructing services has no process side effects. */
-export async function registerLinkedWorkflowCommandSurfaces(pi: ExtensionAPI, projectRoot: string, projectId: string, onSettled?: (ctx: ExtensionCommandContext) => void, runtimeOwnerNonce?: string): Promise<void> {
+export async function registerLinkedWorkflowCommandSurfaces(pi: ExtensionAPI, projectRoot: string, projectId: string, onSettled?: (ctx: ExtensionCommandContext) => void | Promise<void>, runtimeOwnerNonce?: string): Promise<void> {
   registerWorkflowCommands(pi, createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), runtimeOwnerNonce), onSettled);
 }
 
@@ -32,69 +73,92 @@ function normalLink(projectRoot: string, ctx: ExtensionContext): NormalSessionLi
   return listSessionLinks(projectRoot).find((entry): entry is NormalSessionLink => entry.kind === "normal" && entry.piSessionId === ctx.sessionManager.getSessionId());
 }
 
-export default async function hiveExtension(pi: ExtensionAPI): Promise<void> {
+export default async function hiveExtension(pi: ExtensionAPI, dependencies: HiveExtensionDependencies = {}): Promise<void> {
   const configured = loadConfigProject(process.cwd());
   if (configured.status === "unconfigured") return;
   if (configured.status === "invalid") throw configurationFailure(configured);
 
-  // Capture before workflow tools are registered: Pi enables newly registered
-  // custom tools by default, so a later getActiveTools() is not a normal-chat baseline.
-  const startupNormalTools = Object.freeze([...pi.getActiveTools()]);
   const project = resolveProjectIdentity(configured.projectRoot);
-  const runtimeOwnerNonce = randomUUID();
   const runtimes = new WorkflowProductionRuntimeRegistry(configured.projectRoot, project.projectId, undefined, runtimeOwnerNonce);
+  const dashboardStart = createWorkflowDashboardStartLifecycle<ExtensionContext>(
+    configured.manifest.settings?.telemetry?.["dashboard-start"],
+    dependencies.startDashboard ?? ((ctx, open) => startWorkflowDashboard(ctx as ExtensionCommandContext, open)),
+  );
   let activeRuntime: SelectedProductionWorkflowRuntime | undefined;
   let workflowUiVisible = false;
 
-  for (const tool of workflowToolDefinitionsWithRuntime(() => activeRuntime?.rootServices())) pi.registerTool(tool);
-  pi.setActiveTools([...startupNormalTools]);
+  const workflowTools = workflowToolDefinitionsWithRuntime(() => activeRuntime?.rootServices());
+  const workflowToolNames = new Set(workflowTools.map((tool) => tool.name));
+  for (const tool of workflowTools) pi.registerTool(tool);
 
   const refreshSelection = (ctx: ExtensionContext): void => {
     const selected = selectedLink(configured.projectRoot, ctx);
     activeRuntime = runtimes.select(selected, ctx);
   };
-  const refreshWorkflowUi = (ctx: ExtensionContext): void => {
+  const refreshWorkflowUi = (ctx: ExtensionContext): boolean => {
     const selected = selectedLink(configured.projectRoot, ctx);
     try {
       if (selected) {
-        updateWorkflowStatusUi(ctx, restoreWorkflowStatusSummary(configured.projectRoot, selected));
-        workflowUiVisible = true;
-      } else if (workflowUiVisible) {
-        clearWorkflowStatusUi(ctx);
-        workflowUiVisible = false;
+        const restored = updateWorkflowStatusUi(ctx, restoreWorkflowStatusSummary(configured.projectRoot, selected));
+        workflowUiVisible = restored;
+        return restored;
       }
+      if (workflowUiVisible) {
+        const restored = clearWorkflowStatusUi(ctx);
+        workflowUiVisible = false;
+        return restored;
+      }
+      return true;
     } catch {
       if (workflowUiVisible) clearWorkflowStatusUi(ctx);
       workflowUiVisible = false;
+      return false;
     }
   };
-  await registerLinkedWorkflowCommandSurfaces(pi, configured.projectRoot, project.projectId, (ctx) => {
+  await registerLinkedWorkflowCommandSurfaces(pi, configured.projectRoot, project.projectId, async (ctx) => {
     refreshSelection(ctx);
     refreshWorkflowUi(ctx);
+    if (selectedLink(configured.projectRoot, ctx)) await dashboardStart.workflowSelected(ctx);
   }, runtimeOwnerNonce);
 
   // This handler is registered before lifecycle hooks so session restoration has
   // selected the exact linked authority before resume/input callbacks run.
   pi.on("session_start", async (_event, ctx) => {
-    const sessionFile = ctx.sessionManager.getSessionFile();
+    observeSessionReplacementStart(configured.projectRoot, project.projectId, ctx);
+    publishSessionContext(ctx);
+    let sessionFile = ctx.sessionManager.getSessionFile();
     if (!sessionFile) return;
     const selected = selectedLink(configured.projectRoot, ctx);
     if (selected) {
       readActivationSnapshot(configured.projectRoot, selected.activationHash);
       pi.setActiveTools([...selected.tools]);
     } else {
+      sessionFile = materializeNormalSession(ctx.sessionManager) ?? sessionFile;
+      // Pi enables newly registered custom tools by default. Action methods are
+      // unavailable while loading an extension, so derive the initial normal
+      // baseline at this runtime boundary. Replacement back to the canonical
+      // normal session restores its previously captured baseline exactly.
       const stored = normalLink(configured.projectRoot, ctx);
-      const baseline = stored?.normalTools ?? startupNormalTools;
-      pi.setActiveTools([...baseline]);
+      const baseline = stored?.normalTools ?? Object.freeze(pi.getActiveTools().filter((name) => !workflowToolNames.has(name)));
       initializeNormalParent({
         configured: true, projectRoot: configured.projectRoot, projectId: project.projectId,
         piSessionId: ctx.sessionManager.getSessionId(), piSessionFile: sessionFile,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unselected",
         thinking: String(pi.getThinkingLevel()), activeTools: baseline,
       });
+      pi.setActiveTools([...baseline]);
     }
     refreshSelection(ctx);
-    refreshWorkflowUi(ctx);
+    const workflowUiRestored = refreshWorkflowUi(ctx);
+    let dashboardRestored = true;
+    try { await dashboardStart.sessionStarted(ctx, Boolean(selected)); }
+    catch { dashboardRestored = false; /* Optional telemetry startup must not disrupt ordinary Pi startup. */ }
+    if (selected && workflowUiRestored && dashboardRestored && activeRuntime?.link.workflowSessionId === selected.workflowSessionId && workflowLinkGenerationHash(activeRuntime.link) === workflowLinkGenerationHash(selected)) {
+      acknowledgeSessionReplacementStart(configured.projectRoot, project.projectId, ctx, {
+        workflowSessionId: selected.workflowSessionId,
+        linkGenerationHash: workflowLinkGenerationHash(selected),
+      });
+    }
   });
   pi.on("input", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
   pi.on("message_end", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });

@@ -23,6 +23,7 @@ export interface WorkflowRunHookOptions {
 interface PreparedRequest {
   readonly lifecycle: WorkflowRunLifecycle;
   readonly requestId: string;
+  readonly runId: string;
 }
 
 /**
@@ -32,6 +33,7 @@ interface PreparedRequest {
 export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunHookOptions): void {
   const callbackIds = new WeakMap<object, string>();
   const preparedBySession = new Map<string, PreparedRequest>();
+  const observedToolCallIds = new Set<string>();
   const resumeAttempts = new WeakMap<WorkflowRunLifecycle, Promise<void>>();
   let inFlight: PreparedRequest | undefined;
   const inputId = (event: object): string => {
@@ -40,6 +42,19 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
     const created = options.nextInputId?.(event) ?? `input-callback-${randomUUID()}`;
     callbackIds.set(event, created);
     return created;
+  };
+
+  const confirmCurrentRequest = (request: PreparedRequest): boolean => {
+    const lifecycle = options.resolveLifecycle();
+    if (lifecycle !== request.lifecycle) return false;
+    const prepared = preparedBySession.get(lifecycle.options.sessionId);
+    if (prepared !== request) return false;
+    const durable = lifecycle.preparedInputDelivery();
+    if (!durable || durable.requestId !== request.requestId || durable.runId !== request.runId) return false;
+    lifecycle.confirmInputDelivery(request.requestId);
+    if (inFlight === request) inFlight = undefined;
+    if (preparedBySession.get(lifecycle.options.sessionId) === request) preparedBySession.delete(lifecycle.options.sessionId);
+    return true;
   };
 
   const resumeCurrentLifecycle = async (): Promise<WorkflowRunLifecycle | undefined> => {
@@ -97,7 +112,7 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
     const recovered = lifecycle.preparedInputDelivery();
     const requestId = recovered?.requestId ?? `root-request-${randomUUID()}`;
     const prepared = recovered ?? lifecycle.prepareInputDelivery(requestId);
-    preparedBySession.set(sessionId, { lifecycle, requestId: prepared.requestId });
+    preparedBySession.set(sessionId, { lifecycle, requestId: prepared.requestId, runId: prepared.runId });
     const steering = prepared.inputs.filter((input) => input.kind === "steering");
     if (!steering.length) return;
     const content = [
@@ -127,8 +142,21 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
     const request = inFlight;
     inFlight = undefined;
     if (!request || !accepted) return;
-    request.lifecycle.confirmInputDelivery(request.requestId);
-    preparedBySession.delete(request.lifecycle.options.sessionId);
+    confirmCurrentRequest(request);
+  });
+
+  // Pi invokes tool_call only for calls emitted by the active model cycle. A
+  // call therefore proves that this exact prepared root request reached the
+  // model even when native stream ordering has not emitted its response hook.
+  // Register before the selected-node policy so delivery is durable before a
+  // same-response workflow_finish (or any other tool) is authorized/executed.
+  pi.on("tool_call", async (event) => {
+    const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : "";
+    if (!toolCallId || observedToolCallIds.has(toolCallId)) return;
+    observedToolCallIds.add(toolCallId);
+    const request = inFlight;
+    if (!request) return;
+    confirmCurrentRequest(request);
   });
 
   pi.on("session_before_switch", async (event) => {

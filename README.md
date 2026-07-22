@@ -14,14 +14,14 @@ Pi supplies the peer dependencies. pi-hive supports Linux only; npm rejects inst
 
 ## Quick start
 
-1. Copy one of `examples/combined-openspec-delivery`, `examples/split-openspec-handoff`, `examples/markdown-plan-lifecycle`, or `examples/artifact-free-debug` into a project.
+1. Copy the full contents of `examples/combined-openspec-delivery`, `examples/split-openspec-handoff`, `examples/markdown-plan-lifecycle`, or `examples/artifact-free-debug` into a project, including hidden files.
 2. Restart Pi in that project.
 3. Run `/hive:doctor`, then `/hive:select`.
 4. Select a workflow. Selection creates or resumes a linked session but does not start work.
 5. Send an ordinary chat message. The first message starts a run; later messages steer the same open run.
 6. The root completes through the `workflow_finish` tool. The workflow remains selected for another run until `/hive:exit`.
 
-No workflow is automatically selected. Normal chat keeps its original tools and has no workflow prompt, widget, policy, or telemetry.
+No workflow is automatically selected. Normal chat keeps its original tools and has no workflow prompt, widget, policy, or telemetry. The default dashboard daemon waits for the first actual workflow selection; `dashboard-start: session` starts from a session hook, while `manual` is `/hive:observe`-only.
 
 ## Configuration
 
@@ -102,6 +102,8 @@ Built-in adapters are:
 - `openspec`: `author`, `execute`, `review`, and `lifecycle` profiles.
 
 Agents use the generic `artifact_status` and `artifact_action` tools. Adapter-specific action IDs remain behind that facade. A run binds at most one workspace. Mutations use operation IDs, optimistic hashes, a writer lease, and Pi's file mutation queue. OpenSpec is not a global mode or command family.
+
+The combined and split OpenSpec examples are complete project overlays: each includes the required safe `openspec/config.yaml` and a tracked `openspec/changes/` directory, alongside its hidden `.pi/` workflow config. Copy the whole example rather than only `.pi/`; then a new `workspace-bind` can scaffold its first change without a separate OpenSpec initialization step. When authoring a different OpenSpec-backed project from scratch, provide that same initialized layout first.
 
 Checkpoint policies are `required`, `optional`, or `none`. Exact-digest approvals occur through the authenticated dashboard or the guarded TUI fallback when the dashboard is unavailable. A denial is immutable for its digest; revision produces a new digest.
 

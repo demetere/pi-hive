@@ -10,15 +10,27 @@ import { WorkspaceLeaseRuntime } from "../../src/artifacts/leases";
 import { BUILTIN_ARTIFACT_REGISTRY } from "../../src/artifacts/registry";
 import { readActivationSnapshot } from "../../src/config/index";
 import { resolveProjectIdentity } from "../../src/shared/project-identity";
+import { acknowledgeSessionReplacementStart, observeSessionReplacementStart } from "../../src/integration/session-replacement-acknowledgement";
 import { createLinkedWorkflowCommandServices, createPiWorkflowRuntimeCommandAuthority } from "../../src/integration/workflow-command-service";
+import { durablyFlushPiSessionManager } from "../../src/integration/pi-session-manager-compat";
 import { registerWorkflowCommands, type WorkflowCommandServices } from "../../src/integration/workflow-commands";
+import { publishSessionContext } from "../../src/integration/session-context";
 import { createWorkflowEvent } from "../../src/workflows/events";
 import { createHandoffPacket, readHandoffState } from "../../src/workflows/handoff";
 import { appendWorkflowEvent, readWorkflowJournal } from "../../src/workflows/journal";
 import { QuestionService } from "../../src/workflows/questions";
 import { terminalEnvelopeFromEvent, WorkflowRunLifecycle } from "../../src/workflows/runs";
 import { RunOrchestrationService } from "../../src/workflows/orchestration";
-import { initializeNormalParent, markMissingPiSession, listSessionLinks, type WorkflowSessionLink } from "../../src/workflows/sessions";
+import { initializeNormalParent, markMissingPiSession, listSessionLinks, workflowLinkGenerationHash, type WorkflowSessionLink } from "../../src/workflows/sessions";
+import { FakePiSessionManager } from "../helpers/fake-pi-session-manager";
+
+function persistedFakePiSessionManager(projectRoot: string, sessionRoot: string, id: string): FakePiSessionManager {
+  const manager = FakePiSessionManager.create(projectRoot, sessionRoot);
+  manager.newSession({ id });
+  manager.appendCustomEntry("test-anchor", { formatVersion: 1 });
+  durablyFlushPiSessionManager(manager as never);
+  return manager;
+}
 
 function harness(overrides: Partial<WorkflowCommandServices> = {}, onSettled?: (ctx: any) => void) {
   const commands = new Map<string, any>();
@@ -145,10 +157,10 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   const agentPath = join(projectRoot, ".pi/hive/agents/debugger.md");
   writeFileSync(agentPath, readFileSync(agentPath, "utf8").replace("  human-input: true", "  human-input: true\n  artifact: [read, write, review]"));
   const sessionRoot = join(projectRoot, "pi-sessions"); mkdirSync(sessionRoot);
-  let sessionId = "normal"; let sessionFile = join(sessionRoot, "normal.jsonl"); writeFileSync(sessionFile, "normal\n");
+  let sessionManager = persistedFakePiSessionManager(projectRoot, sessionRoot, "normal");
+  let sessionId = sessionManager.getSessionId(); let sessionFile = sessionManager.getSessionFile()!;
   const notices: Array<[string, string]> = [];
   const model = { provider: "provider", id: "model", contextWindow: 2_000_000, maxTokens: 16_384, reasoning: true };
-  const sessionManager = { getSessionId: () => sessionId, getSessionFile: () => sessionFile };
   let created = 0;
   const ctx: any = {
     mode: "print", hasUI: true, cwd: projectRoot, sessionManager, model,
@@ -156,14 +168,31 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
     isProjectTrusted: () => true, isIdle: () => true, abort() {}, waitForIdle: async () => {},
     ui: { notify: (text: string, severity: string) => notices.push([text, severity]) },
     async newSession(input: any) {
-      const nextId = `workflow-pi-${++created}`; const nextFile = join(sessionRoot, `${nextId}.jsonl`); writeFileSync(nextFile, "workflow\n");
-      await input.setup?.({ appendSessionInfo() {}, appendCustomEntry() {} });
-      sessionId = nextId; sessionFile = nextFile; await input.withSession?.({ ...ctx, sessionManager });
+      sessionManager = FakePiSessionManager.create(projectRoot, sessionRoot);
+      sessionManager.newSession({ id: `workflow-pi-${++created}` });
+      sessionId = sessionManager.getSessionId(); sessionFile = sessionManager.getSessionFile()!;
+      ctx.sessionManager = sessionManager;
+      await input.setup?.(sessionManager);
+      const fresh = { ...ctx, sessionManager };
+      await input.withSession?.(fresh);
       return { cancelled: false };
     },
     async switchSession(target: string, input: any) {
-      sessionFile = target; sessionId = listSessionLinks(projectRoot).find((link) => link.piSessionFile === target)?.piSessionId ?? "normal";
-      await input.withSession?.({ ...ctx, sessionManager }); return { cancelled: false };
+      sessionManager = FakePiSessionManager.open(target);
+      sessionFile = sessionManager.getSessionFile()!; sessionId = sessionManager.getSessionId();
+      ctx.sessionManager = sessionManager;
+      const fresh = { ...ctx, sessionManager };
+      const selected = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId);
+      observeSessionReplacementStart(projectRoot, projectId, fresh);
+      if (selected) acknowledgeSessionReplacementStart(projectRoot, projectId, fresh, { workflowSessionId: selected.workflowSessionId, linkGenerationHash: workflowLinkGenerationHash(selected) });
+      publishSessionContext(fresh);
+      await input.withSession?.(fresh); return { cancelled: false };
+    },
+    async reload() {
+      const selected = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId);
+      observeSessionReplacementStart(projectRoot, projectId, ctx);
+      if (selected) acknowledgeSessionReplacementStart(projectRoot, projectId, ctx, { workflowSessionId: selected.workflowSessionId, linkGenerationHash: workflowLinkGenerationHash(selected) });
+      publishSessionContext(ctx);
     },
   };
   const commands = new Map<string, any>();
@@ -305,7 +334,7 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   assert.ok(Buffer.byteLength(linkedNormalStatus, "utf8") <= 8_192);
   unlinkSync(selected.piSessionFile); markMissingPiSession(projectRoot, projectId, selected.workflowSessionId);
   await commands.get("hive:recover").handler(selected.workflowSessionId, ctx);
-  assert.match(notices.map(([text]) => text).join("\n"), /recovered/i);
+  assert.deepEqual(notices.at(-1), [`Recovered ${selected.workflowSessionId} as Pi session ${sessionId}`, "info"]);
   const recovered = listSessionLinks(projectRoot).find((link) => link.kind === "workflow" && link.workflowSessionId === selected.workflowSessionId) as WorkflowSessionLink;
   assert.equal(recovered.orphaned, false);
   const beforeReloadSessionId = sessionId;
@@ -461,4 +490,108 @@ test("typed command answers parse confirm, single, multi, and text before author
     await commands.get("hive:answer").handler(`question-1 ${raw}`, context().ctx);
     assert.deepEqual(calls, [["answer", { questionId: "question-1", value: expected, channel: "command" }]]);
   }
+});
+
+test("session-replacing commands never access an invalidated Pi command context", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-command-stale-context-"));
+  mkdirSync(join(projectRoot, ".pi"), { recursive: true });
+  cpSync(join(process.cwd(), "tests/fixtures/workflow-configs/artifact-free-debug/.pi/hive"), join(projectRoot, ".pi/hive"), { recursive: true });
+  const sessionRoot = join(projectRoot, "pi-sessions");
+  mkdirSync(sessionRoot);
+  const normalManager = persistedFakePiSessionManager(projectRoot, sessionRoot, "normal");
+  const normalFile = normalManager.getSessionFile()!;
+
+  const model = { provider: "provider", id: "model", contextWindow: 2_000_000, maxTokens: 16_384, reasoning: true };
+  const notices: Array<[string, string]> = [];
+  let sessionId = "normal";
+  let sessionFile = normalFile;
+  let created = 0;
+  let currentContext: any;
+  const createContext = (): any => {
+    let stale = false;
+    const sessionManager = FakePiSessionManager.open(sessionFile);
+    const target: any = {
+      mode: "tui", hasUI: true, cwd: projectRoot, sessionManager, model,
+      modelRegistry: { find: () => model, hasConfiguredAuth: () => true },
+      isProjectTrusted: () => true, isIdle: () => true, abort() {}, waitForIdle: async () => {},
+      ui: { notify: (text: string, severity: string) => notices.push([text, severity]) },
+      async newSession(input: any) {
+        const manager = FakePiSessionManager.create(projectRoot, sessionRoot);
+        manager.newSession({ id: `workflow-pi-${++created}` });
+        durablyFlushPiSessionManager(manager as never);
+        sessionId = manager.getSessionId();
+        sessionFile = manager.getSessionFile()!;
+        const fresh = createContext();
+        await input.setup?.(fresh.sessionManager);
+        currentContext = fresh;
+        stale = true;
+        await input.withSession?.(fresh);
+        return { cancelled: false };
+      },
+      async switchSession(path: string, input: any) {
+        const manager = FakePiSessionManager.open(path);
+        sessionFile = manager.getSessionFile()!;
+        sessionId = manager.getSessionId();
+        const fresh = createContext();
+        currentContext = fresh;
+        const selected = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId);
+        observeSessionReplacementStart(projectRoot, projectId, fresh);
+        if (selected) acknowledgeSessionReplacementStart(projectRoot, projectId, fresh, { workflowSessionId: selected.workflowSessionId, linkGenerationHash: workflowLinkGenerationHash(selected) });
+        publishSessionContext(fresh);
+        stale = true;
+        await input.withSession?.(fresh);
+        return { cancelled: false };
+      },
+      async reload() {
+        const reloaded = createContext();
+        currentContext = reloaded;
+        stale = true;
+        const selected = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId);
+        observeSessionReplacementStart(projectRoot, projectId, reloaded);
+        if (selected) acknowledgeSessionReplacementStart(projectRoot, projectId, reloaded, { workflowSessionId: selected.workflowSessionId, linkGenerationHash: workflowLinkGenerationHash(selected) });
+        publishSessionContext(reloaded);
+      },
+    };
+    return new Proxy(target, {
+      get(value, property, receiver) {
+        if (stale) throw new Error(`stale command context access: ${String(property)}`);
+        return Reflect.get(value, property, receiver);
+      },
+    });
+  };
+  currentContext = createContext();
+
+  const commands = new Map<string, any>();
+  const pi: any = { getThinkingLevel: () => "medium", registerCommand(name: string, value: unknown) { commands.set(name, value); } };
+  const projectId = resolveProjectIdentity(projectRoot).projectId;
+  initializeNormalParent({ configured: true, projectRoot, projectId, piSessionId: sessionId, piSessionFile: sessionFile, model: "provider/model", thinking: "medium", activeTools: [] });
+  let settled = 0;
+  await registerLinkedWorkflowCommandSurfaces(pi, projectRoot, projectId, (ctx) => {
+    void ctx.mode;
+    settled += 1;
+  });
+
+  await commands.get("hive:select").handler("debug-chat", currentContext);
+  const selectedAfterSelect = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId)!;
+  assert.ok(selectedAfterSelect);
+  await commands.get("hive:status").handler("", currentContext);
+  await commands.get("hive:checkpoints").handler("", currentContext);
+  assert.equal(settled, 2, "non-replacing commands retain command-settled refreshes");
+
+  await commands.get("hive:reload").handler("", currentContext);
+  assert.notEqual(sessionId, selectedAfterSelect.piSessionId);
+  const selectedAfterReload = listSessionLinks(projectRoot).find((link): link is WorkflowSessionLink => link.kind === "workflow" && link.piSessionId === sessionId)!;
+  await commands.get("hive:exit").handler("", currentContext);
+  assert.equal(sessionId, "normal");
+
+  unlinkSync(selectedAfterReload.piSessionFile);
+  markMissingPiSession(projectRoot, projectId, selectedAfterReload.workflowSessionId);
+  await commands.get("hive:recover").handler(selectedAfterReload.workflowSessionId, currentContext);
+  assert.notEqual(sessionId, "normal");
+  assert.deepEqual(notices.at(-1), [`Recovered ${selectedAfterReload.workflowSessionId} as Pi session ${sessionId}`, "info"], "recover presents its exact result through the fresh replacement context");
+  await commands.get("hive:exit").handler("", currentContext);
+  assert.equal(sessionId, "normal");
+  assert.equal(settled, 2, "select, reload, recover, and exit never settle against their replaced contexts");
+  assert.ok(notices.some(([text]) => /Workflow debug-chat/u.test(text)));
+  assert.ok(notices.some(([text]) => /Checkpoints/u.test(text)));
 });

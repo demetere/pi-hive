@@ -51,7 +51,7 @@ knowledge:
 
 Required keys are `schema-version`, `agents`, and `workflows`. `settings`, `skills`, and `knowledge` are optional. Credentials never belong in config; there is no interpolation.
 
-Dashboard startup values are `session`, `workflow` (default), and `manual`. Startup occurs from a session hook, workflow selection, or `/hive:observe`, never from the extension factory.
+Dashboard startup values are `session`, `workflow` (default), and `manual`. `session` starts once from the first session hook; `workflow` starts once on the first actual workflow-selection event (not when a projected workflow row first appears); and `manual` starts only through `/hive:observe`. Automatic startup does not open a browser or notify normal chat, and no mode starts from the extension factory.
 
 ## Agent catalog
 
@@ -141,6 +141,8 @@ Every node declares a unique stable node ID and a catalog agent ID. Recursive `m
 Configure every checkpoint published by the exact profile as `required`, `optional`, or `none`. A run binds exactly one workspace and never silently selects the latest workspace.
 
 Use a combined workflow for conversational continuity. Use split workflows when teams, capabilities, models, budgets, or approvals need distinct boundaries. Stage a source result with `/hive:select target --from <run-id>`; the next user message consumes it once.
+
+OpenSpec-backed projects must already contain a valid `openspec/config.yaml` and the `openspec/changes/` directory before a run can bind a workspace. The checked-in combined and split examples package that minimal initialized layout (with an empty-directory anchor), so copy each example in full, including `.pi/` and `openspec/`. No separate OpenSpec initialization is needed for those examples.
 
 ## Interactive lifecycle
 

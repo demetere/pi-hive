@@ -11,6 +11,7 @@ import {
   type ArtifactBinding,
 } from "./contracts";
 import { hashArtifactWorkspace, type ArtifactWorkspaceHashesV1 } from "./hashes";
+import { providerArtifactArgumentContract, type ProviderArtifactArgumentContractV1 } from "./action-contracts";
 import type {
   ArtifactAdapter,
   ArtifactRuntimeProfile,
@@ -27,10 +28,48 @@ export const ARTIFACT_WORKSPACE_LIMITS = Object.freeze({
   listBytes: 65_536,
   dtoBytes: 16_384,
 });
+export const ARTIFACT_WORKSPACE_BIND_ACTION_ID = "workspace-bind" as const;
+const WORKSPACE_ID_ARGUMENT_SCHEMA = Object.freeze({ type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$", maxLength: ARTIFACT_CONTRACT_LIMITS.idCharacters });
+const WORKSPACE_BIND_ARGUMENT_SCHEMA = Object.freeze({
+  anyOf: Object.freeze([
+    Object.freeze({
+      type: "object", required: Object.freeze(["mode", "workspaceId"]),
+      properties: Object.freeze({ mode: Object.freeze({ type: "string", const: "new" }), workspaceId: WORKSPACE_ID_ARGUMENT_SCHEMA }),
+      additionalProperties: false,
+    }),
+    Object.freeze({
+      type: "object", required: Object.freeze(["mode", "workspaceId"]),
+      properties: Object.freeze({
+        mode: Object.freeze({ type: "string", const: "existing" }), workspaceId: WORKSPACE_ID_ARGUMENT_SCHEMA,
+        handoffWorkspaceId: WORKSPACE_ID_ARGUMENT_SCHEMA,
+      }),
+      additionalProperties: false,
+    }),
+  ]),
+});
+const WORKSPACE_BIND_PROVIDER_CONTRACT = providerArtifactArgumentContract("1", WORKSPACE_BIND_ARGUMENT_SCHEMA);
 
 export interface PhysicalWorkspaceSelection {
   readonly mode: ArtifactWorkspaceSelection;
   readonly workspaceId: string;
+}
+export interface ArtifactWorkspaceBindArguments extends PhysicalWorkspaceSelection {
+  readonly handoffWorkspaceId?: string;
+}
+
+/** Strict harness-owned action arguments. This action is never delegated to an adapter. */
+export function parseArtifactWorkspaceBindArguments(value: unknown): ArtifactWorkspaceBindArguments {
+  if (!plainRecord(value)) throw new Error("workspace-bind arguments must be an object");
+  const keys = Object.keys(value);
+  if (keys.some((key) => key !== "mode" && key !== "workspaceId" && key !== "handoffWorkspaceId")
+    || !keys.includes("mode") || !keys.includes("workspaceId")) throw new Error("workspace-bind arguments contain unknown or missing fields");
+  if (value.mode !== "new" && value.mode !== "existing") throw new Error("workspace-bind mode must be exactly new or existing");
+  const workspaceId = contractId(value.workspaceId, "workspace-bind workspaceId");
+  const handoffWorkspaceId = value.handoffWorkspaceId === undefined ? undefined : contractId(value.handoffWorkspaceId, "workspace-bind handoffWorkspaceId");
+  if (handoffWorkspaceId !== undefined && (value.mode !== "existing" || handoffWorkspaceId !== workspaceId)) {
+    throw new Error("workspace-bind handoffWorkspaceId requires existing mode and must exactly match workspaceId");
+  }
+  return Object.freeze({ mode: value.mode, workspaceId, ...(handoffWorkspaceId === undefined ? {} : { handoffWorkspaceId }) });
 }
 export interface BindPhysicalArtifactWorkspaceInput {
   readonly projectRoot: string;
@@ -154,6 +193,93 @@ export function listPhysicalArtifactWorkspaces(input: ListPhysicalArtifactWorksp
   const nextCursor = cursor(raw.nextCursor);
   const result = Object.freeze({ items, ...(nextCursor ? { nextCursor } : {}) });
   boundedJson(result, "Artifact workspace list page", { bytes: ARTIFACT_WORKSPACE_LIMITS.listBytes, depth: 8, nodes: 1_024 });
+  return result;
+}
+
+export interface UnboundArtifactWorkspaceStatusV1 {
+  readonly schemaVersion: 1;
+  readonly contractVersion: typeof ARTIFACT_CONTRACT_VERSION;
+  readonly adapter: Readonly<{ id: string; version: string }>;
+  readonly profile: Readonly<{ id: string; version: string }>;
+  readonly workspace: Readonly<{
+    state: "unbound";
+    configuredBinding: Exclude<ArtifactBinding, "none">;
+    allowedModes: readonly ArtifactWorkspaceSelection[];
+    explicitSelectionRequired: true;
+  }>;
+  readonly bindingAction: Readonly<{
+    id: typeof ARTIFACT_WORKSPACE_BIND_ACTION_ID;
+    handoffWorkspaceIds: readonly string[];
+  } & ProviderArtifactArgumentContractV1>;
+  readonly candidates: Readonly<{
+    available: boolean;
+    items: readonly ArtifactWorkspaceListItem[];
+    page: Readonly<{ limit: number; cursor?: string; nextCursor?: string }>;
+  }>;
+  readonly harnessActions: readonly Readonly<{
+    id: typeof ARTIFACT_WORKSPACE_BIND_ACTION_ID;
+    label: string;
+    available: true;
+  } & ProviderArtifactArgumentContractV1>[];
+  readonly summary: string;
+}
+
+/** Bounded discovery view used only before a physical run workspace is bound. */
+export function unboundArtifactWorkspaceStatus(input: {
+  readonly projectRoot: string;
+  readonly adapter: ArtifactAdapter;
+  readonly profile: ArtifactRuntimeProfile;
+  readonly configuredBinding: ArtifactBinding;
+  readonly options?: Readonly<Record<string, JsonValue>>;
+  readonly limit: number;
+  readonly cursor?: string;
+  readonly handoffWorkspaceIds?: readonly string[];
+}): UnboundArtifactWorkspaceStatusV1 {
+  validateIdentity(input.adapter, input.profile);
+  if (input.configuredBinding === "none" || !input.profile.bindings.includes(input.configuredBinding)) throw new Error("Unbound artifact status requires a configured physical binding");
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > ARTIFACT_CONTRACT_LIMITS.pageSize) throw new Error("Unbound artifact status limit is invalid");
+  const canList = input.configuredBinding === "existing" || input.configuredBinding === "either";
+  if (!canList && input.cursor !== undefined) throw new Error("A new-only artifact binding has no candidate-list cursor");
+  const listed: ArtifactWorkspaceListPage = canList ? listPhysicalArtifactWorkspaces({
+    projectRoot: input.projectRoot,
+    adapter: input.adapter,
+    profile: input.profile,
+    options: input.options,
+    limit: input.limit,
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+  }) : Object.freeze({ items: Object.freeze([]) });
+  const allowedModes: readonly ArtifactWorkspaceSelection[] = input.configuredBinding === "either"
+    ? Object.freeze(["new", "existing"])
+    : Object.freeze([input.configuredBinding]);
+  const handoffWorkspaceIds = Object.freeze([...(input.handoffWorkspaceIds ?? [])].map((id) => contractId(id, "Handoff workspace ID")));
+  if (handoffWorkspaceIds.length > ARTIFACT_CONTRACT_LIMITS.viewItems || new Set(handoffWorkspaceIds).size !== handoffWorkspaceIds.length) throw new Error("Handoff workspace IDs are invalid or exceed their bound");
+  const result: UnboundArtifactWorkspaceStatusV1 = Object.freeze({
+    schemaVersion: 1,
+    contractVersion: ARTIFACT_CONTRACT_VERSION,
+    adapter: Object.freeze({ id: input.adapter.id, version: input.adapter.version }),
+    profile: Object.freeze({ id: input.profile.id, version: input.profile.version }),
+    workspace: Object.freeze({ state: "unbound", configuredBinding: input.configuredBinding, allowedModes, explicitSelectionRequired: true }),
+    bindingAction: Object.freeze({
+      id: ARTIFACT_WORKSPACE_BIND_ACTION_ID,
+      ...WORKSPACE_BIND_PROVIDER_CONTRACT,
+      handoffWorkspaceIds,
+    }),
+    candidates: Object.freeze({
+      available: canList,
+      items: listed.items,
+      page: Object.freeze({ limit: input.limit, ...(input.cursor === undefined ? {} : { cursor: input.cursor }), ...(listed.nextCursor === undefined ? {} : { nextCursor: listed.nextCursor }) }),
+    }),
+    harnessActions: Object.freeze([Object.freeze({
+      id: ARTIFACT_WORKSPACE_BIND_ACTION_ID,
+      label: "Bind artifact workspace",
+      available: true as const,
+      ...WORKSPACE_BIND_PROVIDER_CONTRACT,
+    })]),
+    summary: canList
+      ? "No artifact workspace is bound. Select one exact listed ID or supply one exact new ID; latest is never selected implicitly."
+      : "No artifact workspace is bound. Create one exact new workspace ID with workspace-bind; latest is never selected implicitly.",
+  });
+  boundedJson(result, "Unbound artifact workspace status", { bytes: ARTIFACT_WORKSPACE_LIMITS.listBytes, depth: 8, nodes: 1_024 });
   return result;
 }
 

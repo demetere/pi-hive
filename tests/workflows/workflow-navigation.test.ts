@@ -3,10 +3,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { initializeNormalParent, listSessionLinks } from "../../src/workflows/sessions.ts";
+import { initializeNormalParent, listSessionLinks, type WorkflowSessionLink } from "../../src/workflows/sessions.ts";
 import { WorkflowRunLifecycle } from "../../src/workflows/runs.ts";
 import { releaseRuntimeOwnership } from "../../src/workflows/ownership.ts";
-import { exitWorkflowSession, reloadWorkflowSession, selectWorkflowSession } from "../../src/workflows/navigation.ts";
+import { exitWorkflowSession, reloadWorkflowSession, selectWorkflowSession, UnprovenSessionRestorationError } from "../../src/workflows/navigation.ts";
 
 function setup() { const projectRoot = mkdtempSync(join(tmpdir(), "hive-nav-")); initializeNormalParent({ configured: true, projectRoot, projectId: "p", piSessionId: "normal", piSessionFile: "/pi/normal", model: "provider/normal", thinking: "low", activeTools: ["read"] }); const calls: any[] = []; let next = 0; const adapter = { async create(input: any) { calls.push(["create", input]); next++; return { piSessionId: `child-${next}`, piSessionFile: `/pi/child-${next}` }; }, async switch(input: any) { calls.push(["switch", input.piSessionFile]); await input.withSession({ fresh: true, sessionId: input.piSessionFile }); return { cancelled: false }; } }; return { projectRoot, adapter, calls }; }
 const workflow = { workflowId: "build", activationHash: "b".repeat(64), source: "current" as const, resumable: true, freshEnabled: true, model: "provider/model", thinking: "high", tools: ["bash", "write"] };
@@ -48,6 +48,36 @@ test("failed fresh creation preserves the current activation and ownership", asy
   assert.equal((await selectWorkflowSession({ projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: "normal", workflow, adapter: f.adapter, owner: { pid: 1, processMarker: "m", nonce: "original", verifyDead: () => false } })).kind, "resumed");
 });
 
+test("reload failure after fresh-context commit rolls back the exact prior workflow link", async () => {
+  const f = setup();
+  const first = await selectWorkflowSession({ projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: "normal", workflow, adapter: f.adapter, owner: { pid: 1, processMarker: "m", nonce: "held", verifyDead: () => false } });
+  const reloadFailure = {
+    ...f.adapter,
+    async create() { return { piSessionId: "failed-reload", piSessionFile: "/pi/failed-reload" }; },
+    async switch() { throw new Error("injected fresh replacement failure"); },
+  };
+  await assert.rejects(() => selectWorkflowSession({ projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: first.link.piSessionId, workflow, fresh: true, adapter: reloadFailure, owner: { pid: 1, processMarker: "m", nonce: "held", verifyDead: () => false } }), /fresh replacement failure/u);
+  const current = listSessionLinks(f.projectRoot).filter((entry): entry is WorkflowSessionLink => entry.kind === "workflow" && entry.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0]?.workflowSessionId, first.link.workflowSessionId);
+  assert.equal(current.some((entry) => entry.piSessionId === "failed-reload"), false);
+});
+
+test("unproven Pi restoration preserves the committed generation and ownership for recovery", async () => {
+  const f = setup();
+  const first = await selectWorkflowSession({ projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: "normal", workflow, adapter: f.adapter, owner: { pid: 1, processMarker: "m", nonce: "held", verifyDead: () => false } });
+  const unproven = {
+    ...f.adapter,
+    async create() { return { piSessionId: "unproven", piSessionFile: "/pi/unproven" }; },
+    async switch() { throw new UnprovenSessionRestorationError([new Error("replacement acknowledgement missing"), new Error("replacement context unavailable")]); },
+  };
+  await assert.rejects(() => selectWorkflowSession({ projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: first.link.piSessionId, workflow, fresh: true, adapter: unproven, owner: { pid: 1, processMarker: "m", nonce: "held", verifyDead: () => false } }), (error: unknown) => error instanceof AggregateError && /could not be proven/u.test(error.message));
+  const links = listSessionLinks(f.projectRoot).filter((entry): entry is WorkflowSessionLink => entry.kind === "workflow");
+  assert.equal(links.find((entry) => entry.status === "current")?.piSessionId, "unproven");
+  assert.equal(links.find((entry) => entry.status === "archived")?.workflowSessionId, first.link.workflowSessionId);
+  await assert.rejects(() => selectWorkflowSession({ projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: "unproven", workflow, adapter: f.adapter, owner: { pid: 2, processMarker: "other", nonce: "other", verifyDead: () => false } }), /owner|ownership/i);
+});
+
 test("selection rejects missing parents, project mismatches, and each incompatible resume condition", async () => {
   const empty = mkdtempSync(join(tmpdir(), "hive-nav-empty-"));
   await assert.rejects(() => selectWorkflowSession({ projectRoot: empty, projectId: "p", currentPiSessionId: "normal", workflow, adapter: setup().adapter, owner: { pid: 1, processMarker: "m", nonce: "o", verifyDead: () => true } }), /normal parent.*missing/i);
@@ -74,29 +104,15 @@ test("cancelled resume and fresh-source gates fail before publishing selection e
   }
 });
 
-test("fresh selection compensates pre-commit faults and reports compensation failure", async () => {
-  for (const compensateFails of [false, true, "non-error"] as const) {
-    const f = setup();
-    let compensated = 0;
-    const adapter = {
-      ...f.adapter,
-      async create(input: any) {
-        await f.adapter.create(input);
-        return {
-          piSessionId: "candidate", piSessionFile: "/pi/candidate",
-          async compensate() { compensated += 1; if (compensateFails === true) throw new Error("compensate failed"); if (compensateFails === "non-error") throw "compensate failed"; },
-        };
-      },
-    };
-    const selection = selectWorkflowSession({
-      projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: "unknown", workflow, adapter,
-      owner: { pid: 1, processMarker: "m", nonce: "candidate-owner", verifyDead: () => true },
-      beforeCommit: () => { throw new Error("commit probe failed"); },
-    });
-    await assert.rejects(() => selection, compensateFails === false ? /commit probe failed/i : /compensation was incomplete/i);
-    assert.equal(compensated, 1);
-    assert.equal(listSessionLinks(f.projectRoot).some((entry) => entry.kind === "workflow"), false);
-  }
+test("fresh selection fails inside the replacement callback before publishing a link", async () => {
+  const f = setup();
+  const selection = selectWorkflowSession({
+    projectRoot: f.projectRoot, projectId: "p", currentPiSessionId: "unknown", workflow, adapter: f.adapter,
+    owner: { pid: 1, processMarker: "m", nonce: "candidate-owner", verifyDead: () => true },
+    beforeCommit: () => { throw new Error("commit probe failed"); },
+  });
+  await assert.rejects(() => selection, /commit probe failed/i);
+  assert.equal(listSessionLinks(f.projectRoot).some((entry) => entry.kind === "workflow"), false);
 });
 
 test("reload rejects normal chat, open runs, and every invalid prepared activation dimension", async () => {
@@ -148,5 +164,6 @@ test("exit from normal chat does not require workflow ownership and cancellation
       return { cancelled: false };
     },
   };
-  await assert.rejects(() => exitWorkflowSession({ projectRoot: f.projectRoot, currentPiSessionId: selected.link.piSessionId, ownerNonce: "exit-owner", adapter: releasingAdapter }), /ownership release failed/i);
+  const exited = await exitWorkflowSession({ projectRoot: f.projectRoot, currentPiSessionId: selected.link.piSessionId, ownerNonce: "exit-owner", adapter: releasingAdapter });
+  assert.equal(exited.piSessionId, "normal", "native shutdown's exact release is accepted idempotently");
 });

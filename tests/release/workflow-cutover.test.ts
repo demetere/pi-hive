@@ -97,7 +97,16 @@ test("checked-in examples cover and validate every first-release workflow shape"
   }
   const invalid = loadConfigProject(new URL("../../examples/invalid-legacy-config", import.meta.url).pathname);
   assert.equal(invalid.status, "invalid");
-  if (invalid.status === "invalid") assert.ok(invalid.diagnostics.some((entry) => entry.code === "SCHEMA_VERSION_MISSING"));
+  if (invalid.status === "invalid") assert.deepEqual([...new Set(invalid.diagnostics.map((entry) => entry.code))], ["SCHEMA_VERSION_MISSING"]);
+});
+
+test("checked-in OpenSpec examples include a runnable initialized workspace layout", () => {
+  for (const name of ["combined-openspec-delivery", "split-openspec-handoff"]) {
+    const root = new URL(`../../examples/${name}/`, import.meta.url);
+    assert.equal(readFileSync(new URL("openspec/config.yaml", root), "utf8"), "schema: spec-driven\n");
+    assert.equal(statSync(new URL("openspec/changes", root)).isDirectory(), true, `${name} must include openspec/changes/`);
+    assert.equal(statSync(new URL("openspec/changes/.gitkeep", root)).isFile(), true, `${name} must track its empty changes layout`);
+  }
 });
 
 test("release automation contains no retired runtime or review bundle paths", () => {

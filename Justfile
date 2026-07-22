@@ -395,6 +395,11 @@ verify-licenses:
 verify-packed-install:
   node scripts/verify-packed-install.mjs
 
+# Bounded package compatibility lane: verify contents, then install and load the tarball.
+[group('package')]
+verify-node-package-compat: verify-package verify-packed-install
+  @printf "{{GREEN}}Node package compatibility passed.{{NC}}\n"
+
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
 verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets verify-licenses
@@ -404,6 +409,21 @@ verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashb
 [group('quality')]
 ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets verify-licenses pack-dry-run verify-packed-install
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
+
+# Enforce the exact documented root audit exception (including its expiry).
+[group('quality')]
+audit-root:
+  node scripts/check-npm-audit.mjs
+
+# Reject high-severity dashboard dependency advisories.
+[group('quality')]
+audit-dashboard:
+  npm audit --prefix ui/web --audit-level=high
+
+# Complete publish gate: coverage plus CI/package/generated checks and both audits.
+[group('quality')]
+release-gate: coverage ci audit-root audit-dashboard
+  @printf "{{GREEN}}Release gates passed.{{NC}}\n"
 
 # =============================================================================
 # PACKAGE & RELEASE
@@ -424,9 +444,16 @@ release-verify:
 release-artifacts:
   node scripts/generate-release-artifacts.mjs
 
-# Run publish-time checks, including checks required for direct local publish.
+# Validate release artifact identities, metadata, and checksums before publishing.
 [group('package')]
-prepublish: typecheck test test-db dashboard-verify verify-package verify-budgets verify-licenses release-verify
+release-artifacts-verify:
+  node scripts/verify-release-artifacts.mjs
+
+# Direct npm publishing cannot bypass the complete release aggregate. Tagged-state
+# verification intentionally precedes generation so release-artifacts/ does not
+# make the checkout dirty, and npm lifecycle commands are not invoked recursively.
+[group('package')]
+prepublish: release-gate release-verify release-artifacts release-artifacts-verify
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.

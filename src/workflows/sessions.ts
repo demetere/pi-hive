@@ -24,9 +24,26 @@ function readLinks(root: string): SessionLink[] { const path = linksPath(root); 
 function writeLinksUnlocked(root: string, links: readonly SessionLink[]): void { const path = linksPath(root); const dir = dirname(path); mkdirSync(dir, { recursive: true, mode: 0o700 }); const content = `${JSON.stringify({ formatVersion: 1, links })}\n`; sessionInvariant(Buffer.byteLength(content) <= 1_048_576, "SESSION_LINK_LIMIT_EXCEEDED"); const temp = `${path}.${process.pid}.${randomUUID()}.tmp`; let fd: number | undefined; try { fd = openSync(temp, "wx", 0o600); writeFileSync(fd, content); fsyncSync(fd); closeSync(fd); fd = undefined; renameSync(temp, path); const dirFd = openSync(dir, constants.O_RDONLY); try { fsyncSync(dirFd); } finally { closeSync(dirFd); } } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ } try { unlinkSync(temp); } catch { /* published or absent */ } } }
 function compareText(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 export function listSessionLinks(projectRoot: string): readonly SessionLink[] { return freeze(readLinks(projectRoot).sort((a, b) => (a.kind === b.kind ? (a.kind === "normal" ? compareText(a.piSessionId, (b as NormalSessionLink).piSessionId) : compareText(a.workflowSessionId, (b as WorkflowSessionLink).workflowSessionId)) : a.kind === "normal" ? -1 : 1))); }
+/** Serialize identity-sensitive filesystem cleanup with every session-link publication. */
+export function withSessionLinkMutationLock<T>(projectRoot: string, inspect: (links: readonly SessionLink[]) => T): T {
+  const path = linksPath(projectRoot);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  return withCrossProcessFileLock(path, () => inspect(freeze(readLinks(projectRoot))));
+}
 function mutateLinks(projectRoot: string, mutate: (links: SessionLink[]) => readonly SessionLink[]): void { const path = linksPath(projectRoot); mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); withCrossProcessFileLock(path, () => writeLinksUnlocked(projectRoot, mutate(readLinks(projectRoot)))); }
 export function replaceSessionLinks(projectRoot: string, links: readonly SessionLink[]): void { mutateLinks(projectRoot, () => links); }
 export function commitWorkflowSelection(projectRoot: string, workflowId: string, expectedCurrentId: string | undefined, archived: WorkflowSessionLink | undefined, selected: WorkflowSessionLink): void { mutateLinks(projectRoot, (links) => { const latest = links.find((entry): entry is WorkflowSessionLink => entry.kind === "workflow" && entry.workflowId === workflowId && entry.status === "current"); sessionInvariant(latest?.workflowSessionId === expectedCurrentId, "Concurrent workflow selection changed the current session"); return [...links.filter((entry) => entry.kind !== "workflow" || (entry.workflowSessionId !== expectedCurrentId && entry.workflowSessionId !== selected.workflowSessionId)), ...(archived ? [archived] : []), selected]; }); }
+/** Exact-CAS compensation for a selection committed before a replacement reload fails. */
+export function rollbackWorkflowSelection(projectRoot: string, selected: WorkflowSessionLink, previous: WorkflowSessionLink | undefined): void {
+  mutateLinks(projectRoot, (links) => {
+    const current = links.find((entry): entry is WorkflowSessionLink => entry.kind === "workflow" && entry.workflowId === selected.workflowId && entry.status === "current");
+    sessionInvariant(current && sameWorkflowLinkGeneration(current, selected), "Committed workflow selection changed before rollback");
+    return [
+      ...links.filter((entry) => entry.kind !== "workflow" || (entry.workflowSessionId !== selected.workflowSessionId && entry.workflowSessionId !== previous?.workflowSessionId)),
+      ...(previous ? [previous] : []),
+    ];
+  });
+}
 export function initializeNormalParent(input: { configured: boolean; projectRoot: string; projectId: string; piSessionId: string; piSessionFile: string; model: string; thinking: string; activeTools: readonly string[] }): { configured: boolean; commands: readonly string[] } {
   if (!input.configured) return freeze({ configured: false, commands: [] });
   const now = new Date().toISOString();

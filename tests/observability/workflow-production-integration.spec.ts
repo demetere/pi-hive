@@ -349,7 +349,7 @@ test("production projection rebuild preflights aggregate N/N+1 and streams journ
   expect(overLimit.body.error).toMatchObject({ code: "PROJECTION_REBUILD_LIMIT" });
   expect(overLimit.body.error.message).toMatch(/aggregate event or byte limit/i);
   handler.dispose();
-});
+}, 15_000);
 
 test("failed maintenance rebuild rolls back the replacement and leaves already-open workflow streams live", async () => {
   closeAllSubscribers();

@@ -51,23 +51,50 @@ test("release verification binds version, tag, notes, dashboard build, and clean
   assert.ok(failures.includes("Git index and worktree must be clean before publishing"));
 });
 
-test("release verification rejects mismatched versions and release notes", () => {
+test("release verification rejects mismatched versions and any unbracketed or undated changelog heading", () => {
   const root = releaseFixture();
   const failures = verifyRelease(root, "v1.2.4");
   assert.ok(failures.some((failure) => failure.includes("does not match package version")));
+  for (const heading of ["## 1.2.3", "## [1.2.3]", "## 1.2.3 - 2026-07-15", "## [1.2.3] - July 15, 2026"]) {
+    write(join(root, "CHANGELOG.md"), `# Changelog\n\n${heading}\n\n- Invalid release heading.\n`);
+    assert.ok(verifyRelease(root, "v1.2.3").some((failure) => failure.includes("bracketed version and ISO date")), heading);
+  }
 });
 
-test("release workflow uses protected OIDC publishing and attaches manifests", () => {
+test("release workflow gates audits and coverage and validates artifacts before protected OIDC publishing", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
   const contributing = readFileSync(new URL("../../CONTRIBUTING.md", import.meta.url), "utf8");
   const justfile = readFileSync(new URL("../../Justfile", import.meta.url), "utf8");
+  const releasing = readFileSync(new URL("../../RELEASING.md", import.meta.url), "utf8");
   assert.match(workflow, /environment: npm/);
   assert.match(workflow, /id-token: write/);
   assert.doesNotMatch(workflow, /NPM_TOKEN/);
-  assert.match(workflow, /npm publish --provenance --access public/);
+  assert.match(workflow, /npm publish --provenance --access public --ignore-scripts/);
   assert.match(workflow, /gh release view .*--json body/);
   assert.match(workflow, /gh release upload .*release-artifacts\/\*/);
+  assert.match(workflow, /just release-gate/);
+  assert.match(workflow, /just release-artifacts-verify/);
+  const gate = workflow.indexOf("just release-gate");
+  const artifacts = workflow.indexOf("just release-artifacts");
+  const verifyArtifacts = workflow.indexOf("just release-artifacts-verify");
+  const publish = workflow.indexOf("npm publish");
+  const upload = workflow.indexOf("gh release upload");
+  assert.ok(gate >= 0 && artifacts > gate && verifyArtifacts > artifacts && upload > verifyArtifacts && publish > upload, "all reversible gates, artifact validation, and artifact upload precede publish");
   assert.doesNotMatch(`${workflow}\n${contributing}`, /v0\.1\.0/);
   assert.match(contributing, /\[README quick start\]\(\.\/README\.md#quick-start\)/);
-  assert.match(justfile, /prepublish:.*typecheck.*test-db.*release-verify/);
+  assert.match(justfile, /release-gate: coverage ci audit-root audit-dashboard/);
+  assert.match(justfile, /audit-root:[\s\S]*check-npm-audit\.mjs/);
+  assert.match(justfile, /audit-dashboard:[\s\S]*npm audit --prefix ui\/web --audit-level=high/);
+  assert.match(justfile, /prepublish: release-gate release-verify release-artifacts release-artifacts-verify/);
+  assert.match(releasing, /just release-gate/);
+  assert.match(releasing, /before npm publish/i);
+});
+
+test("every supported Node compatibility lane installs and loads the packed package", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const justfile = readFileSync(new URL("../../Justfile", import.meta.url), "utf8");
+  assert.match(workflow, /node-version:\s*\n\s*- "20\.19\.x"\s*\n\s*- "lts\/\*"\s*\n\s*- "current"/u);
+  const compatibilityJob = workflow.slice(workflow.indexOf("  compatibility:"), workflow.indexOf("\n  verify:"));
+  assert.match(compatibilityJob, /run: just typecheck-core test-node-compat dashboard-typecheck dashboard-test-unit verify-node-package-compat/u);
+  assert.match(justfile, /verify-node-package-compat: verify-package verify-packed-install/u);
 });

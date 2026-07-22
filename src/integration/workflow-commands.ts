@@ -1,5 +1,6 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseCommandAnswer, type QuestionDefinition } from "../workflows/question-validation";
+import { replacementSessionContext, sessionContextWasReplaced, trackSessionContext } from "./session-context";
 
 const MAX_OUTPUT_BYTES = 8_192;
 const COMMAND_CHANNEL = "command" as const;
@@ -70,7 +71,7 @@ function bounded(value: unknown): string {
   return `${result}\n[output truncated]`;
 }
 
-function present(ctx: ExtensionCommandContext, message: unknown, severity: Severity = "info"): void {
+function present(ctx: ExtensionContext, message: unknown, severity: Severity = "info"): void {
   const text = bounded(message);
   if (ctx.hasUI) ctx.ui.notify(text, severity);
   else console.log(text);
@@ -131,21 +132,37 @@ function parseSelect(args: string): { workflowId?: string; fresh?: true; from?: 
   return result;
 }
 
-function register(pi: ExtensionAPI, name: string, description: string, handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>, onSettled?: (ctx: ExtensionCommandContext) => void): void {
+async function presentReplacementResult(ctx: ExtensionCommandContext, operation: Promise<string>): Promise<void> {
+  const message = await operation;
+  if (!sessionContextWasReplaced(ctx)) return present(ctx, message);
+  const replacement = replacementSessionContext(ctx);
+  if (replacement) present(replacement, message);
+  else console.log(bounded(message)); // Safe headless fallback: never dereference the stale command context.
+}
+
+function register(pi: ExtensionAPI, name: string, description: string, handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>, onSettled?: (ctx: ExtensionCommandContext) => void | Promise<void>): void {
   pi.registerCommand(name, {
     description,
     handler: async (args, ctx) => {
+      const contextUse = trackSessionContext(ctx);
       try { await handler(args, ctx); }
-      catch (error) { present(ctx, error, "error"); }
-      finally {
-        try { onSettled?.(ctx); }
-        catch { /* UI restoration failures must never reject a handled command. */ }
+      catch (error) {
+        // A successful Pi replacement invalidates the old command context before
+        // control returns here. Preserve the underlying error without touching UI.
+        if (contextUse.wasReplaced()) console.error(bounded(error));
+        else present(ctx, error, "error");
+      } finally {
+        if (!contextUse.wasReplaced()) {
+          try { await onSettled?.(ctx); }
+          catch { /* UI and optional daemon lifecycle failures must never reject a handled command. */ }
+        }
+        contextUse.close();
       }
     },
   });
 }
 
-export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCommandServices, onSettled?: (ctx: ExtensionCommandContext) => void): void {
+export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCommandServices, onSettled?: (ctx: ExtensionCommandContext) => void | Promise<void>): void {
   if (!services.configured) return;
 
   const bind = (name: string, description: string, handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>): void => register(pi, name, description, handler, onSettled);
@@ -154,7 +171,7 @@ export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCom
     const parsed = parseSelect(args);
     const workflowId = parsed.workflowId ?? await chooseWorkflow(ctx, services, parsed.fresh === true);
     if (!workflowId) return;
-    present(ctx, await services.select({ workflowId, ...(parsed.fresh ? { fresh: true as const } : {}), ...(parsed.from ? { from: parsed.from } : {}) }, ctx));
+    await presentReplacementResult(ctx, services.select({ workflowId, ...(parsed.fresh ? { fresh: true as const } : {}), ...(parsed.from ? { from: parsed.from } : {}) }, ctx));
   });
   bind("hive:status", "Show selected workflow status", async (args, ctx) => {
     if (tokens(args).length) throw new Error("Usage: /hive:status");
@@ -176,13 +193,13 @@ export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCom
   });
   bind("hive:exit", "Return to the linked normal chat session", async (args, ctx) => {
     if (tokens(args).length) throw new Error("Usage: /hive:exit");
-    present(ctx, await services.exit(ctx));
+    await presentReplacementResult(ctx, services.exit(ctx));
   });
   const cancel = services.cancel;
   if (cancel) bind("hive:cancel", "Cancel the open workflow run", async (args, ctx) => present(ctx, await cancel(String(args || "").trim() || undefined, ctx)));
   bind("hive:reload", "Create a fresh validated workflow activation", async (args, ctx) => {
     if (tokens(args).length) throw new Error("Usage: /hive:reload");
-    present(ctx, await services.reload(ctx));
+    await presentReplacementResult(ctx, services.reload(ctx));
   });
   const checkpoints = services.checkpoints;
   if (checkpoints) bind("hive:checkpoints", "List or set an optional next-run checkpoint", async (args, ctx) => {
@@ -240,7 +257,7 @@ export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCom
   if (recover) bind("hive:recover", "Recover an orphaned workflow session", async (args, ctx) => {
     const parts = tokens(args);
     if (parts.length !== 1) throw new Error("Usage: /hive:recover <orphan-session-id>");
-    present(ctx, await recover(parts[0]!, ctx));
+    await presentReplacementResult(ctx, recover(parts[0]!, ctx));
   });
   const doctor = services.doctor;
   if (doctor) bind("hive:doctor", "Validate schema-v1 workflow configuration", async (args, ctx) => {

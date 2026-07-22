@@ -15,19 +15,28 @@ function releaseOutputDir(args) {
 
 const outputDir = releaseOutputDir(process.argv.slice(2));
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const dashboardPkg = JSON.parse(readFileSync(join(root, "ui", "web", "package.json"), "utf8"));
 
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function npmSbom(cwd) {
+function npmSbom(cwd, manifest) {
   const raw = execFileSync("npm", ["sbom", "--sbom-format=cyclonedx"], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
     maxBuffer: 32 * 1024 * 1024,
   });
-  return JSON.parse(raw);
+  const sbom = JSON.parse(raw);
+  if (!sbom.metadata?.component) throw new Error(`npm SBOM for ${manifest.name} has no metadata.component`);
+  Object.assign(sbom.metadata.component, {
+    name: manifest.name,
+    version: manifest.version,
+    purl: `pkg:npm/${manifest.name}@${manifest.version}`,
+    type: "library",
+  });
+  return sbom;
 }
 
 rmSync(outputDir, { recursive: true, force: true });
@@ -35,8 +44,8 @@ mkdirSync(outputDir, { recursive: true });
 
 const packageSbomName = `pi-hive-${pkg.version}.sbom.cdx.json`;
 const dashboardSbomName = `pi-hive-dashboard-${pkg.version}.sbom.cdx.json`;
-writeFileSync(join(outputDir, packageSbomName), `${JSON.stringify(npmSbom(root), null, 2)}\n`);
-writeFileSync(join(outputDir, dashboardSbomName), `${JSON.stringify(npmSbom(join(root, "ui", "web")), null, 2)}\n`);
+writeFileSync(join(outputDir, packageSbomName), `${JSON.stringify(npmSbom(root, pkg), null, 2)}\n`);
+writeFileSync(join(outputDir, dashboardSbomName), `${JSON.stringify(npmSbom(join(root, "ui", "web"), dashboardPkg), null, 2)}\n`);
 
 const manifest = {
   schemaVersion: 1,

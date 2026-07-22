@@ -51,7 +51,7 @@ const RequiredCapabilities = Type.Object({
 }, strict);
 const CursorPage = {
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TOOL_CONTRACT_LIMITS.pageSize })),
-  cursor: Type.Optional(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.cursorCharacters, pattern: "^[0-9]+$" })),
+  cursor: Type.Optional(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.cursorCharacters, pattern: "^[A-Za-z0-9._:-]+$" })),
 };
 const ArtifactReference = Type.Object({
   workspaceId: Type.String({ minLength: 1, maxLength: 2_048 }),
@@ -93,14 +93,11 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     contextRefs: Type.Optional(Type.Array(Reference, { maxItems: TOOL_CONTRACT_LIMITS.references })),
     deliverables: Type.Array(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.deliverableCharacters }), { maxItems: TOOL_CONTRACT_LIMITS.deliverables }),
   }, strict),
-  team_status: Type.Union([
-    Type.Object(CursorPage, strict),
-    Type.Object({
-      action: Type.Literal("deliver-results"),
-      deliveryId: Id,
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TOOL_CONTRACT_LIMITS.pageSize })),
-    }, strict),
-  ]),
+  team_status: Type.Object({
+    action: Type.Optional(Type.Literal("deliver-results")),
+    deliveryId: Type.Optional(Id),
+    ...CursorPage,
+  }, strict),
   workflow_status: Type.Object({
     section: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("inputs"), Type.Literal("handoff"), Type.Literal("file-changes"), Type.Literal("artifact-refs"), Type.Literal("evidence-refs")])),
     packetHash: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$", maxLength: 64 })),
@@ -108,9 +105,9 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
   }, strict),
   artifact_status: Type.Object(CursorPage, strict),
   artifact_action: Type.Object({
-    actionId: Id,
-    arguments: Type.Record(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters }), Type.Unknown()),
-    expectedWorkspaceHash: Type.Optional(Type.String({ pattern: "^sha256:[0-9a-f]{64}$", maxLength: 71 })),
+    actionId: Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters, description: "Use only a harness or adapter action ID currently returned by artifact_status: workspace-bind before binding; checkpoint-request only when listed after binding." }),
+    arguments: Type.Record(Type.String({ minLength: 1, maxLength: TOOL_CONTRACT_LIMITS.idCharacters }), Type.Unknown(), { description: "workspace-bind requires exactly {mode:new|existing, workspaceId, handoffWorkspaceId?}; checkpoint-request requires exactly {checkpointId}; adapter actions use their active-profile contract." }),
+    expectedWorkspaceHash: Type.Optional(Type.String({ pattern: "^sha256:[0-9a-f]{64}$", maxLength: 71, description: "Use only for bound mutating adapter actions, from the latest artifact_status workspace hash. Never use for harness-owned workspace-bind or checkpoint-request; the harness derives checkpoint identity and hash server-side." })),
   }, strict),
   knowledge_search: Type.Object({
     query: Type.String({ minLength: 1, maxLength: 4_096 }),
@@ -128,12 +125,13 @@ export const GENERIC_WORKFLOW_TOOL_SCHEMAS = Object.freeze({
     conclusion: Type.String({ minLength: 8, maxLength: 4_096, pattern: SAFE_SINGLE_LINE_TEXT_PATTERN }),
     evidenceEventIds: Type.Array(Id, { minItems: 1, maxItems: 32, uniqueItems: true }),
   }, strict),
-  human_question: Type.Union([
-    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("single"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), required: Type.Boolean() }, strict),
-    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("multi"), choices: Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices }), validation: Type.Optional(QuestionMultiValidation), required: Type.Boolean() }, strict),
-    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("text"), validation: Type.Optional(QuestionTextValidation), required: Type.Boolean() }, strict),
-    Type.Object({ prompt: QuestionPrompt, kind: Type.Literal("confirm"), required: Type.Boolean() }, strict),
-  ]),
+  human_question: Type.Object({
+    prompt: QuestionPrompt,
+    kind: Type.Enum({ Single: "single", Multi: "multi", Text: "text", Confirm: "confirm" }),
+    choices: Type.Optional(Type.Array(QuestionChoice, { minItems: 1, maxItems: QUESTION_LIMITS.choices })),
+    validation: Type.Optional(Type.Union([QuestionTextValidation, QuestionMultiValidation])),
+    required: Type.Boolean(),
+  }, strict),
   workflow_finish: Type.Object({
     status: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("failed")]),
     summary: Type.String({ minLength: 1, maxLength: 8_192 }),
@@ -230,7 +228,12 @@ function assertByteBounds(name: GenericWorkflowToolName, input: Record<string, u
       assertUtf8(raw.id, `delegate_agent contextRefs[${index}].id`, TOOL_CONTRACT_LIMITS.referenceIdCharacters);
     }
   }
-  if (name === "team_status" && input.action === "deliver-results") assertUtf8(input.deliveryId, "team_status deliveryId", TOOL_CONTRACT_LIMITS.idBytes);
+  if (name === "team_status") {
+    if (input.action === "deliver-results") {
+      if (input.cursor !== undefined) throw new Error("team_status deliver-results does not accept a cursor");
+      assertUtf8(input.deliveryId, "team_status deliveryId", TOOL_CONTRACT_LIMITS.idBytes);
+    } else if (input.deliveryId !== undefined) throw new Error("team_status deliveryId requires the deliver-results action");
+  }
   if (name === "artifact_action") {
     assertUtf8(input.actionId, "artifact_action actionId", TOOL_CONTRACT_LIMITS.idBytes);
     boundedJson(input.arguments, "artifact_action arguments", { bytes: 65_536, depth: 16, nodes: 4_096, rootRecord: true });
@@ -470,8 +473,8 @@ export const GENERIC_WORKFLOW_TOOL_CONTRACTS: readonly ToolDefinition<any, objec
   contract("delegate_agent", "Delegate Agent", "Persist and queue one bounded task for one exact direct member."),
   contract("team_status", "Team Status", "Read a bounded cursor-paginated view of task and direct-team runtime state."),
   contract("workflow_status", "Workflow Status", "Read bounded cursor-paginated workflow/run status and authority-derived terminal refs."),
-  contract("artifact_status", "Artifact Status", "Read the active profile's bounded trusted workspace/checkpoint/action view."),
-  contract("artifact_action", "Artifact Action", "Invoke one exact active-profile action; workspace and operation identity come only from trusted run state."),
+  contract("artifact_status", "Artifact Status", "Read bounded artifact state and currently available harness actions. Before binding, this reports explicit workspace-bind modes and cursor-paginated candidates; it never chooses latest. After a physical bind, root sees checkpoint-request only for checkpoints published by the profile and enabled in the frozen run, plus bounded requestability and pending request IDs without control credentials."),
+  contract("artifact_action", "Artifact Action", "Invoke only an action currently returned by artifact_status. workspace-bind is harness-owned and requires exactly {mode:new|existing, workspaceId, handoffWorkspaceId?}. checkpoint-request is root-only, harness-owned, requires exactly {checkpointId}, derives workspace/digest/profile/run identity server-side, and only creates or replays a pending human request. Neither harness action accepts expectedWorkspaceHash, invokes a model, decides approval, or impersonates a human. Adapter actions use their exact active-profile contract."),
   contract("knowledge_search", "Knowledge Search", "Search only this node's attached local knowledge bundles with deterministic bounded lexical ranking."),
   contract("knowledge_read", "Knowledge Read", "Read one exact bounded page from an attached knowledge document with content-hash provenance."),
   contract("knowledge_propose", "Knowledge Propose", "Persist one bounded durable conclusion candidate with exact same-run evidence-event citations; this does not directly mutate knowledge."),

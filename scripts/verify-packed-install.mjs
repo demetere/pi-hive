@@ -75,6 +75,10 @@ try {
     "ui/web/dist/index.html",
     "schemas/hive-manifest-v1.schema.json",
     "examples/artifact-free-debug/.pi/hive/hive-config.yaml",
+    "examples/combined-openspec-delivery/openspec/config.yaml",
+    "examples/combined-openspec-delivery/openspec/changes/.gitkeep",
+    "examples/split-openspec-handoff/openspec/config.yaml",
+    "examples/split-openspec-handoff/openspec/changes/.gitkeep",
   ]) {
     if (!existsSync(join(installedRoot, relativePath))) {
       throw new Error(`installed package is missing ${relativePath}`);
