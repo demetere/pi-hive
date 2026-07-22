@@ -8,6 +8,7 @@ import Activity from "./tabs/Activity";
 import Cost from "./tabs/Cost";
 import Plans from "./tabs/Plans";
 import Settings from "./tabs/Settings";
+import WorkflowDashboard from "./workflow-dashboard";
 import AgentLog from "./components/AgentLog";
 import ConfirmModal from "./components/ConfirmModal";
 import Toast from "./components/Toast";
@@ -81,6 +82,7 @@ export default function App() {
             : activeTab === "plans" ? <Plans search="" />
             : activeTab === "activity" ? <Activity search="" />
             : activeTab === "cost" ? <Cost />
+            : activeTab === "workflows" ? <WorkflowDashboard embedded />
             : activeTab === "settings" ? (scope.level !== "fleet" ? <Settings /> : <Overview />)
             : <Overview />}
         </div>

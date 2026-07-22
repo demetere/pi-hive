@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,22 @@ function stream(count: number) {
   }
   return events;
 }
+
+test("pre-change schema-v1 database migrates the additive proposal dimension with ALTER", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "pi-hive-workflow-schema-v1-")), "workflow.db");
+  openWorkflowProjectionDatabase({ path }).close();
+  const legacy = new Database(path);
+  expect(legacy.query(`SELECT value FROM workflow_projection_metadata WHERE key = 'schema_version'`).get()).toEqual({ value: "1" });
+  legacy.run(`ALTER TABLE workflow_events DROP COLUMN knowledge_proposal_id`);
+  expect((legacy.query(`PRAGMA table_info(workflow_events)`).all() as Array<{ name: string }>).some((column) => column.name === "knowledge_proposal_id")).toBe(false);
+  legacy.close();
+
+  const database = openWorkflowProjectionDatabase({ path });
+  const source = sealWorkflowEvent(createWorkflowEvent({ eventId: "proposal-event", projectId: "project-1", sessionId: "session-1", runId: "run-1", type: "knowledge.transition", producer: "runtime", payload: { formatVersion: 1, operation: "proposal-created", proposalId: "proposal-1" } }), 1, null);
+  database.ingest(toWorkflowTelemetryEvent(source));
+  expect(database.database.query(`SELECT knowledge_proposal_id FROM workflow_events WHERE event_id = ?`).get("proposal-event")).toEqual({ knowledge_proposal_id: "proposal-1" });
+  database.close();
+});
 
 test("workflow server DB pages large filtered resources stably across restart", () => {
   const path = join(mkdtempSync(join(tmpdir(), "pi-hive-workflow-server-db-")), "workflow.db");

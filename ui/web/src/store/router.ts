@@ -16,7 +16,7 @@ import type { Scope } from "./index";
 // Project names and session ids are URL-encoded. The server serves index.html
 // for any of these paths (SPA history fallback), so deep links work.
 
-const TABS = new Set(["overview", "sessions", "agents", "activity", "plans", "cost", "settings"]);
+const TABS = new Set(["overview", "sessions", "agents", "activity", "plans", "cost", "workflows", "settings"]);
 
 function normTab(tab: string | undefined): string {
   return tab && TABS.has(tab) ? tab : "overview";

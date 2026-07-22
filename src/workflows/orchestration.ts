@@ -88,6 +88,7 @@ import { bindPhysicalArtifactWorkspace, listPhysicalArtifactWorkspaces, type Phy
 import { createRunOrchestrationArtifactCallerIssuer, type RunOrchestrationArtifactCallerIssuer } from "../artifacts/internal/caller";
 import type { ArtifactEvidenceReferenceV1, ArtifactWorkspaceBinding, VerifiedArtifactEvidenceV1 } from "../artifacts/types";
 import { heartbeatCurrentRuntimeOwnership } from "./ownership";
+import { registerLiveWorkflowCancellationAuthority } from "./live-cancellation";
 import { resolveContainedPath } from "../core/safe-path";
 import { CheckpointApprovalService, type CheckpointApprovalServiceOptions } from "../artifacts/approvals";
 import type { CheckpointPolicy } from "../artifacts/checkpoints";
@@ -294,6 +295,7 @@ export class RunOrchestrationService {
   private knowledgeRetryAttempt = 0;
   private shuttingDown = false;
   private userWorkDepth = 0;
+  private unregisterLiveCancellationAuthority: () => void = () => {};
 
   constructor(options: RunOrchestrationServiceOptions) {
     this.options = options;
@@ -453,6 +455,15 @@ export class RunOrchestrationService {
       disposeActive: (jobId) => this.disposeCuratorHandle(jobId), now: options.now,
     });
     this.scheduleKnowledgeReconciliation();
+    this.unregisterLiveCancellationAuthority = registerLiveWorkflowCancellationAuthority({
+      projectRoot: options.projectRoot,
+      projectId: options.projectId,
+      sessionId: options.sessionId,
+      snapshotId: options.snapshot.snapshotHash,
+      runtimeOwnerNonce: options.runtimeOwnerNonce,
+      currentRunId: () => this.lifecycle.restore().latestRun?.runId,
+      cancel: (reason) => this.cancel(reason),
+    });
   }
 
   toolPolicyForNode(nodeId: string): SnapshotNodeToolPolicy {
@@ -505,7 +516,7 @@ export class RunOrchestrationService {
       readHashes: () => hashArtifactWorkspace(binding.path!),
       lease: (this.options.artifactLeaseFactory ?? ((options) => new WorkspaceLeaseRuntime(options)))({
         projectRoot: this.options.projectRoot, adapterId: binding.adapterId, workspaceId: binding.workspace.id,
-        sessionId: this.options.sessionId, runId,
+        sessionId: this.options.sessionId, runId, ownerNonce: this.options.runtimeOwnerNonce,
         onHeartbeatLost: (error) => { void this.pause(`artifact writer lease lost: ${error.message}`).catch(() => undefined); },
       }),
       operations: new ArtifactOperationRuntime({
@@ -619,6 +630,9 @@ export class RunOrchestrationService {
       timestamp: this.options.now?.() ?? new Date().toISOString(),
     }));
     const evidence = authority.lease.releaseForLifecycle(reason, finalWorkspaceHash);
+    if (!evidence.released && authority.lease.inspect().state !== "available") {
+      throw new Error("Artifact writer lease belongs to another run or owner; lifecycle release was denied");
+    }
     this.artifactAuthority = undefined;
     return Object.freeze({ released: evidence.released, finalWorkspaceHash });
   }
@@ -1931,6 +1945,7 @@ export class RunOrchestrationService {
 
   async shutdown(reason = "process shutdown"): Promise<void> {
     this.shuttingDown = true;
+    this.unregisterLiveCancellationAuthority();
     if (this.knowledgeReconcileImmediate !== undefined) { clearTimeout(this.knowledgeReconcileImmediate); this.knowledgeReconcileImmediate = undefined; }
     if (this.knowledgeRetryTimer !== undefined) { clearTimeout(this.knowledgeRetryTimer); this.knowledgeRetryTimer = undefined; }
     this.artifactCallerIssuer?.revoke();

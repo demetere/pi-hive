@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -209,6 +210,14 @@ test("production dashboard handler closes the control boundary over journals, SQ
   expect(approvalApproved.body.result).toMatchObject({ requestId: "approval-production", decision: "approved", approverId: "local-dashboard", channel: "dashboard" });
   expect(fixture.approvalService.restore().requests[fixture.approvalRequest.requestId].decision).toMatchObject({ operationId: "approval-decision-production", decision: "approved" });
   expect(readWorkflowJournal(fixture.projectRoot, approvalSession).some((event) => event.type === "approval.recorded" && (event.payload as any).operation === "decision")).toBe(true);
+
+  const knowledgeList = await json(handler, `/api/v1/knowledge?projectId=${projectId}&sessionId=${knowledgeSession}&runId=run-knowledge&limit=100`);
+  expect(knowledgeList.response.status).toBe(200);
+  expect(knowledgeList.body.items).toContainEqual(expect.objectContaining({ knowledgeProposalId: "proposal-production", status: "pending" }));
+  const persistedProjection = new Database(fixture.databasePath, { readonly: true });
+  try {
+    expect(persistedProjection.query(`SELECT knowledge_proposal_id FROM workflow_events WHERE knowledge_proposal_id = ?`).get("proposal-production")).toEqual({ knowledge_proposal_id: "proposal-production" });
+  } finally { persistedProjection.close(); }
 
   const knowledgeDetail = await json(handler, `/api/v1/knowledge/proposal-production?projectId=${projectId}&sessionId=${knowledgeSession}&runId=run-knowledge`);
   expect(knowledgeDetail.response.status).toBe(200);

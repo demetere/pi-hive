@@ -317,6 +317,8 @@ export interface HiveState {
   // The current session mode. Normal = plain Pi; plan = planning team; hive =
   // execution team. (Was `teamMode`; renamed for the three-mode model.)
   mode: HiveMode;
+  /** Schema-v1 projects use workflow selection/status UI instead of fixed-mode chrome. */
+  workflowConfigured?: boolean;
   normalToolNames: string[];
   sddStatus: SddStatus | null;
   obsSeq: number;

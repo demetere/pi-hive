@@ -77,6 +77,7 @@ CREATE TABLE workflow_events (
   checkpoint_id TEXT,
   approval_id TEXT,
   knowledge_job_id TEXT,
+  knowledge_proposal_id TEXT,
   knowledge_update_id TEXT,
   model_id TEXT,
   thinking TEXT,
@@ -365,6 +366,11 @@ export class WorkflowProjectionDatabase {
           if (Number(version?.value ?? 0) !== WORKFLOW_SQLITE_SCHEMA_VERSION) throw new WorkflowProjectionSchemaError(`Unsupported workflow projection schema version ${version?.value ?? "missing"}`);
         }
         database.exec(ADDITIVE_SCHEMA);
+        // API/schema v1 permits additive optional projection dimensions. Keep
+        // existing v1 databases readable while materializing proposal identity
+        // for discovery without a destructive schema-version transition.
+        const eventColumns = new Set((database.query(`PRAGMA table_info(workflow_events)`).all() as Array<{ name: string }>).map((column) => column.name));
+        if (!eventColumns.has("knowledge_proposal_id")) database.run(`ALTER TABLE workflow_events ADD COLUMN knowledge_proposal_id TEXT`);
         const receiptColumns = new Set((database.query(`PRAGMA table_info(workflow_operation_receipts)`).all() as Array<{ name: string }>).map((column) => column.name));
         if (!receiptColumns.has("owner_token")) database.run(`ALTER TABLE workflow_operation_receipts ADD COLUMN owner_token TEXT`);
         if (!receiptColumns.has("lease_expires_at")) database.run(`ALTER TABLE workflow_operation_receipts ADD COLUMN lease_expires_at TEXT`);
@@ -431,7 +437,7 @@ export class WorkflowProjectionDatabase {
       ["run_id", "runId"], ["agent_id", "agentId"], ["agent_name", "agentName"], ["node_id", "nodeId"], ["parent_node_id", "parentNodeId"], ["task_id", "taskId"],
       ["adapter_id", "adapterId"], ["adapter_version", "adapterVersion"], ["profile_id", "profileId"], ["profile_version", "profileVersion"], ["workspace_id", "workspaceId"],
       ["workspace_hash", "workspaceHash"], ["lease_state", "leaseState"], ["question_id", "questionId"], ["checkpoint_id", "checkpointId"], ["approval_id", "approvalId"],
-      ["knowledge_job_id", "knowledgeJobId"], ["knowledge_update_id", "knowledgeUpdateId"], ["model_id", "modelId"], ["thinking", "thinking"], ["tool_name", "toolName"],
+      ["knowledge_job_id", "knowledgeJobId"], ["knowledge_proposal_id", "knowledgeProposalId"], ["knowledge_update_id", "knowledgeUpdateId"], ["model_id", "modelId"], ["thinking", "thinking"], ["tool_name", "toolName"],
       ["capability_id", "capabilityId"], ["attempt_id", "attemptId"], ["operation_id", "operationId"],
     ];
     const priorByStream = new Map<string, { sequence: number; hash: string | null }>();
@@ -723,13 +729,13 @@ export class WorkflowProjectionDatabase {
       this.database.query(`INSERT INTO workflow_events
         (event_id, stream_id, project_id, project_root, project_label, pi_session_id, session_id, workflow_id, snapshot_id, workflow_config_hash, workflow_config_version, run_id,
          agent_id, agent_name, node_id, parent_node_id, task_id, adapter_id, adapter_version, profile_id, profile_version,
-         workspace_id, workspace_hash, lease_state, question_id, checkpoint_id, approval_id, knowledge_job_id, knowledge_update_id,
+         workspace_id, workspace_hash, lease_state, question_id, checkpoint_id, approval_id, knowledge_job_id, knowledge_proposal_id, knowledge_update_id,
          model_id, thinking, tool_name, capability_id, attempt_id, operation_id, precision, elapsed_ms, active_wall_time_ms,
          budget_scope, budget_used, budget_limit, budget_remaining, change_coverage, terminal_refs_json,
          sequence, previous_hash, event_hash, payload_hash, source_event_hash, timestamp, event_type, event_json)
         VALUES ($event_id, $stream_id, $project_id, $project_root, $project_label, $pi_session_id, $session_id, $workflow_id, $snapshot_id, $workflow_config_hash, $workflow_config_version, $run_id,
          $agent_id, $agent_name, $node_id, $parent_node_id, $task_id, $adapter_id, $adapter_version, $profile_id, $profile_version,
-         $workspace_id, $workspace_hash, $lease_state, $question_id, $checkpoint_id, $approval_id, $knowledge_job_id, $knowledge_update_id,
+         $workspace_id, $workspace_hash, $lease_state, $question_id, $checkpoint_id, $approval_id, $knowledge_job_id, $knowledge_proposal_id, $knowledge_update_id,
          $model_id, $thinking, $tool_name, $capability_id, $attempt_id, $operation_id, $precision, $elapsed_ms, $active_wall_time_ms,
          $budget_scope, $budget_used, $budget_limit, $budget_remaining, $change_coverage, jsonb($terminal_refs_json),
          $sequence, $previous_hash, $event_hash, $payload_hash, $source_event_hash, $timestamp, $event_type, jsonb($event_json))`).run({
@@ -740,7 +746,7 @@ export class WorkflowProjectionDatabase {
         $adapter_version: d.adapterVersion ?? null, $profile_id: d.profileId ?? null, $profile_version: d.profileVersion ?? null,
         $workspace_id: d.workspaceId ?? null, $workspace_hash: d.workspaceHash ?? null, $lease_state: d.leaseState ?? null,
         $question_id: d.questionId ?? null, $checkpoint_id: d.checkpointId ?? null, $approval_id: d.approvalId ?? null,
-        $knowledge_job_id: d.knowledgeJobId ?? null, $knowledge_update_id: d.knowledgeUpdateId ?? null, $model_id: d.modelId ?? null,
+        $knowledge_job_id: d.knowledgeJobId ?? null, $knowledge_proposal_id: d.knowledgeProposalId ?? null, $knowledge_update_id: d.knowledgeUpdateId ?? null, $model_id: d.modelId ?? null,
         $thinking: d.thinking ?? null, $tool_name: d.toolName ?? null, $capability_id: d.capabilityId ?? null,
         $attempt_id: d.attemptId ?? null, $operation_id: d.operationId ?? null, $precision: event.usage?.precision ?? null,
         $elapsed_ms: event.metrics?.elapsedMs ?? null, $active_wall_time_ms: event.metrics?.activeWallTimeMs ?? null,
