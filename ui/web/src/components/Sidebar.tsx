@@ -15,6 +15,7 @@ function NavIcon({ name }: { name: string }) {
     activity: (<path d="M1 8h3l2-5 3 10 2-5h4" />),
     plans: (<><rect x="3" y="2" width="10" height="12" rx="1.5" /><path d="M6 6h4M6 9h4" /></>),
     cost: (<><circle cx="8" cy="8" r="6" /><path d="M8 5v6M6.4 6.5h2.2M7.4 9.5h2.2" /></>),
+    workflows: (<><path d="M3 3h4v4H3zM9 9h4v4H9z" /><path d="M7 5h3a2 2 0 0 1 2 2v2M5 7v3a2 2 0 0 0 2 2h2" /></>),
     settings: (<><circle cx="8" cy="8" r="2.2" /><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1" /></>),
   };
   return (
@@ -61,6 +62,7 @@ export default function Sidebar() {
     { id: "activity", label: "Activity", count: scopedEvents.length ? String(scopedEvents.length) : "" },
     { id: "plans", label: "Plans", count: "" },
     { id: "cost", label: "Cost", count: "" },
+    { id: "workflows", label: "Workflows", count: "" },
     ...(projectSelected ? [{ id: "settings", label: "Settings", count: "" }] : []),
   ];
 

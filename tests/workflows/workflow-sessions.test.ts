@@ -95,12 +95,17 @@ test("session-link sorting, replacement, and selection CAS cover every link kind
   assert.equal((listSessionLinks(project).find((link) => link.kind === "workflow" && link.workflowSessionId === "selected") as WorkflowSessionLink).model, "replacement");
 });
 
-test("normal reinitialization preserves creation time and orphan marking is generation-idempotent", () => {
+test("unrelated normal startup preserves the canonical parent while same-session restart refreshes its baseline", () => {
   const project = root();
   initializeNormalParent({ configured: true, projectRoot: project, projectId: "p", piSessionId: "normal", piSessionFile: "/pi/normal", model: "m", thinking: "low", activeTools: [] });
   const createdAt = listSessionLinks(project).find((entry) => entry.kind === "normal")!.createdAt;
-  initializeNormalParent({ configured: true, projectRoot: project, projectId: "p", piSessionId: "normal-2", piSessionFile: "/pi/normal-2", model: "m2", thinking: "high", activeTools: [] });
-  assert.equal(listSessionLinks(project).find((entry) => entry.kind === "normal")!.createdAt, createdAt);
+  initializeNormalParent({ configured: true, projectRoot: project, projectId: "p", piSessionId: "unrelated", piSessionFile: "/pi/unrelated", model: "other", thinking: "high", activeTools: ["bash"] });
+  let normal = listSessionLinks(project).find((entry) => entry.kind === "normal")!;
+  assert.deepEqual({ id: normal.piSessionId, file: normal.piSessionFile, model: normal.normalModel, tools: normal.normalTools }, { id: "normal", file: "/pi/normal", model: "m", tools: [] });
+  initializeNormalParent({ configured: true, projectRoot: project, projectId: "p", piSessionId: "normal", piSessionFile: "/pi/normal", model: "m2", thinking: "high", activeTools: ["read"] });
+  normal = listSessionLinks(project).find((entry) => entry.kind === "normal")!;
+  assert.equal(normal.createdAt, createdAt);
+  assert.deepEqual({ model: normal.normalModel, thinking: normal.normalThinking, tools: normal.normalTools }, { model: "m2", thinking: "high", tools: ["read"] });
 
   upsertWorkflowLink(project, workflowLink("missing"));
   markMissingPiSession(project, "p", "missing");

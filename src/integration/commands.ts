@@ -10,6 +10,8 @@ import * as openspec from "../engine/openspec";
 import { truncateMiddle } from "../core/utils";
 export { createWorkflowLifecycleServiceHandlers } from "./workflow-lifecycle-handlers";
 export type { WorkflowLifecycleServiceHandlers, WorkflowLifecycleServiceHandlerOptions } from "./workflow-lifecycle-handlers";
+export { registerWorkflowCommands } from "./workflow-commands";
+export type { WorkflowCommandServices, WorkflowSelectorItem } from "./workflow-commands";
 
 function listChangeIds(cwd: string, api: typeof openspec): string[] {
   return api.listChanges(cwd).map((c) => c.name);
@@ -35,31 +37,38 @@ const defaultCommandDeps: CommandDeps = {
   fetch: globalThis.fetch.bind(globalThis),
 };
 
-export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: Partial<CommandDeps> = {}) {
-  const deps: CommandDeps = { ...defaultCommandDeps, ...overrides };
-  // Three explicit mode commands + a cycle key (normal → plan → hive → normal).
-  pi.registerCommand("hive:normal", {
-    description: "Switch to normal Pi chat (no hive, no enforcement)",
-    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "normal"); },
-  });
-  pi.registerCommand("hive:plan-mode", {
-    description: "Switch to plan mode — planning team produces full specs",
-    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "plan"); },
-  });
-  pi.registerCommand("hive", {
-    description: "Switch to hive mode — execution team builds the specs",
-    handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "hive"); },
-  });
-  // Namespaced cycle command for the three modes.
-  pi.registerCommand("hive:toggle", {
-    description: "Cycle session mode: normal → plan → hive → normal",
-    handler: async (_args: string, ctx: ExtensionContext) => cycleMode(state, ctx),
-  });
+export interface RegisterCommandOptions {
+  readonly workflowConfigured: boolean;
+  /** Test seam only; production uses the default command dependencies. */
+  readonly dependencies?: Partial<CommandDeps>;
+}
 
-  pi.registerShortcut(Key.ctrlAlt("t"), {
-    description: "Cycle session mode: normal → plan → hive → normal",
-    handler: async (ctx: ExtensionContext) => cycleMode(state, ctx),
-  });
+export function registerCommands(pi: ExtensionAPI, state: HiveState, options: RegisterCommandOptions) {
+  const deps: CommandDeps = { ...defaultCommandDeps, ...options.dependencies };
+  // W27 owns removal of the legacy runtime. Until then, only non-schema
+  // projects retain its fixed-mode commands and keyboard cycle surface.
+  if (!options.workflowConfigured) {
+    pi.registerCommand("hive:normal", {
+      description: "Switch to normal Pi chat (no hive, no enforcement)",
+      handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "normal"); },
+    });
+    pi.registerCommand("hive:plan-mode", {
+      description: "Switch to plan mode — planning team produces full specs",
+      handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "plan"); },
+    });
+    pi.registerCommand("hive", {
+      description: "Switch to hive mode — execution team builds the specs",
+      handler: async (_args: string, ctx: ExtensionContext) => { await applyMode(state, ctx, "hive"); },
+    });
+    pi.registerCommand("hive:toggle", {
+      description: "Cycle session mode: normal → plan → hive → normal",
+      handler: async (_args: string, ctx: ExtensionContext) => cycleMode(state, ctx),
+    });
+    pi.registerShortcut(Key.ctrlAlt("t"), {
+      description: "Cycle session mode: normal → plan → hive → normal",
+      handler: async (ctx: ExtensionContext) => cycleMode(state, ctx),
+    });
+  }
 
   pi.registerCommand("hive:doctor", {
     description: "Run read-only pi-hive diagnostics for this workspace",
@@ -69,7 +78,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive:execute", {
+  if (!options.workflowConfigured) pi.registerCommand("hive:execute", {
     description: "Execute a plan change's tasks.md through the hive (usage: /hive:execute <change-id>)",
     getArgumentCompletions: (prefix: string) => {
       const cwd = state.widgetCtx?.cwd || process.cwd();
@@ -123,7 +132,7 @@ export function registerCommands(pi: ExtensionAPI, state: HiveState, overrides: 
     },
   });
 
-  pi.registerCommand("hive:plan", {
+  if (!options.workflowConfigured) pi.registerCommand("hive:plan", {
     description: "List plan changes, or show the active one (usage: /hive:plan [change-id])",
     handler: async (args: string, ctx: ExtensionContext) => {
       const requested = args.trim().split(/\s+/)[0] || "";

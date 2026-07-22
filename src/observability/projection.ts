@@ -106,7 +106,7 @@ function compareEvents(a: WorkflowTelemetryEvent, b: WorkflowTelemetryEvent): nu
 type CurrentCursorKey = readonly [string, string, string, string, string];
 
 function currentEntityId(row: WorkflowProjectionCurrentRow): string {
-  return String(row.nodeId ?? row.taskId ?? row.questionId ?? row.approvalId ?? row.knowledgeJobId ?? row.knowledgeUpdateId ?? row.workspaceId ?? "");
+  return String(row.nodeId ?? row.taskId ?? row.questionId ?? row.approvalId ?? row.knowledgeProposalId ?? row.knowledgeJobId ?? row.knowledgeUpdateId ?? row.workspaceId ?? "");
 }
 
 function currentCursorKey(row: WorkflowProjectionCurrentRow, entityKey: string): CurrentCursorKey {
@@ -230,7 +230,7 @@ export function workflowProjectionCurrentKey(kind: CurrentKind, event: WorkflowT
     case "questions": return d.questionId ? framedEntityKey([event.streamId, d.runId ?? "", d.questionId]) : undefined;
     case "approvals": return d.approvalId ? framedEntityKey([event.streamId, d.runId ?? "", d.approvalId]) : undefined;
     case "knowledge": {
-      const id = d.knowledgeJobId ?? d.knowledgeUpdateId;
+      const id = d.knowledgeProposalId ?? d.knowledgeJobId ?? d.knowledgeUpdateId;
       return id ? framedEntityKey([event.streamId, d.runId ?? "", id]) : undefined;
     }
   }

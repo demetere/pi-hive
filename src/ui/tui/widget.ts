@@ -160,19 +160,21 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
     activateTeamRuntimes(state, ctx, mode);
   }
 
-  installHeader(state, ctx);
-  if (ctx.hasUI) {
-    ctx.ui.setStatus("hive", modeStatusText(state, mode));
-    // Hive has its own live activity widget. Pi's generic streaming loader can
-    // briefly stack several "Working..." rows during nested delegation before
-    // the TUI reconciles them, which makes the start of a run look noisy. Hide
-    // that generic row only while Hive/Plan mode is active; restore it in normal.
-    if (ctx.mode === "tui") ctx.ui.setWorkingVisible(mode === "normal");
+  if (!state.workflowConfigured) {
+    installHeader(state, ctx);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("hive", modeStatusText(state, mode));
+      // Hive has its own live activity widget. Pi's generic streaming loader can
+      // briefly stack several "Working..." rows during nested delegation before
+      // the TUI reconciles them, which makes the start of a run look noisy. Hide
+      // that generic row only while Hive/Plan mode is active; restore it in normal.
+      if (ctx.mode === "tui") ctx.ui.setWorkingVisible(mode === "normal");
+    }
   }
 
   if (mode === "normal") {
     state.pi.setActiveTools(state.normalToolNames);
-    if (ctx.mode === "tui") {
+    if (ctx.mode === "tui" && !state.workflowConfigured) {
       ctx.ui.setWidget("hive-tree", undefined);
       updateHiveActivityWidget(state);
     }
@@ -195,7 +197,7 @@ export function applyMode(state: HiveState, ctx: ExtensionContext, mode: HiveMod
 
 
 export function installHeader(state: HiveState, ctx: ExtensionContext) {
-  if (ctx.mode !== "tui") return;
+  if (ctx.mode !== "tui" || state.workflowConfigured) return;
   ctx.ui.setHeader((_tui: any, theme: any) => ({
     dispose() {},
     invalidate() {},
@@ -226,7 +228,7 @@ export function installHeader(state: HiveState, ctx: ExtensionContext) {
 
 export function updateWidget(state: HiveState) {
   // Keep team mode active without rendering the full team tree near the footer.
-  if (!state.widgetCtx || state.widgetCtx.mode !== "tui") return;
+  if (!state.widgetCtx || state.widgetCtx.mode !== "tui" || state.workflowConfigured) return;
   state.widgetCtx.ui.setWidget("hive-tree", undefined);
   updateHiveActivityWidget(state);
   installHeader(state, state.widgetCtx);

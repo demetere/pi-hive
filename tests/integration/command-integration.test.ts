@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import * as openspec from "../../src/engine/openspec.ts";
 import { createState } from "../../src/engine/state.ts";
-import { registerCommands, type CommandDeps } from "../../src/integration/commands.ts";
+import { registerCommands, type CommandDeps, type RegisterCommandOptions } from "../../src/integration/commands.ts";
 
 function harness() {
   const commands = new Map<string, any>();
@@ -53,19 +53,22 @@ function fakeOpenSpec(overrides: Partial<typeof openspec> = {}): typeof openspec
   } as typeof openspec;
 }
 
-function commandDeps(overrides: Partial<CommandDeps> = {}): Partial<CommandDeps> {
+function commandDeps(overrides: Partial<CommandDeps> = {}): RegisterCommandOptions {
   return {
-    openspec: fakeOpenSpec(),
-    ensureDashboard: async () => ({ running: true, url: "http://127.0.0.1:43191", adopted: false, spawned: true }),
-    stopDashboard: async () => [],
-    dashboardUrl: () => "http://127.0.0.1:43191",
-    readDaemonToken: () => "test-token",
-    fetch: async () => new Response(JSON.stringify({ events: 0, sessions: 0 }), { status: 200, headers: { "content-type": "application/json" } }),
-    ...overrides,
+    workflowConfigured: false,
+    dependencies: {
+      openspec: fakeOpenSpec(),
+      ensureDashboard: async () => ({ running: true, url: "http://127.0.0.1:43191", adopted: false, spawned: true }),
+      stopDashboard: async () => [],
+      dashboardUrl: () => "http://127.0.0.1:43191",
+      readDaemonToken: () => "test-token",
+      fetch: async () => new Response(JSON.stringify({ events: 0, sessions: 0 }), { status: 200, headers: { "content-type": "application/json" } }),
+      ...overrides,
+    },
   };
 }
 
-test("registered mode commands drive the real mode state machine and drain guard", async () => {
+test("registered legacy mode commands and mode-cycle shortcut remain operational through W27", async () => {
   const h = harness();
   const state = createState(h.pi);
   state.normalToolNames = ["read", "bash"];

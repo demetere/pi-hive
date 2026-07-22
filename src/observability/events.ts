@@ -45,6 +45,8 @@ export interface WorkflowTelemetryDimensions {
   readonly checkpointId?: string;
   readonly approvalId?: string;
   readonly knowledgeJobId?: string;
+  /** Additive API-v1 discovery identity for reviewed knowledge proposals. */
+  readonly knowledgeProposalId?: string;
   readonly knowledgeUpdateId?: string;
   readonly modelId?: string;
   readonly thinking?: string;
@@ -309,6 +311,7 @@ function dimensions(source: WorkflowEventEnvelope, payload: RecordValue, context
     ...optional("checkpointId", stringValue(payload, ["checkpointId"])),
     ...optional("approvalId", stringValue(payload, ["approvalId", "requestId", "decisionId"])),
     ...optional("knowledgeJobId", stringValue(payload, ["knowledgeJobId", "jobId"])),
+    ...optional("knowledgeProposalId", stringValue(payload, ["knowledgeProposalId", "proposalId"])),
     ...optional("knowledgeUpdateId", stringValue(payload, ["knowledgeUpdateId", "updateId"])),
     ...optional("modelId", stringValue(payload, ["modelId", "model"])),
     ...optional("thinking", stringValue(payload, ["thinking"])),

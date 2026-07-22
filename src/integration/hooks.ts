@@ -18,7 +18,9 @@ import { cancelWorkerQueue } from "../engine/governance";
 
 const EXTENSION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-export function registerHooks(pi: ExtensionAPI, state: HiveState) {
+export interface RegisterHookOptions { readonly workflowConfigured?: boolean }
+
+export function registerHooks(pi: ExtensionAPI, state: HiveState, options: RegisterHookOptions = {}) {
   // toolCallId → startedAt for the orchestrator's own tool calls, so
   // orchestrator_tool_end can carry durationMs the same way workers do (J5).
   // Bounded by in-flight calls: entries are deleted on tool_result.
@@ -356,6 +358,15 @@ ${catalog}`,
     state.shuttingDown = false;
     const lifecycleGeneration = state.lifecycleGeneration = (state.lifecycleGeneration || 0) + 1;
     state.widgetCtx = ctx;
+    // Schema-v1 workflow projects keep the legacy hooks registered during W26,
+    // but normal chat must not initialize fixed teams, telemetry, or mode UI.
+    // Workflow session linking and the replacement widget are owned by index.ts.
+    if (options.workflowConfigured) {
+      state.modelRegistry = ctx.modelRegistry;
+      captureNormalTools(state);
+      state.mode = "normal";
+      return;
+    }
     // Capture the ModelRegistry from the full session_start ctx — the reliable
     // handle. The mode-switch ctx that used to feed emitModelCatalog could lack
     // it, leaving model_versions empty and the topology dial without pillars.
