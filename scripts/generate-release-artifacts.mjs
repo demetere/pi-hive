@@ -2,13 +2,19 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const outputDir = join(root, "release-artifacts");
+
+function releaseOutputDir(args) {
+  if (args.length === 0) return join(root, "release-artifacts");
+  if (args.length === 2 && args[0] === "--output-dir" && args[1]) return resolve(args[1]);
+  throw new Error("Usage: generate-release-artifacts.mjs [--output-dir <path>]");
+}
+
+const outputDir = releaseOutputDir(process.argv.slice(2));
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const vendor = JSON.parse(readFileSync(join(root, "ui", "review", "vendor.json"), "utf8"));
 
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -42,7 +48,6 @@ const manifest = {
   },
   builds: {
     dashboardSourceSha256: readFileSync(join(root, "ui", "web", "dist", ".build-hash"), "utf8").trim(),
-    reviewVendor: vendor.package,
   },
   sboms: [packageSbomName, dashboardSbomName],
 };

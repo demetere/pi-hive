@@ -20,7 +20,6 @@ export default tseslint.config(
       "ui/web/coverage/**",
       "ui/web/dist/**",
       "ui/web/node_modules/**",
-      "ui/review/dist/**",
     ],
   },
   js.configs.recommended,
@@ -64,15 +63,17 @@ export default tseslint.config(
   },
   {
     files: [
-      "src/integration/hooks.ts",
-      "src/engine/observability.ts",
-      "src/observability/agent-log.ts",
-      "ui/web/src/store/**/*.{ts,tsx}",
+      "src/integration/workflow-command-service.ts",
+      "src/integration/workflow-commands.ts",
+      "src/observability/events.ts",
+      "src/observability/redaction.ts",
+      "src/observability/security.ts",
+      "ui/web/src/workflow-dashboard.tsx",
     ],
     rules: { "@typescript-eslint/no-explicit-any": "error" },
   },
   {
-    files: ["src/observability/server/db.ts"],
+    files: ["src/observability/server/workflow-service.ts"],
     rules: { "@typescript-eslint/no-explicit-any": "warn" },
   },
   {

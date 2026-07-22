@@ -1,9 +1,9 @@
 name: Release
 
 # Publishes to npm. Trigger either by publishing a GitHub Release:
-#   gh release create v0.1.0 --generate-notes
+#   gh release create vX.Y.Z --generate-notes
 # or manually, passing the existing tag:
-#   gh workflow run Release -f tag=v0.1.0
+#   gh workflow run Release -f tag=vX.Y.Z
 # The tag must match the package.json version, or the job fails before publishing.
 
 on:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing git tag to publish (e.g. v0.1.0)"
+        description: "Existing git tag to publish (e.g. vX.Y.Z)"
         required: true
         type: string
 

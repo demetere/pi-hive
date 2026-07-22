@@ -81,7 +81,7 @@ jobs:
         run: just ci
 
       - name: Require committed generated artifacts
-        run: git diff --exit-code -- ui/web/dist ui/review/dist
+        run: git diff --exit-code -- ui/web/dist schemas
 
       - name: Generate coverage reports
         run: just coverage

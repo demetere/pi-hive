@@ -3,9 +3,9 @@
 Thanks for your interest in improving `pi-hive`. This guide covers the toolchain,
 the local workflow, and the gates your change must pass.
 
-New here? Read the [README](./README.md) "What this is" section for the concepts
-(config-first ownership, the plan → hive flow, OpenSpec, Plannotator) and
-[SETUP.md](./SETUP.md) for how a hive is authored. The extension is config-first:
+New here? Read the [README quick start](./README.md#quick-start) for schema-v1
+workflow selection, linked sessions, capability policy, and artifact adapters, then
+[SETUP.md](./SETUP.md) for how a workflow is authored. The extension is config-first:
 it registers nothing until a project has `.pi/hive/hive-config.yaml`, so keep that
 opt-in guarantee intact in any change.
 
@@ -17,10 +17,10 @@ Install these before building:
   task routes through the `Justfile`, which is the source of truth. Run `just --list`
   to see all recipes. (CI installs `just` via its official script; do the same
   locally.)
-- **[Bun](https://bun.sh) ≥ 1.1** — required for the telemetry dashboard server
+- **[Bun](https://bun.sh) ≥ 1.3.14** — required for the local dashboard server
   (`bun:sqlite`) and the Bun-only test suite (`just test-db`).
-- **[Node.js](https://nodejs.org) ≥ 20** — runs the extension and the Node test suite.
-  CI uses Node 24.
+- **[Node.js](https://nodejs.org) ≥ 20.19.0** — runs the extension, build tools,
+  and the Node test suite. CI uses Node 24.
 - **[Pi](https://github.com/earendil-works/pi-coding-agent)** — to actually run the
   extension end to end. Pi provides `@earendil-works/pi-coding-agent` and
   `@earendil-works/pi-tui` at load time (they are peer dependencies).
@@ -43,7 +43,7 @@ The extension only activates in a project that contains `.pi/hive/hive-config.ya
 
 ## Working on the dashboard
 
-The dashboard is a Solid + Vite SPA under `ui/web/`. Its built bundle
+The dashboard is a React + Vite SPA under `ui/web/`. Its built bundle
 (`ui/web/dist/`) is **committed** so end users need no build step. After editing
 anything under `ui/web/src/`, rebuild and re-stamp the bundle:
 
@@ -59,22 +59,22 @@ running telemetry server.
 
 ## Before you open a PR
 
-Run the same gates as CI:
+Run the local verification gate, then the same aggregate gate as CI:
 
 ```sh
-just ci             # typecheck (core + dashboard), tests, dashboard freshness,
-                    # package-manifest verification, and `npm pack --dry-run`
+just verify         # ESLint, typechecks, tests, generated/dashboard/package checks
+just ci             # verify plus clean packaging and install/release checks
 ```
 
-Your PR must pass `just ci` green.
+Your PR must pass both `just verify` and `just ci` green. ESLint is mandatory;
+fix lint findings rather than bypassing the configured rules.
 
 ## Code style
 
-There is no ESLint/Prettier gate by design — TypeScript's type checkers
-(`strict` for the dashboard, `noImplicitAny` for the core) are the enforced
-correctness gate. Match the surrounding style: 2-space indent, double quotes,
-semicolons, named exports. Keep diffs minimal and idiomatic to the file you are
-editing.
+ESLint and TypeScript's type checkers (`strict` for the dashboard and core)
+are enforced by `just verify` and `just ci`. Match the surrounding style:
+2-space indent, double quotes, semicolons, and named exports. Keep diffs minimal
+and idiomatic to the file you are editing.
 
 ## Commit and PR conventions
 
@@ -111,15 +111,14 @@ You can also publish an existing tag manually (e.g. if the release event doesn't
 fire): `gh workflow run Release -f tag=vX.Y.Z`, or via the Actions tab → Release →
 "Run workflow".
 
-The tag (e.g. `v0.1.0`) must match `package.json`'s version, and `just ci` must
+The tag (e.g. `vX.Y.Z`) must match `package.json`'s version, and `just ci` must
 pass, or the workflow fails before publishing — so a broken or mistagged build
 cannot ship. The published tarball ships only the `files` allowlist (runtime code +
 the prebuilt `ui/web/dist/`); dependency folders never ship.
 
-**One-time setup:** add an npm access token that can publish in CI — a **granular**
-token with "bypass 2FA" enabled, or a classic **automation** token — as the
-`NPM_TOKEN` repository secret (Settings → Secrets and variables → Actions). A plain
-publish token fails with a 403 when the account has 2FA-on-publish enabled.
+**One-time setup:** configure the npm package's GitHub Actions trusted publisher
+for this repository and the protected `npm` environment. The release workflow uses
+GitHub OIDC with provenance and intentionally has no long-lived npm token fallback.
 Publishing to npm is what makes the package appear in the gallery.
 
 ## Security

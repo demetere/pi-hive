@@ -4,9 +4,17 @@ import type { PauseCoordinator, ResumeCoordinator, WorkflowRunLifecycle } from "
 
 export const RUN_INPUT_MESSAGE_TYPE = "pi-hive-run-input-v1";
 
+export interface WorkflowRunHookRuntime {
+  readonly lifecycle: WorkflowRunLifecycle;
+  pause(reason: string): Promise<boolean>;
+  resume(): Promise<boolean>;
+}
+
 export interface WorkflowRunHookOptions {
   /** Resolve on every callback so linked-session replacement cannot retain stale authority. */
   readonly resolveLifecycle: () => WorkflowRunLifecycle | undefined;
+  /** Production orchestration boundary; tests and pure consumers may use the coordinators below. */
+  readonly resolveRuntime?: () => WorkflowRunHookRuntime | undefined;
   readonly nextInputId?: (event: object) => string;
   readonly pauseCoordinator: PauseCoordinator;
   readonly resumeCoordinator: ResumeCoordinator;
@@ -36,7 +44,8 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
 
   const resumeCurrentLifecycle = async (): Promise<WorkflowRunLifecycle | undefined> => {
     while (true) {
-      const lifecycle = options.resolveLifecycle();
+      const runtime = options.resolveRuntime?.();
+      const lifecycle = runtime?.lifecycle ?? options.resolveLifecycle();
       if (!lifecycle) return undefined;
       const run = lifecycle.restore().latestRun;
       if (run?.status === "paused") {
@@ -48,7 +57,10 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
               await lifecycle.pause("complete paused authority release before session resume", options.pauseCoordinator);
               paused = lifecycle.restore().latestRun;
             }
-            if (paused?.status === "paused") await lifecycle.resume(options.resumeCoordinator);
+            if (paused?.status === "paused") {
+              if (runtime) await runtime.resume();
+              else await lifecycle.resume(options.resumeCoordinator);
+            }
           })();
           resumeAttempts.set(lifecycle, attempt);
           void attempt.finally(() => {
@@ -120,10 +132,12 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
   });
 
   pi.on("session_before_switch", async (event) => {
-    const lifecycle = options.resolveLifecycle();
+    const runtime = options.resolveRuntime?.();
+    const lifecycle = runtime?.lifecycle ?? options.resolveLifecycle();
     if (!lifecycle) return;
     try {
-      await lifecycle.pause(`native ${event.reason}`, options.pauseCoordinator);
+      if (runtime) await runtime.pause(`native ${event.reason}`);
+      else await lifecycle.pause(`native ${event.reason}`, options.pauseCoordinator);
       return { cancel: false };
     } catch {
       return { cancel: true };
@@ -132,8 +146,10 @@ export function registerWorkflowRunHooks(pi: ExtensionAPI, options: WorkflowRunH
   pi.on("session_before_fork", async () => options.resolveLifecycle() ? { cancel: true } : undefined);
   pi.on("session_before_tree", async () => options.resolveLifecycle() ? { cancel: true } : undefined);
   pi.on("session_shutdown", async () => {
-    const lifecycle = options.resolveLifecycle();
+    const runtime = options.resolveRuntime?.();
+    const lifecycle = runtime?.lifecycle ?? options.resolveLifecycle();
     if (!lifecycle) return;
-    await lifecycle.pause("process shutdown", options.pauseCoordinator);
+    if (runtime) await runtime.pause("process shutdown");
+    else await lifecycle.pause("process shutdown", options.pauseCoordinator);
   });
 }

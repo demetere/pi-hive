@@ -79,9 +79,6 @@ try {
 }
 
 const requiredNoticeText = [
-  "@plannotator/pi-extension` version 0.23.1",
-  "Copyright (c) 2025 backnotprop",
-  "MIT License",
   "Copyright 2021 The Hanken Grotesk Project Authors",
   "https://github.com/marcologous/hanken-grotesk",
   "Copyright 2020 The DM Mono Project Authors",
@@ -91,20 +88,6 @@ const requiredNoticeText = [
 ];
 for (const text of requiredNoticeText) {
   if (!notices.includes(text)) failures.push(`THIRD_PARTY_NOTICES.md is missing required attribution: ${text}`);
-}
-
-try {
-  const vendor = readJson("ui/review/vendor.json");
-  const packageName = vendor.package?.name;
-  const version = vendor.package?.version;
-  const lock = readJson("package-lock.json");
-  const license = normalizedLicense(lock.packages?.[`node_modules/${packageName}`]?.license);
-  if (packageName !== "@plannotator/pi-extension" || version !== "0.23.1") {
-    failures.push("Plannotator vendor changed; refresh THIRD_PARTY_NOTICES.md and the license checks");
-  }
-  if (license !== "MIT OR Apache-2.0") failures.push(`unexpected Plannotator license: ${license ?? "missing"}`);
-} catch (error) {
-  failures.push(`could not verify Plannotator licensing: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 const packageCount = scanLockfile("package-lock.json") + scanLockfile("ui/web/package-lock.json");

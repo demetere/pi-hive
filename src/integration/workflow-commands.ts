@@ -54,6 +54,10 @@ export interface WorkflowCommandServices {
   answer?(input: { questionId: string; value: unknown; channel: typeof COMMAND_CHANNEL }, ctx?: ExtensionCommandContext): Promise<string>;
   clearHandoff(ctx?: ExtensionCommandContext): Promise<string>;
   recover?(orphanSessionId: string, ctx?: ExtensionCommandContext): Promise<string>;
+  doctor?(json: boolean, ctx?: ExtensionCommandContext): Promise<string>;
+  observe?(ctx?: ExtensionCommandContext): Promise<string>;
+  observeStop?(ctx?: ExtensionCommandContext): Promise<string>;
+  observePrune?(cutoff: string, ctx?: ExtensionCommandContext): Promise<string>;
 }
 
 type Severity = "info" | "warning" | "error";
@@ -238,7 +242,26 @@ export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCom
     if (parts.length !== 1) throw new Error("Usage: /hive:recover <orphan-session-id>");
     present(ctx, await recover(parts[0]!, ctx));
   });
-  // W27 owns the legacy cutover. Until then registerCommands remains the sole
-  // owner of hive:doctor and hive:observe*, so these workflow surfaces coexist
-  // without duplicate slash-command registrations.
+  const doctor = services.doctor;
+  if (doctor) bind("hive:doctor", "Validate schema-v1 workflow configuration", async (args, ctx) => {
+    const parts = tokens(args);
+    if (parts.length > 1 || (parts.length === 1 && parts[0] !== "--json")) throw new Error("Usage: /hive:doctor [--json]");
+    present(ctx, await doctor(parts[0] === "--json", ctx));
+  });
+  const observe = services.observe;
+  if (observe) bind("hive:observe", "Start and open the local workflow dashboard", async (args, ctx) => {
+    if (tokens(args).length) throw new Error("Usage: /hive:observe");
+    present(ctx, await observe(ctx));
+  });
+  const observeStop = services.observeStop;
+  if (observeStop) bind("hive:observe-stop", "Stop the authenticated local workflow dashboard", async (args, ctx) => {
+    if (tokens(args).length) throw new Error("Usage: /hive:observe-stop");
+    present(ctx, await observeStop(ctx));
+  });
+  const observePrune = services.observePrune;
+  if (observePrune) bind("hive:observe-prune", "Prune the rebuildable workflow projection before an ISO timestamp", async (args, ctx) => {
+    const parts = tokens(args);
+    if (parts.length !== 1 || !Number.isFinite(Date.parse(parts[0]!))) throw new Error("Usage: /hive:observe-prune <ISO-timestamp>");
+    present(ctx, await observePrune(parts[0]!, ctx));
+  });
 }

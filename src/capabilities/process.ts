@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 
 const OWNED = new WeakSet<object>();
 const TERMINATED = new WeakSet<object>();
@@ -12,6 +13,19 @@ function hasObservedExit(child: ChildProcess): boolean {
 
 function processGroupIsLive(pid: number): boolean {
   if (process.platform === "win32") return false;
+  if (process.platform === "linux") {
+    try {
+      for (const entry of readdirSync("/proc")) {
+        if (!/^\d+$/u.test(entry)) continue;
+        try {
+          const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+          const tail = stat.slice(stat.lastIndexOf(") ") + 2).split(" ");
+          if (Number(tail[2]) === pid && tail[0] !== "Z") return true;
+        } catch { /* process exited during inspection */ }
+      }
+      return false;
+    } catch { /* fall through to portable group probe */ }
+  }
   try { process.kill(-pid, 0); return true; }
   catch { return false; }
 }
@@ -55,4 +69,31 @@ export function terminateOwnedProcess(
   if (!signalled) return false;
   LAST_SIGNAL.set(handle, signal);
   return true;
+}
+
+/** Run-scoped authority registry. It can contain only handles minted by spawnOwnedProcess. */
+export class OwnedProcessRegistry {
+  private readonly handles = new Set<OwnedProcessTree>();
+
+  spawn(command: string, args: readonly string[], options: SpawnOptions = {}): OwnedProcessTree {
+    const handle = spawnOwnedProcess(command, args, options);
+    this.handles.add(handle);
+    return handle;
+  }
+
+  isSettled(): boolean {
+    for (const handle of this.handles) {
+      const live = process.platform === "win32" ? !hasObservedExit(handle.child) : processGroupIsLive(handle.pid);
+      if (live) return false;
+      this.handles.delete(handle);
+    }
+    return true;
+  }
+
+  terminateAll(signal: NodeJS.Signals = "SIGKILL"): number {
+    let signalled = 0;
+    for (const handle of this.handles) if (terminateOwnedProcess(handle, signal)) signalled += 1;
+    this.isSettled();
+    return signalled;
+  }
 }

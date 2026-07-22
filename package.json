@@ -1,7 +1,7 @@
 {
   "name": "pi-hive",
-  "version": "0.1.0",
-  "description": "Hierarchical multi-agent orchestration extension for the Pi coding agent, with a local React telemetry dashboard.",
+  "version": "1.0.0",
+  "description": "Config-first workflow orchestration for Pi with linked sessions, capability policy, artifact adapters, and a local dashboard.",
   "type": "module",
   "author": "Demetre Dzmanashvili <demetredzmanashvili@gmail.com>",
   "repository": {
@@ -16,6 +16,9 @@
     "node": ">=20.19.0",
     "bun": ">=1.3.14"
   },
+  "os": [
+    "linux"
+  ],
   "main": "index.ts",
   "exports": {
     ".": "./index.ts"
@@ -37,12 +40,8 @@
     "src/",
     "schemas/",
     "ui/web/dist/",
-    "ui/review/src/",
-    "ui/review/dist/",
-    "ui/review/vendor.json",
-    "scripts/build-review-bundle.mjs",
+    "examples/",
     "scripts/check-package-budgets.mjs",
-    "scripts/check-review-vendor.mjs",
     "scripts/check-licenses.mjs",
     "README.md",
     "SECURITY.md",
@@ -50,7 +49,6 @@
   ],
   "scripts": {
     "build:dashboard": "just dashboard-build",
-    "build:review": "just review-build",
     "build:config-schemas": "just config-schema-build",
     "typecheck": "just typecheck",
     "typecheck:core": "just typecheck-core",
@@ -89,7 +87,6 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.7",
     "@eslint/js": "^9.39.5",
-    "@plannotator/pi-extension": "0.23.1",
     "@types/bun": "^1.3.14",
     "@types/node": "^22.20.1",
     "ajv": "^8.17.1",

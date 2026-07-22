@@ -17,7 +17,6 @@ import { listSessionLinks, type WorkflowSessionLink } from "../../workflows/sess
 import { withCrossProcessFileLock } from "../../core/file-lock";
 import { DAEMON_TOKEN, DB_PATH, PROJECT_CWD, REGISTRY_PATH, WORKFLOW_DB_PATH } from "./config";
 import { openWorkflowProjectionDatabase, type WorkflowProjectionDatabase } from "./workflow-db";
-import { readWorkflowProjectionRuntimeDiagnostics } from "./runtime";
 import { closeWorkflowSubscribers, encoder, enqueueBounded, eventFrame, invalidateWorkflowSubscribers, registerSubscriber, removeSubscriber, SSE_BUFFER_BYTES, type WorkflowStreamLimits } from "./sse";
 import type { WorkflowApiOptions, WorkflowControlApi, WorkflowProjectionApi } from "./workflow-routes";
 
@@ -401,7 +400,7 @@ export function createProductionWorkflowApiOptions(options: ProductionWorkflowSe
     databasePath: options.databasePath ?? WORKFLOW_DB_PATH,
     legacyPaths: options.legacyPaths ?? [DB_PATH, REGISTRY_PATH],
     projectCwd: options.projectCwd ?? PROJECT_CWD,
-    diagnostics: options.diagnostics ?? readWorkflowProjectionRuntimeDiagnostics,
+    diagnostics: options.diagnostics ?? (() => Object.freeze([])),
     rebuildLimits: effectiveRebuildLimits(options.rebuildLimits),
     ...(options.streamLimits ? { streamLimits: options.streamLimits } : {}),
   });

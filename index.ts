@@ -1,106 +1,116 @@
-/**
- * Hive orchestration extension for Pi.
- *
- * Installed globally and auto-discovered for every project, but it only
- * activates when the current project opts in by providing a
- * `.pi/hive/hive-config.yaml`. Without that file the extension registers
- * nothing — no tools, no commands, no hooks — so non-hive projects are
- * completely unaffected.
- *
- * When active, it loads a hierarchical team from `.pi/hive/hive-config.yaml`,
- * gives the visible session only delegation/coordination tools (it routes,
- * never edits), renders a live team tree, and records a JSONL conversation log
- * across the orchestrator and workers.
- */
-
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { HIVE_ROOT } from "./src/core/constants";
-
-
-// The project opts in by configuring a hive. We check at load time (the
-// extension module runs in the project's cwd) so projects without a hive get
-// zero registrations — no /hive commands, no tools, no hooks.
-function projectHasHive(): boolean {
-  return existsSync(join(process.cwd(), HIVE_ROOT, "hive-config.yaml"));
-}
+/** Config-first workflow extension entrypoint. */
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadConfigProject, readActivationSnapshot } from "./src/config/index";
+import { resolveProjectIdentity } from "./src/shared/project-identity";
+import { workflowToolDefinitionsWithRuntime } from "./src/integration/workflow-tools";
+import { createLinkedWorkflowCommandServices, createPiWorkflowRuntimeCommandAuthority } from "./src/integration/workflow-command-service";
+import { registerWorkflowCommands } from "./src/integration/workflow-commands";
+import { registerWorkflowRunHooks } from "./src/integration/run-lifecycle";
+import { createSelectedWorkflowToolPolicyHook } from "./src/integration/workflow-tool-policy";
+import { WorkflowProductionRuntimeRegistry, type SelectedProductionWorkflowRuntime } from "./src/integration/workflow-production-runtime";
+import { clearWorkflowStatusUi, restoreWorkflowStatusSummary, updateWorkflowStatusUi } from "./src/ui/tui/workflow-widget";
+import { initializeNormalParent, listSessionLinks, type NormalSessionLink, type WorkflowSessionLink } from "./src/workflows/sessions";
 
 export const WORKFLOW_UI_REFRESH_BOUNDARIES = Object.freeze(["session_start", "input", "message_end", "turn_end", "command-settled"] as const);
 
-/** Testable production wiring seam; constructing services has no process side effects. */
-export async function registerLinkedWorkflowCommandSurfaces(pi: ExtensionAPI, projectRoot: string, projectId: string, onSettled?: (ctx: ExtensionCommandContext) => void): Promise<void> {
-  const [{ registerWorkflowCommands }, { createLinkedWorkflowCommandServices, createPiWorkflowRuntimeCommandAuthority }] = await Promise.all([
-    import("./src/integration/workflow-commands"),
-    import("./src/integration/workflow-command-service"),
-  ]);
-  registerWorkflowCommands(pi, createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority()), onSettled);
+function configurationFailure(result: Exclude<ReturnType<typeof loadConfigProject>, { status: "configured" | "unconfigured" }>): Error {
+  const details = result.diagnostics.slice(0, 20).map((entry) => `${entry.code}: ${entry.message}`).join("; ");
+  return new Error(`pi-hive schema-v1 configuration is invalid. Manual migration is required; pre-1.0 configuration is not loaded. ${details}`);
 }
 
-export default async function hiveExtension(pi: ExtensionAPI) {
-  if (!projectHasHive()) return;
+/** Testable production wiring seam; constructing services has no process side effects. */
+export async function registerLinkedWorkflowCommandSurfaces(pi: ExtensionAPI, projectRoot: string, projectId: string, onSettled?: (ctx: ExtensionCommandContext) => void, runtimeOwnerNonce?: string): Promise<void> {
+  registerWorkflowCommands(pi, createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), runtimeOwnerNonce), onSettled);
+}
 
-  const [stateModule, toolsModule, commandsModule, hooksModule, configModule, projectIdentityModule, sessionsModule, workflowWidgetModule] = await Promise.all([
-    import("./src/engine/state"),
-    import("./src/agents/tools"),
-    import("./src/integration/commands"),
-    import("./src/integration/hooks"),
-    import("./src/config/index"),
-    import("./src/shared/project-identity"),
-    import("./src/workflows/sessions"),
-    import("./src/ui/tui/workflow-widget"),
-  ]);
+function selectedLink(projectRoot: string, ctx: ExtensionContext): WorkflowSessionLink | undefined {
+  return listSessionLinks(projectRoot).find((entry): entry is WorkflowSessionLink => entry.kind === "workflow" && entry.piSessionId === ctx.sessionManager.getSessionId());
+}
 
-  // Resolve schema ownership before registering either legacy or workflow
-  // surfaces so legacy hooks can remain installed through W26 without rendering
-  // fixed-mode chrome in schema-v1 projects.
-  const configured = configModule.loadConfigProject(process.cwd());
-  const workflowConfigured = configured.status === "configured";
-  const state = stateModule.createState(pi);
-  state.workflowConfigured = workflowConfigured;
-  toolsModule.registerTools(pi, state);
-  commandsModule.registerCommands(pi, state, { workflowConfigured });
-  hooksModule.registerHooks(pi, state, { workflowConfigured });
+function normalLink(projectRoot: string, ctx: ExtensionContext): NormalSessionLink | undefined {
+  return listSessionLinks(projectRoot).find((entry): entry is NormalSessionLink => entry.kind === "normal" && entry.piSessionId === ctx.sessionManager.getSessionId());
+}
 
-  // A legacy hive-config remains owned by the existing modes through W27. The
-  // workflow command surfaces are added only when the same opted-in file also
-  // satisfies the schema-v1 workflow configuration contract.
-  if (configured.status !== "configured") return;
-  const project = projectIdentityModule.resolveProjectIdentity(configured.projectRoot);
-  const refreshWorkflowUi = (ctx: Parameters<typeof workflowWidgetModule.updateWorkflowStatusUi>[0]): void => {
+export default async function hiveExtension(pi: ExtensionAPI): Promise<void> {
+  const configured = loadConfigProject(process.cwd());
+  if (configured.status === "unconfigured") return;
+  if (configured.status === "invalid") throw configurationFailure(configured);
+
+  // Capture before workflow tools are registered: Pi enables newly registered
+  // custom tools by default, so a later getActiveTools() is not a normal-chat baseline.
+  const startupNormalTools = Object.freeze([...pi.getActiveTools()]);
+  const project = resolveProjectIdentity(configured.projectRoot);
+  const runtimeOwnerNonce = randomUUID();
+  const runtimes = new WorkflowProductionRuntimeRegistry(configured.projectRoot, project.projectId, undefined, runtimeOwnerNonce);
+  let activeRuntime: SelectedProductionWorkflowRuntime | undefined;
+  let workflowUiVisible = false;
+
+  for (const tool of workflowToolDefinitionsWithRuntime(() => activeRuntime?.rootServices())) pi.registerTool(tool);
+  pi.setActiveTools([...startupNormalTools]);
+
+  const refreshSelection = (ctx: ExtensionContext): void => {
+    const selected = selectedLink(configured.projectRoot, ctx);
+    activeRuntime = runtimes.select(selected, ctx);
+  };
+  const refreshWorkflowUi = (ctx: ExtensionContext): void => {
+    const selected = selectedLink(configured.projectRoot, ctx);
     try {
-      const selected = sessionsModule.listSessionLinks(configured.projectRoot).find((entry) => entry.kind === "workflow" && entry.piSessionId === ctx.sessionManager.getSessionId());
-      if (selected?.kind === "workflow") workflowWidgetModule.updateWorkflowStatusUi(ctx, workflowWidgetModule.restoreWorkflowStatusSummary(configured.projectRoot, selected));
-      else workflowWidgetModule.clearWorkflowStatusUi(ctx);
+      if (selected) {
+        updateWorkflowStatusUi(ctx, restoreWorkflowStatusSummary(configured.projectRoot, selected));
+        workflowUiVisible = true;
+      } else if (workflowUiVisible) {
+        clearWorkflowStatusUi(ctx);
+        workflowUiVisible = false;
+      }
     } catch {
-      workflowWidgetModule.clearWorkflowStatusUi(ctx);
+      if (workflowUiVisible) clearWorkflowStatusUi(ctx);
+      workflowUiVisible = false;
     }
   };
-  await registerLinkedWorkflowCommandSurfaces(pi, configured.projectRoot, project.projectId, refreshWorkflowUi);
+  await registerLinkedWorkflowCommandSurfaces(pi, configured.projectRoot, project.projectId, (ctx) => {
+    refreshSelection(ctx);
+    refreshWorkflowUi(ctx);
+  }, runtimeOwnerNonce);
 
-  // W26 coexists with the legacy modes. Link and render workflow sessions only
-  // after Pi supplies a session-bound context; the extension factory itself
-  // still starts no process and performs no unconfigured registration.
+  // This handler is registered before lifecycle hooks so session restoration has
+  // selected the exact linked authority before resume/input callbacks run.
   pi.on("session_start", async (_event, ctx) => {
     const sessionFile = ctx.sessionManager.getSessionFile();
     if (!sessionFile) return;
-    const selected = sessionsModule.listSessionLinks(configured.projectRoot).find((entry) => entry.kind === "workflow" && entry.piSessionId === ctx.sessionManager.getSessionId());
-    if (!selected) sessionsModule.initializeNormalParent({
-      configured: true,
-      projectRoot: configured.projectRoot,
-      projectId: project.projectId,
-      piSessionId: ctx.sessionManager.getSessionId(),
-      piSessionFile: sessionFile,
-      model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unselected",
-      thinking: String(pi.getThinkingLevel()),
-      activeTools: pi.getActiveTools(),
-    });
+    const selected = selectedLink(configured.projectRoot, ctx);
+    if (selected) {
+      readActivationSnapshot(configured.projectRoot, selected.activationHash);
+      pi.setActiveTools([...selected.tools]);
+    } else {
+      const stored = normalLink(configured.projectRoot, ctx);
+      const baseline = stored?.normalTools ?? startupNormalTools;
+      pi.setActiveTools([...baseline]);
+      initializeNormalParent({
+        configured: true, projectRoot: configured.projectRoot, projectId: project.projectId,
+        piSessionId: ctx.sessionManager.getSessionId(), piSessionFile: sessionFile,
+        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unselected",
+        thinking: String(pi.getThinkingLevel()), activeTools: baseline,
+      });
+    }
+    refreshSelection(ctx);
     refreshWorkflowUi(ctx);
   });
-  // Refresh from the durable journal at bounded Pi lifecycle boundaries. These
-  // hooks create no watcher or long-lived process and survive session restore.
-  pi.on("input", async (_event, ctx) => { refreshWorkflowUi(ctx); });
-  pi.on("message_end", async (_event, ctx) => { refreshWorkflowUi(ctx); });
-  pi.on("turn_end", async (_event, ctx) => { refreshWorkflowUi(ctx); });
-  pi.on("session_shutdown", async (_event, ctx) => workflowWidgetModule.clearWorkflowStatusUi(ctx));
+  pi.on("input", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
+  pi.on("message_end", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
+  pi.on("turn_end", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
+
+  registerWorkflowRunHooks(pi, {
+    resolveLifecycle: () => activeRuntime?.lifecycle,
+    resolveRuntime: () => activeRuntime,
+    pauseCoordinator: {},
+    resumeCoordinator: { acquireOwnership: () => {}, acquireLeases: () => {}, revalidateHashes: () => false, rollbackAuthority: () => {} },
+  });
+  pi.on("tool_call", createSelectedWorkflowToolPolicyHook(configured.projectRoot, () => activeRuntime));
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (workflowUiVisible) clearWorkflowStatusUi(ctx);
+    workflowUiVisible = false;
+    activeRuntime = undefined;
+    await runtimes.shutdown();
+  });
 }

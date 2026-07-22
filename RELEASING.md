@@ -39,9 +39,10 @@ gh workflow run Release -f tag=vx.y.z
 ```
 
 Before npm publishing, the workflow verifies the tag and package versions,
-release notes, dashboard build stamp, Plannotator vendor and review-bundle hashes,
-and a clean Git index/worktree. Direct `npm publish` runs the same release check,
-all TypeScript projects, Node tests, and Bun tests through `prepublishOnly`.
+release notes, dashboard build stamp, exact npm tarball allowlist and byte budgets,
+license notices, and a clean Git index/worktree. Direct `npm publish` runs the same
+release check, all TypeScript projects, Node tests, and Bun tests through
+`prepublishOnly`.
 
 Successful releases attach two CycloneDX SBOMs, a dependency/build manifest, and
 `SHA256SUMS` to the GitHub Release.

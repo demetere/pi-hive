@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { killProcessTree, spawnManaged } from "../../src/engine/process.ts";
+import { killProcessTree, spawnManaged } from "../../src/core/process.ts";
 import { readWorkflowJournal } from "../../src/workflows/journal.ts";
 import { acquireRuntimeOwnership } from "../../src/workflows/ownership.ts";
 import type { ActivationSnapshotFileV1 } from "../../src/config/snapshot.ts";
