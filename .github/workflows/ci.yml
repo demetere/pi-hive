@@ -58,7 +58,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20.19.x"
+          node-version: "lts/*"
           cache: "npm"
 
       - name: Install just
@@ -66,6 +66,9 @@ jobs:
 
       - name: Install root dependencies
         run: npm ci
+
+      - name: Install dashboard dependencies
+        run: npm ci --prefix ui/web
 
       - name: Verify and rebuild Darwin native helpers
         run: just darwin-native-verify && just darwin-native-build && just darwin-native-verify
