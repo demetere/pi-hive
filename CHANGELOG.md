@@ -16,6 +16,7 @@
 - Generic artifact adapters for `none`, Markdown plans, and OpenSpec with leases, checkpoints, and exact approvals.
 - Durable questions, attached local OKF knowledge, bounded enrichment, workflow telemetry, authenticated API v1, and the workflow dashboard.
 - Checked-in combined, split-handoff, Markdown lifecycle, artifact-free, and invalid migration examples.
+- Added macOS arm64/x64 workflow-runtime support with packaged N-API descriptor-relative filesystem helpers and Darwin process identity.
 
 ### Fixed
 

@@ -6,11 +6,11 @@ import {
   lstatSync,
   openSync,
   readSync,
-  readdirSync,
   realpathSync,
 } from "node:fs";
 import { join, posix, relative, resolve, sep } from "node:path";
 import { parseDocument } from "yaml";
+import { descriptorPath, openDescriptorAt, openDirectoryAt, readDirectoryAt, statAt } from "../core/descriptor-fs";
 import { isPathInside, resolveProjectPath } from "../core/safe-path";
 import {
   validKnowledgeBundleId,
@@ -97,11 +97,6 @@ class Diagnostics {
   }
 }
 
-function descriptorPath(descriptor: number, name?: string): string {
-  const root = `/proc/self/fd/${descriptor}`;
-  return name === undefined ? root : `${root}/${name}`;
-}
-
 function openDirectory(path: string): number {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   if (!fstatSync(descriptor).isDirectory()) { closeSync(descriptor); throw new Error("not-directory"); }
@@ -128,11 +123,11 @@ function pinBundleRoot(projectRoot: string, bundlePath: string, operations?: Okf
     for (const segment of segments) {
       traversed = traversed ? `${traversed}/${segment}` : segment;
       operations?.fault?.("before-directory-open", traversed);
-      const child = openDirectory(descriptorPath(descriptor, segment));
+      const child = openDirectoryAt(descriptor, segment);
       closeSync(descriptor);
       descriptor = child;
     }
-    const canonicalRoot = realpathSync.native(descriptorPath(descriptor));
+    const canonicalRoot = descriptorPath(descriptor);
     operations?.fault?.("after-root-pinned", "");
     if (!matchesDirectoryIdentity(descriptor, bundlePath)) throw new Error("identity-changed");
     return { descriptor, canonicalRoot, lexicalRoot: bundlePath };
@@ -151,11 +146,11 @@ function readExactFile(
 ): { value?: LoadedFile; code?: string } {
   let descriptor: number | undefined;
   try {
-    const path = descriptorPath(directoryDescriptor, name);
-    const lexical = lstatSync(path);
-    if (lexical.isSymbolicLink()) return { code: "OKF_SYMLINK_DENIED" };
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const named = statAt(directoryDescriptor, name);
+    if (named.kind === "symlink") return { code: "OKF_SYMLINK_DENIED" };
+    descriptor = openDescriptorAt(directoryDescriptor, name, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = fstatSync(descriptor);
+    if (String(before.dev) !== named.device || String(before.ino) !== named.inode) return { code: "OKF_CONTENT_CHANGED" };
     if (!before.isFile()) return { code: "OKF_IRREGULAR_FILE" };
     if (before.size > limits.fileBytes) return { code: "OKF_FILE_TOO_LARGE" };
     if (before.size > aggregateRemaining) return { code: "OKF_AGGREGATE_TOO_LARGE" };
@@ -199,30 +194,29 @@ function enumerate(
       try {
         if (directory.depth > limits.depth) { diagnostics.add("OKF_DEPTH_EXCEEDED", "error", "The OKF directory depth exceeds its bound."); continue; }
         if (!matchesDirectoryIdentity(directory.descriptor, directory.lexicalPath)) { diagnostics.add("OKF_DIRECTORY_IDENTITY_CHANGED", "error", "An OKF directory identity changed during traversal."); continue; }
-        let entries;
-        try { entries = readdirSync(descriptorPath(directory.descriptor), { withFileTypes: true }).sort((a, b) => compare(a.name, b.name)); }
+        let entries: readonly string[];
+        try { entries = [...readDirectoryAt(directory.descriptor)].sort(compare); }
         catch { diagnostics.add("OKF_READ_FAILED", "error", "An OKF directory cannot be read."); continue; }
         operations?.fault?.("after-directory-listed", directory.relativePath);
         if (!matchesDirectoryIdentity(directory.descriptor, directory.lexicalPath)) { diagnostics.add("OKF_DIRECTORY_IDENTITY_CHANGED", "error", "An OKF directory identity changed during traversal."); continue; }
-        for (const entry of entries) {
-          const relativePath = directory.relativePath ? `${directory.relativePath}/${entry.name}` : entry.name;
+        for (const entryName of entries) {
+          const relativePath = directory.relativePath ? `${directory.relativePath}/${entryName}` : entryName;
           pathBytes += Buffer.byteLength(relativePath, "utf8");
           if (pathBytes > limits.pathBytes) { diagnostics.add("OKF_PATH_LIMIT_EXCEEDED", "error", "OKF path metadata exceeds its bound."); return output; }
           operations?.fault?.("before-entry-open", relativePath);
-          const entryPath = descriptorPath(directory.descriptor, entry.name);
-          let lexical;
-          try { lexical = lstatSync(entryPath); }
+          let entry;
+          try { entry = statAt(directory.descriptor, entryName); }
           catch { diagnostics.add("OKF_READ_FAILED", "error", "An OKF entry changed during traversal."); continue; }
-          if (lexical.isSymbolicLink()) { diagnostics.add("OKF_SYMLINK_DENIED", "error", "Symbolic links are not accepted in an OKF bundle."); continue; }
-          if (lexical.isDirectory()) {
-            try { stack.push({ descriptor: openDirectory(entryPath), lexicalPath: join(directory.lexicalPath, entry.name), relativePath, depth: directory.depth + 1 }); }
+          if (entry.kind === "symlink") { diagnostics.add("OKF_SYMLINK_DENIED", "error", "Symbolic links are not accepted in an OKF bundle."); continue; }
+          if (entry.kind === "directory") {
+            try { stack.push({ descriptor: openDirectoryAt(directory.descriptor, entryName), lexicalPath: join(directory.lexicalPath, entryName), relativePath, depth: directory.depth + 1 }); }
             catch (error) { diagnostics.add((error as NodeJS.ErrnoException).code === "ELOOP" ? "OKF_SYMLINK_DENIED" : "OKF_READ_FAILED", "error", "An OKF directory changed during traversal."); }
             continue;
           }
-          if (!lexical.isFile()) { diagnostics.add("OKF_IRREGULAR_FILE", "error", "Irregular entries are not accepted in an OKF bundle."); continue; }
-          if (!entry.name.endsWith(".md")) continue;
+          if (entry.kind !== "file") { diagnostics.add("OKF_IRREGULAR_FILE", "error", "Irregular entries are not accepted in an OKF bundle."); continue; }
+          if (!entryName.endsWith(".md")) continue;
           if (output.length >= limits.files) { diagnostics.add("OKF_FILE_LIMIT_EXCEEDED", "error", "The OKF file count exceeds its bound."); return output; }
-          const loaded = readExactFile(directory.descriptor, entry.name, limits, limits.aggregateBytes - aggregate, reserveContentBytes);
+          const loaded = readExactFile(directory.descriptor, entryName, limits, limits.aggregateBytes - aggregate, reserveContentBytes);
           if (!loaded.value) {
             const code = loaded.code ?? "OKF_READ_FAILED";
             diagnostics.add(code, "error", code === "OKF_AGGREGATE_TOO_LARGE"

@@ -25,13 +25,13 @@ function recoverySnapshot(identity: { projectId?: string; workflowId?: string } 
   const effective = { filesystem: [], shell: [], git: false, "external-network": false, "human-input": false, artifact: [], knowledge: [] };
   const provenance = { filesystem: ["agent-ceiling", "inherited"], shell: ["agent-ceiling", "inherited"], git: ["agent-ceiling", "inherited"], "external-network": ["agent-ceiling", "inherited"], "human-input": ["agent-ceiling", "inherited"], artifact: ["agent-ceiling", "inherited"], knowledge: ["agent-ceiling", "inherited"] };
   const payload = {
-    versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" },
+    versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v2", package: "0.1.0" },
     project: { projectId: identity.projectId ?? "project-1", rootRef: "." },
     workflow: { id: identity.workflowId ?? "build", artifact: { adapter: "none", adapterVersion: "1", profile: "default", profileVersion: "1", binding: "none", options: {}, optionsSchemaVersion: "1", contractVersion: "pi-hive-artifact-contract-v1", checkpoints: [], actionIds: [], viewVersion: 1, approvals: {} }, team: { rootId: "root", nodes: [{ id: "root", agentId: "agent", memberIds: [], responsibilities: [], skills: { resolved: [] }, knowledge: { resolved: [] }, budgets: {} }] } },
     agents: [{ id: "agent", name: "Agent", tags: [], frontmatter: {}, prompt: "recover", sourceHash: "a".repeat(64), canonicalSourceHash: "b".repeat(64), promptHash: "c".repeat(64) }],
     skills: [], knowledge: [],
     authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective, provenance, budgets: {}, attachments: { skills: [], knowledge: [] }, directMemberIds: [] }, tools: ["workflow_finish", "workflow_status"] }] },
-    models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 }],
+    models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 188416, outputReserve: 20000, contextWindow: 300000 }],
     sources: [],
   } as any;
   return { snapshotHash: hashActivationPayload(payload), createdAt: "2026-01-01T00:00:00.000Z", payload };
@@ -75,7 +75,7 @@ function runRecoveryProcess(f: ReturnType<typeof fixture>, workflowSessionId: st
       sourceState: "current",
       model: {
         defaultModel: "provider/model", defaultThinking: "off",
-        find: (modelId) => modelId === "provider/model" ? { id: modelId, contextWindow: 100000, thinking: ["off"] } : undefined,
+        find: (modelId) => modelId === "provider/model" ? { id: modelId, contextWindow: 300000, thinking: ["off"] } : undefined,
         canActivate: (modelId) => modelId === "provider/model", estimateTokens: (text) => text.length,
       },
       knowledgeAvailable: () => true, workspaceAvailable: () => true,
@@ -113,7 +113,7 @@ const recoveryDependencies = (f: ReturnType<typeof fixture>, overrides: Record<s
     model: {
       defaultModel: "provider/model",
       defaultThinking: "off",
-      find: (modelId: string) => modelId === "provider/model" ? { id: modelId, contextWindow: 100_000, thinking: ["off"] } : undefined,
+      find: (modelId: string) => modelId === "provider/model" ? { id: modelId, contextWindow: 300_000, thinking: ["off"] } : undefined,
       canActivate: (modelId: string) => modelId === "provider/model",
       estimateTokens: (text: string) => text.length,
     },

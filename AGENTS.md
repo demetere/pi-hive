@@ -2,7 +2,7 @@
 
 ## Project purpose
 
-`pi-hive` is a Linux-only Pi package that provides a hierarchical multi-agent orchestration extension plus a local telemetry dashboard. Do not claim Windows process-tree termination support; Windows-form paths remain fail-closed security test inputs.
+`pi-hive` is a Linux and macOS Pi package that provides a hierarchical multi-agent orchestration extension plus a local telemetry dashboard. Darwin descriptor-relative filesystem operations must use the committed N-API helper and preserve Linux-equivalent fail-closed identity guarantees. Do not claim Windows process-tree termination support; Windows-form paths remain fail-closed security test inputs.
 
 The extension must stay safe to install globally: it should do nothing unless the current project opts in with `.pi/hive/hive-config.yaml`.
 

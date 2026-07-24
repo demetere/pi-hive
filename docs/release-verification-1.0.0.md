@@ -59,7 +59,7 @@ This record maps every clause of the 48 architecture acceptance criteria to exac
 | 45 | Projection ingestion is idempotent, sequence/hash gaps fail-stop rather than being guessed through, and projection pruning cannot delete authoritative open-run journals. | `tests/observability/workflow-telemetry.test.ts` — “projection ingestion is event-ID idempotent and fail-stops only a corrupt stream”; `tests/observability/workflow-projection-db.spec.ts` — “workflow SQLite ingestion is idempotent, gap/hash fail-stop, crash-atomic, and rebuild-equivalent”; `tests/observability/workflow-telemetry.test.ts` — “authority-owned journal pruning is fail-closed, crash-recoverable, and idempotent” | Mapped; current cited tests passed |
 | 46 | Schema, state-model, property, policy, scheduler, crash/fault, adapter, security, cross-process, scale, and end-to-end lanes cover the documented W28 invariants. | Complete non-circular inventory in the next section. | Passing; cited suites and the full clean aggregate passed |
 | 47 | Completion envelopes derive changes from mutation/reconciliation state, distinguish pre-existing dirt, disclose partial coverage, and block unexplained protected-path drift. | `tests/workflows/workflow-change-accounting.test.ts` — “clean Git baseline derives create/update/delete/rename and git-reconciled coverage”; `tests/workflows/workflow-change-accounting.test.ts` — “dirty Git baseline preserves pre-existing edits and does not falsely attribute unchanged dirt”; `tests/workflows/workflow-change-accounting.test.ts` — “bounded inventories declare partial coverage instead of claiming completeness”; `tests/workflows/workflow-change-accounting.test.ts` — “unexplained protected-path drift blocks completion while harness session journal changes are excluded” | Mapped; current cited tests passed |
-| 48 | Structured delegation refs are re-authorized for each recipient; public docs state that task prose is not a general information-flow/DLP boundary. | `tests/workflows/workflow-delegation.test.ts` — “results are reauthorized for the parent and use durable prepared/accepted delivery”; `tests/knowledge/knowledge-search.test.ts` — “delegation context and worker-result knowledge refs reauthorize for each recipient”; `tests/release/documentation-consistency.test.ts` — “public docs state clean telemetry, Linux support, and non-sandbox boundaries” | Mapped; current cited tests passed |
+| 48 | Structured delegation refs are re-authorized for each recipient; public docs state that task prose is not a general information-flow/DLP boundary. | `tests/workflows/workflow-delegation.test.ts` — “results are reauthorized for the parent and use durable prepared/accepted delivery”; `tests/knowledge/knowledge-search.test.ts` — “delegation context and worker-result knowledge refs reauthorize for each recipient”; `tests/release/documentation-consistency.test.ts` — “public docs state clean telemetry, Linux/macOS support, and non-sandbox boundaries” | Mapped; current cited tests passed |
 
 ## Criterion 46 — complete W28 suite inventory
 
@@ -158,6 +158,7 @@ The reviewer artifact dated 2026-07-22 records green Node, Bun, dashboard-unit, 
 ### Environment
 
 - Ubuntu Linux, kernel **6.17**.
+- macOS Darwin **25.2.0** on arm64; descriptor-relative knowledge mutation uses the committed N-API `openat(2)` helper.
 - Pi **0.80.10**.
 - Node.js **22.23.1**.
 - Bun **1.3.14**.
@@ -205,7 +206,7 @@ The reviewer artifact dated 2026-07-22 records green Node, Bun, dashboard-unit, 
 ### Clean packed-install inspection — passed
 
 1. Ran `just verify-packed-install` from the final candidate worktree.
-2. The isolated installer proved npm rejects Windows, installed `pi-hive@1.0.0` on Linux, and loaded it in both an inert unconfigured project and a schema-v1 configured project.
+2. The isolated installer proved npm rejects Windows, accepts Linux and macOS (arm64/x64), and loads `pi-hive@1.0.0` in both an inert unconfigured project and a schema-v1 configured project.
 
 ### Dashboard-unavailable TUI approval — passed
 
@@ -227,7 +228,8 @@ Candidate-worktree `just release-gate` passed on 2026-07-22:
 - core coverage: every final clean rerun remained at or above 88.1% statements/lines, 81.1% branches, and 83.4% functions (required gates: 85% lines, 80% branches);
 - dashboard coverage: 95.87% statements/lines, 83.66% branches, 85.18% functions;
 - exact npm allowlist: 175 files; final packed/unpacked byte measurements are recorded with the clean-gate handoff because this evidence file itself is part of the tarball;
-- packed installation: Windows rejected; Linux inert-unconfigured and schema-v1 configured loads passed;
+- packed installation: Windows rejected; Linux and macOS accepted; inert-unconfigured and schema-v1 configured loads passed;
+- macOS workflow runtime: full Node suite passed with descriptor-pinned OKF reads/mutations, ownership recovery, process groups, artifacts, and command policy;
 - licenses/notices: 810 locked packages and three vendored fonts passed;
 - dashboard npm audit: zero vulnerabilities;
 - root audit: only the exact `GHSA-3jxr-9vmj-r5cp` / source `1123898` / nested `brace-expansion@5.0.6` exception under Pi 0.80.7, expiring 2026-08-20;

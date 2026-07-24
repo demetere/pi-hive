@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -554,7 +554,7 @@ test("validated publication remains anchored to the original bundle directory ac
   assert.equal(swapped, true);
   assert.equal(existsSync(join(outside, "curated.md")), false, "validated bytes must never follow a swapped bundle parent outside the project");
   assert.equal(existsSync(join(displaced, "curated.md")), true, "descriptor-anchored publication may only target the validated original directory inode");
-  rmSync(f.root);
+  unlinkSync(f.root);
   renameSync(displaced, f.root);
 
   const replaced = fixture();

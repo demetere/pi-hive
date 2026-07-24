@@ -2,7 +2,7 @@
 
 ## Supported release
 
-Security fixes target the current 1.x workflow architecture on Linux only. Windows and macOS are unsupported; in particular, pi-hive does not claim Windows process-tree termination support.
+Security fixes target the current 1.x workflow architecture on Linux and macOS. Windows is unsupported; in particular, pi-hive does not claim Windows process-tree termination support. Darwin uses the packaged architecture-specific N-API helper for descriptor-relative filesystem operations rather than weakening Linux path-identity guarantees.
 
 ## Report a vulnerability
 

@@ -412,7 +412,14 @@ function sedInlineEditOperands(tokens: readonly string[]): { readonly paths: rea
     const token = tokens[index];
     if (options && token === "--") { options = false; continue; }
     if (options && token.startsWith("-") && token !== "-") {
-      if (token === "-i" || token === "--in-place") { if (inPlace) valid = false; inPlace = true; continue; }
+      if (token === "-i" || token === "--in-place") {
+        if (inPlace) valid = false;
+        inPlace = true;
+        // BSD sed accepts an optional backup suffix as the next argv. Consume
+        // only the unambiguous no-backup form followed by an explicit program.
+        if (token === "-i" && tokens[index + 1] === "" && ["-e", "--expression"].includes(tokens[index + 2] ?? "")) index += 1;
+        continue;
+      }
       if (["-E", "-r", "--regexp-extended", "-n", "--quiet", "--silent"].includes(token)) continue;
       if (token === "-e" || token === "--expression") {
         const program = tokens[++index];

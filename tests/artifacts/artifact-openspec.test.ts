@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -153,7 +153,7 @@ test("workspace lifecycle requires CLI plus initialization, accepts exact contai
   assert.throws(() => bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: author, runId: "run-1", configuredBinding: "either", options: {} }), /explicit|latest/i);
   assert.throws(() => bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: author, runId: "run-1", configuredBinding: "new", options: {}, selection: { mode: "new", workspaceId: "../escape" } }), /workspace ID/i);
   const created = bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: author, runId: "run-1", configuredBinding: "new", options: {}, selection: { mode: "new", workspaceId: "add-auth" } });
-  assert.equal(created.path, join(root, "openspec", "changes", "add-auth"));
+  assert.equal(created.path, realpathSync.native(join(root, "openspec", "changes", "add-auth")));
   assert.throws(() => bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: author, runId: "run-2", configuredBinding: "new", options: {}, selection: { mode: "new", workspaceId: "add-auth" } }), /collision|exists/i);
   for (const id of ["beta", "charlie"]) mkdirSync(join(root, "openspec", "changes", id));
   const first = listPhysicalArtifactWorkspaces({ projectRoot: root, adapter, profile: author, limit: 2 });

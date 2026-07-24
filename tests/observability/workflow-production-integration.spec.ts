@@ -366,7 +366,7 @@ test("failed maintenance rebuild rolls back the replacement and leaves already-o
   writeFileSync(join(journal, "zzzz-corrupt.json"), "{not-json}\n");
   const failed = await json(handler, "/api/v1/maintenance/projection/rebuild", write({ operationId: "atomic-corruption" }));
   expect(failed.response.status).toBe(400);
-  expect(failed.body.error.message).toMatch(/corrupt|journal|chain/i);
+  expect(failed.body.error.message).toMatch(/invalid|corrupt|journal|chain/i);
   const after = await json(handler, "/api/v1/history?limit=100");
   expect(after.body.items).toEqual(before.body.items);
   expect(hasLiveSubscribers()).toBe(true);

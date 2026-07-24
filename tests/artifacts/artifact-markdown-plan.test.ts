@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -107,9 +107,9 @@ test("workspace IDs map exactly to a default or configured contained plan root a
   assert.throws(() => bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: profile("author"), runId: "run", configuredBinding: "either", options: {} }), /explicit|latest/i);
   assert.throws(() => bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: profile("author"), runId: "run", configuredBinding: "new", options: {}, selection: { mode: "new", workspaceId: "../escape" } }), /workspace ID/i);
   const first = bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: profile("author"), runId: "run-1", configuredBinding: "new", options: {}, selection: { mode: "new", workspaceId: "add-auth" } });
-  assert.equal(first.path, join(root, "plans", "add-auth"));
+  assert.equal(first.path, realpathSync.native(join(root, "plans", "add-auth")));
   const configured = bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: profile("author"), runId: "run-2", configuredBinding: "new", options: { root: "docs/plans" }, selection: { mode: "new", workspaceId: "other-plan" } });
-  assert.equal(configured.path, join(root, "docs", "plans", "other-plan"));
+  assert.equal(configured.path, realpathSync.native(join(root, "docs", "plans", "other-plan")));
   assert.throws(() => bindPhysicalArtifactWorkspace({ projectRoot: root, adapter, profile: profile("author"), runId: "run-3", configuredBinding: "new", options: {}, selection: { mode: "new", workspaceId: "add-auth" } }), /collision|exists/i);
   const listed = listPhysicalArtifactWorkspaces({ projectRoot: root, adapter, profile: profile("author"), options: {}, limit: 1 });
   assert.deepEqual(listed.items.map((item) => item.id), ["add-auth"]);

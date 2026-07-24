@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { withCrossProcessFileLock, withCrossProcessFileLockAsync } from "../../src/core/file-lock.ts";
+import { currentBootNonce, currentProcessMarker } from "../../src/core/process-identity.ts";
 
 interface TestLockOwner {
   ownerNonce: string;
@@ -17,18 +18,11 @@ interface TestLockOwner {
   acquiredAt: string;
 }
 
-function marker(pid: number): string {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const startTime = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/u)[19];
-    return startTime ? `pid:${pid}:start:${startTime}` : `pid:${pid}`;
-  } catch { return `pid:${pid}`; }
-}
-
 function newOwner(pid: number, overrides: Partial<TestLockOwner> = {}): TestLockOwner {
+  const localPid = pid === process.pid;
   return {
-    ownerNonce: randomUUID(), generation: randomUUID(), pid, processMarker: marker(pid),
-    bootNonce: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), acquiredAt: new Date().toISOString(),
+    ownerNonce: randomUUID(), generation: randomUUID(), pid, processMarker: localPid ? currentProcessMarker(pid) : `pid:${pid}`,
+    bootNonce: currentBootNonce(), acquiredAt: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -222,24 +216,15 @@ test("malformed and incomplete lock records are retained instead of reclaimed", 
   removeCompleteLock(lock, owner);
 });
 
-test("lock owner creation falls back safely when proc metadata is unavailable", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-hive-lock-proc-fallback-"));
+test("lock owner creation records platform process and boot identity", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-hive-lock-platform-identity-"));
   const resource = join(dir, "registry.jsonl");
   const lock = `${resource}.lock`;
-  const realReadFileSync = readFileSync;
-
-  withFsOverrides({
-    readFileSync: (pathOrFd: string | number, encoding: BufferEncoding) => {
-      if (pathOrFd === `/proc/${process.pid}/stat`) return "1 (node) S";
-      if (pathOrFd === "/proc/sys/kernel/random/boot_id") throw Object.assign(new Error("unavailable"), { code: "EACCES" });
-      return realReadFileSync(pathOrFd, encoding);
-    },
-  }, () => withCrossProcessFileLock(resource, () => {
-    const owner = JSON.parse(realReadFileSync(lock, "utf8")) as TestLockOwner;
-    assert.equal(owner.processMarker, `pid:${process.pid}`);
-    assert.equal(owner.bootNonce, "unknown-boot");
-  }));
-
+  withCrossProcessFileLock(resource, () => {
+    const owner = JSON.parse(readFileSync(lock, "utf8")) as TestLockOwner;
+    assert.equal(owner.processMarker, currentProcessMarker(process.pid));
+    assert.equal(owner.bootNonce, currentBootNonce());
+  });
   assert.equal(existsSync(lock), false);
 });
 
@@ -248,8 +233,8 @@ test("stale recovery handles live-owner markers, permission denial, and boot mis
   const resource = join(dir, "registry.jsonl");
   const lock = `${resource}.lock`;
   const old = new Date(Date.now() - 60_000);
-  const canonicalMarker = marker(process.pid);
-  const legacyMarker = canonicalMarker.split(":").at(-1) ?? canonicalMarker;
+  const canonicalMarker = currentProcessMarker(process.pid);
+  const legacyMarker = process.platform === "linux" ? canonicalMarker.split(":").at(-1) ?? canonicalMarker : `pid:${process.pid}`;
 
   const legacyOwner = newOwner(process.pid, { processMarker: legacyMarker });
   createLockForOwner(lock, legacyOwner);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, linkSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
+import { currentBootNonce, currentProcessMarker, processIdentityIsDead } from "./process-identity";
 
 export interface FileLockOptions {
   timeoutMs?: number;
@@ -24,32 +25,10 @@ interface FileLockIdentity {
   readonly stat: Stats;
 }
 
-function processMarker(pid: number): string {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fieldsAfterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/u);
-    const startTime = fieldsAfterCommand[19];
-    if (!startTime) throw new Error("process start time is absent");
-    return `pid:${pid}:start:${startTime}`;
-  } catch { return `pid:${pid}`; }
-}
-
-function processMarkerMatches(stored: string, pid: number): boolean {
-  const current = processMarker(pid);
-  if (stored === current) return true;
-  const legacyStartTime = stored.trim().split(/\s+/u).at(-1);
-  return current.startsWith(`pid:${pid}:start:`) && current === `pid:${pid}:start:${legacyStartTime}`;
-}
-
-function bootNonce(): string {
-  try { return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(); }
-  catch { return "unknown-boot"; }
-}
-
 function lockOwner(): FileLockOwner {
   return Object.freeze({
     ownerNonce: randomUUID(), generation: randomUUID(), pid: process.pid,
-    processMarker: processMarker(process.pid), bootNonce: bootNonce(), acquiredAt: new Date().toISOString(),
+    processMarker: currentProcessMarker(process.pid), bootNonce: currentBootNonce(), acquiredAt: new Date().toISOString(),
   });
 }
 
@@ -101,12 +80,7 @@ function observeLockIdentity(lockPath: string): FileLockIdentity | undefined {
 }
 
 function ownerIsLive(owner: FileLockOwner): boolean {
-  try {
-    process.kill(owner.pid, 0);
-    return processMarkerMatches(owner.processMarker, owner.pid) && bootNonce() === owner.bootNonce;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
+  return !processIdentityIsDead(owner);
 }
 
 // The generation hard link is an atomic, one-shot removal claim. Only the

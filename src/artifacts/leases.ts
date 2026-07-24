@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { withCrossProcessFileLock, withCrossProcessFileLockAsync } from "../core/file-lock";
+import { currentBootNonce, currentProcessMarker, processIdentityIsDead } from "../core/process-identity";
 import { resolveCanonicalPath } from "../core/safe-path";
 import { isArtifactHash } from "./hashes";
 
@@ -77,32 +78,8 @@ function leasePath(projectRoot: string, adapterId: string, workspaceId: string):
   if (!canonicalProject?.exists) throw new Error("Artifact writer lease project root cannot be canonically resolved");
   return join(canonicalProject.canonicalPath, ".pi", "hive", "sessions", "workspace-leases", `${leaseKey(adapterId, workspaceId)}.json`);
 }
-function processMarker(pid: number): string {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fieldsAfterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/u);
-    const startTime = fieldsAfterCommand[19];
-    if (!startTime) throw new Error("process start time is absent");
-    return `pid:${pid}:start:${startTime}`;
-  } catch { return `pid:${pid}`; }
-}
-function processMarkerMatches(stored: string, pid: number): boolean {
-  const current = processMarker(pid);
-  if (stored === current) return true;
-  const legacyStartTime = stored.trim().split(/\s+/u).at(-1);
-  return current.startsWith(`pid:${pid}:start:`) && current === `pid:${pid}:start:${legacyStartTime}`;
-}
-function bootNonce(): string {
-  try { return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(); }
-  catch { return "unknown-boot"; }
-}
 function defaultDead(owner: WorkspaceLeaseOwnerV1): boolean {
-  try {
-    process.kill(owner.pid, 0);
-    return !processMarkerMatches(owner.processMarker, owner.pid) || bootNonce() !== owner.bootNonce;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH";
-  }
+  return processIdentityIsDead(owner);
 }
 function validDate(value: unknown): value is string { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
 function readLease(path: string): WorkspaceLeaseOwnerV1 | undefined {
@@ -227,8 +204,8 @@ export class WorkspaceLeaseRuntime {
         sessionId: this.options.sessionId,
         runId: this.options.runId,
         pid,
-        processMarker: id(this.options.processMarker ?? processMarker(pid), "Artifact lease process marker"),
-        bootNonce: id(this.options.bootNonce ?? bootNonce(), "Artifact lease boot nonce"),
+        processMarker: id(this.options.processMarker ?? currentProcessMarker(pid), "Artifact lease process marker"),
+        bootNonce: id(this.options.bootNonce ?? currentBootNonce(), "Artifact lease boot nonce"),
         ownerNonce: this.ownerNonce,
         acquiredAt: timestamp,
         heartbeatAt: timestamp,

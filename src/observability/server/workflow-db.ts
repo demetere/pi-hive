@@ -257,11 +257,17 @@ function validateQuery(query: WorkflowHistoryQuery): void {
   const values = [query.cursor, query.projectId, query.sessionId, query.workflowId, query.runId, query.nodeId, query.taskId, query.eventType].filter((value): value is string => value !== undefined);
   if (values.some((value) => Buffer.byteLength(value) > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow projection query exceeds its byte limit");
 }
+function isDarwinSystemAlias(lexical: string, canonical: string): boolean {
+  if (process.platform !== "darwin") return false;
+  return [["/var", "/private/var"], ["/tmp", "/private/tmp"], ["/etc", "/private/etc"]].some(([alias, physical]) =>
+    (lexical === alias || lexical.startsWith(`${alias}/`)) && canonical === `${physical}${lexical.slice(alias.length)}`);
+}
 function canonicalDatabasePath(input: string): string {
   const lexical = resolve(input);
   mkdirSync(dirname(lexical), { recursive: true, mode: 0o700 });
+  const lexicalParent = resolve(dirname(lexical));
   const canonicalParent = realpathSync.native(dirname(lexical));
-  if (canonicalParent !== resolve(dirname(lexical))) throw new Error("Workflow projection database path contains a symlink alias");
+  if (canonicalParent !== lexicalParent && !isDarwinSystemAlias(lexicalParent, canonicalParent)) throw new Error("Workflow projection database path contains a symlink alias");
   if (existsSync(lexical) && lstatSync(lexical).isSymbolicLink()) throw new Error("Workflow projection database symlink is refused");
   chmodSync(canonicalParent, 0o700);
   return join(canonicalParent, basename(lexical));

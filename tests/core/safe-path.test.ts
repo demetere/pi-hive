@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { test } from "node:test";
@@ -26,7 +26,7 @@ test("existing paths use realpath and reject symlink escapes", () => {
   symlinkSync(join(outside, "secret.txt"), join(root, "escape-link"));
 
   const inside = resolveProjectPath(root, "inside-link");
-  assert.equal(inside?.canonicalPath, join(root, "inside/file.txt"));
+  assert.equal(inside?.canonicalPath, realpathSync.native(join(root, "inside/file.txt")));
   assert.equal(resolveProjectPath(root, "escape-link"), null);
   assert.equal(resolveContainedPath(root, join(root, "escape-link")), null);
 });
@@ -39,7 +39,7 @@ test("new targets resolve through their nearest existing parent", () => {
   symlinkSync(outside, join(root, "escape-dir-link"));
 
   const safeNew = resolveProjectPath(root, "inside-dir-link/new/deep.txt", { allowMissing: true });
-  assert.equal(safeNew?.canonicalPath, join(root, "inside/new/deep.txt"));
+  assert.equal(safeNew?.canonicalPath, join(realpathSync.native(root), "inside/new/deep.txt"));
   assert.equal(safeNew?.exists, false);
   assert.equal(resolveProjectPath(root, "escape-dir-link/new.txt", { allowMissing: true }), null);
   assert.equal(resolveProjectPath(root, "missing.txt"), null);

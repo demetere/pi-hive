@@ -47,6 +47,32 @@ jobs:
       - name: Run Node.js compatibility gates
         run: just typecheck-core test-node-compat dashboard-typecheck dashboard-test-unit verify-node-package-compat
 
+  macos:
+    name: macOS workflow runtime
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20.19.x"
+          cache: "npm"
+
+      - name: Install just
+        run: bash .github/scripts/install-just.sh
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Verify and rebuild Darwin native helpers
+        run: just darwin-native-verify && just darwin-native-build && just darwin-native-verify
+
+      - name: Run macOS core gates
+        run: just typecheck-core test verify-node-package-compat
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 40

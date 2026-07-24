@@ -82,7 +82,7 @@ function canonicalGrant(projectRoot: string, grant: NormalizedFilesystemGrant): 
 }
 
 export function assertFilesystemPlatformSupported(platform: NodeJS.Platform = process.platform): void {
-  if (platform !== "linux") throw new Error(`FILESYSTEM_PLATFORM_UNSUPPORTED: pi-hive workflow runtimes require Linux (current platform: ${platform})`);
+  if (platform !== "linux" && platform !== "darwin") throw new Error(`FILESYSTEM_PLATFORM_UNSUPPORTED: pi-hive workflow runtimes require Linux or macOS (current platform: ${platform})`);
 }
 
 export function compileFilesystemPolicy(input: CompileFilesystemPolicyInput): CompiledFilesystemPolicy {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -45,13 +45,13 @@ test("unconfigured discovery has no side effects and nearest physical configured
   manifest(child);
   const result = loadConfigProject(nested);
   assert.equal(result.status, "configured");
-  if (result.status === "configured") assert.equal(result.projectRoot, child);
+  if (result.status === "configured") assert.equal(result.projectRoot, realpathSync.native(child));
 
   const link = join(temp(), "linked");
   symlinkSync(child, link, "dir");
   const linked = loadConfigProject(join(link, "src"));
   assert.equal(linked.status, "configured");
-  if (linked.status === "configured") assert.equal(linked.projectRoot, child);
+  if (linked.status === "configured") assert.equal(linked.projectRoot, realpathSync.native(child));
 });
 
 test("an invalid nearest marker blocks fallback to a valid parent", () => {
@@ -62,7 +62,7 @@ test("an invalid nearest marker blocks fallback to a valid parent", () => {
   const result = loadConfigProject(child);
   assert.equal(result.status, "invalid");
   if (result.status === "invalid") {
-    assert.equal(result.projectRoot, child);
+    assert.equal(result.projectRoot, realpathSync.native(child));
     assert.equal(result.diagnostics[0]?.code, "SCHEMA_VERSION_UNSUPPORTED");
     assert.equal(result.diagnostics[0]?.source, ".pi/hive/hive-config.yaml");
   }

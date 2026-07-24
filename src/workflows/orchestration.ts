@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
 import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
+import { resolveCanonicalPath } from "../core/safe-path";
 import { classifyTrustedTool } from "../capabilities/tools";
 import type { CommandAttemptMetadata } from "../capabilities/command";
 import { compileSnapshotNodeToolPolicies, type SnapshotNodeToolPolicy } from "../capabilities/runtime-policy";
@@ -716,7 +717,9 @@ export class RunOrchestrationService {
       ...(handoffReference ? { handoffReference } : {}),
     });
     if (selection.mode === "new" && binding.path) {
-      const workspacePath = relative(this.options.projectRoot, binding.path).split("\\").join("/");
+      const canonicalProject = resolveCanonicalPath(this.options.projectRoot);
+      if (!canonicalProject?.exists) throw new Error("Artifact project root became unavailable after binding");
+      const workspacePath = relative(canonicalProject.canonicalPath, binding.path).split("\\").join("/");
       const changes = this.changeAccountingFor(run.runId);
       hashArtifactWorkspace(binding.path).entries.filter((entry) => entry.kind === "file").forEach((entry, index) => {
         const prefix = execution?.attemptId ?? `${run.runId}:artifact-bind`;
@@ -835,8 +838,9 @@ export class RunOrchestrationService {
         const evidencePath = reference.path;
         if (typeof evidencePath !== "string" || !evidencePath || evidencePath.includes("\\") || evidencePath.startsWith("/")
           || evidencePath.split("/").some((part: string) => !part || part === "." || part === "..") || Buffer.byteLength(evidencePath, "utf8") > 4_096) throw new Error("Artifact repository evidence path is invalid");
+        const project = resolveCanonicalPath(this.options.projectRoot);
         const candidate = resolveContainedPath(this.options.projectRoot, join(this.options.projectRoot, evidencePath));
-        if (!candidate?.exists || relative(this.options.projectRoot, candidate.canonicalPath).split("\\").join("/") !== evidencePath) throw new Error("Artifact repository evidence escapes or is unavailable");
+        if (!project?.exists || !candidate?.exists || relative(project.canonicalPath, candidate.canonicalPath).split("\\").join("/") !== evidencePath) throw new Error("Artifact repository evidence escapes or is unavailable");
         const stat = lstatSync(candidate.canonicalPath);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 33_554_432) throw new Error("Artifact repository evidence is not a bounded regular file");
         const digest = `sha256:${createHash("sha256").update(readFileSync(candidate.canonicalPath)).digest("hex")}`;
@@ -1973,7 +1977,8 @@ export class RunOrchestrationService {
             let mutationOrdinal = 0;
             const baseMutationQueue = this.artifactMutationQueue();
             const mutationQueue: ArtifactMutationQueue = async (target, operationId, callback) => {
-              const relativeTarget = relative(this.options.projectRoot, target).split("\\").join("/");
+              const project = resolveCanonicalPath(this.options.projectRoot);
+              const relativeTarget = project?.exists ? relative(project.canonicalPath, target).split("\\").join("/") : "";
               if (!relativeTarget || relativeTarget.startsWith("../") || relativeTarget === "..") throw new Error("Artifact mutation accounting target escaped the project");
               const accountingId = `${operationId}:artifact:${++mutationOrdinal}`;
               const recorder = resources.changes.mutationRecorder();

@@ -282,7 +282,7 @@ test("trusted stat/hash remains project-contained and exposes no file content", 
   assert.equal(trustedStatAndHash(root, "../outside.txt").ok, false);
 });
 
-test("first release rejects non-Linux filesystem policy activation explicitly", () => {
+test("workflow filesystem policy rejects unsupported platforms explicitly", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-hive-fs-platform-"));
   const broad = normalizeCapabilities({ filesystem: [{ path: ".", operations: ["read"] }] });
   assert.throws(() => compileFilesystemPolicy({ projectRoot: root, effectivePolicy: effective(broad.filesystem), platform: "win32" }), /FILESYSTEM_PLATFORM_UNSUPPORTED/);

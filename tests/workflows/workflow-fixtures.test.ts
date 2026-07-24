@@ -27,7 +27,7 @@ function workflowTempRoots(): string[] {
 }
 
 function isStrictlyWithin(root: string, target: string): boolean {
-  const fromRoot = relative(root, target);
+  const fromRoot = relative(realpathSync(root), realpathSync(target));
   return (
     fromRoot !== "" &&
     fromRoot !== ".." &&

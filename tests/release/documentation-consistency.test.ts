@@ -27,9 +27,10 @@ test("documented just commands exist", () => {
   for (const match of docs.matchAll(/(?:^|`)\s*just\s+([a-z][a-z0-9-]*)/gmu)) assert.ok(recipes.has(match[1]) || aliases.has(match[1]), `unknown just recipe ${match[1]}`);
 });
 
-test("public docs state clean telemetry, Linux support, and non-sandbox boundaries", () => {
+test("public docs state clean telemetry, supported platforms, and non-sandbox boundaries", () => {
   assert.match(docs, /Historical pre-1\.0 telemetry files are preserved|Historical telemetry stays archived/i);
-  assert.match(docs, /Linux only/i);
+  assert.match(docs, /supports Linux and macOS/i);
+  assert.match(docs, /Darwin N-API helpers/i);
   assert.match(docs, /not an OS sandbox/i);
   assert.match(docs, /not a general information-flow or DLP boundary/i);
 });

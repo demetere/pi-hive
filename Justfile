@@ -375,9 +375,19 @@ coverage-db:
 coverage: coverage-core coverage-db dashboard-test-coverage
   @printf "{{GREEN}}Coverage reports generated under coverage/.{{NC}}\n"
 
+# Rebuild the committed arm64 and x64 Darwin descriptor helpers (macOS only).
+[group('build')]
+darwin-native-build:
+  node scripts/build-darwin-native.mjs
+
+# Verify committed Darwin helpers match their audited C source on every host.
+[group('quality')]
+darwin-native-verify:
+  node scripts/verify-darwin-native.mjs
+
 # Verify package manifest, required files, peer deps, and committed build stamps.
 [group('quality')]
-verify-package: config-schema-verify
+verify-package: config-schema-verify darwin-native-verify
   node scripts/verify-package-files.mjs
 
 # Enforce package-tree and committed dashboard byte budgets.

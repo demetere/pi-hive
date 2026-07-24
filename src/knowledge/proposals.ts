@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
 import { canonicalJson } from "../config/snapshot-canonical";
+import { descriptorPath, linkAt, mkdirAt, openDescriptorAt, openDirectoryAt as openPinnedDirectoryAt, readDirectoryAt, renameAt, statAt, unlinkAt } from "../core/descriptor-fs";
 import type { JsonValue } from "../config/types";
 import { withCrossProcessFileLockAsync } from "../core/file-lock";
 import { resolveContainedPath } from "../core/safe-path";
@@ -275,10 +276,6 @@ function renderManaged(entries: readonly ManagedEntry[]): string {
   if (Buffer.byteLength(output, "utf8") > KNOWLEDGE_PROPOSAL_LIMITS.managedDocumentBytes) throw new KnowledgeMutationError("VALIDATION_FAILED", "Curated OKF document exceeds its byte bound");
   return output;
 }
-function descriptorPath(directoryDescriptor: number, name?: string): string {
-  const root = `/proc/self/fd/${directoryDescriptor}`;
-  return name === undefined ? root : `${root}/${name}`;
-}
 function safePathComponent(value: string): string {
   if (!value || value === "." || value === ".." || value.includes("/") || value.includes("\\") || value.includes("\0")) {
     throw new KnowledgeMutationError("VALIDATION_FAILED", "Knowledge mutation path component is invalid");
@@ -286,16 +283,16 @@ function safePathComponent(value: string): string {
   return value;
 }
 function openDirectoryAt(directoryDescriptor: number, name: string, create: boolean): number {
-  const path = descriptorPath(directoryDescriptor, safePathComponent(name));
+  const component = safePathComponent(name);
   if (create) {
-    try { mkdirSync(path, { mode: 0o700 }); }
+    try { mkdirAt(directoryDescriptor, component, 0o700); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   }
-  const named = lstatSync(path, { bigint: true });
-  if (!named.isDirectory() || named.isSymbolicLink()) throw new Error("not a regular directory");
-  const descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const named = statAt(directoryDescriptor, component);
+  if (named.kind !== "directory") throw new Error("not a regular directory");
+  const descriptor = openPinnedDirectoryAt(directoryDescriptor, component);
   const pinned = fstatSync(descriptor, { bigint: true });
-  if (!pinned.isDirectory() || named.dev !== pinned.dev || named.ino !== pinned.ino) {
+  if (!pinned.isDirectory() || String(pinned.dev) !== named.device || String(pinned.ino) !== named.inode) {
     closeSync(descriptor);
     throw new Error("directory identity changed while opening");
   }
@@ -336,9 +333,9 @@ function assertMutationDirectoriesPinned(directories: PinnedMutationDirectories)
     const projectPinned = fstatSync(directories.descriptors[0], { bigint: true });
     if (!projectNamed.isDirectory() || projectNamed.isSymbolicLink() || projectNamed.dev !== projectPinned.dev || projectNamed.ino !== projectPinned.ino) throw new Error("project identity changed");
     for (let index = 0; index < directories.segments.length; index++) {
-      const named = lstatSync(descriptorPath(directories.descriptors[index], directories.segments[index]), { bigint: true });
+      const named = statAt(directories.descriptors[index], directories.segments[index]);
       const pinned = fstatSync(directories.descriptors[index + 1], { bigint: true });
-      if (!named.isDirectory() || named.isSymbolicLink() || !pinned.isDirectory() || named.dev !== pinned.dev || named.ino !== pinned.ino) throw new Error("component identity changed");
+      if (named.kind !== "directory" || !pinned.isDirectory() || named.device !== String(pinned.dev) || named.inode !== String(pinned.ino)) throw new Error("component identity changed");
     }
   } catch (error) {
     throw new KnowledgeMutationError("VALIDATION_FAILED", `Knowledge mutation directory identity changed after secure pinning: ${String(error instanceof Error ? error.message : error)}`);
@@ -348,17 +345,16 @@ function closeMutationDirectories(directories: PinnedMutationDirectories): void 
   for (const descriptor of [...directories.descriptors].reverse()) try { closeSync(descriptor); } catch { /* best effort */ }
 }
 function atomicWriteAt(directoryDescriptor: number, name: string, content: string): void {
-  const target = descriptorPath(directoryDescriptor, safePathComponent(name));
+  const targetName = safePathComponent(name);
   const temporaryName = `.${randomUUID()}.tmp`;
-  const temporary = descriptorPath(directoryDescriptor, temporaryName);
   let descriptor: number | undefined;
   try {
-    descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    descriptor = openDescriptorAt(directoryDescriptor, temporaryName, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     writeFileSync(descriptor, content); fsyncSync(descriptor); closeSync(descriptor); descriptor = undefined;
-    renameSync(temporary, target); fsyncSync(directoryDescriptor);
+    renameAt(directoryDescriptor, temporaryName, directoryDescriptor, targetName); fsyncSync(directoryDescriptor);
   } finally {
     if (descriptor !== undefined) try { closeSync(descriptor); } catch { /* best effort */ }
-    try { unlinkSync(temporary); } catch { /* published or absent */ }
+    try { unlinkAt(directoryDescriptor, temporaryName); } catch { /* published or absent */ }
   }
 }
 function atomicWriteRelative(directoryDescriptor: number, path: string, content: string): void {
@@ -375,7 +371,7 @@ function atomicWriteRelative(directoryDescriptor: number, path: string, content:
   } finally { for (const descriptor of opened.reverse()) closeSync(descriptor); }
 }
 function entryExistsAt(directoryDescriptor: number, name: string): boolean {
-  try { lstatSync(descriptorPath(directoryDescriptor, safePathComponent(name))); return true; }
+  try { statAt(directoryDescriptor, safePathComponent(name)); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
@@ -388,30 +384,30 @@ function descriptorBundleHash(rootDescriptor: number, override?: Readonly<{ path
   let aggregateBytes = 0;
   const visit = (directoryDescriptor: number, prefix: string, closeDirectory: boolean): void => {
     try {
-      const entries = readdirSync(`/proc/self/fd/${directoryDescriptor}`, { withFileTypes: true }).sort((left, right) => compare(left.name, right.name));
-      for (const entry of entries) {
+      const entries = [...readDirectoryAt(directoryDescriptor)].sort(compare);
+      for (const entryName of entries) {
         // The cross-process mutation lock lives beside curated.md and can be
-        // removed between readdir and lstat by the winning writer. It is
+        // removed between listing and inspection by the winning writer. It is
         // harness control state, never bundle content or hash input.
-        if (!prefix && isKnowledgeMutationLockArtifact(entry.name)) continue;
-        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-        const path = `/proc/self/fd/${directoryDescriptor}/${entry.name}`;
-        const named = lstatSync(path, { bigint: true });
-        if (named.isSymbolicLink() || (!named.isDirectory() && !named.isFile())) throw new KnowledgeMutationError("STALE_HASH", "Knowledge bundle entry identity changed during commit CAS");
-        if (named.isDirectory()) {
-          const child = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        if (!prefix && isKnowledgeMutationLockArtifact(entryName)) continue;
+        const relativePath = prefix ? `${prefix}/${entryName}` : entryName;
+        const named = statAt(directoryDescriptor, entryName);
+        if (named.kind === "symlink" || (named.kind !== "directory" && named.kind !== "file")) throw new KnowledgeMutationError("STALE_HASH", "Knowledge bundle entry identity changed during commit CAS");
+        if (named.kind === "directory") {
+          const child = openPinnedDirectoryAt(directoryDescriptor, entryName);
           visit(child, relativePath, true);
           continue;
         }
-        if (!entry.name.endsWith(".md")) continue;
+        if (!entryName.endsWith(".md")) continue;
         if (files.length >= 1_024 || named.size > 262_144n) throw new KnowledgeMutationError("STALE_HASH", "Knowledge bundle exceeds its commit CAS bound");
-        const file = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const file = openDescriptorAt(directoryDescriptor, entryName, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
           const before = fstatSync(file, { bigint: true });
           const bytes = readFileSync(file);
           const after = fstatSync(file, { bigint: true });
           aggregateBytes += bytes.length;
-          if (!before.isFile() || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs
+          if (!before.isFile() || String(before.dev) !== named.device || String(before.ino) !== named.inode
+            || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs
             || BigInt(bytes.length) !== after.size || aggregateBytes > 8_388_608) throw new KnowledgeMutationError("STALE_HASH", "Knowledge bundle bytes changed during commit CAS");
           files.push({ path: relativePath, hash: createHash("sha256").update(relativePath === override?.path ? override.content : bytes).digest("hex") });
         } finally { closeSync(file); }
@@ -469,12 +465,12 @@ function rollbackMaterial(value: unknown, expectedPath: string): MutationRollbac
 function inspectStagingAt(directoryDescriptor: number, name: string, expectedHash: string, expectedContent: string | undefined, expectedIdentity?: StagingIdentity): Readonly<{ content: string; identity: StagingIdentity }> {
   let descriptor: number | undefined;
   try {
-    const path = descriptorPath(directoryDescriptor, safePathComponent(name));
-    const named = lstatSync(path, { bigint: true });
-    if (!named.isFile() || named.isSymbolicLink()) throw new KnowledgeMutationError("VALIDATION_FAILED", "Knowledge mutation staging is not a regular non-link file");
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const component = safePathComponent(name);
+    const named = statAt(directoryDescriptor, component);
+    if (named.kind !== "file") throw new KnowledgeMutationError("VALIDATION_FAILED", "Knowledge mutation staging is not a regular non-link file");
+    descriptor = openDescriptorAt(directoryDescriptor, component, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = fstatSync(descriptor, { bigint: true });
-    if (!before.isFile() || before.size > BigInt(KNOWLEDGE_PROPOSAL_LIMITS.managedDocumentBytes) || named.dev !== before.dev || named.ino !== before.ino) throw new KnowledgeMutationError("VALIDATION_FAILED", "Knowledge mutation staging is not a bounded regular file with stable identity");
+    if (!before.isFile() || before.size > BigInt(KNOWLEDGE_PROPOSAL_LIMITS.managedDocumentBytes) || named.device !== String(before.dev) || named.inode !== String(before.ino)) throw new KnowledgeMutationError("VALIDATION_FAILED", "Knowledge mutation staging is not a bounded regular file with stable identity");
     const bytes = readFileSync(descriptor);
     const after = fstatSync(descriptor, { bigint: true });
     const identity = Object.freeze({ device: String(after.dev), inode: String(after.ino), size: Number(after.size) });
@@ -586,14 +582,14 @@ export class OkfKnowledgeMutator {
           directory = openSync(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
           assertMutationDirectoriesPinned(mutationDirectories);
           inspectStagingAt(directory, "curated.md", progress.intent!.renderedHash, undefined, progress.validated);
-          if (!progress.intent!.rollback.existed) unlinkSync(descriptorPath(directory, "curated.md"));
+          if (!progress.intent!.rollback.existed) unlinkAt(directory, "curated.md");
           else {
             try {
               const material = inspectStagingAt(mutationDirectories.stagingDescriptor, "rollback.md", progress.intent!.rollback.contentHash, undefined, progress.intent!.rollback.identity);
               assertMutationDirectoriesPinned(mutationDirectories);
               atomicWriteAt(directory, "curated.md", material.content);
             } catch (rollbackError) {
-              try { unlinkSync(descriptorPath(directory, "curated.md")); } catch { /* already absent */ }
+              try { unlinkAt(directory, "curated.md"); } catch { /* already absent */ }
               fsyncSync(directory);
               throw new KnowledgeMutationError("VALIDATION_FAILED", `Unavailable bundle rollback material failed closed: ${String(rollbackError instanceof Error ? rollbackError.message : rollbackError)}`);
             }
@@ -744,18 +740,17 @@ export class OkfKnowledgeMutator {
         }
         const completeBundleBaseHash = progress.intent!.baseBundleHash;
         const expectedPublishedBundleHash = progress.intent!.expectedPublishedBundleHash;
-        const descriptorTarget = descriptorPath(targetDirectory, "curated.md");
         const rollbackPublication = (): boolean => {
           try { inspectStagingAt(targetDirectory!, "curated.md", renderedHash, rendered, progress.validated); } catch { return false; }
           if (!progress.intent!.rollback.existed) {
-            unlinkSync(descriptorTarget);
+            unlinkAt(targetDirectory!, "curated.md");
           } else {
             try {
               assertMutationDirectoriesPinned(mutationDirectories);
               const material = inspectStagingAt(mutationDirectories.stagingDescriptor, "rollback.md", progress.intent!.rollback.contentHash, undefined, progress.intent!.rollback.identity);
               atomicWriteAt(targetDirectory!, "curated.md", material.content);
             } catch (error) {
-              try { unlinkSync(descriptorTarget); } catch { /* already absent */ }
+              try { unlinkAt(targetDirectory!, "curated.md"); } catch { /* already absent */ }
               fsyncSync(targetDirectory!);
               throw new KnowledgeMutationError("VALIDATION_FAILED", `Knowledge rollback material failed closed after publication: ${String(error instanceof Error ? error.message : error)}`);
             }
@@ -804,19 +799,19 @@ export class OkfKnowledgeMutator {
             inspectStagingAt(mutationDirectories.stagingDescriptor, "publication.md", renderedHash, rendered, progress.validated);
           } else if (entryExistsAt(mutationDirectories.stagingDescriptor, "curated.md")) {
             inspectStagingAt(mutationDirectories.stagingDescriptor, "curated.md", renderedHash, rendered, progress.validated);
-            try { linkSync(descriptorPath(mutationDirectories.stagingDescriptor, "curated.md"), descriptorPath(mutationDirectories.stagingDescriptor, "publication.md")); }
+            try { linkAt(mutationDirectories.stagingDescriptor, "curated.md", mutationDirectories.stagingDescriptor, "publication.md"); }
             catch (error) { throw new KnowledgeMutationError("VALIDATION_FAILED", `Validated staging identity could not be sealed for publication: ${String(error instanceof Error ? error.message : error)}`); }
             inspectStagingAt(mutationDirectories.stagingDescriptor, "publication.md", renderedHash, rendered, progress.validated);
           } else if (!(existingEntries && updateAlreadyPresent(existingEntries, update))) {
             throw new KnowledgeMutationError("VALIDATION_FAILED", "Validated staging bytes are missing during recovery");
           }
           if (entryExistsAt(mutationDirectories.stagingDescriptor, "publication.md")) {
-            try { unlinkSync(descriptorPath(mutationDirectories.stagingDescriptor, "curated.md")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+            try { unlinkAt(mutationDirectories.stagingDescriptor, "curated.md"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
             fsyncSync(mutationDirectories.stagingDescriptor);
             inspectStagingAt(mutationDirectories.stagingDescriptor, "publication.md", renderedHash, rendered, progress.validated);
             assertMutationDirectoriesPinned(mutationDirectories);
             if (descriptorBundleHash(targetDirectory) !== completeBundleBaseHash) throw new KnowledgeMutationError("STALE_HASH", "Knowledge complete-bundle commit CAS was lost before publication");
-            renameSync(descriptorPath(mutationDirectories.stagingDescriptor, "publication.md"), descriptorPath(targetDirectory, "curated.md"));
+            renameAt(mutationDirectories.stagingDescriptor, "publication.md", targetDirectory, "curated.md");
             fsyncSync(targetDirectory);
             this.options.fault?.("after-publication");
             if (descriptorBundleHash(targetDirectory) !== expectedPublishedBundleHash) {

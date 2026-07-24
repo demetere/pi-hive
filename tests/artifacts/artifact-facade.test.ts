@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -57,8 +57,9 @@ const profile: ArtifactRuntimeProfile = Object.freeze({
   viewVersion: ARTIFACT_VIEW_VERSION,
 });
 const projectRoot = mkdtempSync(join(tmpdir(), "hive-artifact-facade-"));
-const workspacePath = join(projectRoot, "workspace");
-mkdirSync(workspacePath);
+const workspaceRoot = join(projectRoot, "workspace");
+mkdirSync(workspaceRoot);
+const workspacePath = realpathSync.native(workspaceRoot);
 const binding: ArtifactWorkspaceBinding = Object.freeze({
   schemaVersion: 1,
   contractVersion: ARTIFACT_CONTRACT_VERSION,

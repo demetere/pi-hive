@@ -145,11 +145,11 @@ test("selected workflow sessions restore their frozen model and thinking after T
   };
   replaceSessionLinks(projectRoot, [link]);
   const previousCwd = process.cwd();
-  try { process.chdir(projectRoot); await hiveExtension(pi, { runtimePlatform: "darwin" }); }
+  try { process.chdir(projectRoot); await hiveExtension(pi, { runtimePlatform: "win32" }); }
   finally { process.chdir(previousCwd); }
   for (const handler of hooks.get("session_start") ?? []) await handler({ reason: "resume" }, ctx);
   assert.deepEqual(activeTools, [], "an unsupported workflow resume fails closed without constructing a runtime");
-  assert.match(notices.at(-1) ?? "", /FILESYSTEM_PLATFORM_UNSUPPORTED.*require Linux.*darwin/i);
+  assert.match(notices.at(-1) ?? "", /FILESYSTEM_PLATFORM_UNSUPPORTED.*Linux or macOS.*win32/i);
   for (const handler of hooks.get("model_select") ?? []) await handler({ model: changed, previousModel: frozen, source: "set" }, ctx);
   assert.equal(currentModel.id, "frozen");
   assert.equal(thinking, "medium");
@@ -192,10 +192,10 @@ test("real linked production services register every exact operation with bound 
 });
 
 test("workflow selection rejects unsupported hosts before config or ownership mutation", async () => {
-  const services = createLinkedWorkflowCommandServices({} as any, "/missing-project", "project-1", createPiWorkflowRuntimeCommandAuthority(), undefined, "darwin");
+  const services = createLinkedWorkflowCommandServices({} as any, "/missing-project", "project-1", createPiWorkflowRuntimeCommandAuthority(), undefined, "win32");
   await assert.rejects(
     () => services.select({ workflowId: "debug-chat", fresh: true }, {} as any),
-    /FILESYSTEM_PLATFORM_UNSUPPORTED.*require Linux.*darwin/i,
+    /FILESYSTEM_PLATFORM_UNSUPPORTED.*Linux or macOS.*win32/i,
   );
 });
 

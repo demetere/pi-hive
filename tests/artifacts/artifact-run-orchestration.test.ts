@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -162,8 +162,9 @@ interface FixtureOptions {
 }
 function fixture(label: string, input: FixtureOptions = {}) {
   const projectRoot = mkdtempSync(join(tmpdir(), `hive-artifact-service-${label}-`));
-  const workspacePath = join(projectRoot, "workspace");
-  mkdirSync(workspacePath);
+  const workspaceRoot = join(projectRoot, "workspace");
+  mkdirSync(workspaceRoot);
+  const workspacePath = realpathSync.native(workspaceRoot);
   writeFileSync(join(workspacePath, "state.txt"), "before");
   const sessionId = `session-${label}`;
   const ownerNonce = `owner-${label}`;
@@ -214,8 +215,9 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 test("RunOrchestrationService freezes adapter checkpoint defaults and enforces its sole approval authority at completion", async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-artifact-service-approvals-"));
-  const workspacePath = join(projectRoot, "workspace");
-  mkdirSync(workspacePath);
+  const workspaceRoot = join(projectRoot, "workspace");
+  mkdirSync(workspaceRoot);
+  const workspacePath = realpathSync.native(workspaceRoot);
   writeFileSync(join(workspacePath, "state.txt"), "approved content");
   const approvalProfile: ArtifactRuntimeProfile = Object.freeze({ ...profile, checkpointIds: Object.freeze(["completion", "review"]) });
   let checkpointReady = true;

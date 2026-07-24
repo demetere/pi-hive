@@ -54,6 +54,8 @@ try {
   const { checkPlatform } = createRequire(import.meta.url)(join(npmRoot, "npm", "node_modules", "npm-install-checks"));
   const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   checkPlatform(packageManifest, false, { os: "linux", cpu: process.arch });
+  checkPlatform(packageManifest, false, { os: "darwin", cpu: "arm64" });
+  checkPlatform(packageManifest, false, { os: "darwin", cpu: "x64" });
   let unsupportedCode;
   try { checkPlatform(packageManifest, false, { os: "win32", cpu: "x64" }); }
   catch (error) { unsupportedCode = error?.code; }
@@ -72,6 +74,9 @@ try {
   }
   for (const relativePath of [
     "index.ts",
+    "native/darwin-arm64.node",
+    "native/darwin-x64.node",
+    "native/darwin-descriptor.c",
     "ui/web/dist/index.html",
     "schemas/hive-manifest-v1.schema.json",
     "examples/artifact-free-debug/.pi/hive/hive-config.yaml",
@@ -122,7 +127,7 @@ try {
   loadInstalledExtension(configuredProject);
 
   console.log(
-    `✓ verified npm rejects Windows, installed ${installedPackage.name}@${installedPackage.version} on Linux, and loaded it in inert unconfigured and schema-v1 configured projects`,
+    `✓ verified npm rejects Windows, accepts Linux/macOS, installed ${installedPackage.name}@${installedPackage.version} on ${process.platform}, and loaded it in inert unconfigured and schema-v1 configured projects`,
   );
 } finally {
   rmSync(sandbox, { recursive: true, force: true });

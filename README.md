@@ -10,7 +10,7 @@ pi-hive provides reusable agents, recursive teams, linked Pi sessions, capabilit
 pi install npm:pi-hive
 ```
 
-Pi supplies the peer dependencies. pi-hive supports Linux only; npm rejects installation on unsupported operating systems. Node.js 20.19 or newer is required for package tooling. Bun 1.3.14 or newer is optional and used only when the local dashboard is started.
+Pi supplies the peer dependencies. pi-hive supports Linux and macOS; npm rejects installation on unsupported operating systems. The package includes architecture-specific Darwin N-API helpers for descriptor-relative filesystem operations. Node.js 20.19 or newer is required for package tooling. Bun 1.3.14 or newer is optional and used only when the local dashboard is started.
 
 ## Quick start
 

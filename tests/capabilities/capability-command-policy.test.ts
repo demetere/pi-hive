@@ -260,7 +260,7 @@ test("touch reference forms emit reads and retain only target mutations", () => 
   ]);
 });
 
-test("rm, wc, git status, and touch use exact closed option grammars", () => {
+test("rm, wc, git status, and touch use exact closed option grammars", { skip: process.platform !== "linux" ? "GNU executable probes run on Linux" : false }, () => {
   const root = mkdtempSync(join(tmpdir(), "hive-command-closed-options-"));
   mkdirSync(join(root, "rm-abbreviated"));
   mkdirSync(join(root, "rm-exact"));
@@ -332,7 +332,7 @@ test("indirect configs, dynamic shell paths, and unsupported client surfaces fai
   ]) assert.equal(analyzeCommand(command).valid, false, command);
 });
 
-test("GNU recursive and dereference aliases are executable-supported but fail policy closed", () => {
+test("GNU recursive and dereference aliases are executable-supported but fail policy closed", { skip: process.platform !== "linux" ? "GNU executable probes run on Linux" : false }, () => {
   const root = mkdtempSync(join(tmpdir(), "hive-command-aliases-"));
   const knowledge = join(root, ".pi/hive/knowledge/private");
   const workspace = join(root, "workspace/nested");
@@ -379,7 +379,7 @@ test("rg hostname helpers fail policy closed in separate and attached forms", as
   });
 });
 
-test("sed permits proven inline substitutions and rejects hidden read, write, execute, and script effects", () => {
+test("sed permits proven inline substitutions and rejects hidden read, write, execute, and script effects", { skip: process.platform !== "linux" ? "GNU sed probes run on Linux" : false }, () => {
   const root = mkdtempSync(join(tmpdir(), "hive-command-sed-"));
   const editable = join(root, "editable.md");
   const secret = join(root, "secret.md");
@@ -424,7 +424,7 @@ test("sed permits proven inline substitutions and rejects hidden read, write, ex
   ]) assert.equal(analyzeCommand(command).valid, false, command);
 });
 
-test("empty quoted sed expressions cannot hide executable-visible operands", () => {
+test("empty quoted sed expressions cannot hide executable-visible operands", { skip: process.platform !== "linux" ? "GNU sed probes run on Linux" : false }, () => {
   const root = mkdtempSync(join(tmpdir(), "hive-command-sed-empty-expression-"));
   const secret = join(root, "knowledge-secret.md");
   const hiddenOperand = join(root, "s/original/changed/g");
@@ -441,6 +441,18 @@ test("empty quoted sed expressions cannot hide executable-visible operands", () 
     "sed -i -e '' s/original/changed/g outside.md",
     "sed -i --expression '' s/original/changed/g outside.md",
   ]) assert.equal(analyzeCommand(command).valid, false, command);
+});
+
+test("BSD sed no-backup syntax preserves one exact mutation operand", { skip: process.platform !== "darwin" ? "BSD sed probe runs on macOS" : false }, () => {
+  const root = mkdtempSync(join(tmpdir(), "hive-command-bsd-sed-"));
+  const editable = join(root, "editable.md");
+  writeFileSync(editable, "original\n");
+  const command = "sed -i '' -e s/original/changed/g editable.md";
+  const analyzed = analyzeCommand(command);
+  assert.equal(analyzed.valid, true);
+  assert.deepEqual(analyzed.effects, [{ operation: "update", path: "editable.md" }]);
+  execFileSync("sed", ["-i", "", "-e", "s/original/changed/g", "editable.md"], { cwd: root });
+  assert.equal(readFileSync(editable, "utf8"), "changed\n");
 });
 
 test("network clients classify uploads and fail closed for local output, config, and unsupported forms", () => {

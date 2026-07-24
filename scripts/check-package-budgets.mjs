@@ -11,7 +11,7 @@ export const PACKAGE_BASELINES = Object.freeze({ packedBytes: 1_100_000, unpacke
 export const MAX_REGRESSION_RATIO = 0.1;
 export function regressionLimit(baseline) { return Math.ceil(baseline * (1 + MAX_REGRESSION_RATIO)); }
 const TOP_LEVEL_ALLOWLIST = Object.freeze(["package.json", "LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md", "index.ts", "README.md", "SECURITY.md", "SETUP.md"]);
-const PREFIX_ALLOWLIST = Object.freeze(["src/", "schemas/", "ui/web/dist/", "examples/", "scripts/check-package-budgets.mjs", "scripts/check-licenses.mjs"]);
+const PREFIX_ALLOWLIST = Object.freeze(["src/", "native/", "schemas/", "ui/web/dist/", "examples/", "scripts/build-darwin-native.mjs", "scripts/verify-darwin-native.mjs", "scripts/check-package-budgets.mjs", "scripts/check-licenses.mjs"]);
 export function isAllowedPackagePath(path) { return TOP_LEVEL_ALLOWLIST.includes(path) || PREFIX_ALLOWLIST.some((prefix) => path === prefix || path.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)); }
 function bytes(path) { let total = 0; for (const name of readdirSync(path)) { const target = join(path, name); const stat = statSync(target); total += stat.isDirectory() ? bytes(target) : stat.size; } return total; }
 function npmPack(projectRoot) {

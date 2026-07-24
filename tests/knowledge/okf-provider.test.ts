@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { loadOkfBundle, OKF_PROVIDER_LIMITS, type OkfProviderLimits } from "../../src/knowledge/okf.ts";
+import { validKnowledgeDocumentId } from "../../src/knowledge/types.ts";
 
 function temp(): string { return mkdtempSync(join(tmpdir(), "pi-hive-okf-")); }
 function write(path: string, value: string | Uint8Array): void { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, value); }
@@ -39,7 +40,7 @@ test("minimal OKF bundle preserves provider-neutral documents, links, and bounde
   assert.match(result.bundle.documents[0].content, /producer_extension: kept/, "exact source bytes remain readable");
 });
 
-test("OKF document IDs accept the transport-safe byte boundary and reject N+1", () => {
+test("OKF document IDs accept the transport-safe byte boundary and reject N+1", (t) => {
   const idWithBytes = (bytes: number): string => {
     const parts: string[] = [];
     while (Buffer.byteLength([...parts, "x".repeat(200)].join("/"), "utf8") <= bytes) parts.push("x".repeat(200));
@@ -47,8 +48,14 @@ test("OKF document IDs accept the transport-safe byte boundary and reject N+1", 
     if (remaining > 0) parts.push("x".repeat(remaining));
     return parts.join("/");
   };
-  const exact = temp();
   const exactId = idWithBytes(1_716);
+  assert.equal(validKnowledgeDocumentId(exactId), true);
+  assert.equal(validKnowledgeDocumentId(idWithBytes(1_717)), false);
+  if (process.platform === "darwin") {
+    t.diagnostic("Darwin PATH_MAX cannot materialize the transport-level maximum as one physical fixture path");
+    return;
+  }
+  const exact = temp();
   write(join(exact, `.pi/hive/knowledge/shared/${exactId}.md`), concept("Reference", "Boundary", "accepted"));
   const accepted = load(exact);
   assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));

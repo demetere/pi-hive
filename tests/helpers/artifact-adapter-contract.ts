@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { ArtifactFacadeError } from "../../src/artifacts/facade.ts";
 import { isPathInside, resolveContainedPath } from "../../src/core/safe-path.ts";
@@ -73,8 +73,8 @@ export async function assertArtifactActionFilesystemContained(input: {
   readonly workspacePath: string;
   readonly invoke: () => unknown | Promise<unknown>;
 }): Promise<void> {
-  const filesystemRoot = resolve(input.filesystemRoot);
-  const workspacePath = resolve(input.workspacePath);
+  const filesystemRoot = realpathSync.native(resolve(input.filesystemRoot));
+  const workspacePath = realpathSync.native(resolve(input.workspacePath));
   assert.ok(isPathInside(filesystemRoot, workspacePath), "workspace must be inside the isolated harness filesystem");
   const before = snapshotFilesystem(filesystemRoot);
   let invocationError: unknown;
