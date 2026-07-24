@@ -392,7 +392,18 @@ function sedSubstitutionProgramIsProven(program: string): boolean {
   if (patternEnd === undefined) return false;
   const replacementEnd = sectionEnd(patternEnd);
   if (replacementEnd === undefined) return false;
-  return /^(?:[gpIiMm]|[1-9][0-9]*)*$/u.test(program.slice(replacementEnd));
+  const flags = program.slice(replacementEnd);
+  for (let index = 0; index < flags.length;) {
+    const character = flags[index];
+    if ("gpIiMm".includes(character)) { index += 1; continue; }
+    if (character >= "1" && character <= "9") {
+      index += 1;
+      while (index < flags.length && flags[index] >= "0" && flags[index] <= "9") index += 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 function sedInlineEditOperands(tokens: readonly string[]): { readonly paths: readonly string[]; readonly valid: boolean } {
   const programs: string[] = []; const positional: string[] = [];

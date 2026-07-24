@@ -294,7 +294,7 @@ function operationResponseHash(value: unknown): string {
   return createHash("sha256").update("pi-hive-workflow-operation-response-v1\0").update(canonicalJson(value)).digest("hex");
 }
 function operationError(message: string, code: string): Error {
-  return Object.assign(new Error(message), { status: 409, code });
+  return Object.assign(new Error(message), { status: 409, code, publicMessage: message });
 }
 
 export type WorkflowOperationClaim = Readonly<
@@ -309,12 +309,14 @@ export type WorkflowStreamCatchUp = Readonly<
 >;
 
 export class WorkflowProjectionIntegrityError extends Error {
-  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "WorkflowProjectionIntegrityError"; }
+  readonly publicMessage: string;
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "WorkflowProjectionIntegrityError"; this.publicMessage = message; }
 }
 
 /** A database format this version does not own and must never repair or replace. */
 export class WorkflowProjectionSchemaError extends Error {
-  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "WorkflowProjectionSchemaError"; }
+  readonly publicMessage: string;
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "WorkflowProjectionSchemaError"; this.publicMessage = message; }
 }
 
 export interface OpenWorkflowProjectionDatabaseOptions {

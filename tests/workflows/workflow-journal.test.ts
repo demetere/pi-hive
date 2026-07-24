@@ -33,8 +33,12 @@ test("partial, duplicate, gap, out-of-order, hash corrupt, and unknown versions 
 test("dashboard-style appends serialize safely across processes", async () => {
   const f = fixture();
   const run = (eventId: string) => new Promise<void>((resolve, reject) => {
-    const script = `Promise.all([import('./src/workflows/journal.ts'),import('./src/workflows/events.ts')]).then(([j,e])=>j.appendWorkflowEvent(${JSON.stringify(f.root)},e.createWorkflowEvent({projectId:'project-1',sessionId:'session-1',type:'control.requested',payload:{},producer:'dashboard',eventId:${JSON.stringify(eventId)}})))`;
-    const child = spawn(process.execPath, ["--import", "tsx", "-e", script], { cwd: process.cwd(), stdio: "ignore" });
+    const script = `
+      const [root, eventId] = process.argv.slice(1);
+      Promise.all([import('./src/workflows/journal.ts'), import('./src/workflows/events.ts')])
+        .then(([j, e]) => j.appendWorkflowEvent(root, e.createWorkflowEvent({ projectId: 'project-1', sessionId: 'session-1', type: 'control.requested', payload: {}, producer: 'dashboard', eventId })));
+    `;
+    const child = spawn(process.execPath, ["--import", "tsx", "-e", script, f.root, eventId], { cwd: process.cwd(), stdio: "ignore" });
     child.once("error", reject); child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child ${eventId} exited ${code}`)));
   });
   await Promise.all([run("cross-1"), run("cross-2")]);

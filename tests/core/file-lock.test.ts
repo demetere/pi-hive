@@ -81,10 +81,11 @@ function runWriter(resource: string, value: string): Promise<void> {
   const script = `
     import { appendFileSync } from 'node:fs';
     import { withCrossProcessFileLock } from './src/core/file-lock.ts';
-    withCrossProcessFileLock(${JSON.stringify(resource)}, () => appendFileSync(${JSON.stringify(resource)}, ${JSON.stringify(`${value}\n`)}), { timeoutMs: 5000 });
+    const [resource, value] = process.argv.slice(1);
+    withCrossProcessFileLock(resource, () => appendFileSync(resource, value + '\\n'), { timeoutMs: 5000 });
   `;
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--experimental-strip-types", "--import", "./tests/helpers/register-ts-loader.mjs", "--input-type=module", "-e", script], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", "--import", "./tests/helpers/register-ts-loader.mjs", "--input-type=module", "-e", script, resource, value], {
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
     });

@@ -62,7 +62,7 @@ interface EffectiveRebuildLimits { readonly streams: number; readonly events: nu
 interface RebuildBudget { events: number; bytes: number; names: number; pathBytes: number }
 
 function rebuildLimitError(message: string): Error {
-  return Object.assign(new Error(message), { status: 413, code: "PROJECTION_REBUILD_LIMIT" });
+  return Object.assign(new Error(message), { status: 413, code: "PROJECTION_REBUILD_LIMIT", publicMessage: message });
 }
 
 function effectiveRebuildLimits(input: WorkflowProjectionRebuildLimits | undefined): EffectiveRebuildLimits {

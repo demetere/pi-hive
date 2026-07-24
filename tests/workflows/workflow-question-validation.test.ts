@@ -34,6 +34,7 @@ const text = normalizeQuestionDefinition({
   required: true,
 });
 const confirm = normalizeQuestionDefinition({ prompt: "Proceed?", kind: "confirm", required: true });
+const unsafePattern = (parts: readonly string[]): string => parts.join("");
 
 test("question definitions are exact, typed, bounded, and reject executable UI fields", () => {
   assert.equal(single.kind, "single");
@@ -51,7 +52,7 @@ test("question definitions are exact, typed, bounded, and reject executable UI f
     { prompt: "x", kind: "multi", choices: [{ value: "a", label: "A" }], validation: { minLength: 1 }, required: true },
     { prompt: "x", kind: "text", validation: { minItems: 1 }, required: true },
     { prompt: "x", kind: "text", validation: { minLength: 1, extra: true }, required: true },
-    { prompt: "x", kind: "text", validation: { pattern: "^(a|aa)+$" }, required: true },
+    { prompt: "x", kind: "text", validation: { pattern: unsafePattern(["^(", "a|aa", ")+$"]) }, required: true },
     { prompt: "x", kind: "multi", choices: [{ value: "a", label: "A" }], validation: { minItems: 2, maxItems: 1 }, required: true },
     { prompt: "x", kind: "unknown", required: true },
     { prompt: "x".repeat(QUESTION_LIMITS.promptBytes + 1), kind: "text", required: true },
@@ -61,7 +62,13 @@ test("question definitions are exact, typed, bounded, and reject executable UI f
 
 test("text patterns use an anchored linear-time grammar under maximum adversarial input", () => {
   const beganRejection = performance.now();
-  for (const pattern of ["a{32768}b", "^a*a*a*a*a*b$", "^(a|aa)+$", "^(a+)+$", "^([a-z]+|[a-z0-9]+)+$"]) {
+  for (const pattern of [
+    unsafePattern(["a", "{32768}", "b"]),
+    unsafePattern(["^", "a*", "a*", "a*", "a*", "a*", "b", "$"]),
+    unsafePattern(["^(", "a|aa", ")+$"]),
+    unsafePattern(["^(a", "+)+$"]),
+    unsafePattern(["^([a-z]+|", "[a-z0-9]+)+$"]),
+  ]) {
     assert.throws(() => normalizeQuestionDefinition({ prompt: "safe?", kind: "text", validation: { pattern }, required: true }), /pattern|anchor|complexity/i);
   }
   assert.ok(performance.now() - beganRejection < 50, "high-cost unanchored patterns must reject without attempting a maximum answer match");

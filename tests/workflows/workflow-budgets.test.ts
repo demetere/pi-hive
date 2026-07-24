@@ -53,13 +53,13 @@ async function waitForFiles(paths: readonly string[]): Promise<void> {
   }
 }
 
-function spawnScript(script: string): Promise<void> {
+function spawnScript(script: string, args: readonly string[] = []): Promise<void> {
   return new Promise((resolve, reject) => {
     // Node propagates its internal coverage directory to children even when the
     // variable is omitted; an explicit empty value keeps these race actors from
     // diluting the parent test process's source-map coverage.
     const env = { ...process.env, NODE_V8_COVERAGE: "" };
-    const child = spawn(process.execPath, ["--import", "tsx", "-e", script], { cwd: process.cwd(), env, stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(process.execPath, ["--import", "tsx", "-e", script, ...args], { cwd: process.cwd(), env, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
     child.once("error", reject);
@@ -95,21 +95,24 @@ async function concurrentBudgetAdmissions(kind: "model" | "tool") {
   const children = ready.map((readyPath, index) => spawnScript(`
     import { existsSync, writeFileSync } from "node:fs";
     import { BudgetRuntime } from "./src/workflows/budgets.ts";
+    const [projectRoot, go, readyPath, resultPath, kind, indexText, limitsJson] = process.argv.slice(1);
+    const childIndex = Number(indexText);
+    const limits = JSON.parse(limitsJson);
     let synchronized = false;
     const nowMs = () => {
       if (!synchronized) {
-        writeFileSync(${JSON.stringify(readyPath)}, "ready");
-        while (!existsSync(${JSON.stringify(go)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        writeFileSync(readyPath, "ready");
+        while (!existsSync(go)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
         synchronized = true;
       }
       return 0;
     };
-    const runtime = new BudgetRuntime({ projectRoot: ${JSON.stringify(projectRoot)}, projectId: "project-1", sessionId: "session-1", runId: "run-1", rootNodeId: "root", limits: ${JSON.stringify(concurrentLimits)}, nowMs, now: () => "1970-01-01T00:00:00.000Z" });
-    const result = ${kind === "model"
-      ? `runtime.startModelAttempt("worker", "model-correlation-${index + 1}")`
-      : `runtime.recordToolAttempt("worker", "tool-correlation-${index + 1}", { toolName: "read", policyOutcome: "allowed" })`};
-    writeFileSync(${JSON.stringify(results[index])}, JSON.stringify(result));
-  `));
+    const runtime = new BudgetRuntime({ projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", rootNodeId: "root", limits, nowMs, now: () => "1970-01-01T00:00:00.000Z" });
+    const result = kind === "model"
+      ? runtime.startModelAttempt("worker", "model-correlation-" + String(childIndex + 1))
+      : runtime.recordToolAttempt("worker", "tool-correlation-" + String(childIndex + 1), { toolName: "read", policyOutcome: "allowed" });
+    writeFileSync(resultPath, JSON.stringify(result));
+  `, [projectRoot, go, readyPath, results[index], kind, String(index), JSON.stringify(concurrentLimits)]));
   await waitForFiles(ready);
   writeFileSync(go, "go");
   await Promise.all(children);
@@ -128,15 +131,17 @@ async function concurrentDelegationAdmissions() {
     import { existsSync, writeFileSync } from "node:fs";
     import { BudgetRuntime } from "./src/workflows/budgets.ts";
     import { DelegationRuntime } from "./src/workflows/delegation.ts";
-    const budgets = new BudgetRuntime({ projectRoot: ${JSON.stringify(projectRoot)}, projectId: "project-1", sessionId: "session-1", runId: "run-1", rootNodeId: "root", limits: ${JSON.stringify(concurrentLimits)}, nowMs: () => 0, now: () => "1970-01-01T00:00:00.000Z" });
-    const runtime = new DelegationRuntime({ projectRoot: ${JSON.stringify(projectRoot)}, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: ${JSON.stringify(delegationSnapshot)}, createTaskId: () => "task-${index + 1}", now: () => "1970-01-01T00:00:00.000Z", acceptanceAuthority: { admit: (events, nodeId) => budgets.admitDelegationAgainst(events, nodeId) } });
-    writeFileSync(${JSON.stringify(readyPath)}, "ready");
-    while (!existsSync(${JSON.stringify(go)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    const [projectRoot, go, readyPath, resultPath, indexText, limitsJson, snapshotJson] = process.argv.slice(1);
+    const childIndex = Number(indexText);
+    const budgets = new BudgetRuntime({ projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", rootNodeId: "root", limits: JSON.parse(limitsJson), nowMs: () => 0, now: () => "1970-01-01T00:00:00.000Z" });
+    const runtime = new DelegationRuntime({ projectRoot, projectId: "project-1", sessionId: "session-1", runId: "run-1", snapshot: JSON.parse(snapshotJson), createTaskId: () => "task-" + String(childIndex + 1), now: () => "1970-01-01T00:00:00.000Z", acceptanceAuthority: { admit: (events, nodeId) => budgets.admitDelegationAgainst(events, nodeId) } });
+    writeFileSync(readyPath, "ready");
+    while (!existsSync(go)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     let result;
-    try { result = { ok: true, value: runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "worker", objective: "concurrent-${index + 1}", deliverables: [] }) }; }
+    try { result = { ok: true, value: runtime.accept(runtime.rootExecutionContext(), { targetNodeId: "worker", objective: "concurrent-" + String(childIndex + 1), deliverables: [] }) }; }
     catch (error) { result = { ok: false, message: String(error instanceof Error ? error.message : error) }; }
-    writeFileSync(${JSON.stringify(results[index])}, JSON.stringify(result));
-  `));
+    writeFileSync(resultPath, JSON.stringify(result));
+  `, [projectRoot, go, readyPath, results[index], String(index), JSON.stringify(concurrentLimits), JSON.stringify(delegationSnapshot)]));
   await waitForFiles(ready);
   writeFileSync(go, "go");
   await Promise.all(children);

@@ -160,6 +160,21 @@ function codeFor(error: unknown, status: number): string {
   if (typeof explicit === "string" && /^[A-Z0-9_]{1,64}$/u.test(explicit)) return explicit;
   return status === 409 ? "CAS_CONFLICT" : status === 404 ? "NOT_FOUND" : status === 401 ? "UNAUTHORIZED" : "INVALID_REQUEST";
 }
+function publicMessageFor(error: unknown, status: number, code: string): string {
+  const explicit = (error as { publicMessage?: unknown })?.publicMessage;
+  if (typeof explicit === "string" && explicit.length && !/[\r\n]/u.test(explicit)) return explicit;
+  if (status === 413) return "request exceeds a workflow API limit";
+  if (status === 415) return "content-type must be application/json";
+  if (status === 409) return `${code.toLowerCase().replaceAll("_", " ")} conflict`;
+  if (status === 404) return "route or resource not found";
+  if (status === 401) return "authentication required";
+  if (status === 403) return "request forbidden";
+  if (status === 405) return "method not allowed";
+  if (status === 426) return `Dashboard API version ${WORKFLOW_DASHBOARD_API_VERSION} is required`;
+  if (status === 429) return "authenticated request rate exceeded";
+  if (status >= 500) return "workflow API request failed";
+  return "workflow API request is invalid";
+}
 
 export function createWorkflowApi(options: WorkflowApiOptions): Readonly<{ handle(req: Request, url: URL): Promise<Response | null>; dispose(): void }> {
   if (!options.token || Buffer.byteLength(options.token, "utf8") < 32) throw new Error("Workflow API requires a high-entropy daemon token");
@@ -273,7 +288,8 @@ export function createWorkflowApi(options: WorkflowApiOptions): Readonly<{ handl
         return response({ apiVersion: 1, result });
       } catch (error) {
         const status = statusFor(error);
-        return failure(codeFor(error, status), error instanceof Error ? error.message : String(error), status);
+        const code = codeFor(error, status);
+        return failure(code, publicMessageFor(error, status, code), status);
       }
     },
   });

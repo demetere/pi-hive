@@ -322,10 +322,11 @@ test("a separate process cannot steal an active job without verified owner death
   const script = `
     import { appendFileSync } from 'node:fs';
     import { DurableKnowledgeQueue } from './src/knowledge/queue.ts';
-    const queue = new DurableKnowledgeQueue({ projectRoot: ${JSON.stringify(projectRoot)}, projectId: 'project-1', sessionId: 'session-1', ownerNonce: 'child-owner', isIdle: () => true, verifyOwnerDead: async () => false, process: async () => appendFileSync(${JSON.stringify(marker)}, 'stolen') });
+    const [projectRoot, marker] = process.argv.slice(1);
+    const queue = new DurableKnowledgeQueue({ projectRoot, projectId: 'project-1', sessionId: 'session-1', ownerNonce: 'child-owner', isIdle: () => true, verifyOwnerDead: async () => false, process: async () => appendFileSync(marker, 'stolen') });
     await queue.wake();
   `;
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--import", "./tests/helpers/register-ts-loader.mjs", "--input-type=module", "-e", script], { cwd: process.cwd(), encoding: "utf8", timeout: 10_000 });
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--import", "./tests/helpers/register-ts-loader.mjs", "--input-type=module", "-e", script, projectRoot, marker], { cwd: process.cwd(), encoding: "utf8", timeout: 10_000 });
   assert.equal(child.status, 0, child.stderr);
   assert.equal(existsSync(marker), false);
   release();

@@ -66,9 +66,11 @@ function fixture(snapshot = recoverySnapshot()) {
 const owner = (nonce: string) => ({ pid: 123, processMarker: `marker-${nonce}`, nonce, verifyDead: () => true });
 function runRecoveryProcess(f: ReturnType<typeof fixture>, workflowSessionId: string, suffix: string, crashStage?: string) {
   const candidate = join(f.piRoot, `process-${suffix}.jsonl`);
+  const processSessionId = `process-${suffix}`;
   const script = `
     import { writeFileSync } from "node:fs";
     import { recoverOrphanedWorkflowSession } from "./src/workflows/recovery.ts";
+    const [projectRoot, workflowSessionId, restorePiSessionFile, candidate, processSessionId, crashStage] = process.argv.slice(1);
     const runtime = {
       sourceState: "current",
       model: {
@@ -81,21 +83,21 @@ function runRecoveryProcess(f: ReturnType<typeof fixture>, workflowSessionId: st
     };
     const adapter = {
       async create() {
-        writeFileSync(${JSON.stringify(candidate)}, "process recovery\\n");
-        return { piSessionId: ${JSON.stringify(`process-${suffix}`)}, piSessionFile: ${JSON.stringify(candidate)} };
+        writeFileSync(candidate, "process recovery\\n");
+        return { piSessionId: processSessionId, piSessionFile: candidate };
       },
       async switch({ withSession }) { await withSession({}); return { cancelled: false }; },
     };
     await recoverOrphanedWorkflowSession({
-      projectRoot: ${JSON.stringify(f.projectRoot)}, projectId: "project-1", workflowSessionId: ${JSON.stringify(workflowSessionId)},
-      adapter, owner: { nonce: ${JSON.stringify(`process-${suffix}`)}, verifyDead: () => true }, runtime,
-      restorePiSessionFile: ${JSON.stringify(f.normalFile)},
-      ${crashStage ? `recoveryFault: (stage) => { if (stage === ${JSON.stringify(crashStage)}) process.exit(86); },` : ""}
+      projectRoot, projectId: "project-1", workflowSessionId,
+      adapter, owner: { nonce: processSessionId, verifyDead: () => true }, runtime,
+      restorePiSessionFile,
+      ...(crashStage ? { recoveryFault: (stage) => { if (stage === crashStage) process.exit(86); } } : {}),
     });
   `;
   // Keep the tsx subprocess's transformed source maps out of c8's native
   // strip-types report; merging the two maps misattributes parent coverage.
-  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script, f.projectRoot, workflowSessionId, f.normalFile, candidate, processSessionId, crashStage ?? ""], {
     cwd: process.cwd(), env: { ...process.env, NODE_V8_COVERAGE: "" }, encoding: "utf8",
   });
   if (result.status === 86 && crashStage === "afterCommitted") {
@@ -469,9 +471,10 @@ test("multiprocess restart reconciliation serializes one commit decision with no
   writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`);
   const script = `
     import { detectOrphanedWorkflowSessions } from "./src/workflows/recovery.ts";
-    detectOrphanedWorkflowSessions({ projectRoot: ${JSON.stringify(f.projectRoot)}, projectId: "project-1" });
+    const [projectRoot] = process.argv.slice(1);
+    detectOrphanedWorkflowSessions({ projectRoot, projectId: "project-1" });
   `;
-  const children = ["one", "two"].map(() => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+  const children = ["one", "two"].map(() => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script, f.projectRoot], {
     cwd: process.cwd(), env: { ...process.env, NODE_V8_COVERAGE: "" }, stdio: ["ignore", "pipe", "pipe"],
   }));
   const completed = children.map((child) => new Promise<{ code: number | null; output: string }>((resolve) => {
