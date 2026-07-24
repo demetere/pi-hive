@@ -1,33 +1,653 @@
-:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #e8ecf4; background: #0d1117; color-scheme: dark; }
-* { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; }
-button, select, textarea { font: inherit; }
-button { cursor: pointer; border: 1px solid #374151; border-radius: .45rem; background: #1f2937; color: inherit; padding: .5rem .75rem; }
-button:hover:not(:disabled) { background: #334155; }
-button:disabled { opacity: .55; cursor: default; }
-.skip-link { position: absolute; left: -9999px; }
-.skip-link:focus { left: 1rem; top: 1rem; z-index: 10; background: #fff; color: #000; padding: .5rem; }
-.workflow-dashboard > header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; border-bottom: 1px solid #263244; }
-.workflow-dashboard > header div { display: flex; gap: 1rem; align-items: baseline; }
-.workflow-dashboard > header span { color: #9ca3af; }
-.api-badge { border: 1px solid #475569; border-radius: 999px; padding: .2rem .55rem; }
-.workflow-shell { display: grid; grid-template-columns: minmax(12rem, 16rem) 1fr; min-height: calc(100vh - 4rem); }
-.workflow-shell nav { display: flex; flex-direction: column; gap: .35rem; padding: 1rem; border-right: 1px solid #263244; }
-.workflow-shell nav button { text-align: left; background: transparent; border-color: transparent; }
-.workflow-shell nav button[aria-current="page"] { background: #253047; border-color: #4f63a8; }
-#workflow-content { padding: 1.5rem; min-width: 0; }
-.workflow-title { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
-.workflow-title h1 { margin: 0 0 .35rem; }
-.workflow-title p, .workflow-state { color: #9ca3af; }
-.workflow-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 1rem; margin-top: 1rem; }
-.workflow-card { overflow-wrap: anywhere; background: #151b25; border: 1px solid #2f3b50; border-radius: .65rem; padding: 1rem; }
-.workflow-card h2 { font-size: 1rem; margin: 0 0 .75rem; }
-dl { margin: 0; } dl div { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; padding: .2rem 0; } dt { color: #9ca3af; } dd { margin: 0; }
-.workflow-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
-form { display: grid; gap: .5rem; margin-top: .75rem; } textarea { min-height: 7rem; }
-.workflow-error { border: 1px solid #dc2626; background: #3f1717; padding: 1rem; border-radius: .65rem; }
-.workflow-skeleton { display: grid; gap: .75rem; margin-top: 1rem; } .workflow-skeleton i { height: 5rem; border-radius: .5rem; background: #1f2937; }
-.workflow-tree ul { list-style: none; padding-left: 1.25rem; border-left: 1px solid #374151; } .workflow-tree li { margin: .65rem 0; }
-.load-more { margin-top: 1rem; }
-table { width: 100%; border-collapse: collapse; } th, td { text-align: left; border-bottom: 1px solid #374151; padding: .5rem; }
-@media (max-width: 720px) { .workflow-shell { grid-template-columns: 1fr; } .workflow-shell nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid #263244; } }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── self-hosted fonts (no runtime network calls) ─────────────────────────────
+   Hanken Grotesk ships as a single variable woff2 covering weights 400–800;
+   DM Mono ships as static per-weight files. Latin subsets only. Files live in
+   ui/web/public/fonts and are committed into the shipped dist bundle. */
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/fonts/hanken-grotesk-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/dm-mono-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/dm-mono-latin-500.woff2") format("woff2");
+}
+
+/* ── theme tokens (the only hand-authored CSS): the "Soft Signal / Dusk" design
+   system's CSS custom properties, switched at runtime via data-theme. These back
+   the Tailwind color/shadow tokens. Model identity is ALWAYS neutral (ink/brand)
+   and never a status color; the cool status vocabulary (run/done/wait/warn/crit)
+   is reserved for live agent status + context-window pressure. ─────────────── */
+@layer base {
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #12141A; --surface: #1C1F28; --surface2: #17191F; --raise: #242833; --well: #0F1116;
+    --line: rgba(255,255,255,.07); --line2: rgba(255,255,255,.11);
+    --ink: #EAECEF; --ink-dim: #AEB4BE; --ink-dimmer: #8A919D;
+    --brand: #F4B155; --brand-bg: rgba(244,177,85,.14); --brand-contrast: #21170A;
+    --run: #4FCFE6; --done: #5FD09A; --wait: #A3ACBE; --warn: #ECD15A; --crit: #F47F78;
+    --shadow: 0 16px 40px -20px rgba(0,0,0,.8), 0 2px 8px -4px rgba(0,0,0,.5);
+    /* soft tints for status pills/fills (color-mix-equivalent, precomputed for width) */
+    --run-soft: rgba(79,207,230,.15); --done-soft: rgba(95,208,154,.15);
+    --warn-soft: rgba(236,209,90,.15); --crit-soft: rgba(244,112,104,.15);
+    /* panel gradient + graph canvas */
+    --panel-grad: linear-gradient(180deg, var(--surface), var(--surface2));
+    --graph-bg: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--run) 5%, var(--well)), var(--well));
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #EDEBE4; --surface: #FFFFFF; --surface2: #FAF8F3; --raise: #F1EEE6; --well: #F1EFE8;
+    --line: rgba(28,26,20,.09); --line2: rgba(28,26,20,.14);
+    --ink: #20242B; --ink-dim: #626873; --ink-dimmer: #6B7079;
+    --brand: #995D00; --brand-bg: rgba(153,93,0,.13); --brand-contrast: #FFFFFF;
+    --run: #087B93; --done: #247F58; --wait: #596477; --warn: #75610F; --crit: #B63F3A;
+    --shadow: 0 16px 34px -20px rgba(40,38,48,.28), 0 2px 6px -3px rgba(40,38,48,.14);
+    --run-soft: rgba(21,150,176,.14); --done-soft: rgba(46,155,108,.14);
+    --warn-soft: rgba(151,126,21,.14); --crit-soft: rgba(207,90,82,.14);
+    --panel-grad: linear-gradient(180deg, var(--surface), var(--surface2));
+    --graph-bg: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--run) 5%, var(--well)), var(--well));
+  }
+
+  /* Font-family tokens (shared by CSS + SVG text, which does NOT inherit the
+     body font-family reliably — every <text> must name its family explicitly). */
+  :root {
+    --disp: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+    --mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Legacy var aliases → new palette. Both the pre-rewrite hand-authored CSS
+     (raw var() references below) and un-migrated components resolve through
+     these during the reskin; they are removed as each surface is rebuilt. */
+  :root[data-theme] {
+    --app-bg: var(--bg); --panel: var(--surface); --border: var(--line); --hover: var(--raise); --chip: var(--well);
+    --fg: var(--ink); --fg2: var(--ink-dim); --muted: var(--ink-dimmer);
+    --accent: var(--brand); --accent-hi: var(--brand); --accent-fg: var(--brand);
+    --accent-soft: var(--brand-bg); --accent-border: color-mix(in srgb, var(--brand) 45%, var(--line)); --accent-glow: color-mix(in srgb, var(--brand) 40%, transparent);
+    --ok: var(--done); --ok-soft: var(--done-soft); --ok-border: color-mix(in srgb, var(--done) 45%, var(--line));
+    --err: var(--crit);
+    --node-bg: var(--surface); --node-border: var(--line); --edge: var(--line2);
+    --ease: cubic-bezier(.2, .7, .3, 1);
+  }
+
+  html, body, #root { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Custom scrollbars (theme-aware; no Tailwind utility equivalent). */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* Reduced motion: one global override kills every keyframe animation
+     (flow / softblink / halo / feedin / dash / gdot*), per the design spec. */
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto !important; }
+    *, *::before, *::after { animation: none !important; transition-duration: .01ms !important; transition-delay: 0ms !important; }
+  }
+
+  :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+}
+
+/* ── component primitives ─────────────────────────────────────────────────
+   Repeated UI classes, composed purely from Tailwind utilities via @apply so
+   the ported components keep their original class names and stay pixel-identical
+   to the pre-rewrite build. No hand-written property rules except the few things
+   Tailwind can't express (pseudo-element overlays, color-mix, keyframes). */
+@layer components {
+  /* buttons */
+  .btn { @apply font-semibold rounded-[10px] px-3.5 py-2 cursor-pointer border border-border bg-panel text-fg inline-flex items-center gap-[7px] transition-[transform,background,border-color] duration-[.12s]; }
+  .btn:hover { @apply -translate-y-px; }
+  .btn.primary { @apply bg-accent border-accent shadow-[0_6px_16px_var(--accent-glow)]; color: var(--brand-contrast); }
+  .btn.primary:hover { @apply bg-accent-hi; }
+  .btn.ghost { @apply text-ok border-ok-border bg-ok-soft; }
+  .btn.ghost.off { @apply text-muted border-border bg-panel; }
+  .btn.pill { @apply rounded-[9px] px-3 py-[7px] font-medium text-fg2; }
+  .btn.sm { @apply px-3 py-[7px]; }
+  .btn.danger { @apply bg-err border-err text-white; }
+  .btn.danger:hover { filter: brightness(1.08); }
+  .btn:disabled { @apply opacity-45 cursor-not-allowed translate-y-0; }
+
+  /* kpi cards */
+  .kpis { @apply grid gap-3 mb-3.5; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .kpi { @apply bg-panel border border-border rounded-[14px] px-4 py-3.5 transition-[border-color,transform] duration-[.14s]; }
+  .kpi:hover { @apply -translate-y-0.5 border-accent-border; }
+  .kpi-top { @apply flex items-center justify-between; }
+  .kpi-label { @apply text-muted text-xs font-medium; }
+  .kpi-val { @apply text-[26px] font-bold mt-2 mb-0.5 tracking-[-.5px] tabular-nums; }
+  .kpi-sub { @apply text-muted text-[11.5px]; }
+
+  /* widgets — floating gradient panels ("Soft Signal / Dusk") */
+  .widgets { @apply grid gap-4; grid-template-columns: 1.9fr 1fr; }
+  .widget { @apply border border-line rounded-[18px] overflow-hidden shadow-panel flex flex-col; background: var(--panel-grad); }
+  .widget.span2 { grid-column: 1 / -1; }
+  .widget.hero { @apply h-[476px]; }
+  .w-head { @apply flex items-center gap-2.5 px-[18px] pt-[15px] pb-[13px]; }
+  .w-title { @apply font-bold text-[14px] tracking-[-.01em]; }
+  .w-tools { @apply ml-auto text-ink-dim cursor-pointer flex gap-2 items-center; }
+  .w-tools button { @apply bg-transparent border-0 text-ink-dim cursor-pointer text-[13px] px-1 py-0.5 rounded-md; }
+  .w-tools button:hover { @apply text-ink bg-well; }
+  .w-legend { @apply ml-auto flex items-center gap-2 text-ink-dim text-[11px]; }
+  .w-legend .lg-item { @apply flex items-center gap-1.5 bg-well rounded-full px-2.5 py-1; }
+  .w-legend .lg { @apply w-3 h-[2.5px] rounded-sm inline-block; }
+  .w-legend .lg.cost { @apply bg-brand; }
+  .w-legend .lg.tok { @apply bg-run; }
+
+  .empty { @apply text-muted p-7 text-center; }
+  .empty.small { @apply p-3 text-xs; }
+
+  /* tables */
+  .tab-card { @apply bg-panel border border-border rounded-2xl overflow-hidden shadow-panel; }
+  .table { @apply w-full border-collapse text-[12.5px]; }
+  .table th { @apply text-left text-muted font-semibold text-[11px] uppercase tracking-[.5px] px-3.5 py-3 border-b border-border select-none whitespace-nowrap; }
+  .table th:has(.table-sort):hover { @apply text-fg; }
+  .table th .arrow { @apply text-accent ml-1; }
+  .table-sort { @apply border-0 bg-transparent p-0 text-inherit uppercase tracking-[.5px] cursor-pointer; font: inherit; }
+  .table-row-link { @apply border-0 bg-transparent p-0 text-inherit cursor-pointer text-left; font: inherit; }
+  .table td { @apply px-3.5 py-[11px] border-b border-border align-middle; }
+  .table tbody tr { @apply transition-[background] duration-[.12s]; }
+  .table tbody tr:hover { @apply bg-hover; }
+  .table tbody tr.active { @apply bg-accent-soft; }
+  .table tbody tr:last-child td { @apply border-b-0; }
+  .num { @apply tabular-nums text-left; }
+  .table th.num, .table td.num { @apply w-[92px]; }
+  .mono { @apply tabular-nums; }
+  .muted-cell { @apply text-muted; }
+
+  /* Status vocabulary: running=run(cyan), done=done(green), waiting=warn/wait,
+     error=crit. Model identity is never a status color. */
+  .dot { @apply w-2 h-2 rounded-full inline-block mr-[7px]; }
+  .dot.running { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 22%, transparent); @apply animate-softblink; }
+  .dot.live { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 22%, transparent); }
+  .dot.done { background: var(--done); }
+  .dot.idle, .dot.waiting { background: var(--wait); }
+  .dot.error { background: var(--crit); }
+  .cdot { @apply w-[9px] h-[9px] rounded-full inline-block mr-2 align-middle; }
+
+  .status-tag { @apply text-[10.5px] font-bold px-2 py-0.5 rounded-full uppercase tracking-[.4px]; }
+  .status-tag.running { color: var(--run); background: var(--run-soft); }
+  .status-tag.waiting { @apply text-warn bg-warn-soft; }
+  .status-tag.done { color: var(--done); background: var(--done-soft); }
+  .status-tag.error { color: var(--crit); background: var(--crit-soft); }
+  .status-tag.idle { @apply text-muted bg-chip; }
+
+  .del-col { @apply w-14 text-right; }
+  .row-del { @apply bg-transparent border-0 cursor-pointer text-xs opacity-0 px-1.5 py-[3px] rounded-md grayscale transition-[opacity] duration-[.12s]; }
+  .table tbody tr:hover .row-del, .row-del:focus-visible { @apply opacity-55; }
+  .row-del:hover, .row-del:focus-visible { opacity: 1 !important; background: var(--crit-soft); filter: grayscale(0); }
+
+  .toolbar { @apply flex items-center gap-2.5 mb-3; }
+  .toolbar select, .toolbar input { @apply bg-panel border border-border text-fg rounded-[9px] px-[11px] py-2 text-[12.5px]; font: inherit; }
+  .toolbar .spacer { @apply flex-1; }
+  .pager { @apply flex items-center gap-2; }
+
+  /* cost bars */
+  .cost-grid { @apply grid gap-3; grid-template-columns: 2fr 1fr; }
+  .bar-row { @apply flex items-center gap-2.5 py-2; }
+  .bar-name { @apply w-[150px] overflow-hidden text-ellipsis whitespace-nowrap text-[12.5px]; }
+  .bar-track { @apply block flex-1 h-2.5 bg-chip rounded-md overflow-hidden; }
+  .bar-fill { @apply block h-full min-w-[3px] rounded-md transition-[width] duration-500 ease-smooth; }
+  .bar-val { @apply w-16 text-right tabular-nums font-semibold text-xs; }
+}
+@media (max-width: 1180px) { .widgets, .kpis { grid-template-columns: repeat(2, 1fr) !important; } }
+@media (max-width: 1000px) { .cost-grid { grid-template-columns: 1fr !important; } }
+
+/* ── overview: topology graph ─────────────────────────────────────────────── */
+@layer components {
+  .topology-pane { @apply flex-1 min-w-0 min-h-0 flex flex-col bg-panel; }
+  .topology-pane-head { @apply h-[42px] flex items-center gap-2 px-3 border-b border-border text-fg2 text-[11px] font-bold uppercase tracking-[.45px]; }
+  .topology-pane-head b { @apply ml-auto text-ok bg-ok-soft border border-ok-border rounded-full px-[7px] py-px text-[9.5px] tracking-[.35px]; }
+  .topology-switch { @apply inline-flex gap-[3px] p-[3px] border border-border rounded-[10px] bg-chip; }
+  .topology-switch button { @apply border-0 rounded-[7px] bg-transparent text-muted cursor-pointer text-[11px] font-bold px-2.5 py-[5px] uppercase tracking-[.35px]; font: inherit; }
+  .topology-switch button:hover { @apply text-fg bg-hover; }
+  .topology-switch button.active { @apply text-accent-fg bg-accent-soft shadow-[inset_0_0_0_1px_var(--accent-border)]; }
+
+  .graph-wrap { @apply flex-1 min-h-0 relative overflow-hidden m-3 rounded-xl; background: var(--graph-bg); }
+  /* Naming a color token could make Tailwind's bare `border`/`stroke` utilities
+     emit an inherited stroke that smudges <text>. Neutralize at the SVG roots;
+     elements that need a real stroke set their own below. */
+  /* SVG text does not inherit the body font-family — name it at the SVG root as
+     a low-specificity default (element selector, so per-class families still
+     win). Every classed <text> below also sets its own family explicitly. */
+  .graph-svg, .chart-svg, .donut { stroke: none; font-family: var(--disp); }
+  .graph-svg text, .chart-svg text, .donut text { stroke: none; }
+  .graph-svg { @apply block w-full h-full min-h-[300px]; touch-action: none; }
+  .g-dotgrid { fill: var(--line); }
+  .g-empty { @apply text-ink-dim p-10 text-center; }
+  .graph-controls { @apply absolute top-3 right-3 z-[2] flex flex-col gap-1; }
+  .graph-controls button { @apply w-[30px] h-[30px] rounded-lg border border-line bg-surface text-ink-dim cursor-pointer text-[15px] leading-none grid place-items-center shadow-panel; }
+  .graph-controls button:hover { @apply text-ink; border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+
+  /* Edges: idle static line2; active (running child) animated dashed run flow. */
+  .g-edge { fill: none; stroke: var(--line2); stroke-width: 1.5; }
+  .g-edge.running { stroke: var(--run); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 0.5 7; @apply animate-flow; }
+
+  /* Node card: rounded gradient surface with soft elevation. */
+  .g-node { @apply cursor-pointer; outline: none; }
+  .g-bg { fill: var(--surface); stroke: var(--line); stroke-width: 1; transition: stroke .2s; }
+  .g-node.lead .g-bg { stroke: var(--line); }
+  .g-node.orchestrator .g-bg { stroke: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+  .g-node.running .g-bg { stroke: color-mix(in srgb, var(--run) 70%, var(--line)); animation: gNodePulse 1.6s var(--ease) infinite; }
+  .g-node.clickable .g-bg:hover { stroke: color-mix(in srgb, var(--brand) 55%, var(--line)); }
+  .g-node:focus-visible .g-bg { stroke: var(--brand); filter: drop-shadow(0 0 6px color-mix(in srgb, var(--brand) 40%, transparent)); }
+
+  @keyframes gNodePulse { 0%, 100% { filter: drop-shadow(0 0 0 color-mix(in srgb, var(--run) 0%, transparent)); } 50% { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--run) 34%, transparent)); } }
+
+  .g-dot.running { fill: var(--run); }
+  .g-dot.waiting, .g-dot.idle { fill: var(--wait); }
+  .g-dot.done { fill: var(--done); }
+  .g-dot.error { fill: var(--crit); }
+  .g-dot-halo { fill: color-mix(in srgb, var(--run) 45%, transparent); @apply animate-halo; transform-box: fill-box; transform-origin: center; }
+
+  .g-id { fill: var(--ink); font-family: var(--disp); font-weight: 700; }
+  .g-cap { fill: var(--ink-dimmer); font-family: var(--mono); letter-spacing: .06em; }
+  .g-val { fill: var(--ink); font-family: var(--mono); font-weight: 500; }
+  .g-badge-bg { fill: var(--well); stroke: var(--line); stroke-width: 1; }
+  .g-badge-tx { fill: var(--ink-dim); font-family: var(--mono); }
+  .g-ctx-track { fill: var(--well); }
+  .g-bar-off { fill: var(--line2); }
+  .g-bar-on { fill: var(--ink); }
+
+  .g-collapse { @apply cursor-pointer; }
+  .g-collapse-hit { fill: transparent; }
+  .g-collapse circle { fill: var(--well); stroke: var(--line); stroke-width: 1; }
+  .g-collapse text { fill: var(--ink-dim); font-family: var(--disp); font-size: 13px; font-weight: 700; pointer-events: none; }
+  .g-collapse:hover circle { fill: var(--raise); stroke: var(--brand); }
+}
+
+/* ── overview: cost/tokens chart ──────────────────────────────────────────── */
+@layer components {
+  .chart-wrap { @apply flex-1 flex min-h-[196px] m-3 rounded-xl bg-well p-3; }
+  .chart-host { @apply relative w-full flex-1 flex; }
+  .chart-svg { @apply w-full h-full min-h-[172px] block; touch-action: none; }
+  .chart-grid { stroke: var(--line); stroke-width: 1; }
+  .ax { fill: var(--ink-dim); font-family: var(--mono); font-size: 10px; @apply tabular-nums; }
+  .ax.tok { fill: var(--run); opacity: .85; }
+  .ax.cost { fill: var(--brand); opacity: .85; }
+  .ax.x { fill: var(--ink-dim); }
+  .ln { fill: none; stroke-width: 2; stroke-linejoin: round; }
+  .ln.tok { stroke: var(--run); }
+  .ln.cost { stroke: var(--brand); }
+  .crosshair { stroke: var(--ink-dim); stroke-width: 1; stroke-dasharray: 3 3; opacity: .5; }
+  .chart-svg .dot { stroke: var(--surface); stroke-width: 2; }
+  .chart-svg .dot.tok { fill: var(--run); }
+  .chart-svg .dot.cost { fill: var(--brand); }
+  .chart-tip { @apply absolute top-2.5 pointer-events-none bg-surface border border-line rounded-[9px] px-[11px] py-2 shadow-panel min-w-[120px] z-[2]; transform: translateX(-50%); }
+  .chart-tip .tip-time { @apply text-ink-dim text-[10.5px] mb-[5px] tabular-nums font-mono; }
+  .chart-tip .tip-row { @apply flex items-center gap-[7px] text-xs text-ink-dim; }
+  .chart-tip .tip-row b { @apply ml-auto text-ink tabular-nums font-mono; }
+  .chart-tip .lg { @apply w-3.5 h-[3px] rounded-sm inline-block; }
+  .chart-tip .lg.tok { background: var(--run); }
+  .chart-tip .lg.cost { background: var(--brand); }
+}
+
+/* ── overview: model mix ──────────────────────────────────────────────────── */
+@layer components {
+  .mix-wrap { @apply flex flex-col flex-1; }
+  .donut-row { @apply flex items-center gap-[18px] px-[18px] pt-3 pb-4; }
+  .donut { flex: none; }
+  .d-big { fill: var(--ink); font-family: var(--disp, "Hanken Grotesk"); font-size: 19px; font-weight: 800; }
+  .d-sm { fill: var(--ink-dim); font-family: var(--mono); font-size: 8px; letter-spacing: .1em; }
+  .lg-list { @apply flex flex-col gap-[9px] flex-1; }
+  .lg-row { @apply flex items-center gap-[9px] text-xs; }
+  .lg-dot { @apply w-[9px] h-[9px] rounded-[3px] shrink-0; }
+  .leaders-head { @apply px-[18px] py-1.5 border-t border-line font-mono text-[10px] tracking-[.08em] text-ink-dim; }
+  .leaders { @apply flex flex-col gap-[11px] px-[18px] pt-1 pb-4; }
+  .ld-row { @apply flex items-center gap-2 text-xs mb-[5px]; }
+  .ld-row .cdot { @apply mr-0 shrink-0; }
+  .ld-track { @apply h-[5px] rounded-full bg-well overflow-hidden; }
+  .ld-fill { @apply h-full rounded-full min-w-[3px] transition-[width] duration-500; }
+}
+
+/* ── modals + confirm ─────────────────────────────────────────────────────── */
+@layer components {
+  .modal-backdrop { @apply fixed inset-0 z-50 grid place-items-center p-5 animate-fadein; background: #0008; backdrop-filter: blur(6px); }
+  .modal-panel { @apply bg-panel border border-border rounded-[18px] flex flex-col overflow-hidden; box-shadow: 0 30px 80px #000a; width: min(1800px, 96vw); height: min(1100px, 94vh); animation: activityIn .2s cubic-bezier(.2,.7,.3,1); }
+  .modal-body { @apply flex-1 flex flex-col min-h-0 overflow-auto; }
+  .modal-body > * { @apply flex-1; }
+  .w-collapsed { @apply w-full border-0 bg-transparent flex-1 grid place-items-center text-muted text-xs cursor-pointer min-h-[120px]; }
+  .w-collapsed:hover { @apply text-accent; }
+  .confirm-backdrop { @apply z-[60]; }
+  .confirm-card { @apply bg-panel border border-border rounded-2xl p-6 text-center; box-shadow: 0 30px 80px #000a; width: min(420px, 92vw); animation: activityIn .18s cubic-bezier(.2,.7,.3,1); }
+  .confirm-icon { @apply w-[46px] h-[46px] rounded-xl grid place-items-center text-xl mx-auto mb-3.5 bg-chip border border-border; }
+  .confirm-icon.danger { background: var(--crit-soft); border-color: var(--crit); }
+  .confirm-title { @apply m-0 mb-2 text-[17px] font-bold; }
+  .confirm-msg { @apply text-fg2 text-[13px] leading-normal mb-5; }
+  .confirm-msg b { @apply text-fg; }
+  .confirm-actions { @apply flex gap-2.5 justify-center; }
+  .confirm-actions .btn { @apply min-w-[96px] justify-center; }
+}
+
+/* ── agent log ────────────────────────────────────────────────────────────── */
+@layer components {
+  .log-panel { width: min(960px, 92vw); height: min(860px, 92vh); }
+  .log-head { @apply gap-2.5; }
+  .log-dot { @apply w-2.5 h-2.5 rounded-full shrink-0; }
+  .log-model { @apply text-muted text-[11px] tabular-nums; }
+  .log-live { @apply inline-flex items-center gap-1.5 text-ok text-[11px] font-bold; }
+  .log-runs { @apply flex items-center gap-1.5 px-4 py-2 border-b border-border flex-wrap; }
+  .log-runs-label { @apply text-muted text-[11px] font-bold uppercase tracking-[.5px] mr-1; }
+  .log-run-tab { @apply bg-chip border border-border text-fg2 rounded-full text-[11.5px] font-semibold px-[11px] py-1 cursor-pointer transition-[color,border-color,background] duration-[.12s]; }
+  .log-run-tab:hover { @apply text-fg border-accent-border; }
+  .log-run-tab.active { @apply bg-accent-soft text-accent-fg border-accent-border; }
+  .log-body { @apply flex-1 min-h-0 overflow-y-auto px-[18px] py-4 block; }
+  .log-body > * { @apply mb-3; }
+  .log-body > *:last-child { @apply mb-0; }
+  .log-inv { @apply border border-border rounded-xl overflow-hidden bg-transparent; }
+  .log-inv.open { @apply border-accent-border; }
+  .log-inv-head { @apply w-full border-0 bg-transparent text-left text-inherit flex items-center gap-2.5 px-[13px] py-2.5 cursor-pointer transition-[background] duration-[.12s]; font: inherit; }
+  .log-inv-head:hover { @apply bg-hover; }
+  .log-inv-caret { @apply text-muted text-[10px] w-3 shrink-0; }
+  .log-inv-num { @apply font-bold text-[12.5px] text-accent-fg whitespace-nowrap shrink-0; }
+  .log-inv-task { @apply text-fg2 text-xs overflow-hidden text-ellipsis whitespace-nowrap flex-1 min-w-0; }
+  .log-inv-count { @apply text-muted text-[11px] whitespace-nowrap shrink-0; }
+  .log-inv-body { @apply px-3.5 pt-2.5 pb-3.5 flex flex-col gap-3 border-t border-border; }
+  .log-meta { @apply self-center text-muted text-[11px] bg-chip px-2.5 py-[3px] rounded-full; }
+  .log-msg { @apply flex flex-col gap-[5px]; }
+  .log-role { @apply text-[10px] font-bold uppercase tracking-[.6px] text-muted; }
+  .log-msg.user .log-role { @apply text-accent; }
+  .log-msg.assistant .log-role { @apply text-ok; }
+  .log-parts { @apply flex flex-col gap-2; }
+  .log-text { @apply bg-transparent border border-border rounded-[10px] px-[13px] py-[11px] text-[13px] leading-normal whitespace-pre-wrap break-words; }
+  .log-msg.user .log-text { @apply bg-accent-soft border-accent-border; }
+  .log-thinking { @apply text-fg2 text-[12.5px] whitespace-pre-wrap break-words bg-accent-soft rounded-r-lg px-3 py-[9px]; border-left: 2px solid var(--accent-border); line-height: 1.55; }
+  .log-tool { @apply bg-chip border border-border rounded-[10px] overflow-hidden; }
+  .log-tool.err { @apply border-err; }
+  .log-tool-head { @apply w-full border-0 bg-transparent text-left text-inherit flex items-center gap-2 px-3 py-2 cursor-pointer text-[12.5px]; font: inherit; }
+  .log-tool-head:disabled { @apply cursor-default opacity-100; }
+  .log-tool-head:hover { @apply bg-hover; }
+  .log-tool-head .tool-ic { opacity: .8; }
+  .log-tool-head b { @apply font-bold; }
+  .log-tool-head .tool-toggle { @apply ml-auto text-accent font-semibold text-[11px]; }
+  .log-tool-head .tool-toggle.dim { @apply text-muted; }
+  .log-tool-args { @apply m-0 px-[13px] py-[9px] border-t border-border font-mono text-[11px] whitespace-pre-wrap break-words text-fg2 max-h-[160px] overflow-auto; line-height: 1.45; }
+  .log-tool-body { @apply m-0 px-[13px] py-2.5 border-t border-border font-mono text-[11.5px] whitespace-pre-wrap break-words max-h-[360px] overflow-auto text-fg2; background: var(--app-bg); line-height: 1.5; }
+  .log-bulk { @apply bg-chip border border-border text-fg2 rounded-[7px] text-[11px] font-semibold px-[9px] py-1 cursor-pointer; }
+  .log-bulk:hover { @apply text-fg border-accent-border; }
+}
+
+/* ── activity feed ────────────────────────────────────────────────────────── */
+@layer components {
+  .tl-scroll { @apply overflow-y-auto overflow-x-hidden px-2 pb-2 flex-1 min-h-0; }
+  /* two-line feed entry (Overview LiveActivity) — mirrors the Activity tab's
+     per-agent color language: a left accent tinted by the agent's identity. */
+  .feed-row { @apply relative px-2.5 py-[7px] rounded-[10px] overflow-hidden; --agent-color: var(--brand); border-left: 3px solid color-mix(in srgb, var(--agent-color) 70%, transparent); }
+  .feed-row::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 32px; background: linear-gradient(90deg, color-mix(in srgb, var(--agent-color) 12%, transparent), transparent); pointer-events: none; }
+  .feed-row:hover { background: color-mix(in srgb, var(--agent-color) 6%, transparent); }
+  .feed-pill { @apply font-mono text-[9px] font-medium rounded-full px-2 py-0.5 whitespace-nowrap; letter-spacing: .05em; }
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tl-type { @apply text-[9.5px] uppercase tracking-[.5px] text-run font-bold; }
+  .tl-time { @apply ml-auto text-ink-dim text-[10.5px] whitespace-nowrap; }
+  .tl-text { @apply text-ink-dim text-xs mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .activity-layout { @apply grid gap-3 items-start; grid-template-columns: 310px minmax(0, 1fr); }
+  .activity-agents { @apply sticky top-0 min-h-0 overflow-hidden p-2.5 flex flex-col; height: calc(100vh - 154px); max-height: calc(100vh - 154px); }
+  .activity-panel-head { @apply shrink-0 flex items-center justify-between gap-2 px-1 pt-0.5 pb-2.5 text-fg2; }
+  .activity-panel-head b { @apply text-fg; }
+  .activity-panel-head span { @apply text-muted text-[11px] font-bold; }
+  .team-filters { @apply shrink-0 grid grid-cols-3 gap-1 pb-2; }
+  .team-filter { @apply border border-border rounded-[9px] bg-chip text-fg2 text-[11px] font-bold px-1 py-1.5 cursor-pointer; font: inherit; }
+  .team-filter:hover { @apply text-fg bg-hover; }
+  .team-filter.active { @apply text-accent-fg bg-accent-soft border-accent-border; }
+  .activity-agent-list { @apply min-h-0 overflow-auto pr-0.5; }
+  .agent-filter-row { @apply flex items-stretch gap-1; }
+  .agent-filter-row .agent-filter { @apply min-w-0 flex-1; }
+  .agent-filter { @apply w-full flex items-center gap-2 p-2 border border-transparent rounded-[10px] bg-transparent text-fg2 text-left cursor-pointer; font: inherit; }
+  .agent-open { @apply shrink-0 border border-transparent rounded-[9px] bg-transparent text-muted px-2 cursor-pointer; }
+  .agent-open:hover, .agent-open:focus-visible { @apply text-fg bg-hover border-border; }
+  .agent-filter:hover { @apply bg-hover text-fg; }
+  .agent-filter.active { @apply bg-accent-soft text-accent-fg border-accent-border; }
+  .agent-filter .cdot { @apply mr-0 shrink-0; }
+  .agent-filter-main { @apply min-w-0 flex-1 flex flex-col; line-height: 1.2; }
+  .agent-filter-main b { @apply overflow-hidden text-ellipsis whitespace-nowrap text-xs; }
+  .agent-filter-main small { @apply text-muted overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px]; }
+  .agent-filter-stat { @apply text-muted text-[10.5px] font-bold tabular-nums flex flex-col items-end; line-height: 1.15; }
+  .agent-filter-stat b { @apply text-fg2 text-[11px]; }
+  .agent-filter-stat small { @apply text-muted text-[9.5px]; }
+  .activity-feed { @apply min-w-0; }
+  .activity-card-grid { @apply flex flex-col gap-[9px]; }
+  /* Card border is ALWAYS the agent identity color. Success/failure is signalled
+     by a thin status accent (a short bar riding the left border), not by tinting
+     the whole box. */
+  .activity-box { @apply relative bg-panel border border-border rounded-[14px] shadow-panel px-3.5 py-3 overflow-hidden animate-activityIn; --agent-color: var(--accent); border-left: 4px solid var(--agent-color); transition: border-color .16s var(--ease), background .16s var(--ease); }
+  .activity-box::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 42px; background: linear-gradient(90deg, color-mix(in srgb, var(--agent-color) 16%, transparent), transparent); pointer-events: none; }
+  /* status accent: a 3px-wide bar over the left edge, colored by outcome */
+  .activity-box.ok::after,
+  .activity-box.err::after { content: ""; position: absolute; left: -4px; top: 10px; bottom: 10px; width: 4px; border-radius: 4px; pointer-events: none; }
+  .activity-box.ok::after { background: var(--done); }
+  .activity-box.err::after { background: var(--crit); }
+  .activity-box.compact { @apply shadow-none px-3 py-2.5 rounded-xl min-h-[72px] overflow-visible shrink-0; }
+  .live-cards { @apply flex flex-col gap-2.5 items-stretch; }
+  .live-cards .activity-event-head { @apply min-h-[18px] cursor-default; line-height: 1.35; }
+  .live-cards .activity-event-head b { line-height: 1.35; }
+  .live-cards .activity-box { @apply cursor-default; }
+  .live-cards .activity-summary { @apply whitespace-nowrap mt-1.5; line-height: 1.35; }
+  .live-agent-chip { @apply inline-flex mt-1.5; width: fit-content; }
+  .activity-event-head { @apply w-full flex items-baseline gap-2 border-0 bg-transparent p-0 text-left cursor-pointer relative; color: inherit; font: inherit; }
+  .toast-dismiss { @apply ml-auto border-0 bg-transparent text-muted cursor-pointer rounded px-1; }
+  .toast-dismiss:hover { @apply text-ink bg-well; }
+  .replay-speed.active { color: var(--brand-contrast); }
+  .activity-event-head b { @apply text-fg text-[12.5px] overflow-hidden text-ellipsis whitespace-nowrap; }
+  .agent-chip { @apply border border-border bg-chip text-fg2 rounded-full px-[7px] py-px text-[10.5px] font-bold whitespace-nowrap; }
+  .outcome { @apply inline-grid place-items-center w-[15px] h-[15px] rounded-full text-[9px] font-bold flex-none; }
+  .outcome.ok { color: var(--done); background: var(--done-soft); }
+  .outcome.err { color: var(--crit); background: var(--crit-soft); }
+  /* agent thinking rows: 2-line preview collapsed, full text expanded */
+  .think-text { @apply text-[12.5px] mt-1.5 leading-relaxed; color: var(--ink-dim); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .think-text.expanded { -webkit-line-clamp: unset; display: block; }
+  .tok-meta { @apply font-mono text-[10px] text-ink-dim whitespace-nowrap flex-none; }
+}
+
+/* ── settings ─────────────────────────────────────────────────────────────── */
+@layer components {
+  .settings { @apply max-w-[860px] flex flex-col gap-5; }
+  .settings-card { @apply p-0; }
+  .settings-head { @apply px-5 pt-5 pb-4 border-b border-line; }
+  .settings-title { @apply m-0 text-[15px] font-bold tracking-[-.01em]; }
+  .settings-sub { @apply mt-1.5 mb-0 text-ink-dim text-[12.5px] leading-relaxed max-w-[600px]; }
+  .settings-list { @apply flex flex-col; }
+  .setting-row { @apply flex items-center gap-3 px-[18px] py-3.5 border-b border-line; }
+  .setting-row:last-child { @apply border-b-0; }
+  .setting-meta { @apply min-w-0 flex-1; }
+  .setting-name { @apply flex items-center gap-2 text-[13px] font-semibold text-ink; }
+  .setting-badge { @apply text-[9.5px] font-bold uppercase tracking-[.4px] px-1.5 py-0.5 rounded-full; color: var(--brand); background: var(--brand-bg); }
+  .setting-path { @apply font-mono text-[11px] text-ink-dim mt-1 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .setting-input { @apply w-[220px] flex-none bg-well border border-line text-ink rounded-[9px] px-[11px] py-2 text-[12.5px] outline-none; font: inherit; }
+  .setting-input:focus { border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); box-shadow: 0 0 0 3px var(--brand-bg); }
+  .setting-actions { @apply flex items-center gap-2 flex-none; }
+
+  /* Storage summary — a strip of metric tiles above the prune control. */
+  .storage-panel { @apply px-5 py-5 border-b border-line; }
+  .storage-scope { @apply text-[10.5px] font-semibold uppercase tracking-[.5px] text-ink-dimmer mb-3.5; }
+  .storage-tiles { @apply flex flex-wrap items-stretch gap-2.5; }
+  .storage-tile { @apply flex-1 min-w-[128px] bg-well border border-line rounded-xl px-3.5 py-3; }
+  .storage-tile.accent { @apply border-[color-mix(in_srgb,var(--brand)_35%,var(--line))]; background: color-mix(in srgb, var(--brand) 7%, var(--well)); }
+  .storage-tile-label { @apply text-[10px] font-medium uppercase tracking-[.4px] text-ink-dimmer; }
+  .storage-tile-value { @apply text-[20px] font-bold tabular-nums leading-none mt-1.5 text-ink; }
+  .storage-tile-hint { @apply text-[10.5px] text-ink-dim mt-1 leading-snug; }
+  .storage-muted { @apply text-ink-dim text-[13px] py-1; }
+  /* Prune control row — input + unit + action, roomy and vertically centered. */
+  .prune-row { @apply flex items-center gap-4 px-5 py-4; }
+  .prune-copy { @apply min-w-0 flex-1; }
+  .prune-copy-title { @apply text-[13px] font-semibold text-ink; }
+  .prune-copy-sub { @apply text-[11.5px] text-ink-dim mt-1 leading-relaxed; }
+  .prune-control { @apply flex items-center gap-2.5 flex-none; }
+  .prune-input { @apply w-[84px] flex-none bg-well border border-line text-ink rounded-[9px] px-3 py-2 text-[13px] text-right tabular-nums outline-none; font: inherit; }
+  .prune-input:focus { border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); box-shadow: 0 0 0 3px var(--brand-bg); }
+  .prune-unit { @apply text-ink-dim text-[12.5px] mr-0.5; }
+
+  .expand-mark { @apply text-muted font-extrabold ml-0.5; }
+  .activity-summary { @apply whitespace-nowrap relative max-w-[860px]; }
+  .activity-detail { @apply mt-2 p-2.5 border border-border rounded-xl bg-chip; }
+  .activity-detail pre { @apply mt-2.5 max-h-[320px] overflow-auto text-fg2 whitespace-pre-wrap break-words; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .detail-grid { @apply grid text-[11.5px]; grid-template-columns: 70px 1fr; gap: 4px 10px; }
+  .tool-detail-grid { @apply pb-2.5 border-b border-border; grid-template-columns: 70px minmax(0, 1fr) 70px minmax(0, 1fr); }
+  .detail-grid span { @apply text-muted; }
+  .detail-grid b { @apply text-fg2 font-semibold min-w-0 overflow-hidden text-ellipsis whitespace-nowrap; }
+  .tool-phases { @apply grid gap-2.5 mt-2.5; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tool-phase { @apply border border-border rounded-xl p-2.5 bg-panel; }
+  .tool-phase.start { border-left: 3px solid var(--accent); }
+  .tool-phase.end { border-left: 3px solid var(--ok); }
+  .tool-phase.err { border-left: 3px solid var(--err); }
+  .tool-phase h4 { @apply m-0 mb-2 text-[11px] uppercase tracking-[.5px] text-fg; }
+  .meta-list { @apply mt-2 flex flex-col gap-[5px]; }
+  .meta-list p { @apply m-0 grid text-[11.5px]; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; }
+  .meta-list span { @apply text-muted; }
+  .meta-list b { @apply text-fg2 font-medium overflow-hidden text-ellipsis whitespace-nowrap; }
+  .phase-payload { @apply mt-2.5 max-h-[220px] overflow-auto text-fg2 bg-chip border border-border rounded-[10px] p-[9px] whitespace-pre-wrap break-words; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+}
+@media (max-width: 760px) { .tool-phases { grid-template-columns: 1fr !important; } .tool-detail-grid { grid-template-columns: 70px minmax(0, 1fr) !important; } }
+@media (max-width: 1050px) { .activity-layout { grid-template-columns: 1fr !important; } .activity-agents { position: static !important; height: auto !important; max-height: 360px !important; } }
+
+/* ── plans tab (OpenSpec change list + self-hosted Plannotator review iframe) ── */
+@layer components {
+  .plans-layout { @apply grid gap-3.5 items-start; grid-template-columns: 320px 1fr; }
+  .plans-list { @apply p-0 overflow-hidden; }
+  .plans-list-head { @apply flex items-center justify-between px-3.5 py-3 border-b border-border text-[11px] font-bold uppercase tracking-[.5px] text-muted; }
+  .plans-refresh { @apply bg-transparent border-0 text-muted cursor-pointer text-[15px] leading-none px-1.5 py-0.5 rounded-md; }
+  .plans-refresh:hover { @apply text-fg bg-hover; }
+  .plan-row { @apply block w-full text-left px-3.5 py-[11px] border-x-0 border-t-0 border-b border-border bg-transparent cursor-pointer transition-[background] duration-[.12s]; font: inherit; color: inherit; }
+  .plan-row:last-child { @apply border-b-0; }
+  .plan-row:hover { @apply bg-hover; }
+  .plan-row.active { @apply bg-accent-soft; }
+  .plan-row-main { @apply flex items-baseline justify-between gap-2 mb-1.5; }
+  .plan-title { @apply text-[12.5px] font-semibold text-fg overflow-hidden text-ellipsis whitespace-nowrap; }
+  .plan-tasks { @apply text-[10.5px] text-muted shrink-0; }
+  .plan-row-meta { @apply flex items-center gap-1.5 flex-wrap; }
+  .plan-status { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip text-fg2; }
+  .plan-status-complete { @apply text-ok bg-ok-soft; }
+  .plan-status-in-progress { @apply text-warn bg-warn-soft; }
+  .verdict-pill { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
+  .verdict-green { @apply text-ok bg-ok-soft; }
+  .verdict-yellow { @apply text-warn bg-warn-soft; }
+  .verdict-red { @apply text-crit; background: var(--crit-soft); }
+  .plans-detail { @apply flex flex-col gap-3.5; }
+  .plans-empty { @apply p-10 text-center; }
+  .plan-head { @apply px-[18px] py-4; }
+  .plan-head-title { @apply flex items-baseline gap-2.5 flex-wrap text-[14px]; }
+  .plan-validation { @apply text-[11px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full bg-chip; }
+  .plan-validation.ok { @apply text-ok bg-ok-soft; }
+  .plan-validation.fail { @apply text-crit; background: var(--crit-soft); }
+  .plan-validation.progress { @apply text-warn bg-warn-soft; }
+  .plan-ready { @apply text-[11px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full text-ok bg-ok-soft; }
+  .plan-artifacts { @apply flex items-center gap-1.5 mt-3.5 flex-wrap; }
+  .plan-artifact { @apply flex items-center gap-1.5 text-[11.5px] px-2.5 py-1 rounded-lg border border-border bg-chip text-fg2 cursor-pointer transition-all duration-[.12s]; font: inherit; }
+  .plan-artifact:hover { @apply bg-hover text-fg; }
+  .plan-artifact.active { @apply bg-accent-soft text-accent border-accent-border; }
+  .plan-artifact-id { @apply font-semibold; }
+  .plan-artifact-review { @apply text-[9.5px] uppercase tracking-[.35px] opacity-80; }
+  .plan-artifact.state-approved { @apply text-ok border-ok-border bg-ok-soft; }
+  .plan-artifact.state-denied { @apply text-crit; border-color: var(--err); background: var(--crit-soft); }
+  .plan-artifact.state-review { @apply text-accent border-accent-border bg-accent-soft; }
+  .plan-artifact.state-agent { @apply opacity-60; }
+  .plan-artifact-next { @apply text-[11px] text-muted italic px-1; }
+  .plan-artifact-none { @apply text-[11.5px] text-muted; }
+  .plan-issues { @apply mt-3 pl-[18px] text-[11.5px]; list-style: disc; }
+  .plan-issue-error { @apply text-err; }
+  .plan-issue-warning { @apply text-warn; }
+  .plan-review-frame { @apply p-0 overflow-hidden flex flex-col; }
+  .plan-review-bar { @apply flex items-center justify-between px-3 py-2 border-b border-border; }
+  .plan-review-title { @apply flex items-center gap-2; }
+  .plan-review-rid { @apply text-[11.5px] text-muted; }
+  .plan-review-final { @apply text-[10px] font-bold uppercase tracking-[.4px] px-2 py-0.5 rounded-full; }
+  .plan-review-final.verdict-green { @apply text-ok bg-ok-soft; }
+  .plan-review-final.verdict-red { @apply text-crit; background: var(--crit-soft); }
+  .plan-review-actions { @apply flex items-center gap-1.5; }
+  .plan-review-btn { @apply text-[11.5px] text-fg2 bg-chip border border-border rounded-lg px-2.5 py-1 cursor-pointer no-underline transition-all duration-[.12s]; font: inherit; }
+  .plan-review-btn:hover { @apply text-fg border-accent-border bg-hover; }
+  .plan-review-iframe { @apply w-full block border-0 bg-app-bg; height: 72vh; min-height: 480px; }
+  .plan-review-readonly { @apply overflow-auto bg-app-bg; height: 72vh; min-height: 480px; }
+  .plan-markdown { @apply p-6 max-w-[980px] text-[13px] leading-6 text-fg; }
+  .plan-markdown h1 { @apply text-[24px] leading-8 font-bold mb-4 mt-0; }
+  .plan-markdown h2 { @apply text-[18px] leading-7 font-bold mt-7 mb-3 pb-1 border-b border-border; }
+  .plan-markdown h3 { @apply text-[15px] leading-6 font-semibold mt-5 mb-2; }
+  .plan-markdown p { @apply my-3 text-fg2; }
+  .plan-markdown ul { @apply my-3 pl-5; list-style: disc; }
+  .plan-markdown ol { @apply my-3 pl-5; list-style: decimal; }
+  .plan-markdown li { @apply my-1; }
+  .plan-markdown blockquote { @apply my-4 pl-4 border-l-4 border-accent-border text-muted; }
+  .plan-markdown code { @apply px-1 py-0.5 rounded bg-chip text-fg; font-family: var(--font-mono); }
+  .plan-markdown pre { @apply my-4 p-4 rounded-xl overflow-auto bg-chip border border-border; }
+  .plan-markdown pre code { @apply p-0 bg-transparent; }
+  .plan-markdown table { @apply my-4 border-collapse text-[12px]; }
+  .plan-markdown th, .plan-markdown td { @apply border border-border px-3 py-2 align-top; }
+  .plan-markdown th { @apply bg-chip text-fg font-semibold; }
+  .plan-markdown a { @apply text-accent underline; }
+  .plan-review-frame.fullscreen { @apply fixed inset-0 z-[100] rounded-none border-0; }
+  .plan-review-frame.fullscreen .plan-review-iframe,
+  .plan-review-frame.fullscreen .plan-review-readonly { @apply flex-1; height: auto; }
+}
+@media (max-width: 1000px) { .plans-layout { grid-template-columns: 1fr !important; } }
+@media (max-width: 900px) { .review-box { grid-template-columns: 1fr !important; } .review-actions { justify-content: flex-end !important; } }
+
+/* Schema-v1 workflow dashboard entry. Legacy dashboard styles stay until W27. */
+.workflow-dashboard { min-height: 100%; background: var(--bg); color: var(--ink); }
+.workflow-dashboard .skip-link { position: fixed; left: 1rem; top: -4rem; z-index: 200; padding: .6rem .9rem; border-radius: .5rem; background: var(--brand); color: var(--brand-contrast); }
+.workflow-dashboard .skip-link:focus { top: 1rem; }
+.workflow-dashboard > header { min-height: 3.75rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0 1.25rem; border-bottom: 1px solid var(--line); background: var(--surface); }
+.workflow-dashboard > header div { display: flex; align-items: baseline; gap: .8rem; min-width: 0; }
+.workflow-dashboard > header strong { font-size: 1.1rem; }
+.workflow-dashboard > header span { color: var(--ink-dim); }
+.workflow-dashboard .api-badge { flex: none; padding: .25rem .55rem; border: 1px solid var(--line2); border-radius: 99px; font: .75rem var(--mono); }
+.workflow-shell { display: grid; grid-template-columns: minmax(12rem, 15rem) minmax(0, 1fr); min-height: calc(100vh - 3.75rem); }
+.workflow-dashboard-embedded { min-height: 42rem; border: 1px solid var(--line); border-radius: 1rem; overflow: hidden; }
+.workflow-dashboard-embedded .workflow-shell { min-height: 42rem; }
+.workflow-shell nav { display: flex; flex-direction: column; gap: .25rem; padding: 1rem; border-right: 1px solid var(--line); background: var(--surface2); }
+.workflow-shell nav button { min-height: 2.5rem; border: 1px solid transparent; border-radius: .6rem; padding: .55rem .75rem; background: transparent; color: var(--ink-dim); text-align: left; font: 600 .9rem var(--disp); cursor: pointer; }
+.workflow-shell nav button:hover { background: var(--raise); color: var(--ink); }
+.workflow-shell nav button[aria-current="page"] { border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); background: var(--brand-bg); color: var(--brand); }
+.workflow-shell main { min-width: 0; padding: clamp(1rem, 3vw, 2rem); }
+.workflow-title { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.workflow-title h1 { margin: 0; font-size: clamp(1.5rem, 3vw, 2rem); }
+.workflow-title p { margin: .3rem 0 1rem; color: var(--ink-dim); }
+.workflow-title button, .workflow-card button, .workflow-error button, .load-more { min-height: 2.5rem; border: 1px solid var(--line2); border-radius: .6rem; padding: .55rem .8rem; background: var(--surface); color: var(--ink); font: 600 .85rem var(--disp); cursor: pointer; }
+.workflow-title button:hover, .workflow-card button:hover, .workflow-error button:hover, .load-more:hover { border-color: var(--brand); }
+.workflow-title button:disabled, .workflow-card button:disabled, .load-more:disabled { opacity: .55; cursor: wait; }
+.workflow-state { min-height: 1.5rem; margin-bottom: .75rem; color: var(--ink-dim); }
+.workflow-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
+.workflow-card { min-width: 0; padding: 1rem; border: 1px solid var(--line); border-radius: .9rem; background: var(--panel-grad); box-shadow: var(--shadow); overflow-wrap: anywhere; }
+.workflow-card h2 { margin: 0 0 .75rem; font: 700 1rem var(--mono); }
+.workflow-card dl { display: grid; gap: .4rem; margin: 0; }
+.workflow-card dl div { display: grid; grid-template-columns: minmax(7rem, .8fr) minmax(0, 1.2fr); gap: .7rem; }
+.workflow-card dt { color: var(--ink-dimmer); font: .72rem var(--mono); }
+.workflow-card dd { min-width: 0; margin: 0; color: var(--ink-dim); }
+.workflow-card form { display: grid; gap: .5rem; margin-top: 1rem; }
+.workflow-card label { font-weight: 650; }
+.workflow-card input { min-height: 2.5rem; box-sizing: border-box; width: 100%; border: 1px solid var(--line2); border-radius: .55rem; padding: .5rem .7rem; background: var(--well); color: var(--ink); font: inherit; }
+.workflow-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+.workflow-error { padding: 1rem; border: 1px solid var(--crit); border-radius: .75rem; background: var(--crit-soft); }
+.workflow-empty { padding: 2rem; border: 1px dashed var(--line2); border-radius: .75rem; color: var(--ink-dim); text-align: center; }
+.workflow-skeleton { display: grid; gap: 1rem; grid-template-columns: repeat(3, 1fr); }
+.workflow-skeleton i { height: 10rem; border-radius: .9rem; background: linear-gradient(90deg, var(--surface), var(--raise), var(--surface)); background-size: 200% 100%; animation: workflow-loading 1.2s linear infinite; }
+.load-more { display: block; margin: 1.25rem auto 0; }
+@keyframes workflow-loading { to { background-position: -200% 0; } }
+@media (max-width: 760px) {
+  .workflow-dashboard > header span:not(.api-badge) { display: none; }
+  .workflow-shell { grid-template-columns: 1fr; }
+  .workflow-shell nav { position: sticky; top: 0; z-index: 10; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: .65rem; }
+  .workflow-shell nav button { flex: none; text-align: center; }
+  .workflow-shell main { padding: 1rem; }
+  .workflow-skeleton { grid-template-columns: 1fr; }
+}

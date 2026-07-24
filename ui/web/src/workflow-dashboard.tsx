@@ -10,24 +10,33 @@ const CLAIMED_IDENTITY = "local-dashboard";
 
 type JsonRecord = Record<string, unknown>;
 type ApiResource = "projects" | "workflows" | "sessions" | "runs" | "nodes" | "tasks" | "artifacts" | "checkpoints" | "questions" | "approvals" | "knowledge" | "usage" | "activity" | "history";
-type View = ApiResource | "evidence" | "cost" | "model-mix" | "knowledge-bundles" | "knowledge-jobs" | "knowledge-proposals";
+type View = ApiResource | "overview" | "evidence" | "cost" | "model-mix" | "knowledge-bundles" | "knowledge-jobs" | "knowledge-proposals";
+type Theme = "dark" | "light";
 
 interface ResourcePage { readonly items: readonly JsonRecord[]; readonly nextCursor: string | null }
 interface Credentials { readonly token: string; readonly csrf: string }
 interface SseFrame { readonly event: string; readonly data: string; readonly id?: string }
 
-const WORKFLOW_VIEWS: readonly View[] = [
-  "projects", "workflows", "sessions", "runs", "nodes", "tasks", "artifacts", "evidence", "checkpoints", "questions", "approvals",
-  "knowledge-bundles", "knowledge-jobs", "knowledge-proposals", "cost", "model-mix", "usage", "activity", "history",
+const NAV_GROUPS: readonly { readonly label: string; readonly views: readonly View[] }[] = [
+  { label: "Mission control", views: ["overview", "projects", "workflows", "sessions", "runs"] },
+  { label: "Execution", views: ["nodes", "tasks", "activity", "history"] },
+  { label: "Governance", views: ["artifacts", "evidence", "checkpoints", "questions", "approvals"] },
+  { label: "Knowledge", views: ["knowledge-bundles", "knowledge-jobs", "knowledge-proposals"] },
+  { label: "Insights", views: ["cost", "model-mix", "usage"] },
 ];
 
 const TITLES: Readonly<Record<View, string>> = {
-  projects: "Projects", workflows: "Workflows", sessions: "Sessions", runs: "Runs", nodes: "Topology", tasks: "Tasks", artifacts: "Artifacts",
+  overview: "Overview", projects: "Projects", workflows: "Workflows", sessions: "Sessions", runs: "Runs", nodes: "Topology", tasks: "Tasks", artifacts: "Artifacts",
   evidence: "Evidence", checkpoints: "Checkpoints", questions: "Questions", approvals: "Approvals", "knowledge-bundles": "Knowledge bundles",
   "knowledge-jobs": "Knowledge jobs", "knowledge-proposals": "Knowledge proposals", knowledge: "Knowledge", cost: "Cost", "model-mix": "Model mix", usage: "Usage", activity: "Activity", history: "History",
 };
 
+const SUBTITLES: Readonly<Record<View, string>> = {
+  overview: "Live workflow health, topology, activity, and usage at a glance.", projects: "Configured project identities visible to the workflow projection.", workflows: "Selected workflow definitions and their current state.", sessions: "Linked Pi sessions carrying workflow execution state.", runs: "Durable workflow runs and their terminal or active status.", nodes: "The current hierarchical agent topology for projected runs.", tasks: "Delegated work owned by workflow nodes.", artifacts: "Bound artifact workspaces without exposing private content.", evidence: "Verified event references projected from authoritative journals.", checkpoints: "Artifact checkpoint requests and current decisions.", questions: "Durable human questions awaiting exact typed answers.", approvals: "Human approval controls with exact request provenance.", "knowledge-bundles": "Bounded knowledge updates available to workflows.", "knowledge-jobs": "Durable enrichment work and model attribution.", "knowledge-proposals": "Human-reviewed knowledge changes awaiting decisions.", knowledge: "Projected knowledge lifecycle state.", cost: "Provider-confirmed and explicitly separated estimated spend.", "model-mix": "Token usage grouped by model and precision.", usage: "Authoritative token and cost counters by precision.", activity: "The newest projected workflow events.", history: "Bounded durable workflow event history.",
+};
+
 const DISPLAY_FIELDS: Readonly<Record<View, readonly string[]>> = {
+  overview: [],
   projects: ["projectId", "projectLabel", "status", "eventType", "timestamp"],
   workflows: ["workflowId", "status", "eventType", "timestamp"],
   sessions: ["projectId", "sessionId", "workflowId", "status", "eventType", "timestamp"],
@@ -77,6 +86,7 @@ async function requestHeaders(write = false, stream = false): Promise<Headers> {
 }
 
 function resourceFor(view: View): ApiResource {
+  if (view === "overview") throw new Error("Overview is composed from bounded API v1 resources");
   if (view === "evidence" || view === "model-mix") return "history";
   if (view === "cost") return "usage";
   if (view === "knowledge-bundles" || view === "knowledge-jobs" || view === "knowledge-proposals") return "knowledge";
@@ -110,6 +120,14 @@ function usageRecord(usage: JsonRecord): JsonRecord {
   };
 }
 async function fetchPage(view: View, cursor?: string): Promise<ResourcePage> {
+  if (view === "overview") {
+    const overviewViews = ["projects", "workflows", "sessions", "runs", "nodes", "tasks", "questions", "approvals", "activity", "usage"] as const;
+    const pages = await Promise.all(overviewViews.map(async (sourceView) => ({ sourceView, page: await fetchPage(sourceView) })));
+    return {
+      items: pages.flatMap(({ sourceView, page }) => page.items.map((item) => ({ ...item, dashboardView: sourceView }))).slice(0, MAX_RENDERED_ITEMS),
+      nextCursor: null,
+    };
+  }
   const resource = resourceFor(view);
   const query = new URLSearchParams();
   if (resource !== "usage") {
@@ -156,7 +174,7 @@ async function fetchDetail(kind: "questions" | "approvals" | "knowledge", record
 }
 
 function identity(view: View, record: JsonRecord): string {
-  const keys = view === "projects" ? ["projectId"] : view === "workflows" ? ["workflowId", "sessionId"] : view === "sessions" ? ["sessionId"] : view === "runs" ? ["runId"]
+  const keys = view === "overview" ? ["workflowId", "runId", "sessionId", "projectId", "nodeId", "taskId", "eventId"] : view === "projects" ? ["projectId"] : view === "workflows" ? ["workflowId", "sessionId"] : view === "sessions" ? ["sessionId"] : view === "runs" ? ["runId"]
     : view === "nodes" ? ["nodeId"] : view === "tasks" ? ["taskId"] : view === "artifacts" ? ["workspaceId"] : view === "questions" ? ["questionId"]
       : view === "approvals" || view === "checkpoints" ? ["approvalId", "checkpointId"] : view === "knowledge-jobs" ? ["knowledgeJobId"]
         : view === "knowledge-proposals" ? ["knowledgeProposalId", "knowledgeUpdateId"] : view === "knowledge-bundles" ? ["knowledgeUpdateId"] : ["eventId", "knowledgeJobId", "knowledgeUpdateId"];
@@ -220,13 +238,27 @@ function KnowledgeControl({ record, onChanged }: { record: JsonRecord; onChanged
   return <>{detail && detail.state === "pending" && <div className="workflow-controls" aria-label={`Decide ${id}`}><button disabled={pending} onClick={() => void decide("approve")}>Approve {id}</button><button disabled={pending} onClick={() => void decide("deny")}>Deny {id}</button></div>}{!detail && !error && <p role="status">Loading proposal provenance…</p>}{error && <p role="alert">{error}</p>}</>;
 }
 
+function statusTone(status: string | undefined): "running" | "done" | "waiting" | "error" | "idle" {
+  const value = status?.toLowerCase() ?? "";
+  if (/error|fail|blocked|cancel/u.test(value)) return "error";
+  if (/complete|done|approved|ready|recorded/u.test(value)) return "done";
+  if (/run|active|current|started|progress/u.test(value)) return "running";
+  if (/pending|wait|pause|question|human/u.test(value)) return "waiting";
+  return "idle";
+}
+function StatusBadge({ status }: { status: string | undefined }) {
+  if (!status) return null;
+  const tone = statusTone(status);
+  return <span className={`record-status ${tone}`}><i aria-hidden="true" />{status.replaceAll("_", " ")}</span>;
+}
 function EvidenceRefs({ record }: { record: JsonRecord }) {
   const refs = Array.isArray(record.refs) ? record.refs.filter((value): value is string => typeof value === "string" && Boolean(value)) : [];
-  return refs.length ? <div><h3>Verified references</h3><ul aria-label="Evidence references">{refs.map((ref) => <li key={ref}><code>{ref}</code></li>)}</ul></div> : null;
+  return refs.length ? <div className="evidence-refs"><h3>Verified references</h3><ul aria-label="Evidence references">{refs.map((ref) => <li key={ref}><code>{ref}</code></li>)}</ul></div> : null;
 }
 function RecordCard({ view, record, onChanged }: { view: View; record: JsonRecord; onChanged(): void }) {
   const id = identity(view, record); const heading = `${view}-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-");
-  return <article className="workflow-card" aria-labelledby={heading}><h2 id={heading}>{id}</h2><DisplayFields view={view} record={record} />
+  const status = stringField(record, "status");
+  return <article className={`workflow-card workflow-card-${view}`} aria-labelledby={heading}><div className="record-card-head"><div><span className="record-kind">{TITLES[view]}</span><h2 id={heading}>{id}</h2></div><StatusBadge status={status} /></div><DisplayFields view={view} record={record} />
     {view === "evidence" && <EvidenceRefs record={record} />}
     {view === "questions" && record.status === "pending" && <QuestionControl record={record} onChanged={onChanged} />}
     {view === "approvals" && record.status === "pending" && <ApprovalControl record={record} onChanged={onChanged} />}
@@ -251,17 +283,87 @@ function ModelMixSummary({ items }: { items: readonly JsonRecord[] }) {
   return <section aria-label="Model mix summary" className="workflow-card"><h2>Usage by model</h2><table><thead><tr><th scope="col">Model</th><th scope="col">Provider-confirmed tokens</th><th scope="col">Estimated tokens</th><th scope="col">Usage records</th></tr></thead><tbody>{[...rows].sort(([a], [b]) => a.localeCompare(b)).map(([model, value]) => <tr key={model}><th scope="row">{model}</th><td>{value.confirmed.toLocaleString("en-US")}</td><td>{value.estimated.toLocaleString("en-US")}</td><td>{value.calls.toLocaleString("en-US")}</td></tr>)}</tbody></table></section>;
 }
 function Topology({ items }: { items: readonly JsonRecord[] }) {
-  const byParent = new Map<string, JsonRecord[]>(); const ids = new Set(items.map((item) => stringField(item, "nodeId")).filter((value): value is string => Boolean(value)));
-  for (const item of items) { const parent = stringField(item, "parentNodeId"); const key = parent && ids.has(parent) ? parent : ""; byParent.set(key, [...(byParent.get(key) ?? []), item]); }
+  const scope = (item: JsonRecord) => [stringField(item, "projectId"), stringField(item, "sessionId"), stringField(item, "runId")].map((value) => value ?? "").join("\0");
+  const entityKey = (item: JsonRecord, nodeId = stringField(item, "nodeId") ?? "unknown") => `${scope(item)}\0${nodeId}`;
+  const nodeItems = [...new Map(items.filter((item) => Boolean(stringField(item, "nodeId"))).map((item) => [entityKey(item), item])).values()];
+  const byParent = new Map<string, JsonRecord[]>(); const ids = new Set(nodeItems.map((item) => entityKey(item)));
+  for (const item of nodeItems) { const parent = stringField(item, "parentNodeId"); const candidate = parent ? entityKey(item, parent) : ""; const key = parent && ids.has(candidate) ? candidate : ""; byParent.set(key, [...(byParent.get(key) ?? []), item]); }
   const rendered = new Set<string>();
   const render = (parent: string, ancestors: ReadonlySet<string>): React.ReactNode => {
-    const children = (byParent.get(parent) ?? []).filter((item) => !rendered.has(stringField(item, "nodeId") ?? ""));
+    const children = (byParent.get(parent) ?? []).filter((item) => !rendered.has(entityKey(item)));
     if (!children.length) return null;
-    return <ul>{children.map((item) => { const id = stringField(item, "nodeId") ?? "unknown"; rendered.add(id); const cyclic = ancestors.has(id); const next = new Set(ancestors); next.add(id); return <li key={id}><RecordCard view="nodes" record={item} onChanged={() => {}} />{cyclic ? null : render(id, next)}</li>; })}</ul>;
+    return <ul>{children.map((item) => { const key = entityKey(item); rendered.add(key); const cyclic = ancestors.has(key); const next = new Set(ancestors); next.add(key); return <li key={key}><RecordCard view="nodes" record={item} onChanged={() => {}} />{cyclic ? null : render(key, next)}</li>; })}</ul>;
   };
   const roots = render("", new Set());
-  const disconnected = items.filter((item) => { const id = stringField(item, "nodeId") ?? ""; return id && !rendered.has(id); });
-  return <section aria-label="Topology hierarchy" className="workflow-tree">{roots}{disconnected.length ? <ul>{disconnected.map((item) => { const id = stringField(item, "nodeId")!; if (rendered.has(id)) return null; rendered.add(id); return <li key={id}><RecordCard view="nodes" record={item} onChanged={() => {}} />{render(id, new Set([id]))}</li>; })}</ul> : null}</section>;
+  const disconnected = nodeItems.filter((item) => { const id = stringField(item, "nodeId") ?? ""; return id && !rendered.has(entityKey(item)); });
+  return <section aria-label="Topology hierarchy" className="workflow-tree">{roots}{disconnected.length ? <ul>{disconnected.map((item) => { const key = entityKey(item); if (rendered.has(key)) return null; rendered.add(key); return <li key={key}><RecordCard view="nodes" record={item} onChanged={() => {}} />{render(key, new Set([key]))}</li>; })}</ul> : null}</section>;
+}
+
+function relativeTime(value: string | undefined): string {
+  if (!value) return "—";
+  const elapsed = Date.now() - Date.parse(value);
+  if (!Number.isFinite(elapsed)) return value;
+  const seconds = Math.max(0, Math.floor(elapsed / 1_000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+function eventLabel(record: JsonRecord): string {
+  return (stringField(record, "eventType") ?? "workflow.event").replaceAll(".", " · ").replaceAll("_", " ");
+}
+function ActivityFeed({ items, compact = false }: { items: readonly JsonRecord[]; compact?: boolean }) {
+  const visible = compact ? items.slice(0, 12) : items;
+  return <section className={`activity-feed${compact ? " compact" : ""}`} aria-label={compact ? "Recent activity" : "Activity events"}>{visible.map((item, index) => {
+    const id = stringField(item, "eventId") ?? `event-${index}`; const status = stringField(item, "status");
+    const actor = stringField(item, "agentName") ?? stringField(item, "agentId") ?? stringField(item, "nodeId") ?? stringField(item, "producer") ?? "workflow";
+    return <article className="activity-row" key={id}><i className={`activity-rail ${statusTone(status ?? stringField(item, "eventType"))}`} aria-hidden="true" /><time dateTime={stringField(item, "timestamp")}>{relativeTime(stringField(item, "timestamp"))}</time><div><div className="activity-row-title"><strong>{actor}</strong><span>{eventLabel(item)}</span></div><p>{stringField(item, "workflowId") ?? stringField(item, "runId") ?? stringField(item, "sessionId") ?? id}</p></div><span className="event-sequence">#{numberField(item, "sequence") ?? index + 1}</span></article>;
+  })}</section>;
+}
+function Kpi({ label, value, sub, tone }: { label: string; value: string; sub: string; tone?: "run" | "brand" | "done" | "warn" }) {
+  return <article className={`kpi${tone ? ` kpi-${tone}` : ""}`}><div className="kpi-top"><span className="kpi-label">{label}</span><i className="kpi-signal" aria-hidden="true" /></div><div className="kpi-val">{value}</div><div className="kpi-sub">{sub}</div></article>;
+}
+function Overview({ items, onNavigate }: { items: readonly JsonRecord[]; onNavigate(view: View): void }) {
+  const inView = (view: View) => items.filter((item) => item.dashboardView === view);
+  const projects = inView("projects"); const workflows = inView("workflows"); const sessions = inView("sessions"); const runs = inView("runs"); const nodes = inView("nodes"); const tasks = inView("tasks"); const questions = inView("questions"); const approvals = inView("approvals"); const activity = inView("activity"); const usage = inView("usage")[0] ?? {};
+  const activeRuns = runs.filter((item) => statusTone(stringField(item, "status")) === "running").length;
+  const pendingHuman = [...questions, ...approvals].filter((item) => statusTone(stringField(item, "status")) === "waiting").length;
+  const estimatedTokens = (numberField(usage, "estimatedInputTokens") ?? 0) + (numberField(usage, "estimatedOutputTokens") ?? 0);
+  const confirmedTokens = (numberField(usage, "providerConfirmedInputTokens") ?? 0) + (numberField(usage, "providerConfirmedOutputTokens") ?? 0);
+  const confirmedCost = (numberField(usage, "providerConfirmedCostMicroUsd") ?? 0) / 1_000_000;
+  const latest = activity.map((item) => stringField(item, "timestamp")).filter((value): value is string => Boolean(value)).sort().at(-1);
+  return <>
+    <section className="kpis dashboard-kpis" aria-label="Workflow summary">
+      <Kpi label="Running" value={activeRuns.toLocaleString("en-US")} sub={`${runs.length} total runs`} tone="run" />
+      <Kpi label="Sessions" value={sessions.length.toLocaleString("en-US")} sub={`${workflows.length} workflows`} />
+      <Kpi label="Agents" value={nodes.length.toLocaleString("en-US")} sub={`${tasks.length} delegated tasks`} tone="done" />
+      <Kpi label="Human input" value={pendingHuman.toLocaleString("en-US")} sub="pending decisions" tone={pendingHuman ? "warn" : undefined} />
+      <Kpi label="Tokens" value={(confirmedTokens || estimatedTokens).toLocaleString("en-US")} sub={confirmedTokens ? "provider confirmed" : "estimated"} />
+      <Kpi label="Total cost" value={`$${confirmedCost.toFixed(4)}`} sub={latest ? `updated ${relativeTime(latest)}` : "no usage yet"} tone="brand" />
+    </section>
+    <section className="widgets dashboard-widgets">
+      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live structure</span><h2 className="w-title">Session topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span><button type="button" onClick={() => onNavigate("nodes")}>Open Topology</button></div></div><div className="topology-canvas">{nodes.length ? <Topology items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No topology yet</strong><span>Select a workflow and send a message to start a run.</span></div>}</div></section>
+      <section className="widget activity-widget"><div className="w-head"><div><span className="widget-eyebrow">Streaming</span><h2 className="w-title">Activity</h2></div><div className="w-tools"><span className="live-indicator"><i />live</span><button type="button" onClick={() => onNavigate("activity")}>View all</button></div></div>{activity.length ? <ActivityFeed items={activity} compact /> : <div className="overview-empty small"><strong>Waiting for events</strong><span>Workflow activity will appear here in real time.</span></div>}</section>
+      <section className="widget workflow-widget"><div className="w-head"><div><span className="widget-eyebrow">Catalog</span><h2 className="w-title">Workflows</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("workflows")}>Explore</button></div></div><div className="overview-workflow-list">{workflows.slice(0, 6).map((item) => <button type="button" key={identity("workflows", item)} onClick={() => onNavigate("workflows")}><span><i className={`dot ${statusTone(stringField(item, "status"))}`} />{stringField(item, "workflowId") ?? "workflow"}</span><StatusBadge status={stringField(item, "status")} /></button>)}{!workflows.length && <div className="overview-empty small"><strong>No projected workflows</strong><span>Run /hive:select inside Pi.</span></div>}</div></section>
+      <section className="widget usage-widget"><div className="w-head"><div><span className="widget-eyebrow">Precision separated</span><h2 className="w-title">Cost &amp; tokens</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("cost")}>Inspect usage</button></div></div><div className="usage-bars"><div><span>Provider confirmed</span><b>{confirmedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, confirmedTokens ? 100 : 0)}%` }} /></i></div><div><span>Estimated</span><b>{estimatedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, estimatedTokens && !confirmedTokens ? 100 : confirmedTokens ? estimatedTokens / confirmedTokens * 100 : 0)}%` }} /></i></div></div></section>
+    </section>
+    {!projects.length && !workflows.length && <p className="overview-footnote">The dashboard is connected. Select a workflow in Pi to populate this project.</p>}
+  </>;
+}
+
+function NavIcon({ view }: { view: View }) {
+  const common = { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.45, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
+  if (view === "overview") return <svg {...common}><rect x="2" y="2" width="5" height="5" rx="1.2" /><rect x="9" y="2" width="5" height="5" rx="1.2" /><rect x="2" y="9" width="5" height="5" rx="1.2" /><rect x="9" y="9" width="5" height="5" rx="1.2" /></svg>;
+  if (["projects", "workflows", "sessions", "runs"].includes(view)) return <svg {...common}><rect x="2" y="3" width="12" height="4" rx="1.5" /><rect x="2" y="10" width="12" height="3" rx="1.5" /></svg>;
+  if (["nodes", "tasks"].includes(view)) return <svg {...common}><circle cx="8" cy="3" r="1.7" /><circle cx="3.5" cy="12" r="1.7" /><circle cx="12.5" cy="12" r="1.7" /><path d="M8 4.8v2.5M3.5 10.2V8h9v2.2" /></svg>;
+  if (["activity", "history", "evidence"].includes(view)) return <svg {...common}><path d="M1.5 8h3l1.4-4 3 8 1.7-5 1.1 1H14.5" /></svg>;
+  if (["questions", "approvals", "checkpoints"].includes(view)) return <svg {...common}><path d="M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12Z" /><path d="M6.6 6.2A1.6 1.6 0 0 1 8.2 4.8c1 0 1.8.6 1.8 1.5 0 1.2-1.7 1.3-1.7 2.7M8.3 11.3h.01" /></svg>;
+  if (["knowledge-bundles", "knowledge-jobs", "knowledge-proposals", "knowledge"].includes(view)) return <svg {...common}><path d="M3 2.5h7.5A2.5 2.5 0 0 1 13 5v8.5H5A2 2 0 0 1 3 11.5v-9Z" /><path d="M5 13.5v-9h8M6.5 7h4M6.5 9.5h3" /></svg>;
+  if (["cost", "model-mix", "usage"].includes(view)) return <svg {...common}><path d="M8 1.8v12.4M11 4.2H6.6a2 2 0 1 0 0 4h2.8a2 2 0 1 1 0 4H4.7" /></svg>;
+  return <svg {...common}><path d="M3 2.5h7l3 3v8H3z" /><path d="M10 2.5v3h3M5.5 9h5M5.5 11.5h4" /></svg>;
+}
+function HiveMark({ compact = false }: { compact?: boolean }) {
+  return <span className={`hive-mark${compact ? " compact" : ""}`} aria-hidden="true"><svg width={compact ? 20 : 24} height={compact ? 20 : 24} viewBox="0 0 24 24" fill="none"><path d="m12 2.8 7.7 4.5v9L12 20.8l-7.7-4.5v-9L12 2.8Z" stroke="currentColor" strokeWidth="1.7" /><circle cx="12" cy="12" r="3.2" fill="currentColor" /><path d="M12 5.2v3.1M17.7 8.6 15 10.1M17.7 15.4 15 13.9M6.3 15.4 9 13.9M6.3 8.6 9 10.1" stroke="var(--brand-contrast)" strokeWidth="1.1" /></svg></span>;
 }
 
 function parseSseFrame(raw: string): SseFrame | undefined {
@@ -275,16 +377,23 @@ function parseSseFrame(raw: string): SseFrame | undefined {
 }
 function sleep(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolve) => { const timer = setTimeout(resolve, ms); signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); }); }
 
+function initialTheme(): Theme {
+  try { return window.localStorage.getItem("hive-theme") === "light" ? "light" : "dark"; }
+  catch { return "dark"; }
+}
+
 export default function WorkflowDashboard({ embedded = false }: { embedded?: boolean }) {
-  const [view, setView] = useState<View>("workflows"); const viewRef = useRef<View>(view); viewRef.current = view;
-  const [items, setItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
-  const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const generation = useRef(0);
+  const [view, setView] = useState<View>("overview"); const viewRef = useRef<View>(view); viewRef.current = view;
+  const [items, setItems] = useState<readonly JsonRecord[]>([]); const [summaryItems, setSummaryItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
+  const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [theme, setTheme] = useState<Theme>(initialTheme); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
   const load = useCallback(async (append = false) => {
     const requestedView = view; const currentGeneration = ++generation.current; if (append) setLoadingMore(true); else setLoading(true); setError(undefined);
-    try { const page = await fetchPage(requestedView, append ? cursorRef.current ?? undefined : undefined); if (generation.current !== currentGeneration || viewRef.current !== requestedView) return; setItems((prior) => (append ? [...prior, ...page.items] : page.items).slice(0, MAX_RENDERED_ITEMS)); cursorRef.current = page.nextCursor; setCursor(page.nextCursor); }
+    try { const page = await fetchPage(requestedView, append ? cursorRef.current ?? undefined : undefined); if (generation.current !== currentGeneration || viewRef.current !== requestedView) return; setItems((prior) => (append ? [...prior, ...page.items] : page.items).slice(0, MAX_RENDERED_ITEMS)); if (requestedView === "overview") setSummaryItems(page.items); cursorRef.current = page.nextCursor; setCursor(page.nextCursor); }
     catch (reason) { if (generation.current === currentGeneration) setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { if (generation.current === currentGeneration) { setLoading(false); setLoadingMore(false); } }
   }, [view]);
+  useEffect(() => { document.documentElement.dataset.theme = theme; try { window.localStorage.setItem("hive-theme", theme); } catch { /* storage unavailable */ } }, [theme]);
+  useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 1_000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { setItems([]); cursorRef.current = null; setCursor(null); void load(false); }, [load]);
   useEffect(() => {
     const controller = new AbortController(); let lastEventId: string | undefined; let fatal = false;
@@ -320,15 +429,17 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
   }, [load]);
 
   const title = TITLES[view]; const stateText = loading ? `Loading ${title}…` : error ? `${title} unavailable.` : resync ? `Resynchronizing ${title} from API v1.` : `${items.length} ${title.toLowerCase()} loaded; stream ${streamState}.`;
-  const content = useMemo(() => view === "nodes" && items.length ? <Topology items={items} />
-    : view === "cost" && items[0] ? <CostSummary record={items[0]} />
-      : view === "model-mix" && items.length ? <ModelMixSummary items={items} />
-        : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} onChanged={() => void load(false)} />)}</section> : null, [items, load, title, view]);
-  const landmarkContent = <><div className="workflow-title"><div><h1>{title}</h1><p>Bounded, allowlisted workflow state. This dashboard cannot launch workflows or edit configuration.</p></div><button type="button" onClick={() => void load(false)} disabled={loading}>Refresh</button></div><div className="workflow-state" role="status" aria-live="polite">{stateText}</div>
-    {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <p className="workflow-empty">No {title.toLowerCase()} available.</p> : content}
+  const content = useMemo(() => view === "overview" && items.length ? <Overview items={items} onNavigate={setView} />
+    : view === "nodes" && items.length ? <Topology items={items} />
+      : view === "activity" || view === "history" ? items.length ? <ActivityFeed items={items} /> : null
+        : view === "cost" && items[0] ? <CostSummary record={items[0]} />
+          : view === "model-mix" && items.length ? <ModelMixSummary items={items} />
+            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} onChanged={() => void load(false)} />)}</section> : null, [items, load, title, view]);
+  const landmarkContent = <><div className="workflow-title"><div><span className="page-eyebrow">Mission control / {title}</span><h1>{title}</h1><p>{SUBTITLES[view]}</p></div><button className="refresh-button" type="button" onClick={() => void load(false)} disabled={loading}><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M13.5 5.5A5.8 5.8 0 1 0 14 9" /><path d="M13.5 2v3.5H10" /></svg>Refresh</button></div><div className="workflow-state sr-status" role="status" aria-live="polite">{stateText}</div>
+    {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <div className="workflow-empty"><HiveMark compact /><strong>No {title.toLowerCase()} available</strong><span>The dashboard is connected and waiting for projected workflow state.</span></div> : content}
     {cursor && !loading && !error && <button className="load-more" type="button" disabled={loadingMore || items.length >= MAX_RENDERED_ITEMS} onClick={() => void load(true)}>{loadingMore ? "Loading…" : items.length >= MAX_RENDERED_ITEMS ? "Display limit reached" : `Load more ${title}`}</button>}</>;
-  return <div className={`workflow-dashboard${embedded ? " workflow-dashboard-embedded" : ""}`}><a className="skip-link" href="#workflow-content">Skip to content</a>{!embedded && <header><div><strong>pi-hive</strong><span>Workflow observation &amp; exact human controls</span></div><span className="api-badge">API v1</span></header>}<div className="workflow-shell">
-    <nav aria-label="Workflow dashboard views">{WORKFLOW_VIEWS.filter((entry) => entry !== "knowledge").map((entry) => <button type="button" aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => setView(entry)}>{TITLES[entry]}</button>)}</nav>
-    {embedded ? <section id="workflow-content" tabIndex={-1} aria-label="Workflow dashboard content">{landmarkContent}</section> : <main id="workflow-content" tabIndex={-1}>{landmarkContent}</main>}
-  </div></div>;
+  if (embedded) return <div className="workflow-dashboard workflow-dashboard-embedded"><section id="workflow-content" tabIndex={-1} aria-label="Workflow dashboard content">{landmarkContent}</section></div>;
+  const project = summaryItems.find((item) => item.dashboardView === "projects"); const projectLabel = stringField(project ?? {}, "projectLabel") ?? stringField(project ?? {}, "projectId") ?? "Local project";
+  const navCount = (entry: View): number | undefined => entry === "overview" ? undefined : summaryItems.filter((item) => item.dashboardView === entry).length || undefined;
+  return <div className="workflow-dashboard dashboard-frame"><a className="skip-link" href="#workflow-content">Skip to content</a><aside className="dashboard-sidebar"><div className="sidebar-brand"><HiveMark /><div><strong>pi-hive</strong><span>Mission control</span></div></div><div className="project-scope"><i aria-hidden="true" /><span>{projectLabel}</span><small>API v1</small></div><nav aria-label="Workflow dashboard views">{NAV_GROUPS.map((group) => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.views.map((entry) => <button type="button" aria-label={TITLES[entry]} aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => setView(entry)}><NavIcon view={entry} /><span>{TITLES[entry]}</span>{navCount(entry) !== undefined && <small aria-hidden="true">{navCount(entry)}</small>}</button>)}</div>)}</nav><div className="sidebar-footer"><div className="connection-card"><span><i className={streamState} aria-hidden="true" />{streamState === "live" ? "Connected" : streamState === "connecting" ? "Connecting" : "Resyncing"}</span><code>localhost:43191</code></div><div className="theme-switch" aria-label="Dashboard theme"><button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button><button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button></div></div></aside><div className="dashboard-main"><header className="dashboard-topbar"><div><span className={`topbar-live ${streamState}`}><i />{streamState}</span><span className="topbar-divider" /><span className="topbar-project">{projectLabel}</span></div><time dateTime={now.toISOString()}>{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></header><main id="workflow-content" tabIndex={-1}>{landmarkContent}</main></div></div>;
 }

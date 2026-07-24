@@ -8,23 +8,23 @@ async function expectNoSeriousA11yViolations(page: Page): Promise<void> {
   expect(blocking, blocking.map((value) => `${value.id}: ${value.help} (${value.nodes.length})`).join("\n")).toEqual([]);
 }
 
-test("workflow-only dashboard starts on bounded workflow state and API v1", async ({ page }) => {
+test("mission-control overview starts on bounded workflow state and API v1", async ({ page }) => {
   const mock = await openDashboard(page);
-  await expect(page.getByRole("heading", { name: "Workflows", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "custom-delivery" })).toBeVisible();
-  await expect(page.getByText(/stream live/i)).toBeVisible();
-  await expect(page.getByRole("button", { name: /Overview|Plans|Settings/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await expect(page.locator(".overview-workflow-list").getByText("custom-delivery", { exact: true })).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Workflow summary" })).toBeVisible();
   expect(mock.workflowRequests.every((request) => request.includes("/api/v1/"))).toBe(true);
 });
 
-test("every workflow view is keyboard reachable without a legacy tab", async ({ page }) => {
+test("every workflow view is keyboard reachable from the restored mission-control shell", async ({ page }) => {
   await openDashboard(page);
-  for (const view of ["Projects", "Sessions", "Runs", "Topology", "Tasks", "Artifacts", "Evidence", "Questions", "Checkpoints", "Approvals", "Knowledge bundles", "Knowledge jobs", "Knowledge proposals", "Cost", "Model mix", "Usage", "Activity", "History", "Workflows"]) {
+  for (const view of ["Overview", "Projects", "Sessions", "Runs", "Topology", "Tasks", "Artifacts", "Evidence", "Questions", "Checkpoints", "Approvals", "Knowledge bundles", "Knowledge jobs", "Knowledge proposals", "Cost", "Model mix", "Usage", "Activity", "History", "Workflows"]) {
     const button = page.getByRole("button", { name: view, exact: true });
     await button.focus(); await page.keyboard.press("Enter");
     await expect(page.getByRole("heading", { name: view, exact: true })).toBeVisible();
   }
-  await expect(page.getByText(/cannot launch workflows or edit configuration/i)).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workflow dashboard views" })).toBeVisible();
 });
 
 test("evidence, cost, and model mix render separated bounded telemetry", async ({ page }) => {
@@ -81,7 +81,8 @@ test("hasMore pagination stops at the 500-row render bound", async ({ page }) =>
   for (let pageIndex = 1; pageIndex < 5; pageIndex++) await page.getByRole("button", { name: "Load more Tasks" }).click();
   await expect(page.getByRole("button", { name: "Display limit reached" })).toBeDisabled();
   await expect(page.locator(".workflow-card")).toHaveCount(500);
-  expect(mock.workflowRequests.filter((request) => request.startsWith("GET /api/v1/tasks?")).map((request) => new URL(request.slice(4), "http://local").searchParams.get("cursor"))).toEqual([null, "100", "200", "300", "400"]);
+  const taskCursors = mock.workflowRequests.filter((request) => request.startsWith("GET /api/v1/tasks?")).map((request) => new URL(request.slice(4), "http://local").searchParams.get("cursor"));
+  expect(taskCursors.slice(-5)).toEqual([null, "100", "200", "300", "400"]);
 });
 
 test("workflow desktop and narrow layouts have no serious accessibility issues", async ({ page }) => {

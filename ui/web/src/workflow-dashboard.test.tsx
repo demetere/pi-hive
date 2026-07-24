@@ -134,7 +134,7 @@ describe("workflow dashboard API v1 client", () => {
     for (let pageIndex = 1; pageIndex < 5; pageIndex++) await user.click(await screen.findByRole("button", { name: /Load more Tasks/i }));
     expect(await screen.findByRole("button", { name: "Display limit reached" })).toBeDisabled();
     expect(screen.getAllByRole("article")).toHaveLength(500);
-    expect(calls.filter((url) => url.includes("/api/v1/tasks?")).map((url) => new URL(url, "http://local").searchParams.get("cursor"))).toEqual([null, "100", "200", "300", "400"]);
+    expect(calls.filter((url) => url.includes("/api/v1/tasks?")).map((url) => new URL(url, "http://local").searchParams.get("cursor"))).toEqual([null, null, "100", "200", "300", "400"]);
     view.unmount();
   }, 15_000);
 

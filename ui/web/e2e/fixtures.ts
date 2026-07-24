@@ -72,7 +72,7 @@ export async function installDashboardMock(page: Page, options: MockOptions = {}
 export async function openDashboard(page: Page, options: MockOptions = {}): Promise<DashboardMock> {
   const mock = await installDashboardMock(page, options);
   await page.goto("/");
-  await page.getByRole("heading", { name: "Workflows", exact: true }).waitFor();
-  await page.getByRole("heading", { name: "custom-delivery" }).waitFor();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.locator(".overview-workflow-list").getByText("custom-delivery", { exact: true }).waitFor();
   return mock;
 }
