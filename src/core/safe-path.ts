@@ -78,13 +78,15 @@ export function resolveContainedPath(root: string, candidate: string, options: C
   if (!root || !candidate || hasForeignAbsoluteSyntax(root) || hasForeignAbsoluteSyntax(candidate)) return null;
   const lexicalRoot = path.resolve(root);
   const lexicalCandidate = path.resolve(candidate);
-  if (!isPathInside(lexicalRoot, lexicalCandidate)) return null;
 
   // A configured root may itself be new (for example a not-yet-created tests/
-  // domain), so canonicalize it through its nearest existing parent.
+  // domain), so canonicalize it through its nearest existing parent. Darwin's
+  // /var -> /private/var alias also means trusted callers may already hold the
+  // canonical candidate while retaining the original lexical project root.
   const canonicalRoot = resolveCanonicalPath(lexicalRoot, { allowMissing: true });
+  if (!canonicalRoot || (!isPathInside(lexicalRoot, lexicalCandidate) && !isPathInside(canonicalRoot.canonicalPath, lexicalCandidate))) return null;
   const canonicalCandidate = resolveCanonicalPath(lexicalCandidate, options);
-  if (!canonicalRoot || !canonicalCandidate) return null;
+  if (!canonicalCandidate) return null;
   if (!isPathInside(canonicalRoot.canonicalPath, canonicalCandidate.canonicalPath)) return null;
   return canonicalCandidate;
 }

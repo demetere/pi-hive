@@ -19,30 +19,12 @@ export default defineConfig({
   },
   server: {
     port: 43192,
-    // During UI dev, proxy every dashboard-server route to the Bun server so the
-    // Vite HMR frontend talks to the real backend. /pl-review + /api carry the
-    // self-hosted Plannotator review surface (the review iframe + its handlers).
+    // During UI development, proxy only workflow dashboard production routes to Bun.
     proxy: {
-      "/events": target,
-      "/states": target,
-      "/sessions": target,
-      "/stream": target,
       "/health": target,
-      "/plans": target,
-      "/agent-log": target,
-      "/projects": target,
       "/bootstrap.json": target,
-      "/topologies": target,
-      "/models": target,
-      "/delegations": target,
-      "/tool-calls": target,
-      "/storage": target,
-      "/conversation": target,
-      "/thinking": target,
-      "/project-overrides": target,
-      "/review-sessions": target,
-      "/pl-review": target,
-      "/api": target,
+      "/shutdown": target,
+      "/api/v1": target,
     },
   },
 });

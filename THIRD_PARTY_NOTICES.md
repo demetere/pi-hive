@@ -4,49 +4,12 @@ pi-hive includes or redistributes the third-party materials listed below. This
 file is informational; the licenses below apply only to the named materials
 and do not replace pi-hive's MIT license.
 
-## Plannotator
-
-The review-only UI in `ui/review/` is derived from
-`@plannotator/pi-extension` version 0.23.1:
-
-- Project: Plannotator
-- Source: https://github.com/backnotprop/plannotator/tree/v0.23.1
-- Copyright: Copyright (c) 2025 backnotprop
-- Upstream license: MIT OR Apache-2.0
-- License used for this redistribution: MIT
-
-pi-hive extracts and modifies only the review functionality from Plannotator's
-`plannotator.html`; it does not redistribute the full extension. The derived
-source and compressed output are verified against the pinned npm artifact by
-`scripts/check-review-vendor.mjs`.
-
-### MIT License
-
-Copyright (c) 2025 backnotprop
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 ## Hanken Grotesk
 
 The dashboard redistributes this Latin-subset web font:
 
-- `ui/web/public/fonts/hanken-grotesk-latin.woff2`
+- Source: `ui/web/public/fonts/hanken-grotesk-latin.woff2`
+- Published: `ui/web/dist/fonts/hanken-grotesk-latin.woff2`
 - Source project: https://github.com/marcologous/hanken-grotesk
 - Copyright: Copyright 2021 The Hanken Grotesk Project Authors
 - Project lead: Alfredo Marco Pradil
@@ -56,8 +19,10 @@ The dashboard redistributes this Latin-subset web font:
 
 The dashboard redistributes these Latin-subset web fonts:
 
-- `ui/web/public/fonts/dm-mono-latin-400.woff2`
-- `ui/web/public/fonts/dm-mono-latin-500.woff2`
+- Source: `ui/web/public/fonts/dm-mono-latin-400.woff2`
+- Source: `ui/web/public/fonts/dm-mono-latin-500.woff2`
+- Published: `ui/web/dist/fonts/dm-mono-latin-400.woff2`
+- Published: `ui/web/dist/fonts/dm-mono-latin-500.woff2`
 - Source project: https://github.com/googlefonts/dm-mono
 - Copyright: Copyright 2020 The DM Mono Project Authors
 - Typeface design and development: Colophon Foundry, commissioned by DeepMind

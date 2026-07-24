@@ -1,0 +1,209 @@
+{
+  "$id": "urn:pi-hive:schema:hive-manifest:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agents": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": {
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "knowledge": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": {
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "provider": {
+              "const": "okf",
+              "type": "string"
+            },
+            "updates": {
+              "anyOf": [
+                {
+                  "const": "automatic",
+                  "type": "string"
+                },
+                {
+                  "const": "reviewed",
+                  "type": "string"
+                },
+                {
+                  "const": "read-only",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "provider",
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "schema-version": {
+      "const": 1,
+      "type": "number"
+    },
+    "settings": {
+      "additionalProperties": false,
+      "properties": {
+        "defaults": {
+          "additionalProperties": false,
+          "properties": {
+            "agent": {
+              "additionalProperties": false,
+              "properties": {
+                "model": {
+                  "pattern": "^(?:inherit|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)$",
+                  "type": "string"
+                },
+                "thinking": {
+                  "anyOf": [
+                    {
+                      "const": "inherit",
+                      "type": "string"
+                    },
+                    {
+                      "const": "off",
+                      "type": "string"
+                    },
+                    {
+                      "const": "minimal",
+                      "type": "string"
+                    },
+                    {
+                      "const": "low",
+                      "type": "string"
+                    },
+                    {
+                      "const": "medium",
+                      "type": "string"
+                    },
+                    {
+                      "const": "high",
+                      "type": "string"
+                    },
+                    {
+                      "const": "xhigh",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "workflow": {
+              "additionalProperties": false,
+              "properties": {
+                "budgets": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "active-wall-time": {
+                      "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+                      "type": "string"
+                    },
+                    "max-agent-turns": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "max-delegations": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "max-parallel": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "max-tool-calls": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "token-budget": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "telemetry": {
+          "additionalProperties": false,
+          "properties": {
+            "dashboard-start": {
+              "anyOf": [
+                {
+                  "const": "session",
+                  "type": "string"
+                },
+                {
+                  "const": "workflow",
+                  "type": "string"
+                },
+                {
+                  "const": "manual",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "skills": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": {
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "workflows": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": {
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema-version",
+    "agents",
+    "workflows"
+  ],
+  "title": "pi-hive Manifest Schema v1",
+  "type": "object"
+}

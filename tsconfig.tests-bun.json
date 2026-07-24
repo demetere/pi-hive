@@ -4,5 +4,5 @@
     "lib": ["ES2022", "DOM"],
     "types": ["bun", "node"]
   },
-  "include": ["tests/*.spec.ts"]
+  "include": ["tests/**/*.spec.ts"]
 }

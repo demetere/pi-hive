@@ -1,0 +1,5 @@
+# Intentionally invalid after the 1.0 cutover. Use the manual migration guide.
+planning:
+  main: legacy-planner
+hive:
+  main: legacy-builder

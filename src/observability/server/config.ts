@@ -17,9 +17,7 @@ function validatedHost(): string {
   if (!raw || raw.includes("://") || /[\s/?#]/.test(raw) || raw.length > 253) throw new Error(`Invalid HIVE_TELEMETRY_HOST: ${raw || "<empty>"}`);
   const host = raw.replace(/^\[(.*)\]$/, "$1").toLowerCase();
   const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
-  if (!loopback && process.env.HIVE_TELEMETRY_ALLOW_NON_LOOPBACK !== "1") {
-    throw new Error(`Refusing non-loopback dashboard host "${raw}" without HIVE_TELEMETRY_ALLOW_NON_LOOPBACK=1`);
-  }
+  if (!loopback) throw new Error(`Refusing non-loopback dashboard host "${raw}"; first-release dashboard binding is loopback-only`);
   return host;
 }
 
@@ -29,6 +27,9 @@ export const SINGLE_LOG_PATH = process.env.HIVE_TELEMETRY_LOG || "";
 export const HIVE_GLOBAL_DIR = path.join(process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent"), "hive");
 export const REGISTRY_PATH = path.resolve(process.env.HIVE_TELEMETRY_REGISTRY || path.join(HIVE_GLOBAL_DIR, "telemetry-sessions.jsonl"));
 export const DB_PATH = path.resolve(process.env.HIVE_TELEMETRY_DB || path.join(HIVE_GLOBAL_DIR, "telemetry.db"));
+// Workflow telemetry is a clean schema break. Keep it in a separate rebuildable
+// database so legacy telemetry.db is never migrated, dual-read, or destroyed.
+export const WORKFLOW_DB_PATH = path.resolve(process.env.HIVE_WORKFLOW_TELEMETRY_DB || path.join(HIVE_GLOBAL_DIR, "workflow-telemetry-v1.db"));
 export const CONVERSATION_LOG = process.env.HIVE_CONVERSATION_LOG || "";
 export const BOOT_SESSION_ID = process.env.HIVE_SESSION_ID || "global";
 export const PROJECT_CWD = process.env.HIVE_PROJECT_CWD || process.cwd();

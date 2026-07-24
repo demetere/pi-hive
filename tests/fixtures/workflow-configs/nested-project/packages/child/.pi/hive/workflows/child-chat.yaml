@@ -1,0 +1,18 @@
+name: Child Chat
+description: Identify the child fixture from its nearest manifest.
+use-when: Testing nested project discovery.
+tags: [fixture]
+
+artifact:
+  adapter: none
+  profile: default
+  binding: none
+  options: {}
+
+team:
+  id: root
+  agent: child-root
+
+instructions:
+  root: |
+    Identify the child fixture.
