@@ -6,7 +6,7 @@ import { hashArtifactWorkspace } from "../artifacts/hashes";
 import { WorkspaceLeaseRuntime } from "../artifacts/leases";
 import { BUILTIN_ARTIFACT_REGISTRY, type ResolvedArtifactProfile } from "../artifacts/registry";
 import type { CheckpointPolicy } from "../artifacts/checkpoints";
-import { buildActivationSnapshot, loadConfigCatalogs, loadConfigProject, readActivationSnapshot, resolveConfigWorkflows, writeActivationSnapshot, type ActivationSnapshotFileV1, type SnapshotArtifactCompatibilityIdentity, type SnapshotCompatibilityRuntime, type SnapshotModelAdapter, type ValidWorkflowDefinition } from "../config/index";
+import { buildActivationSnapshot, loadConfigCatalogs, loadConfigProject, readActivationSnapshot, resolveConfigWorkflows, SnapshotModelPreflightError, writeActivationSnapshot, type ActivationSnapshotFileV1, type SnapshotArtifactCompatibilityIdentity, type SnapshotCompatibilityRuntime, type SnapshotModelAdapter, type ValidWorkflowDefinition } from "../config/index";
 import { canonicalJson } from "../config/snapshot-canonical";
 import { pruneWorkflowProjection, startWorkflowDashboard, stopWorkflowDashboard, workflowDashboardAvailable } from "./workflow-dashboard-service";
 import { createBudgetState, effectiveRuntimeBudgetLimitsFromSnapshot, reduceBudgetState } from "../workflows/budgets";
@@ -104,20 +104,28 @@ export function createPiWorkflowRuntimeCommandAuthority(): WorkflowRuntimeComman
   });
 }
 
-interface PreparedWorkflow { readonly item: WorkflowSelectorItem; readonly selectable?: SelectableWorkflow; readonly freshSelectable?: SelectableWorkflow; readonly current?: WorkflowSessionLink; readonly definition?: ValidWorkflowDefinition }
+interface PreparedWorkflow { readonly item: WorkflowSelectorItem; readonly selectable?: SelectableWorkflow; readonly freshSelectable?: SelectableWorkflow; readonly current?: WorkflowSessionLink; readonly definition?: ValidWorkflowDefinition; readonly freshError?: SnapshotModelPreflightError }
+type PiModel = ReturnType<ExtensionCommandContext["modelRegistry"]["getAvailable"]>[number];
+interface CompatibleActivation { readonly snapshot: ActivationSnapshotFileV1; readonly defaultModel: PiModel; readonly rootModel: PiModel; readonly root: ReturnType<typeof workflowRoot> }
 function currentPiSessionId(ctx: ExtensionCommandContext): string { return ctx.sessionManager.getSessionId(); }
 function requireContext(ctx: ExtensionCommandContext | undefined): ExtensionCommandContext { if (!ctx) throw new Error("Workflow command requires a command-bound Pi session context"); return ctx; }
 function modelId(ctx: ExtensionCommandContext): string { if (!ctx.model) throw new Error("Workflow activation requires a selected Pi model"); return `${ctx.model.provider}/${ctx.model.id}`; }
 function splitModel(value: string): readonly [string, string] { const index = value.indexOf("/"); if (index < 1 || index === value.length - 1) throw new Error(`Workflow model ${value} is invalid`); return [value.slice(0, index), value.slice(index + 1)]; }
-function modelAdapter(pi: ExtensionAPI, ctx: ExtensionCommandContext): SnapshotModelAdapter {
+function modelAdapter(pi: ExtensionAPI, ctx: ExtensionCommandContext, defaults?: Readonly<{ model: string; thinking: string }>): SnapshotModelAdapter {
   const registry = ctx.modelRegistry;
   return {
-    defaultModel: modelId(ctx), defaultThinking: String(pi.getThinkingLevel()),
+    defaultModel: defaults?.model ?? modelId(ctx), defaultThinking: defaults?.thinking ?? String(pi.getThinkingLevel()),
     find(id) { const [provider, selected] = splitModel(id); const model = registry.find(provider, selected); if (!model) return undefined; const mapped = model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? Object.keys(model.thinkingLevelMap) : []; return { id, contextWindow: model.contextWindow, maxTokens: model.maxTokens, thinking: [...new Set(["off", ...(model.reasoning ? ["minimal", "low", "medium", "high", "xhigh"] : []), ...mapped])] }; },
     canActivate(id) { const [provider, selected] = splitModel(id); const model = registry.find(provider, selected); return Boolean(model && registry.hasConfiguredAuth(model)); },
     estimateTokens(text) { return Math.ceil(Buffer.byteLength(text, "utf8") / 4); },
   };
 }
+function thinkingOptions(model: PiModel, current: string): readonly string[] {
+  const mapped = model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? Object.keys(model.thinkingLevelMap) : [];
+  const supported = [...new Set(["off", ...(model.reasoning ? ["minimal", "low", "medium", "high", "xhigh"] : []), ...mapped])];
+  return [...new Set([current, "medium", "low", "off", ...supported])].filter((level) => supported.includes(level));
+}
+function contextLabel(tokens: number): string { return tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 ? 1 : 0)}M` : `${Math.round(tokens / 1_000)}K`; }
 function workflowRoot(snapshot: ActivationSnapshotFileV1): Readonly<{ id: string; model: string; thinking: string; tools: readonly string[] }> {
   const team = snapshot.payload.workflow.team as { rootId?: unknown } | undefined; const id = typeof team?.rootId === "string" ? team.rootId : "";
   const authority = snapshot.payload.authority.nodes.find((node) => node.nodeId === id); const model = snapshot.payload.models.find((node) => node.nodeId === id);
@@ -212,20 +220,71 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
       let stored: ActivationSnapshotFileV1 | undefined;
       if (current) { try { stored = readActivationSnapshot(projectRoot, current.activationHash); } catch { stored = undefined; } }
       let freshSnapshot: ActivationSnapshotFileV1 | undefined;
-      if (definition.status === "valid") { freshSnapshot = buildActivationSnapshot({ project, catalogs, workflow: definition, authority: definition.authority, models: modelAdapter(pi, ctx), packageVersion: PACKAGE_VERSION }); writeActivationSnapshot(projectRoot, freshSnapshot); }
+      let freshError: SnapshotModelPreflightError | undefined;
+      if (definition.status === "valid") {
+        try { freshSnapshot = buildActivationSnapshot({ project, catalogs, workflow: definition, authority: definition.authority, models: modelAdapter(pi, ctx), packageVersion: PACKAGE_VERSION }); writeActivationSnapshot(projectRoot, freshSnapshot); }
+        catch (error) { if (error instanceof SnapshotModelPreflightError) freshError = error; else throw error; }
+      }
       const currentFresh = Boolean(current && freshSnapshot && current.activationHash === freshSnapshot.snapshotHash);
       const resumable = Boolean(current && stored && stored.payload.workflow.id === definition.id);
       const source: SelectableWorkflow["source"] = currentFresh || (!current && freshSnapshot) ? "current" : resumable ? "stale" : definition.status === "invalid" ? "invalid" : "missing";
       const selectedSnapshot = !currentFresh && resumable ? stored : freshSnapshot; let selectable: SelectableWorkflow | undefined; let freshSelectable: SelectableWorkflow | undefined;
       if (selectedSnapshot) { const root = workflowRoot(selectedSnapshot); selectable = { workflowId: definition.id, activationHash: selectedSnapshot.snapshotHash, source, resumable, freshEnabled: Boolean(freshSnapshot), model: root.model, thinking: root.thinking, tools: root.tools }; }
       if (freshSnapshot) { const root = workflowRoot(freshSnapshot); freshSelectable = { workflowId: definition.id, activationHash: freshSnapshot.snapshotHash, source: "current", resumable: currentFresh, freshEnabled: true, model: root.model, thinking: root.thinking, tools: root.tools }; }
-      const diagnostics = [...definition.diagnosticCodes, ...(current?.orphaned && current.recovery?.state === "blocked" ? current.recovery.codes : [])];
+      const diagnostics = [...definition.diagnosticCodes, ...(freshError?.codes ?? []), ...(current?.orphaned && current.recovery?.state === "blocked" ? current.recovery.codes : [])];
       const state: WorkflowSelectorItem["state"] = current?.orphaned ? "orphaned" : current && source === "current" ? "active" : current?.stale || source === "stale" ? "stale" : !current && archived.length ? "archived" : definition.status === "invalid" ? "invalid" : resumable ? "resumable" : "available";
-      return { current, ...(definition.status === "valid" ? { definition } : {}), ...(selectable ? { selectable } : {}), ...(freshSelectable ? { freshSelectable } : {}), item: {
+      return { current, ...(definition.status === "valid" ? { definition } : {}), ...(freshError ? { freshError } : {}), ...(selectable ? { selectable } : {}), ...(freshSelectable ? { freshSelectable } : {}), item: {
         workflowId: definition.id, name: definition.name ?? definition.id, description: definition.description ?? "Configured workflow", useWhen: definition.useWhen ?? "when selected by the operator", ...(definition.avoidWhen ? { avoidWhen: definition.avoidWhen } : {}), tags: definition.tags ?? [], adapter: definition.adapter ?? "none", profile: definition.profile ?? "default",
-        ...(selectedSnapshot ? { activationHash: selectedSnapshot.snapshotHash } : {}), source, archivedLinks: archived.map((link) => ({ workflowSessionId: link.workflowSessionId, piSessionId: link.piSessionId, activationHash: link.activationHash })), state, resumable, selectable: Boolean(freshSnapshot), diagnostics, ...(diagnostics.length ? { diagnostic: diagnostics.join(", ") } : {}),
+        ...(selectedSnapshot ? { activationHash: selectedSnapshot.snapshotHash } : {}), source, archivedLinks: archived.map((link) => ({ workflowSessionId: link.workflowSessionId, piSessionId: link.piSessionId, activationHash: link.activationHash })), state, resumable, selectable: Boolean(freshSnapshot || freshError), diagnostics, ...(diagnostics.length ? { diagnostic: freshError ? `Current model ${modelId(ctx)} cannot activate this workflow; selection can choose a compatible model.` : diagnostics.join(", ") } : {}),
       } };
     });
+  };
+  const compatibleActivations = (ctx: ExtensionCommandContext, definition: ValidWorkflowDefinition): readonly CompatibleActivation[] => {
+    const project = loadConfigProject(projectRoot); if (project.status !== "configured") throw new Error("Workflow configuration is unavailable or invalid");
+    const catalogs = loadConfigCatalogs(project);
+    const registry = ctx.modelRegistry;
+    const available = typeof registry.getAvailable === "function" ? registry.getAvailable() : [];
+    const models = [...available]
+      .filter((model) => registry.hasConfiguredAuth(model))
+      .sort((left, right) => right.contextWindow - left.contextWindow || `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`))
+      .slice(0, 256);
+    const choices: CompatibleActivation[] = [];
+    const seen = new Set<string>();
+    for (const defaultModel of models) {
+      for (const thinking of thinkingOptions(defaultModel, String(pi.getThinkingLevel()))) {
+        try {
+          const snapshot = buildActivationSnapshot({
+            project, catalogs, workflow: definition, authority: definition.authority,
+            models: modelAdapter(pi, ctx, { model: `${defaultModel.provider}/${defaultModel.id}`, thinking }),
+            packageVersion: PACKAGE_VERSION,
+          });
+          if (seen.has(snapshot.snapshotHash)) continue;
+          const root = workflowRoot(snapshot);
+          const [provider, id] = splitModel(root.model);
+          const rootModel = registry.find(provider, id);
+          if (!rootModel || !registry.hasConfiguredAuth(rootModel)) continue;
+          seen.add(snapshot.snapshotHash);
+          choices.push(Object.freeze({ snapshot, defaultModel, rootModel, root }));
+        } catch (error) { if (!(error instanceof SnapshotModelPreflightError)) throw error; }
+      }
+    }
+    return Object.freeze(choices.slice(0, 100));
+  };
+  const chooseCompatibleActivation = async (ctx: ExtensionCommandContext, definition: ValidWorkflowDefinition, error: SnapshotModelPreflightError): Promise<SelectableWorkflow | undefined> => {
+    const choices = compatibleActivations(ctx, definition);
+    if (!choices.length) throw new Error(`Workflow ${definition.id} has no authenticated compatible model (${error.codes.join(", ")})`);
+    const labels = choices.map((choice) => {
+      const inherited = `${choice.defaultModel.provider}/${choice.defaultModel.id}`;
+      const root = choice.root.model;
+      return `${root} · thinking ${choice.root.thinking} · ${contextLabel(choice.rootModel.contextWindow)} context${inherited === root ? "" : ` · inherit ${inherited}`}`;
+    });
+    if (ctx.mode !== "tui" || !ctx.hasUI) throw new Error(`Current model ${modelId(ctx)} cannot activate ${definition.id}. Choose a compatible model first: ${labels.slice(0, 10).join(", ")}`);
+    const selected = await ctx.ui.select(`Choose model for ${definition.name}`, labels);
+    const index = selected === undefined ? -1 : labels.indexOf(selected);
+    const choice = index < 0 ? undefined : choices[index];
+    if (!choice) return undefined;
+    writeActivationSnapshot(projectRoot, choice.snapshot);
+    return { workflowId: definition.id, activationHash: choice.snapshot.snapshotHash, source: "current", resumable: false, freshEnabled: true, model: choice.root.model, thinking: choice.root.thinking, tools: choice.root.tools };
   };
   const selectedLink = (ctx: ExtensionCommandContext): WorkflowSessionLink => { const link = listSessionLinks(projectRoot).find((entry): entry is WorkflowSessionLink => entry.kind === "workflow" && entry.piSessionId === currentPiSessionId(ctx)); if (!link) throw new Error("No workflow session is selected"); return link; };
   const owner = () => ({ pid: process.pid, processMarker: `pi-hive-${process.pid}`, nonce: sharedRuntimeOwnerNonce, verifyDead: () => false });
@@ -259,7 +318,18 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
   return {
     configured: true,
     async listWorkflows(ctx) { return prepare(requireContext(ctx)).map((entry) => entry.item); },
-    async select(input, context) { const ctx = requireContext(context); const candidate = prepare(ctx).find((entry) => entry.item.workflowId === input.workflowId); const selected = input.fresh ? candidate?.freshSelectable : candidate?.selectable; if (!selected) throw new Error(`Workflow ${input.workflowId} is unavailable${input.fresh ? " for fresh activation" : ""}`); const result = await lifecycle(ctx).select({ workflow: selected, ...(input.fresh ? { fresh: true } : {}), ...(input.from ? { from: input.from } : {}) }); return `${result.kind === "resumed" ? "Resumed" : "Selected"} ${input.workflowId}`; },
+    async select(input, context) {
+      const ctx = requireContext(context);
+      const candidate = prepare(ctx).find((entry) => entry.item.workflowId === input.workflowId);
+      let selected = input.fresh ? candidate?.freshSelectable : candidate?.selectable;
+      if (!selected && candidate?.definition && candidate.freshError) selected = await chooseCompatibleActivation(ctx, candidate.definition, candidate.freshError);
+      if (!selected) {
+        if (candidate?.freshError) return `Selection cancelled for ${input.workflowId}`;
+        throw new Error(`Workflow ${input.workflowId} is unavailable${input.fresh ? " for fresh activation" : ""}`);
+      }
+      const result = await lifecycle(ctx).select({ workflow: selected, ...(input.fresh ? { fresh: true } : {}), ...(input.from ? { from: input.from } : {}) });
+      return `${result.kind === "resumed" ? "Resumed" : "Selected"} ${input.workflowId}`;
+    },
     async status(context) {
       const ctx = requireContext(context);
       const sessionId = currentPiSessionId(ctx);

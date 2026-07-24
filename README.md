@@ -17,7 +17,7 @@ Pi supplies the peer dependencies. pi-hive supports Linux only; npm rejects inst
 1. Copy the full contents of `examples/combined-openspec-delivery`, `examples/split-openspec-handoff`, `examples/markdown-plan-lifecycle`, or `examples/artifact-free-debug` into a project, including hidden files.
 2. Restart Pi in that project.
 3. Run `/hive:doctor`, then `/hive:select`.
-4. Select a workflow. Selection creates or resumes a linked session but does not start work.
+4. Select a workflow. Selection creates or resumes a linked session but does not start work. `model: inherit` starts from Pi's current model; if it cannot fit a fresh activation, the TUI offers authenticated compatible models before switching. The confirmed model and thinking level are frozen for the selected workflow session.
 5. Send an ordinary chat message. The first message starts a run; later messages steer the same open run.
 6. The root completes through the `workflow_finish` tool. The workflow remains selected for another run until `/hive:exit`.
 

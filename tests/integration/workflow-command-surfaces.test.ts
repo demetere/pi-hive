@@ -21,7 +21,7 @@ import { appendWorkflowEvent, readWorkflowJournal } from "../../src/workflows/jo
 import { QuestionService } from "../../src/workflows/questions";
 import { terminalEnvelopeFromEvent, WorkflowRunLifecycle } from "../../src/workflows/runs";
 import { RunOrchestrationService } from "../../src/workflows/orchestration";
-import { initializeNormalParent, markMissingPiSession, listSessionLinks, workflowLinkGenerationHash, type WorkflowSessionLink } from "../../src/workflows/sessions";
+import { initializeNormalParent, markMissingPiSession, listSessionLinks, replaceSessionLinks, workflowLinkGenerationHash, type WorkflowSessionLink } from "../../src/workflows/sessions";
 import { FakePiSessionManager } from "../helpers/fake-pi-session-manager";
 
 function persistedFakePiSessionManager(projectRoot: string, sessionRoot: string, id: string): FakePiSessionManager {
@@ -113,6 +113,47 @@ test("actual schema-v1 index wiring has unique commands, no mode-cycle shortcut,
   assert.equal(widgets.some(([, value]) => value !== undefined), false, "normal chat renders no workflow widget");
 });
 
+test("selected workflow sessions restore their frozen model and thinking after TUI changes", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-index-model-freeze-"));
+  mkdirSync(join(projectRoot, ".pi"), { recursive: true });
+  cpSync(join(process.cwd(), "tests/fixtures/workflow-configs/artifact-free-debug/.pi/hive"), join(projectRoot, ".pi/hive"), { recursive: true });
+  const hooks = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+  const notices: string[] = [];
+  const frozen = { provider: "provider", id: "frozen", contextWindow: 1_000_000, maxTokens: 16_384, reasoning: true };
+  const changed = { ...frozen, id: "changed" };
+  let currentModel = changed;
+  let thinking = "high";
+  const pi: any = {
+    registerTool() {}, registerCommand() {},
+    on(name: string, handler: (event: any, ctx: any) => unknown) { hooks.set(name, [...(hooks.get(name) ?? []), handler]); },
+    getThinkingLevel: () => thinking,
+    async setModel(model: typeof frozen) { currentModel = model; ctx.model = model; return true; },
+    setThinkingLevel(level: string) { thinking = level; },
+  };
+  const ctx: any = {
+    mode: "tui", hasUI: true, model: currentModel,
+    sessionManager: { getSessionId: () => "workflow-pi", getSessionFile: () => join(projectRoot, "workflow.jsonl") },
+    modelRegistry: { find: (_provider: string, id: string) => id === "frozen" ? frozen : id === "changed" ? changed : undefined, hasConfiguredAuth: () => true },
+    ui: { notify: (text: string) => notices.push(text) },
+  };
+  const link: WorkflowSessionLink = {
+    kind: "workflow", formatVersion: 1, workflowSessionId: "workflow-session", workflowId: "debug-chat", activationHash: "a".repeat(64),
+    piSessionId: "workflow-pi", piSessionFile: join(projectRoot, "workflow.jsonl"), normalParentId: "normal", normalParentFile: join(projectRoot, "normal.jsonl"),
+    status: "current", stale: false, model: "provider/frozen", thinking: "medium", tools: [], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", name: "hive:debug-chat:aaaaaaaa",
+  };
+  replaceSessionLinks(projectRoot, [link]);
+  const previousCwd = process.cwd();
+  try { process.chdir(projectRoot); await hiveExtension(pi); }
+  finally { process.chdir(previousCwd); }
+  for (const handler of hooks.get("model_select") ?? []) await handler({ model: changed, previousModel: frozen, source: "set" }, ctx);
+  assert.equal(currentModel.id, "frozen");
+  assert.equal(thinking, "medium");
+  thinking = "high";
+  for (const handler of hooks.get("thinking_level_select") ?? []) await handler({ level: "high", previousLevel: "medium" }, ctx);
+  assert.equal(thinking, "medium");
+  assert.equal(notices.filter((notice) => /keeps .* fixed/i.test(notice)).length, 2);
+});
+
 test("pre-1.0 config fails before any partial registration or telemetry mutation", async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-index-legacy-"));
   mkdirSync(join(projectRoot, ".pi/hive"), { recursive: true });
@@ -143,6 +184,35 @@ test("real linked production services register every exact operation with bound 
   const services = createLinkedWorkflowCommandServices(pi, "/project", "project-1", createPiWorkflowRuntimeCommandAuthority());
   registerWorkflowCommands(pi, services);
   assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+});
+
+test("inherited workflows remain selectable and offer compatible models when the current model is too small", async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "hive-command-model-choice-"));
+  mkdirSync(join(projectRoot, ".pi"), { recursive: true });
+  cpSync(join(process.cwd(), "tests/fixtures/workflow-configs/artifact-free-debug/.pi/hive"), join(projectRoot, ".pi/hive"), { recursive: true });
+  const small = { provider: "provider", id: "small", contextWindow: 200_000, maxTokens: 16_384, reasoning: true };
+  const large = { provider: "provider", id: "large", contextWindow: 1_000_000, maxTokens: 16_384, reasoning: true };
+  const selectedTitles: string[] = [];
+  const selectedLabels: string[][] = [];
+  const ctx: any = {
+    mode: "tui", hasUI: true, model: small,
+    sessionManager: { getSessionId: () => "normal" },
+    modelRegistry: {
+      find: (provider: string, id: string) => provider === "provider" ? [small, large].find((model) => model.id === id) : undefined,
+      getAvailable: () => [large],
+      hasConfiguredAuth: () => true,
+    },
+    ui: { notify() {}, async select(title: string, labels: string[]) { selectedTitles.push(title); selectedLabels.push(labels); return undefined; } },
+  };
+  const pi: any = { getThinkingLevel: () => "medium" };
+  const services = createLinkedWorkflowCommandServices(pi, projectRoot, resolveProjectIdentity(projectRoot).projectId, createPiWorkflowRuntimeCommandAuthority());
+  const rows = await services.listWorkflows(ctx);
+  assert.equal(rows[0]?.selectable, true);
+  assert.match(rows[0]?.diagnostic ?? "", /current model.*cannot activate.*compatible model/i);
+  assert.equal(await services.select({ workflowId: "debug-chat", fresh: true }, ctx), "Selection cancelled for debug-chat");
+  assert.deepEqual(selectedTitles, ["Choose model for Debug Chat"]);
+  assert.match(selectedLabels[0]?.join("\n") ?? "", /provider\/large.*1M context/i);
+  assert.equal(listSessionLinks(projectRoot).some((link) => link.kind === "workflow"), false);
 });
 
 test("real index wiring executes select, status, checkpoints, answer, cancel, exit, and recover with valid Pi context", async () => {

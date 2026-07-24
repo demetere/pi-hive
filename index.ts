@@ -86,6 +86,22 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
   );
   let activeRuntime: SelectedProductionWorkflowRuntime | undefined;
   let workflowUiVisible = false;
+  let restoringFrozenModel = false;
+
+  const applyFrozenModel = async (ctx: ExtensionContext, modelId: string, thinking: string): Promise<void> => {
+    if (restoringFrozenModel) return;
+    const separator = modelId.indexOf("/");
+    if (separator < 1 || separator === modelId.length - 1) throw new Error(`Frozen workflow model ${modelId} is invalid`);
+    const model = ctx.modelRegistry.find(modelId.slice(0, separator), modelId.slice(separator + 1));
+    if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`Frozen workflow model ${modelId} is unavailable`);
+    restoringFrozenModel = true;
+    try {
+      if (!ctx.model || `${ctx.model.provider}/${ctx.model.id}` !== modelId) {
+        if (!await pi.setModel(model)) throw new Error(`Frozen workflow model ${modelId} could not be selected`);
+      }
+      if (String(pi.getThinkingLevel()) !== thinking) pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+    } finally { restoringFrozenModel = false; }
+  };
 
   const workflowTools = workflowToolDefinitionsWithRuntime(() => activeRuntime?.rootServices());
   const workflowToolNames = new Set(workflowTools.map((tool) => tool.name));
@@ -131,6 +147,7 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
     const selected = selectedLink(configured.projectRoot, ctx);
     if (selected) {
       readActivationSnapshot(configured.projectRoot, selected.activationHash);
+      await applyFrozenModel(ctx, selected.model, selected.thinking);
       pi.setActiveTools([...selected.tools]);
     } else {
       sessionFile = materializeNormalSession(ctx.sessionManager) ?? sessionFile;
@@ -160,7 +177,21 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
       });
     }
   });
-  pi.on("input", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
+  pi.on("model_select", async (event, ctx) => {
+    if (restoringFrozenModel) return;
+    const selected = selectedLink(configured.projectRoot, ctx);
+    if (!selected || `${event.model.provider}/${event.model.id}` === selected.model) return;
+    await applyFrozenModel(ctx, selected.model, selected.thinking);
+    if (ctx.hasUI) ctx.ui.notify(`Workflow ${selected.workflowId} keeps ${selected.model} fixed. Exit and select again to change models.`, "warning");
+  });
+  pi.on("thinking_level_select", async (event, ctx) => {
+    if (restoringFrozenModel) return;
+    const selected = selectedLink(configured.projectRoot, ctx);
+    if (!selected || String(event.level) === selected.thinking) return;
+    await applyFrozenModel(ctx, selected.model, selected.thinking);
+    if (ctx.hasUI) ctx.ui.notify(`Workflow ${selected.workflowId} keeps thinking ${selected.thinking} fixed. Exit and select again to change it.`, "warning");
+  });
+  pi.on("input", async (_event, ctx) => { const selected = selectedLink(configured.projectRoot, ctx); if (selected) await applyFrozenModel(ctx, selected.model, selected.thinking); refreshSelection(ctx); refreshWorkflowUi(ctx); });
   pi.on("message_end", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
   pi.on("turn_end", async (_event, ctx) => { refreshSelection(ctx); refreshWorkflowUi(ctx); });
 

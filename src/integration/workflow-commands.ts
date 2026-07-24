@@ -84,7 +84,7 @@ function tokens(args: string): string[] {
 function selectorDescription(item: WorkflowSelectorItem): string {
   const activation = item.activationHash ? `snapshot: ${item.activationHash.slice(0, 12)}` : "snapshot: unavailable";
   const archives = item.archivedLinks.length ? `archives: ${item.archivedLinks.map((link) => `${link.workflowSessionId}/${link.piSessionId}/${link.activationHash.slice(0, 12)}`).join(",")}` : "archives: none";
-  const details = [item.description, `use: ${item.useWhen}`, item.avoidWhen ? `avoid: ${item.avoidWhen}` : "", item.tags.length ? `tags: ${item.tags.join(",")}` : "", `${item.adapter}/${item.profile}`, item.state, `source: ${item.source}`, activation, archives, item.diagnostics.join(", ") || item.diagnostic || ""].filter(Boolean);
+  const details = [item.description, `use: ${item.useWhen}`, item.avoidWhen ? `avoid: ${item.avoidWhen}` : "", item.tags.length ? `tags: ${item.tags.join(",")}` : "", `${item.adapter}/${item.profile}`, item.state, `source: ${item.source}`, activation, archives, item.diagnostic || item.diagnostics.join(", ") || ""].filter(Boolean);
   return bounded(details.join(" · ")).replaceAll("\n", " ");
 }
 

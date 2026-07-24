@@ -8,7 +8,7 @@ import type { ValidWorkflowDefinition } from "./resolver";
 import { isEffectiveAuthoritySnapshotV1, type EffectiveAuthoritySnapshotV1 } from "./snapshot-authority";
 import { canonicalCatalogText } from "./catalog-hash";
 import { canonicalJson, hashActivationPayload } from "./snapshot-canonical";
-import { SNAPSHOT_CONTEXT_POLICY, validateSnapshotModels, type SnapshotModelAdapter, type SnapshotNodeModelValidation } from "./snapshot-model";
+import { SNAPSHOT_CONTEXT_POLICY, validateSnapshotModels, type SnapshotModelAdapter, type SnapshotModelDiagnosticCode, type SnapshotNodeModelValidation } from "./snapshot-model";
 import { CAPABILITY_CONTRACT_VERSION, SCHEMA_VERSION } from "./versions";
 import { buildDynamicPromptReserveForActivation, buildStaticPromptForActivation } from "../workflows/prompts";
 import { curatorFitsSnapshotModelContext } from "../knowledge/curator-contract";
@@ -35,6 +35,14 @@ export interface ActivationSnapshotPayloadV1 {
 }
 export interface ActivationSnapshotFileV1 { snapshotHash: string; createdAt: string; payload: ActivationSnapshotPayloadV1 }
 export interface BuildActivationSnapshotInput { project: ConfiguredProject; workflow: ValidWorkflowDefinition; catalogs: ConfigCatalogResult; authority: EffectiveAuthoritySnapshotV1; models: SnapshotModelAdapter; packageVersion: string; createdAt?: string }
+export class SnapshotModelPreflightError extends Error {
+  readonly codes: readonly SnapshotModelDiagnosticCode[];
+  constructor(codes: readonly SnapshotModelDiagnosticCode[]) {
+    super(`Snapshot model preflight failed: ${codes.join(",")}`);
+    this.name = "SnapshotModelPreflightError";
+    this.codes = Object.freeze([...codes]);
+  }
+}
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function sorted(values: readonly string[]): string[] { return [...new Set(values)].sort(compare); }
 export function validateSnapshotRelativePath(path: string, label = "Snapshot path"): string {
@@ -190,7 +198,7 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
     return { nodeId: node.id, model: nodeAuthority.model, thinking: nodeAuthority.thinking, staticText, dynamicTokenReserve: buildDynamicPromptReserveForActivation() };
   });
   const modelResult = validateSnapshotModels(staticByNode, input.models);
-  if (!modelResult.ok) throw new Error(`Snapshot model preflight failed: ${modelResult.codes.join(",")}`);
+  if (!modelResult.ok) throw new SnapshotModelPreflightError(modelResult.codes);
   assertKnowledgeCuratorTopology(workflow, authority, modelResult.nodes);
   const payload: ActivationSnapshotPayloadV1 = {
     versions: { snapshot: SNAPSHOT_FORMAT_VERSION, packageContract: SNAPSHOT_PACKAGE_CONTRACT_VERSION, schema: SCHEMA_VERSION, capability: CAPABILITY_CONTRACT_VERSION, catalogHash: SNAPSHOT_CATALOG_HASH_VERSION, artifact: ARTIFACT_CONTRACT_VERSION, contextPolicy: SNAPSHOT_CONTEXT_POLICY.version, package: input.packageVersion },
