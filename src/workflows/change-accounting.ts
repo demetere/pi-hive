@@ -4,9 +4,10 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdir
 import { join, relative, resolve, sep } from "node:path";
 import { checkProtectedPath, type ProtectedPathRoot } from "../capabilities/reserved-paths";
 import { isTrustedCommandAttemptMetadata, type CommandAttemptMetadata } from "../capabilities/command";
+import { canonicalJson } from "../config/snapshot-canonical";
 import type { JsonValue } from "../config/types";
 import { resolveProjectPath } from "../core/safe-path";
-import { createWorkflowEvent, sealWorkflowEvent, type WorkflowEventEnvelope, type WorkflowEventType } from "./events";
+import { createWorkflowEvent, sealWorkflowEvent, WORKFLOW_EVENT_LIMITS, type WorkflowEventEnvelope, type WorkflowEventType } from "./events";
 import { appendWorkflowEventChecked, readWorkflowJournal } from "./journal";
 import { replayWorkflowJournal } from "./replay";
 import type { FileChangeRecord, ProjectStateResult } from "./runs";
@@ -22,7 +23,7 @@ export interface PreExistingChange { readonly path: string; readonly status: str
 export interface GitChangeEvidence {
   readonly available: boolean; readonly head?: string; readonly indexHash?: string;
   readonly indexEntries?: Readonly<Record<string, string>>;
-  readonly status: readonly PreExistingChange[]; readonly diagnostics: readonly string[];
+  readonly status: readonly PreExistingChange[]; readonly diagnostics: readonly string[]; readonly partial?: boolean;
 }
 export type MutationPathKind = "file" | "directory";
 export interface MutationIntent { readonly attemptId: string; readonly path: string; readonly beforeHash?: string; readonly beforeKind?: MutationPathKind; readonly startedSequence: number }
@@ -104,8 +105,9 @@ function parseGitEvidence(value: unknown): GitChangeEvidence | undefined {
       indexEntries[path] = rawEntry;
     }
   }
+  if (value.partial !== undefined && typeof value.partial !== "boolean") throw new Error("Git change evidence partial marker is invalid");
   const diagnostics = Object.freeze(value.diagnostics.map((item) => boundedText(item, "Git diagnostic", 2_048)));
-  return deepFreeze({ available: value.available, ...(head ? { head } : {}), ...(indexHash ? { indexHash } : {}), ...(indexEntries ? { indexEntries } : {}), status: parseDirty(value.status), diagnostics });
+  return deepFreeze({ available: value.available, ...(head ? { head } : {}), ...(indexHash ? { indexHash } : {}), ...(indexEntries ? { indexEntries } : {}), status: parseDirty(value.status), diagnostics, ...(value.partial === true ? { partial: true } : {}) });
 }
 function payload(event: WorkflowEventEnvelope): Record<string, unknown> {
   if (!plainRecord(event.payload) || event.payload.formatVersion !== FORMAT_VERSION) throw new Error("Change accounting event payload is invalid");
@@ -193,11 +195,27 @@ function hashFile(path: string, maxBytes: number): { hash?: string; size?: numbe
   finally { if (fd !== undefined) closeSync(fd); }
 }
 function isRuntimeExcluded(path: string): boolean { return path === ".git" || path.startsWith(".git/") || path === ".pi/hive/sessions" || path.startsWith(".pi/hive/sessions/"); }
-function inventory(options: ChangeAccountingOptions, limits: ChangeAccountingLimits): Inventory {
+function inventory(options: ChangeAccountingOptions, limits: ChangeAccountingLimits, priorityPaths: readonly string[] = []): Inventory {
   const entries: Record<string, InventoryEntry> = {};
   const diagnostics: string[] = [];
   let aggregatePathBytes = 0;
   let partial = false;
+  const addFile = (path: string, absolute: string): void => {
+    if (entries[path]) return;
+    const pathBytes = Buffer.byteLength(path, "utf8");
+    if (Object.keys(entries).length >= limits.maxFiles || aggregatePathBytes + pathBytes > limits.maxAggregatePathBytes) { partial = true; return; }
+    const hashed = hashFile(absolute, limits.maxFileBytes);
+    if (!hashed.hash || hashed.size === undefined) { partial = true; diagnostics.push(`${path}: ${hashed.diagnostic ?? "hash unavailable"}`); return; }
+    entries[path] = Object.freeze({ path, hash: hashed.hash, size: hashed.size });
+    aggregatePathBytes += pathBytes;
+  };
+  for (const path of [...new Set(priorityPaths)].sort()) {
+    const target = resolveProjectPath(options.projectRoot, path, { allowMissing: true });
+    if (!target?.exists || isRuntimeExcluded(path)) continue;
+    let stat;
+    try { stat = lstatSync(target.lexicalPath); } catch { partial = true; diagnostics.push(`cannot inspect priority path ${path}`); continue; }
+    if (stat.isFile()) addFile(path, target.lexicalPath);
+  }
   const roots = options.scopes?.length ? options.scopes : ["."];
   const stack: string[] = [];
   for (const scope of roots) {
@@ -218,12 +236,8 @@ function inventory(options: ChangeAccountingOptions, limits: ChangeAccountingLim
       continue;
     }
     if (!stat.isFile()) { diagnostics.push(`unsupported inventory entry ${path}`); partial = true; continue; }
-    const pathBytes = Buffer.byteLength(path, "utf8");
-    if (Object.keys(entries).length >= limits.maxFiles || aggregatePathBytes + pathBytes > limits.maxAggregatePathBytes) { partial = true; diagnostics.push("inventory file/path bound exceeded"); break; }
-    const hashed = hashFile(absolute, limits.maxFileBytes);
-    if (!hashed.hash || hashed.size === undefined) { partial = true; diagnostics.push(`${path}: ${hashed.diagnostic ?? "hash unavailable"}`); continue; }
-    entries[path] = Object.freeze({ path, hash: hashed.hash, size: hashed.size });
-    aggregatePathBytes += pathBytes;
+    if (Object.keys(entries).length >= limits.maxFiles || aggregatePathBytes + Buffer.byteLength(path, "utf8") > limits.maxAggregatePathBytes) { partial = true; diagnostics.push("inventory file/path bound exceeded"); break; }
+    addFile(path, absolute);
   }
   return deepFreeze({ entries, partial, diagnostics: diagnostics.slice(0, 128) });
 }
@@ -247,14 +261,26 @@ function gitStatus(projectRoot: string): PreExistingChange[] {
   }
   return changes.sort((a, b) => a.path.localeCompare(b.path) || a.status.localeCompare(b.status));
 }
-function gitEvidence(projectRoot: string): GitChangeEvidence {
+function gitEvidence(projectRoot: string, limits: ChangeAccountingLimits): GitChangeEvidence {
   const diagnostics: string[] = [];
+  let partial = false;
   try {
     const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: projectRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
     if (!root) return deepFreeze({ available: false, status: [], diagnostics: ["Git root is unavailable"] });
     let head: string | undefined;
     try { head = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: projectRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined; }
     catch { diagnostics.push("Git HEAD is unborn or unavailable"); }
+    const allStatus = gitStatus(projectRoot);
+    const status: PreExistingChange[] = [];
+    let statusPathBytes = 0;
+    const statusPathLimit = Math.min(limits.maxAggregatePathBytes, 49_152);
+    for (const change of allStatus) {
+      const pathBytes = Buffer.byteLength(change.path, "utf8");
+      if (status.length >= Math.min(limits.maxFiles, 512) || statusPathBytes + pathBytes > statusPathLimit) { partial = true; break; }
+      status.push(change); statusPathBytes += pathBytes;
+    }
+    if (partial) diagnostics.push("Git status evidence bound exceeded");
+    const statusPaths = new Set(status.map((change) => change.path));
     const index = execFileSync("git", ["ls-files", "--stage", "-z", "--", "."], { cwd: projectRoot, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 8 * 1024 * 1024 });
     const indexHash = `sha256:${createHash("sha256").update("pi-hive-git-index-v1\0").update(index).digest("hex")}`;
     const indexEntries: Record<string, string> = {};
@@ -262,9 +288,9 @@ function gitEvidence(projectRoot: string): GitChangeEvidence {
       const match = /^([0-7]{6}) ([0-9a-f]{40,64}) ([0-3])\t([\s\S]+)$/u.exec(field);
       if (!match || match[3] !== "0") continue;
       const path = gitPath(projectRoot, match[4]);
-      if (path) indexEntries[path] = `${match[1]}:${match[2]}:${match[3]}`;
+      if (path && statusPaths.has(path)) indexEntries[path] = `${match[1]}:${match[2]}:${match[3]}`;
     }
-    return deepFreeze({ available: true, ...(head ? { head } : {}), indexHash, indexEntries, status: gitStatus(projectRoot), diagnostics });
+    return deepFreeze({ available: true, ...(head ? { head } : {}), indexHash, indexEntries, status, diagnostics, ...(partial ? { partial: true } : {}) });
   } catch (error) {
     return deepFreeze({ available: false, status: [], diagnostics: [`Git evidence unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 1_024)}`] });
   }
@@ -306,11 +332,29 @@ export class ChangeAccountingRuntime {
   captureBaseline(): ChangeBaseline {
     const existing = this.restore().baseline;
     if (existing) return existing;
-    const scan = inventory(this.options, this.limits);
-    const git = gitEvidence(this.options.projectRoot);
+    const git = gitEvidence(this.options.projectRoot, this.limits);
+    const scan = inventory(this.options, this.limits, git.status.map((change) => change.path));
     const dirty = git.status.map((change) => Object.freeze({ ...change, ...(scan.entries[change.path]?.hash ? { baselineHash: scan.entries[change.path].hash } : {}) }));
-    const mode: ChangeAccountingMode = scan.partial ? "partial" : git.available ? "git" : "scoped";
-    this.append("change.baseline.recorded", { mode, entries: scan.entries as unknown as JsonValue, dirty: dirty as unknown as JsonValue, git: git as unknown as JsonValue, partial: scan.partial, diagnostics: [...scan.diagnostics, ...git.diagnostics] });
+    const orderedEntries = Object.values(scan.entries).sort((left, right) => Number(Boolean(dirty.some((change) => change.path === right.path))) - Number(Boolean(dirty.some((change) => change.path === left.path))) || left.path.localeCompare(right.path));
+    const baseDiagnostics = [...scan.diagnostics, ...git.diagnostics];
+    const payloadFor = (count: number): Record<string, JsonValue> => {
+      const compacted = count < orderedEntries.length;
+      const entries = Object.fromEntries(orderedEntries.slice(0, count).map((entry) => [entry.path, entry]));
+      const partial = scan.partial || git.partial === true || compacted;
+      const diagnostics = [...baseDiagnostics, ...(compacted ? ["baseline event payload bound reduced inventory evidence"] : [])];
+      const mode: ChangeAccountingMode = partial ? "partial" : git.available ? "git" : "scoped";
+      return { mode, entries: entries as unknown as JsonValue, dirty: dirty as unknown as JsonValue, git: git as unknown as JsonValue, partial, diagnostics };
+    };
+    const payloadLimit = WORKFLOW_EVENT_LIMITS.payloadBytes - 4_096;
+    let low = 0, high = orderedEntries.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (Buffer.byteLength(canonicalJson({ formatVersion: FORMAT_VERSION, ...payloadFor(middle) }), "utf8") <= payloadLimit) low = middle;
+      else high = middle - 1;
+    }
+    const payload = payloadFor(low);
+    if (Buffer.byteLength(canonicalJson({ formatVersion: FORMAT_VERSION, ...payload }), "utf8") > payloadLimit) throw new Error("CHANGE_BASELINE_PAYLOAD_LIMIT_EXCEEDED");
+    this.append("change.baseline.recorded", payload);
     return this.restore().baseline!;
   }
   private currentState(path: string): Readonly<{ kind: MutationPathKind; hash: string }> | undefined {
@@ -415,8 +459,8 @@ export class ChangeAccountingRuntime {
     const state = this.restore();
     const baseline = state.baseline;
     if (!baseline) return deepFreeze({ state: "unsatisfied", issues: ["run change baseline is missing"], fileChanges: [], changeCoverage: "partial", preExistingChanges: [], partial: true });
-    const current = inventory(this.options, this.limits);
-    const currentGit = baseline.git?.available ? gitEvidence(this.options.projectRoot) : undefined;
+    const currentGit = baseline.git?.available ? gitEvidence(this.options.projectRoot, this.limits) : undefined;
+    const current = inventory(this.options, this.limits, [...Object.keys(baseline.entries), ...(currentGit?.status.map((change) => change.path) ?? [])]);
     const baselineStatus = new Map((baseline.git?.status ?? []).map((entry) => [entry.path, entry.status]));
     const currentStatus = new Map((currentGit?.status ?? []).map((entry) => [entry.path, entry.status]));
     const statusChangedPaths = [...new Set([...baselineStatus.keys(), ...currentStatus.keys()])]
@@ -500,7 +544,7 @@ export class ChangeAccountingRuntime {
     const unresolvedCommands = Object.values(state.commandAttempts).filter((attempt) => attempt.status === "pending");
     if (unresolvedCommands.length) issues.push(`${unresolvedCommands.length} known mutating shell/Git attempt(s) have no durable change-accounting result`);
     const gitUnavailable = baseline.mode === "git" && !currentGit?.available;
-    const partial = baseline.partial || current.partial || gitUnavailable;
+    const partial = baseline.partial || current.partial || currentGit?.partial === true || gitUnavailable;
     const metadataDrift = indexChanged || headChanged || statusChangedPaths.length > 0;
     const allRecorded = fileChanges.every((change) => change.attribution === "recorded");
     const allGitBacked = fileChanges.every((change) => change.attribution === "recorded" || change.attribution === "git-reconciled");

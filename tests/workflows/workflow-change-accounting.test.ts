@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ChangeAccountingRuntime } from "../../src/workflows/change-accounting.ts";
 import { analyzeCommand } from "../../src/capabilities/command.ts";
+import { canonicalJson } from "../../src/config/snapshot-canonical.ts";
+import { WORKFLOW_EVENT_LIMITS } from "../../src/workflows/events.ts";
+import { readWorkflowJournal } from "../../src/workflows/journal.ts";
 
 function fixture(git = false) {
   const projectRoot = mkdtempSync(join(tmpdir(), "hive-changes-"));
@@ -259,6 +262,23 @@ test("bounded inventories declare partial coverage instead of claiming completen
   const report = runtime.reconcile();
   assert.equal(report.changeCoverage, "partial");
   assert.equal(report.partial, true);
+});
+
+test("large Git baselines fit one bounded event and preserve dirty-path evidence first", () => {
+  const { projectRoot, runtime } = fixture(true);
+  mkdirSync(join(projectRoot, "bulk"));
+  for (let index = 0; index < 1_300; index++) writeFileSync(join(projectRoot, "bulk", `${String(index).padStart(4, "0")}-${"x".repeat(80)}.txt`), `${index}\n`);
+  writeFileSync(join(projectRoot, "zz-dirty.txt"), "clean\n");
+  commit(projectRoot);
+  writeFileSync(join(projectRoot, "zz-dirty.txt"), "pre-existing edit\n");
+
+  const baseline = runtime.captureBaseline();
+  assert.equal(baseline.partial, true);
+  assert.match(baseline.diagnostics.join(" "), /payload bound/i);
+  assert.match(baseline.dirty.find((change) => change.path === "zz-dirty.txt")?.baselineHash ?? "", /^sha256:/u);
+  const event = readWorkflowJournal(projectRoot, "session-1").find((candidate) => candidate.type === "change.baseline.recorded");
+  assert.ok(event);
+  assert.ok(Buffer.byteLength(canonicalJson(event.payload), "utf8") <= WORKFLOW_EVENT_LIMITS.payloadBytes);
 });
 
 test("Git index-only protected drift is detected even when the worktree hash returns to baseline", () => {
