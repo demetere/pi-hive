@@ -148,7 +148,7 @@ test("real-shaped activation materializes a slash-only canonical normal session 
       getThinkingLevel: () => "medium",
       getAllTools: () => [...new Set([...baseline, ...declared])].map((name) => ({ name })),
     };
-    await hiveExtension(pi, { startDashboard: async () => {} });
+    await hiveExtension(pi, { startDashboard: async () => {}, runtimePlatform: "linux" });
     for (const handler of hooks.get("session_start") ?? []) await handler({ reason }, ctx);
   };
   const createContext = (): any => {

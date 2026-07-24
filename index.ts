@@ -1,6 +1,7 @@
 /** Config-first workflow extension entrypoint. */
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { assertFilesystemPlatformSupported } from "./src/capabilities/filesystem";
 import { loadConfigProject, readActivationSnapshot } from "./src/config/index";
 import { resolveProjectIdentity } from "./src/shared/project-identity";
 import { workflowToolDefinitionsWithRuntime } from "./src/integration/workflow-tools";
@@ -58,11 +59,13 @@ export function createWorkflowDashboardStartLifecycle<Context>(
 
 export interface HiveExtensionDependencies {
   readonly startDashboard?: (ctx: ExtensionContext, open: boolean) => Promise<unknown>;
+  /** Test seam; production always uses process.platform. */
+  readonly runtimePlatform?: NodeJS.Platform;
 }
 
 /** Testable production wiring seam; constructing services has no process side effects. */
-export async function registerLinkedWorkflowCommandSurfaces(pi: ExtensionAPI, projectRoot: string, projectId: string, onSettled?: (ctx: ExtensionCommandContext) => void | Promise<void>, runtimeOwnerNonce?: string): Promise<void> {
-  registerWorkflowCommands(pi, createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), runtimeOwnerNonce), onSettled);
+export async function registerLinkedWorkflowCommandSurfaces(pi: ExtensionAPI, projectRoot: string, projectId: string, onSettled?: (ctx: ExtensionCommandContext) => void | Promise<void>, runtimeOwnerNonce?: string, runtimePlatform: NodeJS.Platform = process.platform): Promise<void> {
+  registerWorkflowCommands(pi, createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), runtimeOwnerNonce, runtimePlatform), onSettled);
 }
 
 function selectedLink(projectRoot: string, ctx: ExtensionContext): WorkflowSessionLink | undefined {
@@ -79,6 +82,7 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
   if (configured.status === "invalid") throw configurationFailure(configured);
 
   const project = resolveProjectIdentity(configured.projectRoot);
+  const runtimePlatform = dependencies.runtimePlatform ?? process.platform;
   const runtimes = new WorkflowProductionRuntimeRegistry(configured.projectRoot, project.projectId, undefined, runtimeOwnerNonce);
   const dashboardStart = createWorkflowDashboardStartLifecycle<ExtensionContext>(
     configured.manifest.settings?.telemetry?.["dashboard-start"],
@@ -135,7 +139,7 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
     refreshSelection(ctx);
     refreshWorkflowUi(ctx);
     if (selectedLink(configured.projectRoot, ctx)) await dashboardStart.workflowSelected(ctx);
-  }, runtimeOwnerNonce);
+  }, runtimeOwnerNonce, runtimePlatform);
 
   // This handler is registered before lifecycle hooks so session restoration has
   // selected the exact linked authority before resume/input callbacks run.
@@ -146,6 +150,12 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
     if (!sessionFile) return;
     const selected = selectedLink(configured.projectRoot, ctx);
     if (selected) {
+      try { assertFilesystemPlatformSupported(runtimePlatform); }
+      catch (error) {
+        pi.setActiveTools([]);
+        if (ctx.hasUI) ctx.ui.notify(String(error instanceof Error ? error.message : error), "error");
+        return;
+      }
       readActivationSnapshot(configured.projectRoot, selected.activationHash);
       await applyFrozenModel(ctx, selected.model, selected.thinking);
       pi.setActiveTools([...selected.tools]);

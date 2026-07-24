@@ -123,8 +123,10 @@ test("selected workflow sessions restore their frozen model and thinking after T
   const changed = { ...frozen, id: "changed" };
   let currentModel = changed;
   let thinking = "high";
+  let activeTools = ["read"];
   const pi: any = {
     registerTool() {}, registerCommand() {},
+    getActiveTools: () => [...activeTools], getAllTools: () => [], setActiveTools: (tools: string[]) => { activeTools = [...tools]; },
     on(name: string, handler: (event: any, ctx: any) => unknown) { hooks.set(name, [...(hooks.get(name) ?? []), handler]); },
     getThinkingLevel: () => thinking,
     async setModel(model: typeof frozen) { currentModel = model; ctx.model = model; return true; },
@@ -143,8 +145,11 @@ test("selected workflow sessions restore their frozen model and thinking after T
   };
   replaceSessionLinks(projectRoot, [link]);
   const previousCwd = process.cwd();
-  try { process.chdir(projectRoot); await hiveExtension(pi); }
+  try { process.chdir(projectRoot); await hiveExtension(pi, { runtimePlatform: "darwin" }); }
   finally { process.chdir(previousCwd); }
+  for (const handler of hooks.get("session_start") ?? []) await handler({ reason: "resume" }, ctx);
+  assert.deepEqual(activeTools, [], "an unsupported workflow resume fails closed without constructing a runtime");
+  assert.match(notices.at(-1) ?? "", /FILESYSTEM_PLATFORM_UNSUPPORTED.*require Linux.*darwin/i);
   for (const handler of hooks.get("model_select") ?? []) await handler({ model: changed, previousModel: frozen, source: "set" }, ctx);
   assert.equal(currentModel.id, "frozen");
   assert.equal(thinking, "medium");
@@ -181,9 +186,17 @@ test("index production wiring constructs real linked services and runtime comman
 test("real linked production services register every exact operation with bound runtime authority", () => {
   const commands = new Map<string, unknown>();
   const pi = { registerCommand(name: string, value: unknown) { commands.set(name, value); } } as any;
-  const services = createLinkedWorkflowCommandServices(pi, "/project", "project-1", createPiWorkflowRuntimeCommandAuthority());
+  const services = createLinkedWorkflowCommandServices(pi, "/project", "project-1", createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
   registerWorkflowCommands(pi, services);
   assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+});
+
+test("workflow selection rejects unsupported hosts before config or ownership mutation", async () => {
+  const services = createLinkedWorkflowCommandServices({} as any, "/missing-project", "project-1", createPiWorkflowRuntimeCommandAuthority(), undefined, "darwin");
+  await assert.rejects(
+    () => services.select({ workflowId: "debug-chat", fresh: true }, {} as any),
+    /FILESYSTEM_PLATFORM_UNSUPPORTED.*require Linux.*darwin/i,
+  );
 });
 
 test("inherited workflows remain selectable and offer compatible models when the current model is too small", async () => {
@@ -205,7 +218,7 @@ test("inherited workflows remain selectable and offer compatible models when the
     ui: { notify() {}, async select(title: string, labels: string[]) { selectedTitles.push(title); selectedLabels.push(labels); return undefined; } },
   };
   const pi: any = { getThinkingLevel: () => "medium" };
-  const services = createLinkedWorkflowCommandServices(pi, projectRoot, resolveProjectIdentity(projectRoot).projectId, createPiWorkflowRuntimeCommandAuthority());
+  const services = createLinkedWorkflowCommandServices(pi, projectRoot, resolveProjectIdentity(projectRoot).projectId, createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
   const rows = await services.listWorkflows(ctx);
   assert.equal(rows[0]?.selectable, true);
   assert.match(rows[0]?.diagnostic ?? "", /current model.*cannot activate.*compatible model/i);
@@ -269,9 +282,9 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   const pi: any = { getThinkingLevel: () => "medium", registerCommand(name: string, value: unknown) { commands.set(name, value); } };
   const projectId = resolveProjectIdentity(projectRoot).projectId;
   initializeNormalParent({ configured: true, projectRoot, projectId, piSessionId: "normal", piSessionFile: sessionFile, model: "provider/model", thinking: "medium", activeTools: [] });
-  await registerLinkedWorkflowCommandSurfaces(pi, projectRoot, projectId);
+  await registerLinkedWorkflowCommandSurfaces(pi, projectRoot, projectId, undefined, undefined, "linux");
   assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
-  const services = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority());
+  const services = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
   await commands.get("hive:status").handler("", ctx);
   const normalStatus = notices.at(-1)?.[0] ?? "";
   assert.match(normalStatus, /^Normal chat normal/u);
@@ -385,7 +398,7 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   assert.equal(successorLease.acquire().ok, true, "subsequent work acquires immediately after cancellation");
   assert.equal(successorLease.release(), true);
   assert.equal(protectedLease.release(), true);
-  const restoredServices = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority());
+  const restoredServices = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
   const restoredStatus = await restoredServices.status(ctx);
   assert.match(restoredStatus, /cancelled run production-command-run/u);
   assert.match(restoredStatus, /workers 1 \(queued 0, active 0, suspended 0, terminal 1\)/u);

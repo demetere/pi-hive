@@ -9,6 +9,7 @@ import type { CheckpointPolicy } from "../artifacts/checkpoints";
 import { buildActivationSnapshot, loadConfigCatalogs, loadConfigProject, readActivationSnapshot, resolveConfigWorkflows, SnapshotModelPreflightError, writeActivationSnapshot, type ActivationSnapshotFileV1, type SnapshotArtifactCompatibilityIdentity, type SnapshotCompatibilityRuntime, type SnapshotModelAdapter, type ValidWorkflowDefinition } from "../config/index";
 import { canonicalJson } from "../config/snapshot-canonical";
 import { pruneWorkflowProjection, startWorkflowDashboard, stopWorkflowDashboard, workflowDashboardAvailable } from "./workflow-dashboard-service";
+import { assertFilesystemPlatformSupported } from "../capabilities/filesystem";
 import { createBudgetState, effectiveRuntimeBudgetLimitsFromSnapshot, reduceBudgetState } from "../workflows/budgets";
 import { createDelegationState, reduceDelegationState } from "../workflows/delegation";
 import { readHandoffState } from "../workflows/handoff";
@@ -208,7 +209,7 @@ function checkpointPolicies(snapshot: ActivationSnapshotFileV1, selected: Resolv
   return Object.freeze(policies);
 }
 
-export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoot: string, projectId: string, authority: WorkflowRuntimeCommandAuthority = createPiWorkflowRuntimeCommandAuthority(), sharedRuntimeOwnerNonce: string = ownerNonce): WorkflowCommandServices {
+export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoot: string, projectId: string, authority: WorkflowRuntimeCommandAuthority = createPiWorkflowRuntimeCommandAuthority(), sharedRuntimeOwnerNonce: string = ownerNonce, runtimePlatform: NodeJS.Platform = process.platform): WorkflowCommandServices {
   const prepare = (ctx: ExtensionCommandContext): readonly PreparedWorkflow[] => {
     const project = loadConfigProject(projectRoot); if (project.status !== "configured") throw new Error("Workflow configuration is unavailable or invalid");
     const catalogs = loadConfigCatalogs(project); const links = listSessionLinks(projectRoot).filter((link): link is WorkflowSessionLink => link.kind === "workflow");
@@ -287,7 +288,7 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
     return { workflowId: definition.id, activationHash: choice.snapshot.snapshotHash, source: "current", resumable: false, freshEnabled: true, model: choice.root.model, thinking: choice.root.thinking, tools: choice.root.tools };
   };
   const selectedLink = (ctx: ExtensionCommandContext): WorkflowSessionLink => { const link = listSessionLinks(projectRoot).find((entry): entry is WorkflowSessionLink => entry.kind === "workflow" && entry.piSessionId === currentPiSessionId(ctx)); if (!link) throw new Error("No workflow session is selected"); return link; };
-  const owner = () => ({ pid: process.pid, processMarker: `pi-hive-${process.pid}`, nonce: sharedRuntimeOwnerNonce, verifyDead: () => false });
+  const owner = () => ({ pid: process.pid, nonce: sharedRuntimeOwnerNonce });
   const lifecycle = (ctx: ExtensionCommandContext, recoverySessionId?: string) => createWorkflowLifecycleServiceHandlers({
     projectRoot, projectId, currentPiSessionId: () => currentPiSessionId(ctx), adapter: createPiSessionNavigationAdapter(ctx), owner,
     ...(recoverySessionId ? { recovery: { currentPiSessionFile: () => { const file = ctx.sessionManager.getSessionFile(); if (!file) throw new Error("Workflow recovery requires a persisted current Pi session"); return file; }, runtime: () => recoveryRuntime(ctx, recoverySessionId) } } : {}),
@@ -319,6 +320,7 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
     configured: true,
     async listWorkflows(ctx) { return prepare(requireContext(ctx)).map((entry) => entry.item); },
     async select(input, context) {
+      assertFilesystemPlatformSupported(runtimePlatform);
       const ctx = requireContext(context);
       const candidate = prepare(ctx).find((entry) => entry.item.workflowId === input.workflowId);
       let selected = input.fresh ? candidate?.freshSelectable : candidate?.selectable;
@@ -338,7 +340,7 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
     },
     async exit(context) { const ctx = requireContext(context); await exitWorkflowSession({ projectRoot, currentPiSessionId: currentPiSessionId(ctx), ownerNonce: sharedRuntimeOwnerNonce, adapter: createPiSessionNavigationAdapter(ctx) }); return "Returned to the linked normal chat session"; },
     async cancel(reason, context) { const ctx = requireContext(context); const link = selectedLink(ctx); const snapshot = readActivationSnapshot(projectRoot, link.activationHash); return authority.cancelRun({ ctx, projectRoot, projectId, link, snapshot, reason: reason?.trim() || "Cancelled by operator" }); },
-    async reload(context) { const ctx = requireContext(context); const link = selectedLink(ctx); const candidate = prepare(ctx).find((entry) => entry.item.workflowId === link.workflowId); if (!candidate?.freshSelectable) throw new Error("Current workflow cannot be freshly revalidated"); const result = await lifecycle(ctx).reload(() => ({ workflow: candidate.freshSelectable! })); return `Reloaded ${result.link.workflowId}`; },
+    async reload(context) { assertFilesystemPlatformSupported(runtimePlatform); const ctx = requireContext(context); const link = selectedLink(ctx); const candidate = prepare(ctx).find((entry) => entry.item.workflowId === link.workflowId); if (!candidate?.freshSelectable) throw new Error("Current workflow cannot be freshly revalidated"); const result = await lifecycle(ctx).reload(() => ({ workflow: candidate.freshSelectable! })); return `Reloaded ${result.link.workflowId}`; },
     async checkpoints(input, context) {
       const ctx = requireContext(context);
       const { service } = checkpoint(ctx);
@@ -362,7 +364,7 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
     async readQuestion(questionId, context) { const ctx = requireContext(context); const link = selectedLink(ctx); const runId = openRunId(projectRoot, link); if (!runId) throw new Error("No open workflow run has pending questions"); const snapshot = readActivationSnapshot(projectRoot, link.activationHash); const service = new QuestionService({ projectRoot, projectId, sessionId: link.workflowSessionId, runId, snapshot, authenticateControl: () => undefined }); const question = service.restore().questions[questionId]; if (!question || question.state !== "pending") throw new Error("Exact pending question is missing"); return { definition: question.definition }; },
     async answer(input, context) { const ctx = requireContext(context); const link = selectedLink(ctx); const runId = openRunId(projectRoot, link); if (!runId) throw new Error("No open workflow run has pending questions"); const snapshot = readActivationSnapshot(projectRoot, link.activationHash); const claimedIdentity = "pi-command-context"; const service = new QuestionService({ projectRoot, projectId, sessionId: link.workflowSessionId, runId, snapshot, authenticateControl: (request) => authority.authenticateQuestion(ctx, request) }); service.answer({ projectId, sessionId: link.workflowSessionId, runId, questionId: input.questionId, expectedState: "pending", value: input.value, channel: "command", operationId: `command-${randomUUID()}`, claimedIdentity }); return `Answered ${input.questionId}`; },
     async clearHandoff(context) { const ctx = requireContext(context); const link = selectedLink(ctx); const staged = readHandoffState(projectRoot, link.workflowSessionId).staged; if (!staged) return "No staged handoff"; lifecycle(ctx).clearHandoff(link.workflowSessionId, staged.packetHash); return "Handoff cleared"; },
-    async recover(orphanSessionId, context) { const ctx = requireContext(context); requireTrustedContext(ctx); const result = await lifecycle(ctx, orphanSessionId).recover(orphanSessionId); return `Recovered ${result.workflowSessionId} as Pi session ${result.piSessionId}`; },
+    async recover(orphanSessionId, context) { assertFilesystemPlatformSupported(runtimePlatform); const ctx = requireContext(context); requireTrustedContext(ctx); const result = await lifecycle(ctx, orphanSessionId).recover(orphanSessionId); return `Recovered ${result.workflowSessionId} as Pi session ${result.piSessionId}`; },
     async doctor(json, context) {
       requireContext(context);
       const project = loadConfigProject(projectRoot);

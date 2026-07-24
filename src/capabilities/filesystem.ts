@@ -81,8 +81,12 @@ function canonicalGrant(projectRoot: string, grant: NormalizedFilesystemGrant): 
   });
 }
 
+export function assertFilesystemPlatformSupported(platform: NodeJS.Platform = process.platform): void {
+  if (platform !== "linux") throw new Error(`FILESYSTEM_PLATFORM_UNSUPPORTED: pi-hive workflow runtimes require Linux (current platform: ${platform})`);
+}
+
 export function compileFilesystemPolicy(input: CompileFilesystemPolicyInput): CompiledFilesystemPolicy {
-  if ((input.platform ?? process.platform) !== "linux") throw new Error("FILESYSTEM_PLATFORM_UNSUPPORTED");
+  assertFilesystemPlatformSupported(input.platform);
   const lexicalProjectRoot = resolve(input.projectRoot);
   const canonical = resolveCanonicalPath(lexicalProjectRoot);
   if (!canonical || !canonical.exists || !statSync(canonical.canonicalPath).isDirectory()) throw new Error("FILESYSTEM_PROJECT_ROOT_INVALID");
