@@ -95,6 +95,9 @@ export function validateSnapshotResumeCompatibility(snapshot: ActivationSnapshot
   for (const modelRecord of snapshot.payload.models) {
     const storedContextValid = Number.isSafeInteger(modelRecord.staticTokens) && modelRecord.staticTokens >= 0
       && Number.isSafeInteger(modelRecord.dynamicReserve) && modelRecord.dynamicReserve >= 0
+      && (versions.contextPolicy === SNAPSHOT_CONTEXT_POLICY.version
+        ? Number.isSafeInteger(modelRecord.outputReserve) && modelRecord.outputReserve! >= SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve
+        : modelRecord.outputReserve === undefined || Number.isSafeInteger(modelRecord.outputReserve) && modelRecord.outputReserve >= 0)
       && Number.isSafeInteger(modelRecord.contextWindow) && modelRecord.contextWindow > 0;
     if (!storedContextValid) { codes.push("SNAPSHOT_CONTEXT_INVALID"); continue; }
     let model;
@@ -110,7 +113,7 @@ export function validateSnapshotResumeCompatibility(snapshot: ActivationSnapshot
     try {
       if (!Number.isSafeInteger(model.contextWindow) || model.contextWindow <= 0 || (model.maxTokens !== undefined && (!Number.isSafeInteger(model.maxTokens) || model.maxTokens < 0))) { codes.push("SNAPSHOT_CONTEXT_INVALID"); continue; }
       if (!model.thinking.includes(modelRecord.thinking)) codes.push("SNAPSHOT_THINKING_UNSUPPORTED");
-      if (modelRecord.staticTokens + modelRecord.dynamicReserve > model.contextWindow) codes.push("SNAPSHOT_CONTEXT_INSUFFICIENT");
+      if (modelRecord.staticTokens + modelRecord.dynamicReserve + (modelRecord.outputReserve ?? 0) > model.contextWindow) codes.push("SNAPSHOT_CONTEXT_INSUFFICIENT");
     } catch {
       codes.push("SNAPSHOT_MODEL_PROBE_FAILED");
     }

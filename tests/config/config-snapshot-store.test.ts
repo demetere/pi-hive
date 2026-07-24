@@ -15,7 +15,7 @@ function snapshot(): ActivationSnapshotFileV1 {
     artifact: ["agent-ceiling", "inherited"], knowledge: ["agent-ceiling", "inherited"],
   };
   const payload = {
-    versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v1", package: "0.1.0" },
+    versions: { snapshot: 1, packageContract: "pi-hive-package-contract-v1", schema: 1, capability: 1, catalogHash: "pi-hive-catalog-hash-v1", artifact: "pi-hive-artifact-contract-v1", contextPolicy: "pi-hive-context-policy-v2", package: "0.1.0" },
     project: { projectId: "id", rootRef: "." },
     workflow: {
       id: "w",
@@ -26,7 +26,7 @@ function snapshot(): ActivationSnapshotFileV1 {
     skills: [],
     knowledge: [{ id: "k", provider: "okf", path: ".pi/hive/knowledge/k", updates: "reviewed", metadataFingerprint: "f".repeat(64), attachedNodeIds: ["root"] }],
     authority: { capabilityContractVersion: 1, nodes: [{ nodeId: "root", capabilities: { effective: { ...emptyEffective, artifact: ["read"] }, provenance: inheritedProvenance, budgets: {}, attachments: { skills: [], knowledge: ["k"] }, directMemberIds: [] }, tools: ["artifact_status", "workflow_finish", "workflow_status"] }] },
-    models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 }],
+    models: [{ nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 188416, outputReserve: 20000, contextWindow: 300000 }],
     sources: [],
   } as any;
   const identity = {
@@ -154,7 +154,7 @@ test("persisted snapshots enforce semantic identity coverage and contract invari
     },
     tools: ["workflow_finish", "workflow_status"],
   };
-  const model = { nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 20000, contextWindow: 100000 };
+  const model = { nodeId: "root", modelId: "provider/model", thinking: "off", staticTokens: 8192, dynamicReserve: 188416, outputReserve: 20000, contextWindow: 300000 };
   assertRejected((payload) => { payload.workflow.team.nodes = [node, node]; payload.agents = [agent]; payload.authority.nodes = [authority]; payload.models = [model]; }, /duplicate.*node|node.*duplicate/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = [agent, agent]; payload.authority.nodes = [authority]; payload.models = [model]; }, /duplicate.*agent|agent.*duplicate/i);
   assertRejected((payload) => { payload.workflow.team.nodes = [node]; payload.agents = []; payload.authority.nodes = [authority]; payload.models = [model]; }, /agent.*coverage|coverage.*agent/i);

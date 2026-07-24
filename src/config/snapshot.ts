@@ -10,7 +10,7 @@ import { canonicalCatalogText } from "./catalog-hash";
 import { canonicalJson, hashActivationPayload } from "./snapshot-canonical";
 import { SNAPSHOT_CONTEXT_POLICY, validateSnapshotModels, type SnapshotModelAdapter, type SnapshotModelDiagnosticCode, type SnapshotNodeModelValidation } from "./snapshot-model";
 import { CAPABILITY_CONTRACT_VERSION, SCHEMA_VERSION } from "./versions";
-import { buildDynamicPromptReserveForActivation, buildStaticPromptForActivation } from "../workflows/prompts";
+import { buildDynamicPromptReserveForActivation, buildMinimumDynamicPromptReserveForActivation, buildStaticPromptForActivation } from "../workflows/prompts";
 import { curatorFitsSnapshotModelContext } from "../knowledge/curator-contract";
 
 export const SNAPSHOT_FORMAT_VERSION = 1 as const;
@@ -195,7 +195,8 @@ export function buildActivationSnapshot(input: BuildActivationSnapshotInput): Ac
       skills: nodeSkills,
       protectedKnowledgePaths: knowledge.map((entry) => entry.path).sort(compare),
     });
-    return { nodeId: node.id, model: nodeAuthority.model, thinking: nodeAuthority.thinking, staticText, dynamicTokenReserve: buildDynamicPromptReserveForActivation() };
+    const kind = node.id === workflow.team.rootId ? "root" : "worker";
+    return { nodeId: node.id, model: nodeAuthority.model, thinking: nodeAuthority.thinking, staticText, dynamicTokenReserve: buildDynamicPromptReserveForActivation(), minimumDynamicTokenReserve: buildMinimumDynamicPromptReserveForActivation(kind) };
   });
   const modelResult = validateSnapshotModels(staticByNode, input.models);
   if (!modelResult.ok) throw new SnapshotModelPreflightError(modelResult.codes);

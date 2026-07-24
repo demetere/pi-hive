@@ -1,7 +1,10 @@
 export const SNAPSHOT_CONTEXT_POLICY = Object.freeze({
-  version: "pi-hive-context-policy-v1",
+  version: "pi-hive-context-policy-v2",
   harnessReserve: 8_192,
   minimumDynamicReserve: 8_192,
+  minimumRootDynamicReserve: 188_416,
+  minimumWorkerDynamicReserve: 118_784,
+  minimumOutputReserve: 4_096,
   contextFraction: 0.2,
 });
 
@@ -14,8 +17,8 @@ export interface SnapshotModelAdapter {
   canActivate(modelId: string): boolean;
   estimateTokens(text: string): number;
 }
-export interface SnapshotNodeModelInput { nodeId: string; model?: string; thinking?: string; staticText: string; dynamicTokenReserve?: number }
-export interface SnapshotNodeModelValidation { nodeId: string; modelId: string; thinking: string; staticTokens: number; dynamicReserve: number; contextWindow: number }
+export interface SnapshotNodeModelInput { nodeId: string; model?: string; thinking?: string; staticText: string; dynamicTokenReserve?: number; minimumDynamicTokenReserve?: number }
+export interface SnapshotNodeModelValidation { nodeId: string; modelId: string; thinking: string; staticTokens: number; dynamicReserve: number; outputReserve?: number; contextWindow: number }
 export type SnapshotModelValidationResult = { ok: true; nodes: SnapshotNodeModelValidation[]; codes: [] } | { ok: false; nodes: SnapshotNodeModelValidation[]; codes: SnapshotModelDiagnosticCode[] };
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 
@@ -33,10 +36,15 @@ export function validateSnapshotModels(inputs: readonly SnapshotNodeModelInput[]
     if (!model.thinking.includes(thinking)) { codes.push("SNAPSHOT_THINKING_UNSUPPORTED"); continue; }
     const staticTokens = adapter.estimateTokens(input.staticText) + SNAPSHOT_CONTEXT_POLICY.harnessReserve;
     const dynamicPromptTokens = input.dynamicTokenReserve ?? 0;
-    if (!Number.isSafeInteger(staticTokens) || staticTokens < 0 || !Number.isSafeInteger(dynamicPromptTokens) || dynamicPromptTokens < 0) { codes.push("SNAPSHOT_CONTEXT_INVALID"); continue; }
-    const dynamicReserve = Math.max(dynamicPromptTokens, SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve, model.maxTokens ?? 0, Math.ceil(model.contextWindow * SNAPSHOT_CONTEXT_POLICY.contextFraction));
-    if (staticTokens + dynamicReserve > model.contextWindow) { codes.push("SNAPSHOT_CONTEXT_INSUFFICIENT"); continue; }
-    nodes.push({ nodeId: input.nodeId, modelId, thinking, staticTokens, dynamicReserve, contextWindow: model.contextWindow });
+    const minimumDynamicTokens = input.minimumDynamicTokenReserve ?? SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve;
+    if (!Number.isSafeInteger(staticTokens) || staticTokens < 0 || !Number.isSafeInteger(dynamicPromptTokens) || dynamicPromptTokens < 0 || !Number.isSafeInteger(minimumDynamicTokens) || minimumDynamicTokens < SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve) { codes.push("SNAPSHOT_CONTEXT_INVALID"); continue; }
+    const proportionalOutput = Math.ceil(model.contextWindow * SNAPSHOT_CONTEXT_POLICY.contextFraction);
+    const outputReserve = Math.max(SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve, Math.min(model.maxTokens ?? proportionalOutput, proportionalOutput));
+    const minimumDynamicReserve = Math.max(SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve, minimumDynamicTokens);
+    const availableDynamic = model.contextWindow - staticTokens - outputReserve;
+    if (availableDynamic < minimumDynamicReserve) { codes.push("SNAPSHOT_CONTEXT_INSUFFICIENT"); continue; }
+    const dynamicReserve = Math.min(Math.max(dynamicPromptTokens, minimumDynamicReserve), availableDynamic);
+    nodes.push({ nodeId: input.nodeId, modelId, thinking, staticTokens, dynamicReserve, outputReserve, contextWindow: model.contextWindow });
   }
   const unique = [...new Set(codes)];
   return unique.length ? { ok: false, nodes, codes: unique } : { ok: true, nodes, codes: [] };

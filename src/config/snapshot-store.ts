@@ -346,7 +346,7 @@ function validatePayload(value: unknown): void {
   const modelNodeIds: string[] = [];
   for (const [index, entry] of payload.models.entries()) {
     const model = record(entry, `models[${index}]`);
-    exactKeys(model, ["nodeId", "modelId", "thinking", "staticTokens", "dynamicReserve", "contextWindow"], [], `models[${index}]`);
+    exactKeys(model, ["nodeId", "modelId", "thinking", "staticTokens", "dynamicReserve", "contextWindow"], ["outputReserve"], `models[${index}]`);
     const nodeId = string(model.nodeId, `models[${index}].nodeId`);
     const modelId = string(model.modelId, `models[${index}].modelId`);
     const thinking = string(model.thinking, `models[${index}].thinking`);
@@ -356,9 +356,14 @@ function validatePayload(value: unknown): void {
     if (effective?.thinking !== undefined && effective.thinking !== thinking) throw new Error(`Snapshot models[${index}] diverges from frozen authority thinking.`);
     const staticTokens = safeInteger(model.staticTokens, `models[${index}].staticTokens`);
     const dynamicReserve = safeInteger(model.dynamicReserve, `models[${index}].dynamicReserve`);
+    const outputReserve = model.outputReserve === undefined ? undefined : safeInteger(model.outputReserve, `models[${index}].outputReserve`);
     const contextWindow = safeInteger(model.contextWindow, `models[${index}].contextWindow`, true);
     const minimumReserve = Math.max(SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve, Math.ceil(contextWindow * SNAPSHOT_CONTEXT_POLICY.contextFraction));
-    if (versions.contextPolicy === SNAPSHOT_CONTEXT_POLICY.version && (staticTokens < SNAPSHOT_CONTEXT_POLICY.harnessReserve || dynamicReserve < minimumReserve || staticTokens > contextWindow - dynamicReserve)) throw new Error(`Snapshot models[${index}] violates the context policy invariant.`);
+    const requiredDynamicReserve = nodeId === workflowCoverage.rootNodeId ? SNAPSHOT_CONTEXT_POLICY.minimumRootDynamicReserve : SNAPSHOT_CONTEXT_POLICY.minimumWorkerDynamicReserve;
+    const currentPolicyInvalid = versions.contextPolicy === SNAPSHOT_CONTEXT_POLICY.version && (outputReserve === undefined || outputReserve < SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve
+      || staticTokens < SNAPSHOT_CONTEXT_POLICY.harnessReserve || dynamicReserve < requiredDynamicReserve || staticTokens + dynamicReserve + outputReserve > contextWindow);
+    const legacyPolicyInvalid = versions.contextPolicy === "pi-hive-context-policy-v1" && (staticTokens < SNAPSHOT_CONTEXT_POLICY.harnessReserve || dynamicReserve < minimumReserve || staticTokens > contextWindow - dynamicReserve);
+    if (currentPolicyInvalid || legacyPolicyInvalid) throw new Error(`Snapshot models[${index}] violates the context policy invariant.`);
   }
   sameIds(uniqueIds(modelNodeIds, "model nodes"), workflowCoverage.nodeIds, "model node");
   if (!Array.isArray(payload.sources)) throw new Error("Snapshot sources must be an array.");

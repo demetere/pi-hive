@@ -191,14 +191,25 @@ function questionAnswerTranscriptRef(question: Pick<PersistedQuestion, "runId" |
     : `run:${question.runId}/node:${question.nodeId}/question:${question.questionId}`;
 }
 
-function assertQuestionAnswerDeliverable(question: Pick<PersistedQuestion, "questionId" | "runId" | "nodeId" | "taskId" | "definition">, answer: PersistedQuestionAnswer): void {
-  const inputs = losslessDynamicPromptInputs({
+function questionAnswerPromptInputs(question: Pick<PersistedQuestion, "questionId" | "runId" | "nodeId" | "taskId" | "definition">, answer: PersistedQuestionAnswer) {
+  return losslessDynamicPromptInputs({
     provenance: `human-answer:${question.questionId}:${answer.channel}:${answer.identity}`,
     content: { questionId: question.questionId, definition: question.definition, answer },
     ref: questionAnswerTranscriptRef(question),
   });
+}
+
+function assertQuestionAnswerDeliverable(question: Pick<PersistedQuestion, "questionId" | "runId" | "nodeId" | "taskId" | "definition">, answer: PersistedQuestionAnswer): void {
+  const inputs = questionAnswerPromptInputs(question, answer);
   if (question.taskId === undefined) assertLosslessRootDynamicPromptDeliveryFits(inputs);
   else assertLosslessDynamicPromptDeliveryFits(inputs);
+}
+
+function assertQuestionAnswerDeliverableForSnapshot(snapshot: ActivationSnapshotFileV1, question: Pick<PersistedQuestion, "questionId" | "runId" | "nodeId" | "taskId" | "definition">, answer: PersistedQuestionAnswer): void {
+  const inputs = questionAnswerPromptInputs(question, answer);
+  const context = { snapshot, nodeId: question.nodeId };
+  if (question.taskId === undefined) assertLosslessRootDynamicPromptDeliveryFits(inputs, context);
+  else assertLosslessDynamicPromptDeliveryFits(inputs, context);
 }
 
 function parseAnswer(payload: Record<string, unknown>, question: PersistedQuestion, event: WorkflowEventEnvelope): PersistedQuestionAnswer {
@@ -608,6 +619,7 @@ export class QuestionService {
     const answeredAt = this.options.now?.() ?? new Date().toISOString();
     const persistedAnswer = deepFreeze({ value, channel, identity: authenticatedIdentity, operationId, inputHash, answeredAt });
     assertQuestionAnswerDeliverable(current, persistedAnswer);
+    assertQuestionAnswerDeliverableForSnapshot(this.options.snapshot, current, persistedAnswer);
     const draft = createWorkflowEvent({
       projectId: this.options.projectId, sessionId: this.options.sessionId, runId: this.options.runId,
       type: "question.transition", producer: questionAnswerProducer(channel), timestamp: answeredAt,
@@ -625,6 +637,7 @@ export class QuestionService {
         if (!locked || locked.projectId !== projectId || locked.sessionId !== sessionId || locked.runId !== runId || locked.state !== "pending") throw new Error("Question answer CAS lost: exact question identity is already answered, closed, or unknown");
         validateQuestionAnswer(locked.definition, value);
         assertQuestionAnswerDeliverable(locked, persistedAnswer);
+        assertQuestionAnswerDeliverableForSnapshot(this.options.snapshot, locked, persistedAnswer);
         const run = replayWorkflowJournal(events, createEmptyRunLifecycleState(this.options.sessionId), reduceRunLifecycle).state.latestRun;
         if (run && run.runId !== this.options.runId) throw new Error("Question answer service is stale and does not target the current run");
         if (run && (!isOpenRunStatus(run.status) || run.cancellationRequested || run.pendingTerminal)) throw new Error("Question answer is late because the run is terminal, cancelling, or finalizing");

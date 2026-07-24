@@ -7,7 +7,7 @@ const registry = {
   defaultThinking: "high",
   find(modelId: string) {
     if (modelId === "provider/default") return { id: modelId, contextWindow: 50_000, maxTokens: 10_000, thinking: ["off", "high"] };
-    if (modelId === "provider/small") return { id: modelId, contextWindow: 20_000, maxTokens: 1_000, thinking: ["off"] };
+    if (modelId === "provider/small") return { id: modelId, contextWindow: 21_000, maxTokens: 1_000, thinking: ["off"] };
     return undefined;
   },
   canActivate(modelId: string) { return modelId !== "provider/blocked"; },
@@ -24,26 +24,31 @@ test("model preflight resolves model and thinking inheritance exactly and record
   assert.deepEqual(result.nodes.map((node) => node.modelId), ["provider/small", "provider/default"]);
   assert.deepEqual(result.nodes.map((node) => node.thinking), ["off", "high"]);
   assert.equal(result.nodes[0].dynamicReserve, SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve);
-  assert.equal(result.nodes[1].dynamicReserve, 10_000);
+  assert.equal(result.nodes[0].outputReserve, SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve);
+  assert.equal(result.nodes[1].dynamicReserve, SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve);
+  assert.equal(result.nodes[1].outputReserve, 10_000);
 });
 
 test("model preflight rejects unavailable models, unsupported thinking, and context N+1 without fallback", () => {
   assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/missing", thinking: "off", staticText: "" }], registry).codes, ["SNAPSHOT_MODEL_UNAVAILABLE"]);
   assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "high", staticText: "" }], registry).codes, ["SNAPSHOT_THINKING_UNSUPPORTED"]);
-  const exact = "x".repeat(20_000 - SNAPSHOT_CONTEXT_POLICY.harnessReserve - SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve);
+  const exact = "x".repeat(21_000 - SNAPSHOT_CONTEXT_POLICY.harnessReserve - SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve - SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve);
   assert.equal(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: exact }], registry).ok, true);
   assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: `${exact}x` }], registry).codes, ["SNAPSHOT_CONTEXT_INSUFFICIENT"]);
 });
 
-test("model preflight records and enforces a deterministic worst-case dynamic token reserve", () => {
+test("model preflight records a preferred dynamic cap and enforces an explicit minimum", () => {
   let estimatedText = "";
   const compressible = { ...registry, estimateTokens(text: string) { estimatedText = text; return text === "static" ? 6 : 1; } };
   const result = validateSnapshotModels([{ nodeId: "root", model: "provider/default", thinking: "off", staticText: "static", dynamicTokenReserve: 12_000 }], compressible);
   assert.equal(result.ok, true);
   assert.equal(result.nodes[0].dynamicReserve, 12_000);
   assert.equal(estimatedText, "static", "dynamic reserve must not tokenize a compressible sample");
-  assert.equal(result.nodes[0].staticTokens + result.nodes[0].dynamicReserve <= result.nodes[0].contextWindow, true);
-  assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: "", dynamicTokenReserve: 12_000 }], registry).codes, ["SNAPSHOT_CONTEXT_INSUFFICIENT"]);
+  assert.equal(result.nodes[0].staticTokens + result.nodes[0].dynamicReserve + (result.nodes[0].outputReserve ?? 0) <= result.nodes[0].contextWindow, true);
+  const adapted = validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: "", dynamicTokenReserve: 12_000 }], registry);
+  assert.equal(adapted.ok, true);
+  assert.equal(adapted.nodes[0].dynamicReserve, 21_000 - SNAPSHOT_CONTEXT_POLICY.harnessReserve - SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve);
+  assert.deepEqual(validateSnapshotModels([{ nodeId: "root", model: "provider/small", thinking: "off", staticText: "", dynamicTokenReserve: 12_000, minimumDynamicTokenReserve: 12_000 }], registry).codes, ["SNAPSHOT_CONTEXT_INSUFFICIENT"]);
 });
 
 test("model preflight rejects invalid numeric model metadata", () => {

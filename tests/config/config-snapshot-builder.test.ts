@@ -72,10 +72,25 @@ test("curator topology accepts the exact frozen static plus fixed I/O context bo
     };
     return buildActivationSnapshot({ ...base, authority, models: boundaryModels, packageVersion: "0.1.0" });
   };
-  const exact = build(274_432);
-  assert.equal(exact.payload.models[0].contextWindow, 274_432);
-  assert.equal(exact.payload.models[0].staticTokens + exact.payload.models[0].dynamicReserve, 274_432);
-  assert.throws(() => build(274_431), /curator|context|input|output|static|preflight/i);
+  const exact = build(204_800);
+  assert.equal(exact.payload.models[0].contextWindow, 204_800);
+  assert.equal(exact.payload.models[0].staticTokens + exact.payload.models[0].dynamicReserve + (exact.payload.models[0].outputReserve ?? 0), 204_800);
+  assert.throws(() => build(204_799), /curator|context|input|output|static|preflight/i);
+});
+
+test("activation freezes a model-adaptive dynamic page for a 272K inherited model", () => {
+  const base = fixture();
+  const adaptiveModels = {
+    defaultModel: "provider/model", defaultThinking: "off",
+    find: (id: string) => id === "provider/model" ? { id, contextWindow: 272_000, maxTokens: 128_000, thinking: ["off"] } : undefined,
+    canActivate: () => true,
+    estimateTokens: (text: string) => Math.ceil(Buffer.byteLength(text, "utf8") / 4),
+  };
+  const snapshot = buildActivationSnapshot({ ...base, authority: testAuthority(), models: adaptiveModels, packageVersion: "0.1.0" });
+  const model = snapshot.payload.models[0];
+  assert.equal(model.outputReserve, 54_400);
+  assert.ok(model.dynamicReserve < 266_240);
+  assert.equal(model.staticTokens + model.dynamicReserve + (model.outputReserve ?? 0), model.contextWindow);
 });
 
 test("snapshot model preflight consumes frozen authority instead of re-resolving mutable source defaults", () => {

@@ -5,9 +5,11 @@ import {
   PROMPT_LIMITS,
   assembleRootWorkflowPrompt,
   assembleWorkerWorkflowPrompt,
+  assertLosslessRootDynamicPromptDeliveryFits,
   buildCompactionPreservationBlock,
   buildDynamicPromptReserveForActivation,
   buildStaticPromptForActivation,
+  losslessDynamicPromptInputs,
   validateCompactionPreservation,
 } from "../../src/workflows/prompts.ts";
 import { SNAPSHOT_CONTEXT_POLICY, validateSnapshotModels } from "../../src/config/snapshot-model.ts";
@@ -155,7 +157,24 @@ test("root dynamic context paginates section and aggregate overflow with refs an
   assert.equal(aggregatePaged.dynamicSections.at(-1)?.truncated, true);
 });
 
-test("activation and model-change preflight use the complete conservative static prompt plus reserve", () => {
+test("frozen model budgets shrink dynamic pages and exact answer limits without lossy compaction", () => {
+  const adaptive = structuredClone(snapshot());
+  adaptive.payload.versions.contextPolicy = SNAPSHOT_CONTEXT_POLICY.version;
+  adaptive.payload.models = adaptive.payload.models.map((model) => ({ ...model, staticTokens: 10_000, dynamicReserve: 200_000, outputReserve: 40_000, contextWindow: 250_000 }));
+  const prompt = assembleRootWorkflowPrompt({
+    snapshot: adaptive, nodeId: "root", sessionId: "session-1", runId: "run-1",
+    runInputs: Array.from({ length: 12 }, (_, index) => ({ source: "user" as const, provenance: `adaptive:${index}`, content: "x".repeat(PROMPT_LIMITS.dynamicSectionBytes), ref: `run:run-1/input:${index + 1}` })),
+  });
+  assert.ok(prompt.dynamicBytes <= 200_000 - 4_096);
+  assert.ok(prompt.dynamicBytes < PROMPT_LIMITS.dynamicAggregateBytes);
+  assert.equal(prompt.dynamicSections.at(-1)?.truncated, true);
+
+  const answer = losslessDynamicPromptInputs({ provenance: "adaptive-answer", content: "x".repeat(30_000), ref: "question:q/answer" });
+  assert.doesNotThrow(() => assertLosslessRootDynamicPromptDeliveryFits(answer));
+  assert.throws(() => assertLosslessRootDynamicPromptDeliveryFits(answer, { snapshot: adaptive, nodeId: "root" }), /lossless delivery page bound/i);
+});
+
+test("activation and model-change preflight use static, output, and model-adaptive dynamic reserves", () => {
   const source = snapshot();
   const rootNode = (source.payload.workflow.team as { nodes: Array<Record<string, unknown>> }).nodes[0];
   const authority = source.payload.authority.nodes[0];
@@ -174,7 +193,7 @@ test("activation and model-change preflight use the complete conservative static
   assert.match(staticText, /# Immutable harness operating contract/);
   assert.match(staticText, /root-only instructions/);
   const staticBytes = Buffer.byteLength(staticText, "utf8");
-  const exactContext = staticBytes + SNAPSHOT_CONTEXT_POLICY.harnessReserve + SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve;
+  const exactContext = staticBytes + SNAPSHOT_CONTEXT_POLICY.harnessReserve + SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve + SNAPSHOT_CONTEXT_POLICY.minimumDynamicReserve;
   const adapter = {
     defaultModel: "provider/exact",
     defaultThinking: "medium",
@@ -189,7 +208,7 @@ test("activation and model-change preflight use the complete conservative static
   const worstCaseDynamic = buildDynamicPromptReserveForActivation();
   assert.ok(worstCaseDynamic >= PROMPT_LIMITS.dynamicAggregateBytes);
   let tokenized = "";
-  const dynamicContext = staticBytes + SNAPSHOT_CONTEXT_POLICY.harnessReserve + worstCaseDynamic;
+  const dynamicContext = staticBytes + SNAPSHOT_CONTEXT_POLICY.harnessReserve + SNAPSHOT_CONTEXT_POLICY.minimumOutputReserve + worstCaseDynamic;
   const compressible = {
     ...adapter,
     find(modelId: string) { return { id: modelId, contextWindow: dynamicContext, maxTokens: 1, thinking: ["medium"] }; },

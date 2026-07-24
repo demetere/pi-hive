@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ActivationSnapshotFileV1 } from "../config/snapshot";
 import { canonicalJson } from "../config/snapshot-canonical";
+import { SNAPSHOT_CONTEXT_POLICY } from "../config/snapshot-model";
 import { DEFAULT_PROTECTED_PATHS } from "../capabilities/reserved-paths";
 
 export const PROMPT_CONTRACT_VERSION = "pi-hive-prompt-tool-contract-v1" as const;
@@ -28,7 +29,8 @@ export interface DynamicPromptInput {
 
 const LOSSLESS_DYNAMIC_CHUNK_BYTES = 8_192;
 const LOSSLESS_REQUIRED_ENVELOPE_BYTES = 69_632;
-const PAGINATED_DYNAMIC_SELECTION_BYTES = PROMPT_LIMITS.dynamicAggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - 4_096;
+const DYNAMIC_PROMPT_FORMATTING_RESERVE = 4_096;
+const PAGINATED_DYNAMIC_SELECTION_BYTES = PROMPT_LIMITS.dynamicAggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - DYNAMIC_PROMPT_FORMATTING_RESERVE;
 
 /**
  * A worker authority delivery reserves one complete task envelope. The exact
@@ -295,7 +297,34 @@ export interface StaticPromptForActivationInput {
  * content-sensitive model tokenizer or a compressible sample string.
  */
 export function buildDynamicPromptReserveForActivation(): number {
-  return PROMPT_LIMITS.dynamicAggregateBytes + 4_096;
+  return PROMPT_LIMITS.dynamicAggregateBytes + DYNAMIC_PROMPT_FORMATTING_RESERVE;
+}
+
+/** Minimum page that preserves required root/worker envelopes and one exact chunk. */
+export function buildMinimumDynamicPromptReserveForActivation(kind: PromptKind): number {
+  const computed = (kind === "root" ? 2 : 1) * LOSSLESS_REQUIRED_ENVELOPE_BYTES
+    + PROMPT_LIMITS.dynamicSectionBytes
+    + (2 * DYNAMIC_PROMPT_FORMATTING_RESERVE)
+    + LOSSLESS_DYNAMIC_CHUNK_BYTES;
+  const policy = kind === "root" ? SNAPSHOT_CONTEXT_POLICY.minimumRootDynamicReserve : SNAPSHOT_CONTEXT_POLICY.minimumWorkerDynamicReserve;
+  if (computed !== policy) throw new Error("Prompt delivery limits diverge from the snapshot context policy");
+  return policy;
+}
+
+function dynamicAggregateBytesForSnapshot(snapshot: ActivationSnapshotFileV1, nodeId: string, kind: PromptKind): number {
+  if (snapshot.payload.versions.contextPolicy !== SNAPSHOT_CONTEXT_POLICY.version) return PROMPT_LIMITS.dynamicAggregateBytes;
+  const model = snapshot.payload.models.find((entry) => entry.nodeId === nodeId);
+  const minimum = buildMinimumDynamicPromptReserveForActivation(kind);
+  if (!model || !Number.isSafeInteger(model.dynamicReserve) || model.dynamicReserve < minimum) throw new Error(`Prompt node ${nodeId} lacks a valid frozen dynamic context budget`);
+  const aggregate = model.dynamicReserve - DYNAMIC_PROMPT_FORMATTING_RESERVE;
+  if (aggregate < PROMPT_LIMITS.dynamicSectionBytes + DYNAMIC_PROMPT_FORMATTING_RESERVE) throw new Error(`Prompt node ${nodeId} dynamic context budget cannot contain a page`);
+  return Math.min(PROMPT_LIMITS.dynamicAggregateBytes, aggregate);
+}
+
+function deliveryLimitsForAggregate(aggregateBytes: number, kind: PromptKind): LosslessDynamicDeliveryMeasurement {
+  const selected = aggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - DYNAMIC_PROMPT_FORMATTING_RESERVE;
+  const envelopes = kind === "root" ? 2 : 1;
+  return Object.freeze({ encodedBytes: Math.max(0, selected - (envelopes * LOSSLESS_REQUIRED_ENVELOPE_BYTES)), sections: PROMPT_LIMITS.dynamicSections - (kind === "root" ? 3 : 1) });
 }
 
 export function buildStaticPromptForActivation(input: StaticPromptForActivationInput): string {
@@ -379,12 +408,20 @@ function assertLosslessDynamicPromptDeliveryBound(inputs: readonly DynamicPrompt
   }
 }
 
-export function assertLosslessDynamicPromptDeliveryFits(inputs: readonly DynamicPromptInput[]): void {
-  assertLosslessDynamicPromptDeliveryBound(inputs, LOSSLESS_DYNAMIC_DELIVERY_LIMITS);
+export interface FrozenDynamicPromptContext { readonly snapshot: ActivationSnapshotFileV1; readonly nodeId: string }
+
+export function assertLosslessDynamicPromptDeliveryFits(inputs: readonly DynamicPromptInput[], context?: FrozenDynamicPromptContext): void {
+  const limits = context
+    ? deliveryLimitsForAggregate(dynamicAggregateBytesForSnapshot(context.snapshot, context.nodeId, "worker"), "worker")
+    : LOSSLESS_DYNAMIC_DELIVERY_LIMITS;
+  assertLosslessDynamicPromptDeliveryBound(inputs, limits);
 }
 
-export function assertLosslessRootDynamicPromptDeliveryFits(inputs: readonly DynamicPromptInput[]): void {
-  assertLosslessDynamicPromptDeliveryBound(inputs, ROOT_LOSSLESS_DYNAMIC_DELIVERY_LIMITS);
+export function assertLosslessRootDynamicPromptDeliveryFits(inputs: readonly DynamicPromptInput[], context?: FrozenDynamicPromptContext): void {
+  const limits = context
+    ? deliveryLimitsForAggregate(dynamicAggregateBytesForSnapshot(context.snapshot, context.nodeId, "root"), "root")
+    : ROOT_LOSSLESS_DYNAMIC_DELIVERY_LIMITS;
+  assertLosslessDynamicPromptDeliveryBound(inputs, limits);
 }
 
 /**
@@ -392,7 +429,7 @@ export function assertLosslessRootDynamicPromptDeliveryFits(inputs: readonly Dyn
  * than rejecting a legal stream merely because it contains more than 64
  * sections or expands past the aggregate rendering bound.
  */
-function boundDynamicPage(inputs: readonly DynamicPromptInput[], required?: Readonly<{ source: DynamicPromptSource; provenance: string }>): readonly BoundDynamicResult[] {
+function boundDynamicPage(inputs: readonly DynamicPromptInput[], aggregateBytes: number, required?: Readonly<{ source: DynamicPromptSource; provenance: string }>): readonly BoundDynamicResult[] {
   const requiredIndex = required === undefined
     ? -1
     : inputs.findIndex((entry) => entry.source === required.source && entry.provenance === required.provenance);
@@ -412,14 +449,14 @@ function boundDynamicPage(inputs: readonly DynamicPromptInput[], required?: Read
     : [...priority].sort((left, right) => left - right);
   let selectedIndexes = initialIndexes;
   let selected = selectedIndexes.map((index) => boundDynamic(inputs[index]));
-  if (inputs.length <= PROMPT_LIMITS.dynamicSections && dynamicBytes(selected) <= PROMPT_LIMITS.dynamicAggregateBytes) return Object.freeze(selected);
+  if (inputs.length <= PROMPT_LIMITS.dynamicSections && dynamicBytes(selected) <= aggregateBytes) return Object.freeze(selected);
 
   if (selectedIndexes.length > maxSelected) {
     const keep = new Set(priority.slice(0, maxSelected));
     selectedIndexes = selectedIndexes.filter((index) => keep.has(index));
     selected = selectedIndexes.map((index) => boundDynamic(inputs[index]));
   }
-  const selectedBudget = PROMPT_LIMITS.dynamicAggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - 4_096;
+  const selectedBudget = aggregateBytes - PROMPT_LIMITS.dynamicSectionBytes - DYNAMIC_PROMPT_FORMATTING_RESERVE;
   while (selected.length && dynamicBytes(selected) > selectedBudget) {
     let removeAt = selectedIndexes.findIndex((index) => index !== requiredIndex && index !== protectedFirstIndex);
     if (removeAt < 0) removeAt = selectedIndexes.findIndex((index) => index !== requiredIndex);
@@ -484,7 +521,7 @@ function boundDynamicPage(inputs: readonly DynamicPromptInput[], required?: Read
     },
   }, true, preservedRefs);
   const result = [...selected, marker];
-  if (result.length > PROMPT_LIMITS.dynamicSections || dynamicBytes(result) > PROMPT_LIMITS.dynamicAggregateBytes) throw new Error("Dynamic prompt pagination could not satisfy its bounded context limit");
+  if (result.length > PROMPT_LIMITS.dynamicSections || dynamicBytes(result) > aggregateBytes) throw new Error("Dynamic prompt pagination could not satisfy its bounded context limit");
   return Object.freeze(result);
 }
 
@@ -548,7 +585,8 @@ function assemble(input: WorkflowPromptBaseInput, kind: PromptKind, task?: Promp
     ...(taskDynamic ? [taskDynamic] : []),
     ...dynamic,
   ];
-  const bounded = boundDynamicPage(allDynamic, task ? { source: "parent-task", provenance: `task:${task.taskId}` } : undefined);
+  const aggregateBytes = dynamicAggregateBytesForSnapshot(input.snapshot, input.nodeId, kind);
+  const bounded = boundDynamicPage(allDynamic, aggregateBytes, task ? { source: "parent-task", provenance: `task:${task.taskId}` } : undefined);
   const renderedDynamicBytes = dynamicBytes(bounded);
 
   let contextSection: string;
