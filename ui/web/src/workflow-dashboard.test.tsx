@@ -64,9 +64,10 @@ describe("workflow dashboard API v1 client", () => {
   beforeEach(() => { vi.restoreAllMocks(); window.sessionStorage.clear(); window.history.replaceState(null, "", "/"); });
 
   it("keeps views and opened items in clean URL paths", async () => {
-    window.history.replaceState(null, "", "/runs/run-1"); installFetch(); const user = userEvent.setup(); render(<WorkflowDashboard />);
-    expect(await screen.findByRole("dialog", { name: "run-1" })).toBeInTheDocument();
-    await user.keyboard("{Escape}"); expect(window.location.pathname).toBe("/runs");
+    window.history.replaceState(null, "", "/sessions/session-1/runs/run-1"); installFetch(); const user = userEvent.setup(); render(<WorkflowDashboard />);
+    expect(await screen.findByRole("dialog", { name: "session-1" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Run details · run-1" })).toBeInTheDocument();
+    await user.keyboard("{Escape}"); expect(window.location.pathname).toBe("/sessions");
     await user.click(screen.getByRole("button", { name: "Tasks" }));
     expect(await screen.findByRole("heading", { name: "Tasks" })).toBeInTheDocument(); expect(window.location.pathname).toBe("/tasks");
     act(() => { window.history.pushState(null, "", "/activity"); window.dispatchEvent(new PopStateEvent("popstate")); });
@@ -78,8 +79,12 @@ describe("workflow dashboard API v1 client", () => {
     render(<WorkflowDashboard />);
     expect(await screen.findByRole("heading", { name: "Workflows" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Topology" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Runs" }));
-    await user.click(await screen.findByRole("button", { name: "run-1" }));
+    expect(screen.queryByRole("button", { name: "Runs" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    await user.click(await screen.findByRole("button", { name: /session-1/u }));
+    expect(await screen.findByRole("columnheader", { name: "Confirmed tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Estimated cost" })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /run-1/u })).toHaveTextContent(/14.*9.*\$0\.0000.*\$0\.0000.*waiting for human/u);
     const topology = await screen.findByRole("region", { name: "Topology hierarchy" });
     expect(topology.querySelector(".graph-svg")).not.toBeNull();
     expect(topology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(2);
@@ -276,8 +281,8 @@ describe("workflow dashboard API v1 client", () => {
       if (url.includes("/api/v1/nodes?")) return new Response(JSON.stringify(page("nodes", Array.from({ length: 120 }, (_, index) => ({ projectId: "project-1", sessionId: "session-1", runId: "run-1", nodeId: `deep-${index}`, ...(index ? { parentNodeId: `deep-${index - 1}` } : {}), status: "running" })))));
       return new Response(JSON.stringify(responseFor(url.split("/api/v1/")[1]?.split(/[?]/u)[0] ?? "workflows")));
     }));
-    const user = userEvent.setup(); const view = render(<WorkflowDashboard />); await user.click(await screen.findByRole("button", { name: "Runs" }));
-    await user.click(await screen.findByRole("button", { name: "run-1" }));
+    const user = userEvent.setup(); const view = render(<WorkflowDashboard />); await user.click(await screen.findByRole("button", { name: "Sessions" }));
+    await user.click(await screen.findByRole("button", { name: /session-1/u }));
     const topology = await screen.findByRole("region", { name: "Topology hierarchy" });
     expect(topology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(120); expect(topology).toHaveTextContent("deep-119"); view.unmount();
   });

@@ -625,9 +625,9 @@
 .workflow-card dd { overflow: hidden; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 
 .workflow-catalog-card,
-.run-catalog-card { cursor: pointer; }
+.session-catalog-card { cursor: pointer; }
 .workflow-catalog-card:focus-visible,
-.run-catalog-card:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.session-catalog-card:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 .workflow-catalog-card .record-card-head code { display: block; margin-top: 4px; color: var(--ink-dimmer); font: 9px var(--mono); }
 .workflow-card-actions { display: flex; align-items: center; gap: 8px; }
 .workflow-catalog-description { max-width: 760px; margin: -3px 0 12px; color: var(--ink-dim); font-size: 11px; line-height: 1.5; }
@@ -687,6 +687,20 @@
 .workflow-version-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .workflow-version-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .workflow-version-list .record-status { margin-left: auto; }
+.session-run-history { max-width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.session-run-history table { width: 100%; min-width: 980px; border-collapse: collapse; }
+.session-run-history th,
+.session-run-history td { padding: 9px 10px; border-bottom: 1px solid var(--line); color: var(--ink-dim); font-size: 10px; text-align: right; white-space: nowrap; }
+.session-run-history thead th { position: sticky; top: 0; z-index: 1; background: var(--well); color: var(--ink-dimmer); font-size: 8.5px; text-transform: uppercase; }
+.session-run-history th:first-child,
+.session-run-history td:first-child { text-align: left; }
+.session-run-history tbody tr:last-child > * { border-bottom: 0; }
+.session-run-history tbody tr.selected > * { background: var(--brand-bg); }
+.session-run-history button { max-width: 190px; padding: 0; border: 0; background: transparent; color: var(--brand); cursor: pointer; }
+.session-run-history button:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.session-run-history code { display: block; overflow: hidden; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.session-run-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.workflow-modal .activity-feed { max-height: 430px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
 
 .workflow-card select,
 .workflow-card textarea,

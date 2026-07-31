@@ -380,17 +380,41 @@ function WorkflowRecordCard({ record, initiallyOpen = false, onOpen, onDismiss }
     {(sessions.length > 0 || runs.length > 0) && <div className="workflow-catalog-section"><h3>Runtime links</h3><p>{sessions.length} linked session{sessions.length === 1 ? "" : "s"}; {runs.length} run{runs.length === 1 ? "" : "s"}.</p></div>}
   </div></DashboardModal>}</>;
 }
-function RunRecordCard({ record, initiallyOpen = false, onOpen, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onOpen?(id: string): void; onDismiss?(): void }) {
-  const id = identity("runs", record); const heading = `runs-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-"); const modalHeading = `${heading}-modal-title`; const trigger = useRef<HTMLElement>(null);
-  const [open, setOpen] = useState(initiallyOpen); const [nodes, setNodes] = useState<readonly JsonRecord[]>([]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string>(); const attempted = useRef(false);
-  const loadNodes = useCallback(async () => { if (attempted.current) return; attempted.current = true; setLoading(true); try { setNodes(await fetchRunNodes(record)); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setLoading(false); } }, [record]);
-  useEffect(() => { setOpen(initiallyOpen); if (initiallyOpen) void loadNodes(); }, [initiallyOpen, loadNodes]);
-  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); onOpen?.(id); void loadNodes(); };
-  return <><article ref={trigger} className="workflow-card workflow-card-runs run-catalog-card" aria-labelledby={heading} role="button" tabIndex={0} aria-haspopup="dialog" aria-expanded={open} onClick={show} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); } }}><div className="record-card-head"><div><span className="record-kind">Run</span><h2 id={heading}>{id}</h2></div><StatusBadge status={stringField(record, "status")} /></div><DisplayFields view="runs" record={record} /></article>{open && <DashboardModal labelledBy={modalHeading} onClose={close} returnFocus={trigger}><div className="workflow-modal-head"><span className="record-kind">Run topology</span><h2 id={modalHeading}>{id}</h2><code>{stringField(record, "workflowId") ?? "workflow"}</code></div><div className="workflow-catalog-details">{loading && <p role="status">Loading live run topology…</p>}{error && <p role="alert">{error}</p>}<div className="workflow-catalog-section workflow-topology-section"><h3>Live topology</h3>{nodes.length ? <div className="workflow-modal-topology"><TopologyGraph items={nodes} /></div> : !loading && !error && <p>This run has not instantiated any agent nodes.</p>}</div></div></DashboardModal>}</>;
+function SessionRecordCard({ record, initiallyOpen = false, initialRunId, onOpen, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; initialRunId?: string; onOpen?(id: string): void; onDismiss?(): void }) {
+  const id = identity("sessions", record); const heading = `sessions-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-"); const modalHeading = `${heading}-modal-title`; const trigger = useRef<HTMLElement>(null);
+  const [open, setOpen] = useState(initiallyOpen); const [runs, setRuns] = useState<readonly JsonRecord[]>([]); const [events, setEvents] = useState<readonly JsonRecord[]>([]); const [selectedRunId, setSelectedRunId] = useState<string>(); const [nodes, setNodes] = useState<readonly JsonRecord[]>([]);
+  const [loading, setLoading] = useState(false); const [loadingTopology, setLoadingTopology] = useState(false); const [error, setError] = useState<string>(); const attempted = useRef(false); const topologyGeneration = useRef(0);
+  const selectRun = useCallback(async (run: JsonRecord) => {
+    const runId = stringField(run, "runId"); if (!runId) return;
+    const currentGeneration = ++topologyGeneration.current; setSelectedRunId(runId); setNodes([]); setLoadingTopology(true); setError(undefined);
+    try { const next = await fetchRunNodes(run); if (topologyGeneration.current === currentGeneration) setNodes(next); }
+    catch (reason) { if (topologyGeneration.current === currentGeneration) setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (topologyGeneration.current === currentGeneration) setLoadingTopology(false); }
+  }, []);
+  const loadDetails = useCallback(async () => {
+    if (attempted.current) return; attempted.current = true; setLoading(true); setError(undefined);
+    try {
+      const [relatedRuns, relatedEvents] = await Promise.all([fetchSessionRelated("runs", record), fetchSessionRelated("history", record)]);
+      setRuns(relatedRuns); setEvents(relatedEvents);
+      const selected = relatedRuns.find((run) => stringField(run, "runId") === initialRunId) ?? relatedRuns.at(-1);
+      if (selected) await selectRun(selected);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setLoading(false); }
+  }, [initialRunId, record, selectRun]);
+  useEffect(() => { setOpen(initiallyOpen); if (initiallyOpen) void loadDetails(); }, [initiallyOpen, loadDetails]);
+  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); onOpen?.(id); void loadDetails(); };
+  const selectedRun = runs.find((run) => stringField(run, "runId") === selectedRunId);
+  return <><article ref={trigger} className="workflow-card workflow-card-sessions session-catalog-card" aria-labelledby={heading} role="button" tabIndex={0} aria-haspopup="dialog" aria-expanded={open} onClick={show} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); } }}><div className="record-card-head"><div><span className="record-kind">Session</span><h2 id={heading}>{id}</h2></div><StatusBadge status={stringField(record, "status")} /></div><DisplayFields view="sessions" record={record} /></article>{open && <DashboardModal labelledBy={modalHeading} onClose={close} returnFocus={trigger}><div className="workflow-modal-head"><span className="record-kind">Workflow session</span><h2 id={modalHeading}>{id}</h2><code>{stringField(record, "workflowId") ?? "workflow"}</code></div><div className="workflow-catalog-details">
+    {loading && <p role="status">Loading session runs and activity…</p>}{error && <p role="alert">{error}</p>}
+    <div className="workflow-catalog-summary"><div><span>Status</span><strong>{stringField(record, "status") ?? "—"}</strong></div><div><span>Workflow</span><strong>{stringField(record, "workflowId") ?? "—"}</strong></div><div><span>Runs</span><strong>{runs.length}</strong></div><div><span>Events</span><strong>{events.length}</strong></div></div>
+    <div className="workflow-catalog-section"><h3>Run history</h3>{runs.length ? <SessionRunHistory runs={runs} events={events} selectedRunId={selectedRunId} onSelect={(run) => void selectRun(run)} /> : !loading && <p>No runs have been projected for this session.</p>}</div>
+    {selectedRun && <div className="workflow-catalog-section workflow-topology-section"><div className="session-run-heading"><h3>Run details · {selectedRunId}</h3><StatusBadge status={stringField(selectedRun, "status")} /></div>{loadingTopology && <p role="status">Loading run topology…</p>}{nodes.length ? <div className="workflow-modal-topology"><TopologyGraph items={nodes} /></div> : !loadingTopology && <p>This run has not instantiated any agent nodes.</p>}</div>}
+    <div className="workflow-catalog-section"><h3>Session activity</h3>{events.length ? <ActivityFeed items={events} /> : !loading && <p>No projected activity is available for this session.</p>}</div>
+  </div></DashboardModal>}</>;
 }
-function RecordCard({ view, record, onChanged, initiallyOpen = false, onOpen, onDismiss }: { view: View; record: JsonRecord; onChanged(): void; initiallyOpen?: boolean; onOpen?(id: string): void; onDismiss?(): void }) {
+function RecordCard({ view, record, onChanged, initiallyOpen = false, initialRunId, onOpen, onDismiss }: { view: View; record: JsonRecord; onChanged(): void; initiallyOpen?: boolean; initialRunId?: string; onOpen?(id: string): void; onDismiss?(): void }) {
   if (view === "workflows") return <WorkflowRecordCard record={record} initiallyOpen={initiallyOpen} onOpen={onOpen} onDismiss={onDismiss} />;
-  if (view === "runs") return <RunRecordCard record={record} initiallyOpen={initiallyOpen} onOpen={onOpen} onDismiss={onDismiss} />;
+  if (view === "sessions") return <SessionRecordCard record={record} initiallyOpen={initiallyOpen} initialRunId={initialRunId} onOpen={onOpen} onDismiss={onDismiss} />;
   const id = identity(view, record); const heading = `${view}-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-");
   const status = stringField(record, "status");
   return <article className={`workflow-card workflow-card-${view}`} aria-labelledby={heading}><div className="record-card-head"><div><span className="record-kind">{TITLES[view]}</span><h2 id={heading}>{id}</h2></div><StatusBadge status={status} /></div><DisplayFields view={view} record={record} />
@@ -437,6 +461,19 @@ function ActivityFeed({ items, compact = false }: { items: readonly JsonRecord[]
     const actor = stringField(item, "agentName") ?? stringField(item, "agentId") ?? stringField(item, "nodeId") ?? stringField(item, "producer") ?? "workflow";
     return <article className="activity-row" key={id}><i className={`activity-rail ${statusTone(status ?? stringField(item, "eventType"))}`} aria-hidden="true" /><time dateTime={stringField(item, "timestamp")}>{relativeTime(stringField(item, "timestamp"))}</time><div><div className="activity-row-title"><strong>{actor}</strong><span>{eventLabel(item)}</span></div><p>{stringField(item, "workflowId") ?? stringField(item, "runId") ?? stringField(item, "sessionId") ?? id}</p></div><span className="event-sequence">#{numberField(item, "sequence") ?? index + 1}</span></article>;
   })}</section>;
+}
+function sessionHistoryTime(value: string | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : value;
+}
+function SessionRunHistory({ runs, events, selectedRunId, onSelect }: { runs: readonly JsonRecord[]; events: readonly JsonRecord[]; selectedRunId?: string; onSelect(run: JsonRecord): void }) {
+  const dollars = (micro: number) => `$${(micro / 1_000_000).toFixed(4)}`;
+  return <div className="session-run-history"><table><thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Updated</th><th scope="col">Events</th><th scope="col">Confirmed tokens</th><th scope="col">Estimated tokens</th><th scope="col">Confirmed cost</th><th scope="col">Estimated cost</th><th scope="col">Status</th></tr></thead><tbody>{runs.map((run) => {
+    const runId = stringField(run, "runId") ?? "run"; const related = events.filter((event) => stringField(event, "runId") === runId); const timestamps = related.map((event) => stringField(event, "timestamp")).filter((value): value is string => Boolean(value)).sort();
+    let confirmedTokens = 0; let estimatedTokens = 0; let confirmedCost = 0; let estimatedCost = 0;
+    for (const event of related) { const tokens = (numberField(event, "usageInputTokens") ?? 0) + (numberField(event, "usageOutputTokens") ?? 0); const cost = numberField(event, "usageCostMicroUsd") ?? 0; if (event.usagePrecision === "provider-confirmed") { confirmedTokens += tokens; confirmedCost += cost; } else if (event.usagePrecision === "estimated") { estimatedTokens += tokens; estimatedCost += cost; } }
+    return <tr key={runId} className={runId === selectedRunId ? "selected" : undefined}><th scope="row"><button type="button" aria-pressed={runId === selectedRunId} onClick={() => onSelect(run)}><code>{runId}</code></button></th><td>{sessionHistoryTime(timestamps[0])}</td><td>{sessionHistoryTime(timestamps.at(-1) ?? stringField(run, "timestamp"))}</td><td>{related.length.toLocaleString("en-US")}</td><td>{confirmedTokens.toLocaleString("en-US")}</td><td>{estimatedTokens.toLocaleString("en-US")}</td><td>{dollars(confirmedCost)}</td><td>{dollars(estimatedCost)}</td><td><StatusBadge status={stringField(run, "status")} /></td></tr>;
+  })}</tbody></table></div>;
 }
 function Kpi({ label, value, sub, tone }: { label: string; value: string; sub: string; tone?: "run" | "brand" | "done" | "warn" }) {
   return <article className={`kpi${tone ? ` kpi-${tone}` : ""}`}><div className="kpi-top"><span className="kpi-label">{label}</span><i className="kpi-signal" aria-hidden="true" /></div><div className="kpi-val">{value}</div><div className="kpi-sub">{sub}</div></article>;
@@ -511,7 +548,7 @@ function initialTheme(): Theme {
   try { return window.localStorage.getItem("hive-theme") === "light" ? "light" : "dark"; }
   catch { return "dark"; }
 }
-interface DashboardRoute { readonly view: View; readonly itemId?: string }
+interface DashboardRoute { readonly view: View; readonly itemId?: string; readonly runId?: string }
 function routeFromPath(): DashboardRoute | undefined {
   try {
     const parts = window.location.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
@@ -520,13 +557,15 @@ function routeFromPath(): DashboardRoute | undefined {
     if (view === "overview" && parts.length === 1) return { view };
     if (!NAV_GROUPS.some((group) => group.views.includes(view))) return undefined;
     if (parts.length === 1) return { view };
-    if (parts.length === 2 && (view === "workflows" || view === "runs") && parts[1]) return { view, itemId: parts[1] };
+    if (parts.length === 2 && (view === "workflows" || view === "sessions") && parts[1]) return { view, itemId: parts[1] };
+    if (parts.length === 4 && view === "sessions" && parts[1] && parts[2] === "runs" && parts[3]) return { view, itemId: parts[1], runId: parts[3] };
     return undefined;
   } catch { return undefined; }
 }
-function routePath(view: View, itemId?: string): string {
+function routePath(view: View, itemId?: string, runId?: string): string {
   if (view === "overview" && !itemId) return "/";
-  return `/${view}${itemId ? `/${encodeURIComponent(itemId)}` : ""}`;
+  const base = `/${view}${itemId ? `/${encodeURIComponent(itemId)}` : ""}`;
+  return view === "sessions" && itemId && runId ? `${base}/runs/${encodeURIComponent(runId)}` : base;
 }
 function initialProjectScope(): string | null | undefined {
   try {
@@ -541,7 +580,7 @@ function initialProjectScope(): string | null | undefined {
 export default function WorkflowDashboard({ embedded = false }: { embedded?: boolean }) {
   const initialRoute = embedded ? { view: "overview" as View } : routeFromPath() ?? { view: "overview" as View };
   const [view, setView] = useState<View>(initialRoute.view); const viewRef = useRef<View>(view); viewRef.current = view;
-  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | undefined>(initialRoute.view === "workflows" ? initialRoute.itemId : undefined); const [expandedRunId, setExpandedRunId] = useState<string | undefined>(initialRoute.view === "runs" ? initialRoute.itemId : undefined);
+  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | undefined>(initialRoute.view === "workflows" ? initialRoute.itemId : undefined); const [expandedSessionId, setExpandedSessionId] = useState<string | undefined>(initialRoute.view === "sessions" ? initialRoute.itemId : undefined); const [expandedRunId, setExpandedRunId] = useState<string | undefined>(initialRoute.view === "sessions" ? initialRoute.runId : undefined);
   const [projectScope, setProjectScope] = useState<string | null | undefined>(initialProjectScope); const [defaultProjectId, setDefaultProjectId] = useState<string>(); const [projectOptions, setProjectOptions] = useState<readonly ProjectOption[]>([]);
   const [items, setItems] = useState<readonly JsonRecord[]>([]); const [summaryItems, setSummaryItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [theme, setTheme] = useState<Theme>(initialTheme); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
@@ -556,10 +595,10 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
     if (embedded) return;
     const syncRoute = (): void => {
       const route = routeFromPath() ?? { view: "overview" as View }; setView(route.view);
-      setExpandedWorkflowId(route.view === "workflows" ? route.itemId : undefined); setExpandedRunId(route.view === "runs" ? route.itemId : undefined);
+      setExpandedWorkflowId(route.view === "workflows" ? route.itemId : undefined); setExpandedSessionId(route.view === "sessions" ? route.itemId : undefined); setExpandedRunId(route.view === "sessions" ? route.runId : undefined);
     };
     const route = routeFromPath() ?? { view: "overview" as View }; const url = new URL(window.location.href);
-    url.searchParams.delete("project"); url.hash = ""; url.pathname = routePath(route.view, route.itemId); window.history.replaceState(null, "", url);
+    url.searchParams.delete("project"); url.hash = ""; url.pathname = routePath(route.view, route.itemId, route.runId); window.history.replaceState(null, "", url);
     window.addEventListener("popstate", syncRoute); return () => window.removeEventListener("popstate", syncRoute);
   }, [embedded]);
   useEffect(() => { document.documentElement.dataset.theme = theme; try { window.localStorage.setItem("hive-theme", theme); } catch { /* storage unavailable */ } }, [theme]);
@@ -598,20 +637,21 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
     void run(); return () => controller.abort("dashboard unmounted or view changed");
   }, [load]);
 
-  const navigate = useCallback((next: View, itemId?: string): void => {
-    setView(next); setExpandedWorkflowId(next === "workflows" ? itemId : undefined); setExpandedRunId(next === "runs" ? itemId : undefined);
-    if (!embedded) { const path = routePath(next, itemId); if (window.location.pathname !== path) window.history.pushState(null, "", path); }
+  const navigate = useCallback((next: View, itemId?: string, runId?: string): void => {
+    setView(next); setExpandedWorkflowId(next === "workflows" ? itemId : undefined); setExpandedSessionId(next === "sessions" ? itemId : undefined); setExpandedRunId(next === "sessions" ? runId : undefined);
+    if (!embedded) { const path = routePath(next, itemId, runId); if (window.location.pathname !== path) window.history.pushState(null, "", path); }
   }, [embedded]);
   const title = TITLES[view]; const stateText = loading ? `Loading ${title}…` : error ? `${title} unavailable.` : resync ? `Resynchronizing ${title} from API v1.` : `${items.length} ${title.toLowerCase()} loaded; stream ${streamState}.`;
   const openWorkflow = useCallback((workflowId: string): void => navigate("workflows", workflowId || undefined), [navigate]);
-  const openRun = useCallback((runId: string): void => navigate("runs", runId || undefined), [navigate]);
-  const dismissWorkflow = useCallback(() => navigate("workflows"), [navigate]); const dismissRun = useCallback(() => navigate("runs"), [navigate]);
+  const openSession = useCallback((sessionId: string): void => navigate("sessions", sessionId || undefined), [navigate]);
+  const openRun = useCallback((runId: string, sessionId: string): void => navigate("sessions", sessionId || undefined, runId || undefined), [navigate]);
+  const dismissWorkflow = useCallback(() => navigate("workflows"), [navigate]); const dismissSession = useCallback(() => navigate("sessions"), [navigate]);
   const content = useMemo(() => view === "overview" && items.length ? <Overview items={items} onNavigate={navigate} onOpenWorkflow={openWorkflow} onOpenRun={openRun} />
     : view === "nodes" && items.length ? <TopologyGraph items={items} />
       : view === "activity" || view === "history" ? items.length ? <ActivityFeed items={items} /> : null
         : view === "cost" && items[0] ? <CostSummary record={items[0]} />
           : view === "model-mix" && items.length ? <ModelMixSummary items={items} />
-            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} initiallyOpen={(view === "workflows" && stringField(item, "workflowId") === expandedWorkflowId) || (view === "runs" && stringField(item, "runId") === expandedRunId)} onOpen={view === "workflows" ? openWorkflow : view === "runs" ? openRun : undefined} onDismiss={view === "workflows" ? dismissWorkflow : view === "runs" ? dismissRun : undefined} onChanged={() => void load(false)} />)}</section> : null, [dismissRun, dismissWorkflow, expandedRunId, expandedWorkflowId, items, load, openRun, openWorkflow, title, view]);
+            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} initiallyOpen={(view === "workflows" && stringField(item, "workflowId") === expandedWorkflowId) || (view === "sessions" && stringField(item, "sessionId") === expandedSessionId)} initialRunId={view === "sessions" ? expandedRunId : undefined} onOpen={view === "workflows" ? openWorkflow : view === "sessions" ? openSession : undefined} onDismiss={view === "workflows" ? dismissWorkflow : view === "sessions" ? dismissSession : undefined} onChanged={() => void load(false)} />)}</section> : null, [dismissSession, dismissWorkflow, expandedRunId, expandedSessionId, expandedWorkflowId, items, load, navigate, openRun, openSession, openWorkflow, title, view]);
   const landmarkContent = <><div className="workflow-title"><div><span className="page-eyebrow">Mission control / {title}</span><h1>{title}</h1><p>{SUBTITLES[view]}</p></div><button className="refresh-button" type="button" onClick={() => void load(false)} disabled={loading}><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M13.5 5.5A5.8 5.8 0 1 0 14 9" /><path d="M13.5 2v3.5H10" /></svg>Refresh</button></div><div className="workflow-state sr-status" role="status" aria-live="polite">{stateText}</div>
     {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <div className="workflow-empty"><HiveMark compact /><strong>No {title.toLowerCase()} available</strong><span>The dashboard is connected and waiting for projected workflow state.</span></div> : content}
     {cursor && !loading && !error && <button className="load-more" type="button" disabled={loadingMore || items.length >= MAX_RENDERED_ITEMS} onClick={() => void load(true)}>{loadingMore ? "Loading…" : items.length >= MAX_RENDERED_ITEMS ? "Display limit reached" : `Load more ${title}`}</button>}</>;
