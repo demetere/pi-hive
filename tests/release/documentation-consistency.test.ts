@@ -7,7 +7,7 @@ const docs = ["README.md", "SETUP.md", "SECURITY.md"].map(file).join("\n");
 const commandsSource = file("src/integration/workflow-commands.ts");
 const toolsSource = file("src/workflows/tools.ts");
 const justfile = file("Justfile");
-const expectedCommands = ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"];
+const expectedCommands = ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:dashboard", "hive:dashboard-prune", "hive:dashboard-restart", "hive:dashboard-stop", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"];
 const expectedTools = ["artifact_action", "artifact_status", "delegate_agent", "human_question", "knowledge_propose", "knowledge_read", "knowledge_search", "route_agent", "team_status", "workflow_finish", "workflow_status"];
 
 test("documented commands exactly match workflow registration", () => {

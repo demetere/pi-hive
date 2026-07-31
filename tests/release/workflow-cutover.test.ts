@@ -75,7 +75,7 @@ test("public package and docs describe the breaking workflow-only release", () =
   const docs = ["README.md", "SETUP.md", "SECURITY.md", "CHANGELOG.md"].map(project).join("\n");
   assert.doesNotMatch(docs, /\/hive:(?:normal|plan-mode|toggle|execute|plan)\b/);
   assert.doesNotMatch(docs, /Ctrl\+Alt\+T|agent-type|mental-model YAML|planning:\s+block|hive:\s+block/i);
-  for (const command of ["select", "status", "exit", "cancel", "reload", "checkpoints", "answer", "handoff-clear", "recover", "doctor", "observe", "observe-stop", "observe-prune"]) {
+  for (const command of ["select", "status", "exit", "cancel", "reload", "checkpoints", "answer", "handoff-clear", "recover", "doctor", "dashboard", "dashboard-restart", "dashboard-stop", "dashboard-prune"]) {
     assert.match(docs, new RegExp(`/hive:${command}\\b`), `docs must include /hive:${command}`);
   }
   assert.match(docs, /manual migration/i);

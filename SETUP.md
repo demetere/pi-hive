@@ -51,7 +51,7 @@ knowledge:
 
 Required keys are `schema-version`, `agents`, and `workflows`. `settings`, `skills`, and `knowledge` are optional. Credentials never belong in config; there is no interpolation.
 
-Dashboard startup values are `session`, `workflow` (default), and `manual`. `session` starts once from the first session hook; `workflow` starts once on the first actual workflow-selection event (not when a projected workflow row first appears); and `manual` starts only through `/hive:observe`. Automatic startup does not open a browser or notify normal chat, and no mode starts from the extension factory.
+Dashboard startup values are `session`, `workflow` (default), and `manual`. `session` starts once from the first session hook; `workflow` starts once on the first actual workflow-selection event (not when a projected workflow row first appears); and `manual` starts only through `/hive:dashboard`. Starting or reusing the daemon registers that canonical project root in the bounded private global registry, so one daemon synchronizes all concurrently registered projects. The top-left dashboard selector changes only the displayed project scope; “All projects” aggregates them. Automatic startup does not open a browser or notify normal chat, and no mode starts from the extension factory.
 
 ## Agent catalog
 
@@ -167,9 +167,10 @@ OpenSpec-backed projects must already contain a valid `openspec/config.yaml` and
 - `/hive:handoff-clear`
 - `/hive:recover <orphan-session-id>`
 - `/hive:doctor [--json]`
-- `/hive:observe`
-- `/hive:observe-stop`
-- `/hive:observe-prune <ISO-timestamp>`
+- `/hive:dashboard`
+- `/hive:dashboard-restart`
+- `/hive:dashboard-stop`
+- `/hive:dashboard-prune <ISO-timestamp>`
 
 ## Validation checklist
 

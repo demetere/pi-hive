@@ -21,7 +21,7 @@ Pi supplies the peer dependencies. pi-hive supports Linux and macOS; npm rejects
 5. Send an ordinary chat message. The first message starts a run; later messages steer the same open run.
 6. The root completes through the `workflow_finish` tool. The workflow remains selected for another run until `/hive:exit`.
 
-No workflow is automatically selected. Normal chat keeps its original tools and has no workflow prompt, widget, policy, or telemetry. The default dashboard daemon waits for the first actual workflow selection; `dashboard-start: session` starts from a session hook, while `manual` is `/hive:observe`-only.
+No workflow is automatically selected. Normal chat keeps its original tools and has no workflow prompt, widget, policy, or telemetry. The default dashboard daemon waits for the first actual workflow selection; `dashboard-start: session` starts from a session hook, while `manual` is `/hive:dashboard`-only.
 
 ## Configuration
 
@@ -133,15 +133,16 @@ Routing is advisory and deterministic. Delegation is persisted and direct-member
 - `/hive:handoff-clear`
 - `/hive:recover <orphan-session-id>`
 - `/hive:doctor [--json]`
-- `/hive:observe`
-- `/hive:observe-stop`
-- `/hive:observe-prune <ISO-timestamp>`
+- `/hive:dashboard`
+- `/hive:dashboard-restart`
+- `/hive:dashboard-stop`
+- `/hive:dashboard-prune <ISO-timestamp>`
 
 ## Knowledge and telemetry
 
 Attached local OKF bundles support bounded deterministic search. Agent-owned bundles default to automatic updates, shared bundles to reviewed updates, and read-only bundles never mutate. Enrichment is durable, idle, bounded, preemptible, and provenance-backed.
 
-Authoritative workflow journals remain under `.pi/hive/sessions/`. The dashboard projection is a rebuildable SQLite database under `~/.pi/agent/hive/`. The dashboard binds to `127.0.0.1:43191`, authenticates writes, checks origin and CSRF, and sends no third-party telemetry. Historical pre-1.0 telemetry files are preserved but are not imported or displayed.
+Authoritative workflow journals remain under `.pi/hive/sessions/`. Each project that starts or reuses the shared daemon is added to the bounded private registry at `~/.pi/agent/hive/workflow-projects-v1.json`; the daemon continuously projects every registered configured root into the rebuildable SQLite database under `~/.pi/agent/hive/`. The top-left dashboard selector filters one project or aggregates all projects without changing ingestion. The dashboard binds to `127.0.0.1:43191`, authenticates writes, checks origin and CSRF, and sends no third-party telemetry. Historical pre-1.0 telemetry files are preserved but are not imported or displayed.
 
 ## Manual migration from pre-1.0
 
