@@ -65,7 +65,7 @@
 .project-scope {
   min-height: 42px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   margin: 3px 14px 14px;
@@ -96,11 +96,6 @@
 }
 
 .project-scope > select:focus-visible { outline: 1px solid var(--brand); outline-offset: 3px; }
-
-.project-scope > small {
-  color: var(--ink-dimmer);
-  font: 9px var(--mono);
-}
 
 .dashboard-sidebar nav {
   min-height: 0;
@@ -746,7 +741,6 @@
   .sidebar-brand { justify-content: center; padding-inline: 10px; }
   .sidebar-brand > div,
   .project-scope select,
-  .project-scope small,
   .nav-group-label,
   .nav-group button > span,
   .nav-group button small,

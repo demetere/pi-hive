@@ -80,6 +80,7 @@ describe("workflow dashboard API v1 client", () => {
     expect(calls.some((call) => call.url.includes("/api/v1/artifacts?"))).toBe(true);
     expect(calls.some((call) => call.url === "/api/v1/usage?projectId=project-1")).toBe(true);
     expect(calls.some((call) => call.url === "/api/v1/project-registry")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Projects" })).not.toBeInTheDocument();
     expect(calls.some((call) => call.url.includes("/api/v1/tree"))).toBe(false);
   });
 
@@ -91,6 +92,9 @@ describe("workflow dashboard API v1 client", () => {
     const user = userEvent.setup(); render(<WorkflowDashboard />);
     const selector = await screen.findByRole("combobox", { name: "Project scope" });
     await waitFor(() => expect(selector).toHaveValue("project-1"));
+    expect(screen.getByRole("option", { name: "Project One" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Project Two" })).toBeInTheDocument();
+    expect(selector).not.toHaveTextContent(/live|historical/i);
     const scopedCalls = calls.filter((call) => call.url.startsWith("/api/v1/") && !call.url.startsWith("/api/v1/projects?") && call.url !== "/api/v1/project-registry" && call.url !== "/api/v1/stream");
     expect(scopedCalls.length).toBeGreaterThan(0);
     for (const call of scopedCalls) expect(new URL(call.url, "http://local").searchParams.get("projectId")).toBe("project-1");
