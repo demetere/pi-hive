@@ -8,7 +8,7 @@ import { BUILTIN_ARTIFACT_REGISTRY, type ResolvedArtifactProfile } from "../arti
 import type { CheckpointPolicy } from "../artifacts/checkpoints";
 import { buildActivationSnapshot, loadConfigCatalogs, loadConfigProject, readActivationSnapshot, resolveConfigWorkflows, SnapshotModelPreflightError, writeActivationSnapshot, type ActivationSnapshotFileV1, type SnapshotArtifactCompatibilityIdentity, type SnapshotCompatibilityRuntime, type SnapshotModelAdapter, type ValidWorkflowDefinition } from "../config/index";
 import { canonicalJson } from "../config/snapshot-canonical";
-import { pruneWorkflowProjection, startWorkflowDashboard, stopWorkflowDashboard, workflowDashboardAvailable } from "./workflow-dashboard-service";
+import { pruneWorkflowProjection, restartWorkflowDashboard, startWorkflowDashboard, stopWorkflowDashboard, workflowDashboardAvailable } from "./workflow-dashboard-service";
 import { assertFilesystemPlatformSupported } from "../capabilities/filesystem";
 import { createBudgetState, effectiveRuntimeBudgetLimitsFromSnapshot, reduceBudgetState } from "../workflows/budgets";
 import { createDelegationState, reduceDelegationState } from "../workflows/delegation";
@@ -373,8 +373,9 @@ export function createLinkedWorkflowCommandServices(pi: ExtensionAPI, projectRoo
         : { ok: false, status: project.status, diagnostics: project.status === "invalid" ? project.diagnostics : [{ code: "CONFIG_NOT_FOUND", message: "No .pi/hive/hive-config.yaml manifest was discovered." }] };
       return json ? JSON.stringify(result) : result.ok ? `Workflow configuration valid (schema-version 1) at ${projectRoot}` : `Workflow configuration invalid: ${result.diagnostics.map((entry) => `${entry.code}: ${entry.message}`).join("; ")}`;
     },
-    async observe(context) { return `Workflow dashboard: ${await startWorkflowDashboard(requireContext(context), true)}`; },
-    async observeStop() { return await stopWorkflowDashboard() ? "Workflow dashboard stopped" : "Workflow dashboard was not running"; },
-    async observePrune(cutoff) { await pruneWorkflowProjection(cutoff); return `Workflow projection pruned before ${cutoff}; authoritative journals were not changed`; },
+    async dashboard(context) { return `Workflow dashboard: ${await startWorkflowDashboard(requireContext(context), true)}`; },
+    async dashboardStop() { return await stopWorkflowDashboard() ? "Workflow dashboard stopped" : "Workflow dashboard was not running"; },
+    async dashboardRestart(context) { return `Workflow dashboard restarted: ${await restartWorkflowDashboard(requireContext(context), true)}`; },
+    async dashboardPrune(cutoff) { await pruneWorkflowProjection(cutoff); return `Workflow projection pruned before ${cutoff}; authoritative journals were not changed`; },
   };
 }

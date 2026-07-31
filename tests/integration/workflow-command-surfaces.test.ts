@@ -105,7 +105,7 @@ test("actual schema-v1 index wiring has unique commands, no mode-cycle shortcut,
   } finally {
     process.chdir(previousCwd);
   }
-  const workflowCommands = ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"];
+  const workflowCommands = ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:dashboard", "hive:dashboard-prune", "hive:dashboard-restart", "hive:dashboard-stop", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"];
   assert.deepEqual([...commands.keys()].sort(), workflowCommands.sort());
   assert.equal(shortcuts.length, 0);
   assert.equal(widgets.some(([id]) => id === "hive-tree"), false);
@@ -176,7 +176,7 @@ test("index production wiring constructs real linked services and runtime comman
   const pi = { registerCommand(name: string, value: unknown) { commands.set(name, value); } } as any;
   let refreshes = 0;
   await registerLinkedWorkflowCommandSurfaces(pi, "/project", "project-1", () => { refreshes += 1; });
-  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:dashboard", "hive:dashboard-prune", "hive:dashboard-restart", "hive:dashboard-stop", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
   const notices: string[] = [];
   await (commands.get("hive:status") as any).handler("", { mode: "print", hasUI: false, sessionManager: { getSessionId: () => "normal" } });
   assert.equal(refreshes, 1);
@@ -188,7 +188,7 @@ test("real linked production services register every exact operation with bound 
   const pi = { registerCommand(name: string, value: unknown) { commands.set(name, value); } } as any;
   const services = createLinkedWorkflowCommandServices(pi, "/project", "project-1", createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
   registerWorkflowCommands(pi, services);
-  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:dashboard", "hive:dashboard-prune", "hive:dashboard-restart", "hive:dashboard-stop", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
 });
 
 test("workflow selection rejects unsupported hosts before config or ownership mutation", async () => {
@@ -283,7 +283,7 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   const projectId = resolveProjectIdentity(projectRoot).projectId;
   initializeNormalParent({ configured: true, projectRoot, projectId, piSessionId: "normal", piSessionFile: sessionFile, model: "provider/model", thinking: "medium", activeTools: [] });
   await registerLinkedWorkflowCommandSurfaces(pi, projectRoot, projectId, undefined, undefined, "linux");
-  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:observe", "hive:observe-prune", "hive:observe-stop", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
+  assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:dashboard", "hive:dashboard-prune", "hive:dashboard-restart", "hive:dashboard-stop", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
   const services = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
   await commands.get("hive:status").handler("", ctx);
   const normalStatus = notices.at(-1)?.[0] ?? "";

@@ -56,9 +56,10 @@ export interface WorkflowCommandServices {
   clearHandoff(ctx?: ExtensionCommandContext): Promise<string>;
   recover?(orphanSessionId: string, ctx?: ExtensionCommandContext): Promise<string>;
   doctor?(json: boolean, ctx?: ExtensionCommandContext): Promise<string>;
-  observe?(ctx?: ExtensionCommandContext): Promise<string>;
-  observeStop?(ctx?: ExtensionCommandContext): Promise<string>;
-  observePrune?(cutoff: string, ctx?: ExtensionCommandContext): Promise<string>;
+  dashboard?(ctx?: ExtensionCommandContext): Promise<string>;
+  dashboardStop?(ctx?: ExtensionCommandContext): Promise<string>;
+  dashboardRestart?(ctx?: ExtensionCommandContext): Promise<string>;
+  dashboardPrune?(cutoff: string, ctx?: ExtensionCommandContext): Promise<string>;
 }
 
 type Severity = "info" | "warning" | "error";
@@ -265,20 +266,25 @@ export function registerWorkflowCommands(pi: ExtensionAPI, services: WorkflowCom
     if (parts.length > 1 || (parts.length === 1 && parts[0] !== "--json")) throw new Error("Usage: /hive:doctor [--json]");
     present(ctx, await doctor(parts[0] === "--json", ctx));
   });
-  const observe = services.observe;
-  if (observe) bind("hive:observe", "Start and open the local workflow dashboard", async (args, ctx) => {
-    if (tokens(args).length) throw new Error("Usage: /hive:observe");
-    present(ctx, await observe(ctx));
+  const dashboard = services.dashboard;
+  if (dashboard) bind("hive:dashboard", "Start and open the local workflow dashboard", async (args, ctx) => {
+    if (tokens(args).length) throw new Error("Usage: /hive:dashboard");
+    present(ctx, await dashboard(ctx));
   });
-  const observeStop = services.observeStop;
-  if (observeStop) bind("hive:observe-stop", "Stop the authenticated local workflow dashboard", async (args, ctx) => {
-    if (tokens(args).length) throw new Error("Usage: /hive:observe-stop");
-    present(ctx, await observeStop(ctx));
+  const dashboardStop = services.dashboardStop;
+  if (dashboardStop) bind("hive:dashboard-stop", "Stop the authenticated local workflow dashboard", async (args, ctx) => {
+    if (tokens(args).length) throw new Error("Usage: /hive:dashboard-stop");
+    present(ctx, await dashboardStop(ctx));
   });
-  const observePrune = services.observePrune;
-  if (observePrune) bind("hive:observe-prune", "Prune the rebuildable workflow projection before an ISO timestamp", async (args, ctx) => {
+  const dashboardRestart = services.dashboardRestart;
+  if (dashboardRestart) bind("hive:dashboard-restart", "Restart and open the authenticated local workflow dashboard", async (args, ctx) => {
+    if (tokens(args).length) throw new Error("Usage: /hive:dashboard-restart");
+    present(ctx, await dashboardRestart(ctx));
+  });
+  const dashboardPrune = services.dashboardPrune;
+  if (dashboardPrune) bind("hive:dashboard-prune", "Prune the rebuildable workflow projection before an ISO timestamp", async (args, ctx) => {
     const parts = tokens(args);
-    if (parts.length !== 1 || !Number.isFinite(Date.parse(parts[0]!))) throw new Error("Usage: /hive:observe-prune <ISO-timestamp>");
-    present(ctx, await observePrune(parts[0]!, ctx));
+    if (parts.length !== 1 || !Number.isFinite(Date.parse(parts[0]!))) throw new Error("Usage: /hive:dashboard-prune <ISO-timestamp>");
+    present(ctx, await dashboardPrune(parts[0]!, ctx));
   });
 }
