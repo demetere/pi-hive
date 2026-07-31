@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import WorkflowDashboard from "./workflow-dashboard";
@@ -61,7 +61,17 @@ function installFetch(options: { apiVersion?: number | undefined; projectId?: st
 }
 
 describe("workflow dashboard API v1 client", () => {
-  beforeEach(() => { vi.restoreAllMocks(); });
+  beforeEach(() => { vi.restoreAllMocks(); window.sessionStorage.clear(); window.history.replaceState(null, "", "/"); });
+
+  it("keeps views and opened items in clean URL paths", async () => {
+    window.history.replaceState(null, "", "/runs/run-1"); installFetch(); const user = userEvent.setup(); render(<WorkflowDashboard />);
+    expect(await screen.findByRole("dialog", { name: "run-1" })).toBeInTheDocument();
+    await user.keyboard("{Escape}"); expect(window.location.pathname).toBe("/runs");
+    await user.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(await screen.findByRole("heading", { name: "Tasks" })).toBeInTheDocument(); expect(window.location.pathname).toBe("/tasks");
+    act(() => { window.history.pushState(null, "", "/activity"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    expect(await screen.findByRole("heading", { name: "Activity" })).toBeInTheDocument();
+  });
 
   it("uses only exact W25 read paths, including nodes, artifacts, and the usage object", async () => {
     const calls = installFetch(); const user = userEvent.setup();
@@ -92,6 +102,7 @@ describe("workflow dashboard API v1 client", () => {
     const workflowLink = await screen.findByRole("button", { name: /custom-delivery/i });
     await user.click(workflowLink);
     const dialog = await screen.findByRole("dialog", { name: "Custom Delivery" });
+    expect(window.location.pathname).toBe("/workflows/custom-delivery");
     const workflowCard = screen.getByRole("button", { name: "Custom Delivery" });
     expect(workflowCard).toHaveAttribute("aria-expanded", "true");
     expect(workflowCard.querySelector("dl")).toBeNull();
@@ -106,7 +117,7 @@ describe("workflow dashboard API v1 client", () => {
     await waitFor(() => expect(configuredTopology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(2));
     expect((await screen.findAllByText("v1")).length).toBeGreaterThanOrEqual(1);
     await user.keyboard("{Escape}");
-    expect(dialog).not.toBeInTheDocument();
+    expect(dialog).not.toBeInTheDocument(); expect(window.location.pathname).toBe("/workflows");
     expect(screen.getByRole("button", { name: "Custom Delivery" })).toHaveFocus();
     await waitFor(() => expect(calls.some((call) => call.url.includes("/api/v1/history?") && call.url.includes("eventType=workflow.cataloged"))).toBe(true));
     expect(calls.some((call) => call.url.includes("/api/v1/sessions?") && call.url.includes("workflowId=custom-delivery"))).toBe(true);
@@ -130,8 +141,10 @@ describe("workflow dashboard API v1 client", () => {
 
     calls.length = 0; await user.selectOptions(selector, "project-2");
     await waitFor(() => expect(calls.some((call) => call.url.includes("/api/v1/workflows?") && new URL(call.url, "http://local").searchParams.get("projectId") === "project-2")).toBe(true));
+    expect(window.sessionStorage.getItem("hive-project-scope")).toBe("project-2"); expect(window.location.search).not.toContain("project");
     calls.length = 0; await user.selectOptions(selector, "");
     await waitFor(() => expect(calls.some((call) => call.url.includes("/api/v1/workflows?") && !new URL(call.url, "http://local").searchParams.has("projectId"))).toBe(true));
+    expect(window.sessionStorage.getItem("hive-project-scope")).toBe("all"); expect(window.location.search).not.toContain("project");
   });
 
   it("fails closed when a JSON response omits or changes apiVersion", async () => {

@@ -8,6 +8,7 @@ const MAX_SSE_FRAME_BYTES = 65_536;
 const MAX_SSE_BUFFER_BYTES = 131_072;
 const RECONNECT_MS = 250;
 const CLAIMED_IDENTITY = "local-dashboard";
+const PROJECT_SCOPE_STORAGE_KEY = "hive-project-scope";
 
 type JsonRecord = Record<string, unknown>;
 type ApiResource = "projects" | "workflows" | "sessions" | "runs" | "nodes" | "tasks" | "artifacts" | "checkpoints" | "questions" | "approvals" | "knowledge" | "usage" | "activity" | "history";
@@ -20,7 +21,7 @@ interface ProjectOption { readonly projectId: string; readonly projectLabel: str
 interface SseFrame { readonly event: string; readonly data: string; readonly id?: string }
 
 const NAV_GROUPS: readonly { readonly label: string; readonly views: readonly View[] }[] = [
-  { label: "Mission control", views: ["overview", "workflows", "sessions", "runs"] },
+  { label: "Mission control", views: ["overview", "workflows", "sessions"] },
   { label: "Execution", views: ["tasks", "activity", "history"] },
   { label: "Governance", views: ["artifacts", "evidence", "checkpoints", "questions", "approvals"] },
   { label: "Knowledge", views: ["knowledge-bundles", "knowledge-jobs", "knowledge-proposals"] },
@@ -220,6 +221,16 @@ async function fetchWorkflowRelated(resource: "history" | "sessions" | "runs", r
   if (!Array.isArray(body.items)) throw new Error(`Invalid workflow ${resource} response`);
   return records(body.items);
 }
+async function fetchSessionRelated(resource: "history" | "runs", record: JsonRecord): Promise<readonly JsonRecord[]> {
+  const projectId = stringField(record, "projectId"); const sessionId = stringField(record, "sessionId");
+  if (!projectId || !sessionId) return [];
+  const query = new URLSearchParams({ projectId, sessionId, limit: String(MAX_RENDERED_ITEMS) }); const path = `/api/v1/${resource}?${query}`;
+  const response = await fetch(path, { headers: await requestHeaders(), credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) throw new Error(`Session ${resource} request failed (${response.status})`);
+  const body = requireV1(await response.json(), path);
+  if (!Array.isArray(body.items)) throw new Error(`Invalid session ${resource} response`);
+  return records(body.items).map((item) => resource === "history" ? historyRecord(item) : item);
+}
 async function fetchRunNodes(record: JsonRecord): Promise<readonly JsonRecord[]> {
   const projectId = stringField(record, "projectId"); const sessionId = stringField(record, "sessionId"); const runId = stringField(record, "runId");
   if (!projectId || !sessionId || !runId) return [];
@@ -336,7 +347,7 @@ function DashboardModal({ labelledBy, onClose, returnFocus, children }: { labell
   }, [onClose, returnFocus]);
   return <div className="workflow-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="workflow-modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={panel} tabIndex={-1}><button className="workflow-modal-close" type="button" data-modal-close onClick={onClose} aria-label="Close details"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m3 3 10 10M13 3 3 13" /></svg></button>{children}</section></div>;
 }
-function WorkflowRecordCard({ record, initiallyOpen = false, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onDismiss?(): void }) {
+function WorkflowRecordCard({ record, initiallyOpen = false, onOpen, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onOpen?(id: string): void; onDismiss?(): void }) {
   const id = stringField(record, "workflowId") ?? identity("workflows", record); const heading = `workflow-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-"); const modalHeading = `${heading}-modal-title`; const trigger = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(initiallyOpen); const [loading, setLoading] = useState(false); const [error, setError] = useState<string>(); const attempted = useRef(false);
   const [versions, setVersions] = useState<readonly JsonRecord[]>([]); const [sessions, setSessions] = useState<readonly JsonRecord[]>([]); const [runs, setRuns] = useState<readonly JsonRecord[]>([]);
@@ -354,8 +365,8 @@ function WorkflowRecordCard({ record, initiallyOpen = false, onDismiss }: { reco
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setLoading(false); }
   }, [record]);
-  useEffect(() => { if (initiallyOpen) { setOpen(true); void loadDetails(); } }, [initiallyOpen, loadDetails]);
-  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); void loadDetails(); };
+  useEffect(() => { setOpen(initiallyOpen); if (initiallyOpen) void loadDetails(); }, [initiallyOpen, loadDetails]);
+  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); onOpen?.(id); void loadDetails(); };
   const topology = catalog && Array.isArray(catalog.topology) ? records(catalog.topology).map((node) => ({ ...node, projectId: record.projectId, sessionId: `configured:${id}`, status: "configured" })) : [];
   return <><article ref={trigger} className="workflow-card workflow-card-workflows workflow-catalog-card" aria-labelledby={heading} role="button" tabIndex={0} aria-haspopup="dialog" aria-expanded={open} aria-controls={`${heading}-details`} onClick={show} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); } }}>
     <div className="record-card-head"><div><span className="record-kind">Workflow definition</span><h2 id={heading}>{stringField(catalog ?? {}, "name") ?? id}</h2><code>{id}</code></div><div className="workflow-card-actions"><StatusBadge status={stringField(record, "status")} /></div></div>
@@ -369,17 +380,17 @@ function WorkflowRecordCard({ record, initiallyOpen = false, onDismiss }: { reco
     {(sessions.length > 0 || runs.length > 0) && <div className="workflow-catalog-section"><h3>Runtime links</h3><p>{sessions.length} linked session{sessions.length === 1 ? "" : "s"}; {runs.length} run{runs.length === 1 ? "" : "s"}.</p></div>}
   </div></DashboardModal>}</>;
 }
-function RunRecordCard({ record, initiallyOpen = false, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onDismiss?(): void }) {
+function RunRecordCard({ record, initiallyOpen = false, onOpen, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onOpen?(id: string): void; onDismiss?(): void }) {
   const id = identity("runs", record); const heading = `runs-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-"); const modalHeading = `${heading}-modal-title`; const trigger = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(initiallyOpen); const [nodes, setNodes] = useState<readonly JsonRecord[]>([]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string>(); const attempted = useRef(false);
   const loadNodes = useCallback(async () => { if (attempted.current) return; attempted.current = true; setLoading(true); try { setNodes(await fetchRunNodes(record)); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setLoading(false); } }, [record]);
-  useEffect(() => { if (initiallyOpen) { setOpen(true); void loadNodes(); } }, [initiallyOpen, loadNodes]);
-  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); void loadNodes(); };
+  useEffect(() => { setOpen(initiallyOpen); if (initiallyOpen) void loadNodes(); }, [initiallyOpen, loadNodes]);
+  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); onOpen?.(id); void loadNodes(); };
   return <><article ref={trigger} className="workflow-card workflow-card-runs run-catalog-card" aria-labelledby={heading} role="button" tabIndex={0} aria-haspopup="dialog" aria-expanded={open} onClick={show} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); } }}><div className="record-card-head"><div><span className="record-kind">Run</span><h2 id={heading}>{id}</h2></div><StatusBadge status={stringField(record, "status")} /></div><DisplayFields view="runs" record={record} /></article>{open && <DashboardModal labelledBy={modalHeading} onClose={close} returnFocus={trigger}><div className="workflow-modal-head"><span className="record-kind">Run topology</span><h2 id={modalHeading}>{id}</h2><code>{stringField(record, "workflowId") ?? "workflow"}</code></div><div className="workflow-catalog-details">{loading && <p role="status">Loading live run topology…</p>}{error && <p role="alert">{error}</p>}<div className="workflow-catalog-section workflow-topology-section"><h3>Live topology</h3>{nodes.length ? <div className="workflow-modal-topology"><TopologyGraph items={nodes} /></div> : !loading && !error && <p>This run has not instantiated any agent nodes.</p>}</div></div></DashboardModal>}</>;
 }
-function RecordCard({ view, record, onChanged, initiallyOpen = false, onDismiss }: { view: View; record: JsonRecord; onChanged(): void; initiallyOpen?: boolean; onDismiss?(): void }) {
-  if (view === "workflows") return <WorkflowRecordCard record={record} initiallyOpen={initiallyOpen} onDismiss={onDismiss} />;
-  if (view === "runs") return <RunRecordCard record={record} initiallyOpen={initiallyOpen} onDismiss={onDismiss} />;
+function RecordCard({ view, record, onChanged, initiallyOpen = false, onOpen, onDismiss }: { view: View; record: JsonRecord; onChanged(): void; initiallyOpen?: boolean; onOpen?(id: string): void; onDismiss?(): void }) {
+  if (view === "workflows") return <WorkflowRecordCard record={record} initiallyOpen={initiallyOpen} onOpen={onOpen} onDismiss={onDismiss} />;
+  if (view === "runs") return <RunRecordCard record={record} initiallyOpen={initiallyOpen} onOpen={onOpen} onDismiss={onDismiss} />;
   const id = identity(view, record); const heading = `${view}-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-");
   const status = stringField(record, "status");
   return <article className={`workflow-card workflow-card-${view}`} aria-labelledby={heading}><div className="record-card-head"><div><span className="record-kind">{TITLES[view]}</span><h2 id={heading}>{id}</h2></div><StatusBadge status={status} /></div><DisplayFields view={view} record={record} />
@@ -430,7 +441,7 @@ function ActivityFeed({ items, compact = false }: { items: readonly JsonRecord[]
 function Kpi({ label, value, sub, tone }: { label: string; value: string; sub: string; tone?: "run" | "brand" | "done" | "warn" }) {
   return <article className={`kpi${tone ? ` kpi-${tone}` : ""}`}><div className="kpi-top"><span className="kpi-label">{label}</span><i className="kpi-signal" aria-hidden="true" /></div><div className="kpi-val">{value}</div><div className="kpi-sub">{sub}</div></article>;
 }
-function Overview({ items, onNavigate, onOpenWorkflow, onOpenRun }: { items: readonly JsonRecord[]; onNavigate(view: View): void; onOpenWorkflow(workflowId: string): void; onOpenRun(runId: string): void }) {
+function Overview({ items, onNavigate, onOpenWorkflow, onOpenRun }: { items: readonly JsonRecord[]; onNavigate(view: View): void; onOpenWorkflow(workflowId: string): void; onOpenRun(runId: string, sessionId: string): void }) {
   const inView = (view: View) => items.filter((item) => item.dashboardView === view);
   const projects = inView("projects"); const workflows = inView("workflows"); const sessions = inView("sessions"); const runs = inView("runs"); const nodes = inView("nodes"); const tasks = inView("tasks"); const questions = inView("questions"); const approvals = inView("approvals"); const activity = inView("activity"); const usage = inView("usage")[0] ?? {};
   const activeRuns = runs.filter((item) => statusTone(stringField(item, "status")) === "running").length;
@@ -449,7 +460,7 @@ function Overview({ items, onNavigate, onOpenWorkflow, onOpenRun }: { items: rea
       <Kpi label="Total cost" value={`$${confirmedCost.toFixed(4)}`} sub={latest ? `updated ${relativeTime(latest)}` : "no usage yet"} tone="brand" />
     </section>
     <section className="widgets dashboard-widgets">
-      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live run structure</span><h2 className="w-title">Run topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span>{nodes.length > 0 && stringField(nodes[0], "runId") && <button type="button" onClick={() => onOpenRun(stringField(nodes[0], "runId")!)}>Open run</button>}</div></div><div className="topology-canvas">{nodes.length ? <TopologyGraph items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No active run topology</strong><span>Selecting a workflow does not create runtime nodes. Send a message to start a run.</span></div>}</div></section>
+      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live run structure</span><h2 className="w-title">Run topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span>{nodes.length > 0 && stringField(nodes[0], "runId") && stringField(nodes[0], "sessionId") && <button type="button" onClick={() => onOpenRun(stringField(nodes[0], "runId")!, stringField(nodes[0], "sessionId")!)}>Open run</button>}</div></div><div className="topology-canvas">{nodes.length ? <TopologyGraph items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No active run topology</strong><span>Selecting a workflow does not create runtime nodes. Send a message to start a run.</span></div>}</div></section>
       <section className="widget activity-widget"><div className="w-head"><div><span className="widget-eyebrow">Streaming</span><h2 className="w-title">Activity</h2></div><div className="w-tools"><span className="live-indicator"><i />live</span><button type="button" onClick={() => onNavigate("activity")}>View all</button></div></div>{activity.length ? <ActivityFeed items={activity} compact /> : <div className="overview-empty small"><strong>Waiting for events</strong><span>Workflow activity will appear here in real time.</span></div>}</section>
       <section className="widget workflow-widget"><div className="w-head"><div><span className="widget-eyebrow">Catalog</span><h2 className="w-title">Workflows</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("workflows")}>Explore</button></div></div><div className="overview-workflow-list">{workflows.slice(0, 6).map((item) => <button type="button" key={`${stringField(item, "projectId") ?? "project"}:${identity("workflows", item)}`} onClick={() => onOpenWorkflow(stringField(item, "workflowId") ?? "")}><span><i className={`dot ${statusTone(stringField(item, "status"))}`} />{stringField(item, "workflowId") ?? "workflow"}</span><StatusBadge status={stringField(item, "status")} /></button>)}{!workflows.length && <div className="overview-empty small"><strong>No cataloged workflows</strong><span>Reload the configured Pi project to refresh its workflow catalog.</span></div>}</div></section>
       <section className="widget usage-widget"><div className="w-head"><div><span className="widget-eyebrow">Precision separated</span><h2 className="w-title">Cost &amp; tokens</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("cost")}>Inspect usage</button></div></div><div className="usage-bars"><div><span>Provider confirmed</span><b>{confirmedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, confirmedTokens ? 100 : 0)}%` }} /></i></div><div><span>Estimated</span><b>{estimatedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, estimatedTokens && !confirmedTokens ? 100 : confirmedTokens ? estimatedTokens / confirmedTokens * 100 : 0)}%` }} /></i></div></div></section>
@@ -500,14 +511,37 @@ function initialTheme(): Theme {
   try { return window.localStorage.getItem("hive-theme") === "light" ? "light" : "dark"; }
   catch { return "dark"; }
 }
+interface DashboardRoute { readonly view: View; readonly itemId?: string }
+function routeFromPath(): DashboardRoute | undefined {
+  try {
+    const parts = window.location.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+    if (!parts.length) return { view: "overview" };
+    const view = parts[0] as View;
+    if (view === "overview" && parts.length === 1) return { view };
+    if (!NAV_GROUPS.some((group) => group.views.includes(view))) return undefined;
+    if (parts.length === 1) return { view };
+    if (parts.length === 2 && (view === "workflows" || view === "runs") && parts[1]) return { view, itemId: parts[1] };
+    return undefined;
+  } catch { return undefined; }
+}
+function routePath(view: View, itemId?: string): string {
+  if (view === "overview" && !itemId) return "/";
+  return `/${view}${itemId ? `/${encodeURIComponent(itemId)}` : ""}`;
+}
 function initialProjectScope(): string | null | undefined {
-  try { const value = new URLSearchParams(window.location.search).get("project"); return value === "all" ? null : value || undefined; }
-  catch { return undefined; }
+  try {
+    const stored = window.sessionStorage.getItem(PROJECT_SCOPE_STORAGE_KEY);
+    if (stored) return stored === "all" ? null : stored;
+    const legacy = new URLSearchParams(window.location.search).get("project");
+    if (legacy) { window.sessionStorage.setItem(PROJECT_SCOPE_STORAGE_KEY, legacy); return legacy === "all" ? null : legacy; }
+    return undefined;
+  } catch { return undefined; }
 }
 
 export default function WorkflowDashboard({ embedded = false }: { embedded?: boolean }) {
-  const [view, setView] = useState<View>("overview"); const viewRef = useRef<View>(view); viewRef.current = view;
-  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string>(); const [expandedRunId, setExpandedRunId] = useState<string>();
+  const initialRoute = embedded ? { view: "overview" as View } : routeFromPath() ?? { view: "overview" as View };
+  const [view, setView] = useState<View>(initialRoute.view); const viewRef = useRef<View>(view); viewRef.current = view;
+  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | undefined>(initialRoute.view === "workflows" ? initialRoute.itemId : undefined); const [expandedRunId, setExpandedRunId] = useState<string | undefined>(initialRoute.view === "runs" ? initialRoute.itemId : undefined);
   const [projectScope, setProjectScope] = useState<string | null | undefined>(initialProjectScope); const [defaultProjectId, setDefaultProjectId] = useState<string>(); const [projectOptions, setProjectOptions] = useState<readonly ProjectOption[]>([]);
   const [items, setItems] = useState<readonly JsonRecord[]>([]); const [summaryItems, setSummaryItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [theme, setTheme] = useState<Theme>(initialTheme); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
@@ -518,6 +552,16 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
     finally { if (generation.current === currentGeneration) { setLoading(false); setLoadingMore(false); } }
   }, [projectScope, view]);
   useEffect(() => { let active = true; void Promise.all([bootstrap(), fetchProjectOptions()]).then(([credentials, options]) => { if (!active) return; setProjectOptions(options); setDefaultProjectId(credentials.projectId); }).catch(() => { /* the main resource load presents the bounded API error */ }); return () => { active = false; }; }, []);
+  useEffect(() => {
+    if (embedded) return;
+    const syncRoute = (): void => {
+      const route = routeFromPath() ?? { view: "overview" as View }; setView(route.view);
+      setExpandedWorkflowId(route.view === "workflows" ? route.itemId : undefined); setExpandedRunId(route.view === "runs" ? route.itemId : undefined);
+    };
+    const route = routeFromPath() ?? { view: "overview" as View }; const url = new URL(window.location.href);
+    url.searchParams.delete("project"); url.hash = ""; url.pathname = routePath(route.view, route.itemId); window.history.replaceState(null, "", url);
+    window.addEventListener("popstate", syncRoute); return () => window.removeEventListener("popstate", syncRoute);
+  }, [embedded]);
   useEffect(() => { document.documentElement.dataset.theme = theme; try { window.localStorage.setItem("hive-theme", theme); } catch { /* storage unavailable */ } }, [theme]);
   useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 1_000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { setItems([]); cursorRef.current = null; setCursor(null); void load(false); }, [load]);
@@ -554,16 +598,20 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
     void run(); return () => controller.abort("dashboard unmounted or view changed");
   }, [load]);
 
+  const navigate = useCallback((next: View, itemId?: string): void => {
+    setView(next); setExpandedWorkflowId(next === "workflows" ? itemId : undefined); setExpandedRunId(next === "runs" ? itemId : undefined);
+    if (!embedded) { const path = routePath(next, itemId); if (window.location.pathname !== path) window.history.pushState(null, "", path); }
+  }, [embedded]);
   const title = TITLES[view]; const stateText = loading ? `Loading ${title}…` : error ? `${title} unavailable.` : resync ? `Resynchronizing ${title} from API v1.` : `${items.length} ${title.toLowerCase()} loaded; stream ${streamState}.`;
-  const openWorkflow = useCallback((workflowId: string): void => { setExpandedWorkflowId(workflowId || undefined); setView("workflows"); }, []);
-  const openRun = useCallback((runId: string): void => { setExpandedRunId(runId || undefined); setView("runs"); }, []);
-  const dismissWorkflow = useCallback(() => setExpandedWorkflowId(undefined), []); const dismissRun = useCallback(() => setExpandedRunId(undefined), []);
-  const content = useMemo(() => view === "overview" && items.length ? <Overview items={items} onNavigate={setView} onOpenWorkflow={openWorkflow} onOpenRun={openRun} />
+  const openWorkflow = useCallback((workflowId: string): void => navigate("workflows", workflowId || undefined), [navigate]);
+  const openRun = useCallback((runId: string): void => navigate("runs", runId || undefined), [navigate]);
+  const dismissWorkflow = useCallback(() => navigate("workflows"), [navigate]); const dismissRun = useCallback(() => navigate("runs"), [navigate]);
+  const content = useMemo(() => view === "overview" && items.length ? <Overview items={items} onNavigate={navigate} onOpenWorkflow={openWorkflow} onOpenRun={openRun} />
     : view === "nodes" && items.length ? <TopologyGraph items={items} />
       : view === "activity" || view === "history" ? items.length ? <ActivityFeed items={items} /> : null
         : view === "cost" && items[0] ? <CostSummary record={items[0]} />
           : view === "model-mix" && items.length ? <ModelMixSummary items={items} />
-            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} initiallyOpen={(view === "workflows" && stringField(item, "workflowId") === expandedWorkflowId) || (view === "runs" && stringField(item, "runId") === expandedRunId)} onDismiss={view === "workflows" ? dismissWorkflow : view === "runs" ? dismissRun : undefined} onChanged={() => void load(false)} />)}</section> : null, [dismissRun, dismissWorkflow, expandedRunId, expandedWorkflowId, items, load, openRun, openWorkflow, title, view]);
+            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} initiallyOpen={(view === "workflows" && stringField(item, "workflowId") === expandedWorkflowId) || (view === "runs" && stringField(item, "runId") === expandedRunId)} onOpen={view === "workflows" ? openWorkflow : view === "runs" ? openRun : undefined} onDismiss={view === "workflows" ? dismissWorkflow : view === "runs" ? dismissRun : undefined} onChanged={() => void load(false)} />)}</section> : null, [dismissRun, dismissWorkflow, expandedRunId, expandedWorkflowId, items, load, openRun, openWorkflow, title, view]);
   const landmarkContent = <><div className="workflow-title"><div><span className="page-eyebrow">Mission control / {title}</span><h1>{title}</h1><p>{SUBTITLES[view]}</p></div><button className="refresh-button" type="button" onClick={() => void load(false)} disabled={loading}><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M13.5 5.5A5.8 5.8 0 1 0 14 9" /><path d="M13.5 2v3.5H10" /></svg>Refresh</button></div><div className="workflow-state sr-status" role="status" aria-live="polite">{stateText}</div>
     {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <div className="workflow-empty"><HiveMark compact /><strong>No {title.toLowerCase()} available</strong><span>The dashboard is connected and waiting for projected workflow state.</span></div> : content}
     {cursor && !loading && !error && <button className="load-more" type="button" disabled={loadingMore || items.length >= MAX_RENDERED_ITEMS} onClick={() => void load(true)}>{loadingMore ? "Loading…" : items.length >= MAX_RENDERED_ITEMS ? "Display limit reached" : `Load more ${title}`}</button>}</>;
@@ -573,8 +621,8 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
   const projectedProject = summaryItems.find((item) => item.dashboardView === "projects");
   const projectLabel = effectiveProjectScope === null ? "All projects" : selectedProject?.projectLabel ?? stringField(projectedProject ?? {}, "projectLabel") ?? stringField(projectedProject ?? {}, "projectId") ?? "Local project";
   const changeProject = (value: string): void => {
-    const next = value || null; setProjectScope(next); const url = new URL(window.location.href); url.searchParams.set("project", next ?? "all"); window.history.replaceState(null, "", url);
+    const next = value || null; setProjectScope(next); try { window.sessionStorage.setItem(PROJECT_SCOPE_STORAGE_KEY, next ?? "all"); } catch { /* storage unavailable */ }
   };
   const navCount = (entry: View): number | undefined => entry === "overview" ? undefined : summaryItems.filter((item) => item.dashboardView === entry).length || undefined;
-  return <div className="workflow-dashboard dashboard-frame"><a className="skip-link" href="#workflow-content">Skip to content</a><aside className="dashboard-sidebar"><div className="sidebar-brand"><HiveMark /><div><strong>pi-hive</strong><span>Mission control</span></div></div><label className="project-scope"><i aria-hidden="true" /><span className="sr-only">Project scope</span><select aria-label="Project scope" value={effectiveProjectScope ?? ""} onChange={(event) => changeProject(event.target.value)}><option value="">All projects</option>{projectOptions.map((project) => <option key={project.projectId} value={project.projectId}>{project.projectLabel}</option>)}</select></label><nav aria-label="Workflow dashboard views">{NAV_GROUPS.map((group) => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.views.map((entry) => <button type="button" aria-label={TITLES[entry]} aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => setView(entry)}><NavIcon view={entry} /><span>{TITLES[entry]}</span>{navCount(entry) !== undefined && <small aria-hidden="true">{navCount(entry)}</small>}</button>)}</div>)}</nav><div className="sidebar-footer"><div className="connection-card"><span><i className={streamState} aria-hidden="true" />{streamState === "live" ? "Connected" : streamState === "connecting" ? "Connecting" : "Resyncing"}</span><code>localhost:43191</code></div><div className="theme-switch" aria-label="Dashboard theme"><button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button><button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button></div></div></aside><div className="dashboard-main"><header className="dashboard-topbar"><div><span className={`topbar-live ${streamState}`}><i />{streamState}</span><span className="topbar-divider" /><span className="topbar-project">{projectLabel}</span></div><time dateTime={now.toISOString()}>{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></header><main id="workflow-content" tabIndex={-1}>{landmarkContent}</main></div></div>;
+  return <div className="workflow-dashboard dashboard-frame"><a className="skip-link" href="#workflow-content" onClick={(event) => { event.preventDefault(); document.getElementById("workflow-content")?.focus(); }}>Skip to content</a><aside className="dashboard-sidebar"><div className="sidebar-brand"><HiveMark /><div><strong>pi-hive</strong><span>Mission control</span></div></div><label className="project-scope"><i aria-hidden="true" /><span className="sr-only">Project scope</span><select aria-label="Project scope" value={effectiveProjectScope ?? ""} onChange={(event) => changeProject(event.target.value)}><option value="">All projects</option>{projectOptions.map((project) => <option key={project.projectId} value={project.projectId}>{project.projectLabel}</option>)}</select></label><nav aria-label="Workflow dashboard views">{NAV_GROUPS.map((group) => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.views.map((entry) => <button type="button" aria-label={TITLES[entry]} aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => navigate(entry)}><NavIcon view={entry} /><span>{TITLES[entry]}</span>{navCount(entry) !== undefined && <small aria-hidden="true">{navCount(entry)}</small>}</button>)}</div>)}</nav><div className="sidebar-footer"><div className="connection-card"><span><i className={streamState} aria-hidden="true" />{streamState === "live" ? "Connected" : streamState === "connecting" ? "Connecting" : "Resyncing"}</span><code>localhost:43191</code></div><div className="theme-switch" aria-label="Dashboard theme"><button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button><button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button></div></div></aside><div className="dashboard-main"><header className="dashboard-topbar"><div><span className={`topbar-live ${streamState}`}><i />{streamState}</span><span className="topbar-divider" /><span className="topbar-project">{projectLabel}</span></div><time dateTime={now.toISOString()}>{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></header><main id="workflow-content" tabIndex={-1}>{landmarkContent}</main></div></div>;
 }
