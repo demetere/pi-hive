@@ -9,7 +9,7 @@ interface MockOptions { readonly paginatedTasks?: boolean }
 const common = { projectId: "project-1", sessionId: "session-1", workflowId: "custom-delivery", runId: "run-1" };
 const resources: Record<string, Array<Record<string, unknown>>> = {
   projects: [{ projectId: "project-1", status: "active" }],
-  workflows: [{ ...common, status: "active" }], sessions: [{ ...common, status: "current" }], runs: [{ ...common, status: "waiting_for_human" }],
+  workflows: [{ ...common, status: "active", metadata: { catalog: { name: "Custom Delivery", description: "Deliver a tested change through coordinated specialists.", definitionVersion: 1, definitionHash: `sha256:${"a".repeat(64)}`, status: "available", topology: [{ nodeId: "root", agentId: "coordinator", agentName: "Delivery Orchestrator", role: "orchestrator", model: "provider/gpt-5.4", thinking: "high" }, { nodeId: "worker", parentNodeId: "root", agentId: "specialist", agentName: "Implementation Specialist", model: "provider/gpt-5.4-mini", thinking: "medium" }], topologyTruncated: false } } }], sessions: [{ ...common, status: "current" }], runs: [{ ...common, status: "waiting_for_human" }],
   nodes: [{ ...common, nodeId: "root", agentId: "coordinator", status: "running" }, { ...common, nodeId: "worker", agentId: "specialist", parentNodeId: "root", status: "waiting" }],
   tasks: [{ ...common, taskId: "task-1", nodeId: "worker", status: "running" }],
   artifacts: [{ ...common, workspaceId: "workspace-1", adapterId: "markdown-plan", profileId: "author", status: "recorded" }],
@@ -51,6 +51,7 @@ export async function installDashboardMock(page: Page, options: MockOptions = {}
       mutations.push({ method, path: pathname, headers: request.headers(), body });
       return json(route, { apiVersion: 1, result: { ok: true } });
     }
+    if (pathname === "/api/v1/project-registry") return json(route, { apiVersion: 1, items: [{ projectId: "project-1", projectLabel: "Project One", registeredAt: "2026-07-20T00:00:00Z", syncStatus: "live" }] });
     if (pathname === "/api/v1/usage") return json(route, { apiVersion: 1, usage: { estimated: { inputTokens: 100, outputTokens: 20, costMicroUsd: 3000 }, providerConfirmed: { inputTokens: 90, outputTokens: 18, costMicroUsd: 2700 } } });
     const detail = /^\/api\/v1\/(questions|approvals|knowledge)\/([^/]+)$/u.exec(pathname);
     if (detail?.[1] === "questions") return json(route, { apiVersion: 1, object: { ...common, questionId: detail[2], state: "pending", definition: { prompt: "Continue?", kind: "confirm", required: true } } });

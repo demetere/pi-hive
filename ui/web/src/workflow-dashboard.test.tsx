@@ -9,6 +9,7 @@ const page = (resource: string, items: unknown[], nextCursor?: string) => ({ api
 function responseFor(resource: string): Json {
   const common = { projectId: "project-1", sessionId: "session-1", workflowId: "custom-delivery", runId: "run-1" };
   if (resource === "activity" || resource === "history") return { apiVersion: 1, items: [
+    { eventId: "catalog-event", eventType: "workflow.cataloged", timestamp: "2025-12-31T23:59:59Z", producer: "runtime", sequence: 1, refs: [], dimensions: { ...common, workflowConfigHash: "a".repeat(64), workflowConfigVersion: "1" }, metadata: { catalog: { workflowId: "custom-delivery", name: "Custom Delivery", description: "Cataloged delivery workflow", definitionHash: "a".repeat(64), definitionVersion: 1, status: "available", topology: [{ nodeId: "root", agentId: "coordinator", agentName: "Coordinator", role: "orchestrator", model: "provider/gpt-5.4", thinking: "high" }, { nodeId: "worker", parentNodeId: "root", agentId: "specialist", agentName: "Specialist", model: "provider/gpt-5.4-mini", thinking: "medium" }], topologyTruncated: false, diagnosticCodes: [] } } },
     { eventId: "evidence-event", eventType: "terminal.recorded", timestamp: "2026-01-01T00:00:00Z", producer: "harness", sequence: 1, refs: ["tool-call-7", `sha256:${"a".repeat(64)}`], dimensions: { ...common, modelId: "provider/model-a" } },
     { eventId: "plain-event", eventType: "run.started", timestamp: "2026-01-01T00:00:01Z", producer: "runtime", sequence: 2, refs: [], dimensions: common },
     { eventId: "model-a-confirmed", eventType: "budget.model.usage.recorded", timestamp: "2026-01-01T00:00:02Z", producer: "harness", sequence: 3, refs: [], dimensions: { ...common, modelId: "provider/model-a" }, usage: { inputTokens: 11, outputTokens: 3, costMicroUsd: 40, precision: "provider-confirmed" } },
@@ -16,7 +17,7 @@ function responseFor(resource: string): Json {
   ], hasMore: false };
   const values: Record<string, unknown[]> = {
     projects: [{ projectId: "project-1", status: "active", projectRoot: "/must/not/render" }],
-    workflows: [{ ...common, name: "Custom Delivery", description: "must-not-render-description", status: "active" }],
+    workflows: [{ ...common, name: "Custom Delivery", description: "must-not-render-description", workflowConfigHash: "a".repeat(64), workflowConfigVersion: "1", status: "available", eventType: "workflow.cataloged", metadata: { catalog: { workflowId: "custom-delivery", name: "Custom Delivery", description: "Cataloged delivery workflow", definitionHash: "a".repeat(64), definitionVersion: 1, status: "available", topology: [{ nodeId: "root", agentId: "coordinator", agentName: "Coordinator", role: "orchestrator", model: "provider/gpt-5.4", thinking: "high" }, { nodeId: "worker", parentNodeId: "root", agentId: "specialist", agentName: "Specialist", model: "provider/gpt-5.4-mini", thinking: "medium" }], topologyTruncated: false, diagnosticCodes: [] } } }],
     sessions: [{ ...common, status: "current", activationHash: "secret-activation" }],
     runs: [{ ...common, status: "waiting_for_human" }],
     nodes: [{ ...common, nodeId: "root", parentNodeId: null, agentId: "coordinator", status: "running" }, { ...common, nodeId: "worker", parentNodeId: "root", agentId: "specialist", status: "waiting" }],
@@ -66,11 +67,13 @@ describe("workflow dashboard API v1 client", () => {
     const calls = installFetch(); const user = userEvent.setup();
     render(<WorkflowDashboard />);
     expect(await screen.findByRole("heading", { name: "Workflows" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Topology" }));
+    expect(screen.queryByRole("button", { name: "Topology" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Runs" }));
+    await user.click(await screen.findByRole("button", { name: "run-1" }));
     const topology = await screen.findByRole("region", { name: "Topology hierarchy" });
-    expect(topology.querySelector("[role='tree'], [role='treeitem']")).toBeNull();
-    expect(topology.querySelectorAll("ul")).toHaveLength(2);
-    expect(topology.querySelectorAll("li")).toHaveLength(2);
+    expect(topology.querySelector(".graph-svg")).not.toBeNull();
+    expect(topology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(2);
+    expect(topology.querySelectorAll(".g-edge")).toHaveLength(1);
     expect(topology).toHaveTextContent(/root.*worker/s);
     await user.click(screen.getByRole("button", { name: "Artifacts" }));
     expect(await screen.findByRole("heading", { name: "workspace-1" })).toBeInTheDocument();
@@ -82,6 +85,32 @@ describe("workflow dashboard API v1 client", () => {
     expect(calls.some((call) => call.url === "/api/v1/project-registry")).toBe(true);
     expect(screen.queryByRole("button", { name: "Projects" })).not.toBeInTheDocument();
     expect(calls.some((call) => call.url.includes("/api/v1/tree"))).toBe(false);
+  });
+
+  it("opens cataloged workflow versions and configured topology from the overview", async () => {
+    const calls = installFetch(); const user = userEvent.setup(); render(<WorkflowDashboard />);
+    const workflowLink = await screen.findByRole("button", { name: /custom-delivery/i });
+    await user.click(workflowLink);
+    const dialog = await screen.findByRole("dialog", { name: "Custom Delivery" });
+    const workflowCard = screen.getByRole("button", { name: "Custom Delivery" });
+    expect(workflowCard).toHaveAttribute("aria-expanded", "true");
+    expect(workflowCard.querySelector("dl")).toBeNull();
+    expect(workflowCard).not.toHaveTextContent(/project-1|workflow\.cataloged|a{32}/u);
+    expect(screen.getByRole("heading", { name: "Configured topology" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Topology hierarchy" })).toHaveClass("topology-graph");
+    const configuredTopology = screen.getByRole("region", { name: "Topology hierarchy" });
+    expect(configuredTopology).toHaveTextContent(/Coordinator.*gpt-5\.4.*HIGH.*Specialist.*gpt-5\.4-mini.*MEDIUM/s);
+    await user.click(screen.getByRole("button", { name: "Collapse Coordinator" }));
+    await waitFor(() => expect(configuredTopology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "Expand Coordinator" }));
+    await waitFor(() => expect(configuredTopology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(2));
+    expect((await screen.findAllByText("v1")).length).toBeGreaterThanOrEqual(1);
+    await user.keyboard("{Escape}");
+    expect(dialog).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Custom Delivery" })).toHaveFocus();
+    await waitFor(() => expect(calls.some((call) => call.url.includes("/api/v1/history?") && call.url.includes("eventType=workflow.cataloged"))).toBe(true));
+    expect(calls.some((call) => call.url.includes("/api/v1/sessions?") && call.url.includes("workflowId=custom-delivery"))).toBe(true);
+    expect(calls.some((call) => call.url.includes("/api/v1/runs?") && call.url.includes("workflowId=custom-delivery"))).toBe(true);
   });
 
   it("scopes dashboard resources to the selected project and supports all-project aggregation", async () => {
@@ -234,9 +263,10 @@ describe("workflow dashboard API v1 client", () => {
       if (url.includes("/api/v1/nodes?")) return new Response(JSON.stringify(page("nodes", Array.from({ length: 120 }, (_, index) => ({ projectId: "project-1", sessionId: "session-1", runId: "run-1", nodeId: `deep-${index}`, ...(index ? { parentNodeId: `deep-${index - 1}` } : {}), status: "running" })))));
       return new Response(JSON.stringify(responseFor(url.split("/api/v1/")[1]?.split(/[?]/u)[0] ?? "workflows")));
     }));
-    const user = userEvent.setup(); const view = render(<WorkflowDashboard />); await user.click(await screen.findByRole("button", { name: "Topology" }));
+    const user = userEvent.setup(); const view = render(<WorkflowDashboard />); await user.click(await screen.findByRole("button", { name: "Runs" }));
+    await user.click(await screen.findByRole("button", { name: "run-1" }));
     const topology = await screen.findByRole("region", { name: "Topology hierarchy" });
-    expect(topology.querySelectorAll("article")).toHaveLength(120); expect(topology).toHaveTextContent("deep-119"); view.unmount();
+    expect(topology.querySelectorAll(".g-node:not(.group-header)")).toHaveLength(120); expect(topology).toHaveTextContent("deep-119"); view.unmount();
   });
 
   it("uses authenticated bounded fetch-stream SSE, validates hello, and reconnects with Last-Event-ID", async () => {

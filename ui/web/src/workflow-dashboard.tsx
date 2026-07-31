@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import TopologyGraph from "./topology-graph";
 
 const API_VERSION = 1;
 const PAGE_SIZE = 100;
@@ -20,7 +21,7 @@ interface SseFrame { readonly event: string; readonly data: string; readonly id?
 
 const NAV_GROUPS: readonly { readonly label: string; readonly views: readonly View[] }[] = [
   { label: "Mission control", views: ["overview", "workflows", "sessions", "runs"] },
-  { label: "Execution", views: ["nodes", "tasks", "activity", "history"] },
+  { label: "Execution", views: ["tasks", "activity", "history"] },
   { label: "Governance", views: ["artifacts", "evidence", "checkpoints", "questions", "approvals"] },
   { label: "Knowledge", views: ["knowledge-bundles", "knowledge-jobs", "knowledge-proposals"] },
   { label: "Insights", views: ["cost", "model-mix", "usage"] },
@@ -33,31 +34,31 @@ const TITLES: Readonly<Record<View, string>> = {
 };
 
 const SUBTITLES: Readonly<Record<View, string>> = {
-  overview: "Live workflow health, topology, activity, and usage at a glance.", projects: "Registered live projects and retained historical project projections.", workflows: "Selected workflow definitions and their current state.", sessions: "Linked Pi sessions carrying workflow execution state.", runs: "Durable workflow runs and their terminal or active status.", nodes: "The live hierarchical agent topology instantiated by projected runs.", tasks: "Delegated work owned by workflow nodes.", artifacts: "Bound artifact workspaces without exposing private content.", evidence: "Verified event references projected from authoritative journals.", checkpoints: "Artifact checkpoint requests and current decisions.", questions: "Durable human questions awaiting exact typed answers.", approvals: "Human approval controls with exact request provenance.", "knowledge-bundles": "Bounded knowledge updates available to workflows.", "knowledge-jobs": "Durable enrichment work and model attribution.", "knowledge-proposals": "Human-reviewed knowledge changes awaiting decisions.", knowledge: "Projected knowledge lifecycle state.", cost: "Provider-confirmed and explicitly separated estimated spend.", "model-mix": "Token usage grouped by model and precision.", usage: "Authoritative token and cost counters by precision.", activity: "The newest projected workflow events.", history: "Bounded durable workflow event history.",
+  overview: "Live workflow health, topology, activity, and usage at a glance.", projects: "Registered live projects and retained historical project projections.", workflows: "Cataloged workflow definitions, immutable versions, and configured topology.", sessions: "Linked Pi sessions carrying workflow execution state.", runs: "Durable workflow runs and their terminal or active status.", nodes: "The live hierarchical agent topology instantiated by projected runs.", tasks: "Delegated work owned by workflow nodes.", artifacts: "Bound artifact workspaces without exposing private content.", evidence: "Verified event references projected from authoritative journals.", checkpoints: "Artifact checkpoint requests and current decisions.", questions: "Durable human questions awaiting exact typed answers.", approvals: "Human approval controls with exact request provenance.", "knowledge-bundles": "Bounded knowledge updates available to workflows.", "knowledge-jobs": "Durable enrichment work and model attribution.", "knowledge-proposals": "Human-reviewed knowledge changes awaiting decisions.", knowledge: "Projected knowledge lifecycle state.", cost: "Provider-confirmed and explicitly separated estimated spend.", "model-mix": "Token usage grouped by model and precision.", usage: "Authoritative token and cost counters by precision.", activity: "The newest projected workflow events.", history: "Bounded durable workflow event history.",
 };
 
 const DISPLAY_FIELDS: Readonly<Record<View, readonly string[]>> = {
   overview: [],
-  projects: ["projectId", "projectLabel", "syncStatus", "status", "eventType", "timestamp"],
-  workflows: ["projectId", "projectLabel", "workflowId", "status", "eventType", "timestamp"],
-  sessions: ["projectId", "sessionId", "workflowId", "status", "eventType", "timestamp"],
-  runs: ["projectId", "sessionId", "workflowId", "runId", "status", "eventType", "timestamp"],
-  nodes: ["nodeId", "parentNodeId", "agentId", "agentName", "status", "eventType", "timestamp"],
-  tasks: ["taskId", "nodeId", "agentId", "status", "eventType", "timestamp"],
-  artifacts: ["workspaceId", "adapterId", "adapterVersion", "profileId", "profileVersion", "status", "eventType", "timestamp"],
-  evidence: ["eventId", "eventType", "timestamp", "producer", "sequence", "projectId", "sessionId", "runId", "nodeId", "taskId", "workspaceId"],
-  checkpoints: ["approvalId", "checkpointId", "workspaceId", "status", "eventType", "timestamp"],
-  questions: ["questionId", "nodeId", "taskId", "status", "eventType", "timestamp"],
-  approvals: ["approvalId", "checkpointId", "workspaceId", "status", "eventType", "timestamp"],
-  "knowledge-bundles": ["knowledgeUpdateId", "status", "eventType", "timestamp"],
-  "knowledge-jobs": ["knowledgeJobId", "nodeId", "agentId", "modelId", "status", "operation", "eventType", "timestamp"],
-  "knowledge-proposals": ["knowledgeProposalId", "knowledgeUpdateId", "status", "operation", "eventType", "timestamp"],
-  knowledge: ["knowledgeJobId", "knowledgeUpdateId", "status", "operation", "eventType", "timestamp"],
+  projects: ["projectLabel", "syncStatus"],
+  workflows: [],
+  sessions: ["workflowId"],
+  runs: ["workflowId", "sessionId"],
+  nodes: ["agentId", "agentName", "parentNodeId"],
+  tasks: ["nodeId", "agentId"],
+  artifacts: ["adapterId", "profileId"],
+  evidence: ["eventType", "timestamp", "producer", "sequence", "sessionId", "runId", "nodeId", "taskId", "workspaceId"],
+  checkpoints: ["checkpointId", "workspaceId"],
+  questions: ["nodeId", "taskId"],
+  approvals: ["checkpointId", "workspaceId"],
+  "knowledge-bundles": [],
+  "knowledge-jobs": ["nodeId", "agentId", "modelId", "operation"],
+  "knowledge-proposals": ["knowledgeUpdateId", "operation"],
+  knowledge: ["knowledgeUpdateId", "operation"],
   cost: ["estimatedCostMicroUsd", "providerConfirmedCostMicroUsd"],
   "model-mix": ["modelId", "usagePrecision", "usageInputTokens", "usageOutputTokens", "usageCostMicroUsd"],
   usage: ["estimatedInputTokens", "estimatedOutputTokens", "estimatedCostMicroUsd", "providerConfirmedInputTokens", "providerConfirmedOutputTokens", "providerConfirmedCostMicroUsd"],
-  activity: ["eventId", "eventType", "timestamp", "producer", "sequence", "projectId", "sessionId", "workflowId", "runId", "nodeId", "taskId", "status", "operation"],
-  history: ["eventId", "eventType", "timestamp", "producer", "sequence", "projectId", "sessionId", "workflowId", "runId", "nodeId", "taskId", "status", "operation"],
+  activity: ["eventType", "timestamp", "producer", "sequence", "workflowId", "runId", "nodeId", "taskId", "operation"],
+  history: ["eventType", "timestamp", "producer", "sequence", "workflowId", "runId", "nodeId", "taskId", "operation"],
 };
 
 function isRecord(value: unknown): value is JsonRecord { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
@@ -207,6 +208,28 @@ async function fetchDetail(kind: "questions" | "approvals" | "knowledge", record
   if (!isRecord(body.object)) throw new Error(`Invalid API v1 ${kind} detail`);
   return body.object;
 }
+async function fetchWorkflowRelated(resource: "history" | "sessions" | "runs", record: JsonRecord, eventType?: string): Promise<readonly JsonRecord[]> {
+  const projectId = stringField(record, "projectId"); const workflowId = stringField(record, "workflowId");
+  if (!projectId || !workflowId) return [];
+  const query = new URLSearchParams({ projectId, workflowId, limit: String(MAX_RENDERED_ITEMS) });
+  if (eventType) query.set("eventType", eventType);
+  const path = `/api/v1/${resource}?${query}`;
+  const response = await fetch(path, { headers: await requestHeaders(), credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) throw new Error(`Workflow ${resource} request failed (${response.status})`);
+  const body = requireV1(await response.json(), path);
+  if (!Array.isArray(body.items)) throw new Error(`Invalid workflow ${resource} response`);
+  return records(body.items);
+}
+async function fetchRunNodes(record: JsonRecord): Promise<readonly JsonRecord[]> {
+  const projectId = stringField(record, "projectId"); const sessionId = stringField(record, "sessionId"); const runId = stringField(record, "runId");
+  if (!projectId || !sessionId || !runId) return [];
+  const query = new URLSearchParams({ projectId, sessionId, runId, limit: String(MAX_RENDERED_ITEMS) }); const path = `/api/v1/nodes?${query}`;
+  const response = await fetch(path, { headers: await requestHeaders(), credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) throw new Error(`Run topology request failed (${response.status})`);
+  const body = requireV1(await response.json(), path);
+  if (!Array.isArray(body.items)) throw new Error("Invalid run topology response");
+  return records(body.items);
+}
 
 function identity(view: View, record: JsonRecord): string {
   const keys = view === "overview" ? ["workflowId", "runId", "sessionId", "projectId", "nodeId", "taskId", "eventId"] : view === "projects" ? ["projectId"] : view === "workflows" ? ["workflowId", "sessionId"] : view === "sessions" ? ["sessionId"] : view === "runs" ? ["runId"]
@@ -225,7 +248,7 @@ function displayValue(value: unknown): string | undefined {
 }
 function DisplayFields({ view, record }: { view: View; record: JsonRecord }) {
   const entries = DISPLAY_FIELDS[view].map((key) => [key, displayValue(record[key])] as const).filter((entry): entry is readonly [string, string] => entry[1] !== undefined);
-  return <dl>{entries.map(([key, value]) => <div key={key}><dt>{fieldLabel(key)}</dt><dd>{value}</dd></div>)}</dl>;
+  return entries.length ? <dl>{entries.map(([key, value]) => <div key={key}><dt>{fieldLabel(key)}</dt><dd>{value}</dd></div>)}</dl> : null;
 }
 
 interface QuestionDefinition { readonly kind: "single" | "multi" | "text" | "confirm"; readonly required: boolean; readonly choices: readonly { value: string; label: string }[]; readonly validation?: JsonRecord }
@@ -276,7 +299,7 @@ function KnowledgeControl({ record, onChanged }: { record: JsonRecord; onChanged
 function statusTone(status: string | undefined): "running" | "done" | "waiting" | "error" | "idle" {
   const value = status?.toLowerCase() ?? "";
   if (/error|fail|blocked|cancel/u.test(value)) return "error";
-  if (/complete|done|approved|ready|recorded/u.test(value)) return "done";
+  if (/complete|done|approved|ready|recorded|available|configured/u.test(value)) return "done";
   if (/run|active|current|started|progress/u.test(value)) return "running";
   if (/pending|wait|pause|question|human/u.test(value)) return "waiting";
   return "idle";
@@ -290,7 +313,73 @@ function EvidenceRefs({ record }: { record: JsonRecord }) {
   const refs = Array.isArray(record.refs) ? record.refs.filter((value): value is string => typeof value === "string" && Boolean(value)) : [];
   return refs.length ? <div className="evidence-refs"><h3>Verified references</h3><ul aria-label="Evidence references">{refs.map((ref) => <li key={ref}><code>{ref}</code></li>)}</ul></div> : null;
 }
-function RecordCard({ view, record, onChanged }: { view: View; record: JsonRecord; onChanged(): void }) {
+function workflowCatalogMetadata(record: JsonRecord): JsonRecord | undefined {
+  const metadata = isRecord(record.metadata) ? record.metadata : undefined;
+  return metadata && isRecord(metadata.catalog) ? metadata.catalog : undefined;
+}
+function DashboardModal({ labelledBy, onClose, returnFocus, children }: { labelledBy: string; onClose(): void; returnFocus: React.RefObject<HTMLElement | null>; children: React.ReactNode }) {
+  const panel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const previous = returnFocus.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : undefined); const priorOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden"; panel.current?.querySelector<HTMLElement>("[data-modal-close]")?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+      if (event.key !== "Tab" || !panel.current) return;
+      const focusable = [...panel.current.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) { event.preventDefault(); panel.current.focus(); return; }
+      const first = focusable[0]; const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", keydown);
+    return () => { document.removeEventListener("keydown", keydown); document.body.style.overflow = priorOverflow; previous?.focus(); };
+  }, [onClose, returnFocus]);
+  return <div className="workflow-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="workflow-modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={panel} tabIndex={-1}><button className="workflow-modal-close" type="button" data-modal-close onClick={onClose} aria-label="Close details"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m3 3 10 10M13 3 3 13" /></svg></button>{children}</section></div>;
+}
+function WorkflowRecordCard({ record, initiallyOpen = false, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onDismiss?(): void }) {
+  const id = stringField(record, "workflowId") ?? identity("workflows", record); const heading = `workflow-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-"); const modalHeading = `${heading}-modal-title`; const trigger = useRef<HTMLElement>(null);
+  const [open, setOpen] = useState(initiallyOpen); const [loading, setLoading] = useState(false); const [error, setError] = useState<string>(); const attempted = useRef(false);
+  const [versions, setVersions] = useState<readonly JsonRecord[]>([]); const [sessions, setSessions] = useState<readonly JsonRecord[]>([]); const [runs, setRuns] = useState<readonly JsonRecord[]>([]);
+  const catalog = workflowCatalogMetadata(record);
+  const loadDetails = useCallback(async () => {
+    if (attempted.current) return; attempted.current = true; setLoading(true); setError(undefined);
+    try {
+      const [history, relatedSessions, relatedRuns] = await Promise.all([
+        fetchWorkflowRelated("history", record, "workflow.cataloged"), fetchWorkflowRelated("sessions", record), fetchWorkflowRelated("runs", record),
+      ]);
+      const unique = new Map<string, JsonRecord>();
+      for (const event of history) { const value = workflowCatalogMetadata(event); const definitionHash = value && stringField(value, "definitionHash"); if (value && definitionHash) unique.set(definitionHash, value); }
+      setVersions([...unique.values()].sort((left, right) => (numberField(right, "definitionVersion") ?? 0) - (numberField(left, "definitionVersion") ?? 0)));
+      setSessions(relatedSessions); setRuns(relatedRuns);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setLoading(false); }
+  }, [record]);
+  useEffect(() => { if (initiallyOpen) { setOpen(true); void loadDetails(); } }, [initiallyOpen, loadDetails]);
+  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); void loadDetails(); };
+  const topology = catalog && Array.isArray(catalog.topology) ? records(catalog.topology).map((node) => ({ ...node, projectId: record.projectId, sessionId: `configured:${id}`, status: "configured" })) : [];
+  return <><article ref={trigger} className="workflow-card workflow-card-workflows workflow-catalog-card" aria-labelledby={heading} role="button" tabIndex={0} aria-haspopup="dialog" aria-expanded={open} aria-controls={`${heading}-details`} onClick={show} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); } }}>
+    <div className="record-card-head"><div><span className="record-kind">Workflow definition</span><h2 id={heading}>{stringField(catalog ?? {}, "name") ?? id}</h2><code>{id}</code></div><div className="workflow-card-actions"><StatusBadge status={stringField(record, "status")} /></div></div>
+    {catalog && <p className="workflow-catalog-description">{stringField(catalog, "description")}</p>}
+    <DisplayFields view="workflows" record={record} />
+  </article>{open && <DashboardModal labelledBy={modalHeading} onClose={close} returnFocus={trigger}><div className="workflow-modal-head"><span className="record-kind">Workflow definition</span><h2 id={modalHeading}>{stringField(catalog ?? {}, "name") ?? id}</h2><code>{id}</code></div><div id={`${heading}-details`} className="workflow-catalog-details">
+    {loading && <p role="status">Loading workflow versions and runtime links…</p>}{error && <p role="alert">{error}</p>}
+    <div className="workflow-catalog-summary"><div><span>Definition version</span><strong>v{numberField(catalog ?? {}, "definitionVersion") ?? stringField(record, "workflowConfigVersion") ?? "—"}</strong></div><div><span>Saved versions</span><strong>{versions.length || 1}</strong></div><div><span>Linked sessions</span><strong>{sessions.length}</strong></div><div><span>Runs</span><strong>{runs.length}</strong></div></div>
+    <div className="workflow-catalog-section workflow-topology-section"><h3>Configured topology</h3>{topology.length ? <div className="workflow-modal-topology"><TopologyGraph items={topology} /></div> : <p>No valid configured nodes are available for this definition.</p>}{catalog?.topologyTruncated === true && <p>Topology display was truncated at the telemetry safety bound.</p>}</div>
+    <div className="workflow-catalog-section"><h3>Version history</h3>{versions.length ? <ol className="workflow-version-list">{versions.map((version) => <li key={stringField(version, "definitionHash")}><strong>v{numberField(version, "definitionVersion")}</strong><StatusBadge status={stringField(version, "status")} /></li>)}</ol> : !loading && <p>This is the only cataloged definition version.</p>}</div>
+    {(sessions.length > 0 || runs.length > 0) && <div className="workflow-catalog-section"><h3>Runtime links</h3><p>{sessions.length} linked session{sessions.length === 1 ? "" : "s"}; {runs.length} run{runs.length === 1 ? "" : "s"}.</p></div>}
+  </div></DashboardModal>}</>;
+}
+function RunRecordCard({ record, initiallyOpen = false, onDismiss }: { record: JsonRecord; initiallyOpen?: boolean; onDismiss?(): void }) {
+  const id = identity("runs", record); const heading = `runs-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-"); const modalHeading = `${heading}-modal-title`; const trigger = useRef<HTMLElement>(null);
+  const [open, setOpen] = useState(initiallyOpen); const [nodes, setNodes] = useState<readonly JsonRecord[]>([]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string>(); const attempted = useRef(false);
+  const loadNodes = useCallback(async () => { if (attempted.current) return; attempted.current = true; setLoading(true); try { setNodes(await fetchRunNodes(record)); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setLoading(false); } }, [record]);
+  useEffect(() => { if (initiallyOpen) { setOpen(true); void loadNodes(); } }, [initiallyOpen, loadNodes]);
+  const close = useCallback(() => { setOpen(false); onDismiss?.(); }, [onDismiss]); const show = (): void => { setOpen(true); void loadNodes(); };
+  return <><article ref={trigger} className="workflow-card workflow-card-runs run-catalog-card" aria-labelledby={heading} role="button" tabIndex={0} aria-haspopup="dialog" aria-expanded={open} onClick={show} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); } }}><div className="record-card-head"><div><span className="record-kind">Run</span><h2 id={heading}>{id}</h2></div><StatusBadge status={stringField(record, "status")} /></div><DisplayFields view="runs" record={record} /></article>{open && <DashboardModal labelledBy={modalHeading} onClose={close} returnFocus={trigger}><div className="workflow-modal-head"><span className="record-kind">Run topology</span><h2 id={modalHeading}>{id}</h2><code>{stringField(record, "workflowId") ?? "workflow"}</code></div><div className="workflow-catalog-details">{loading && <p role="status">Loading live run topology…</p>}{error && <p role="alert">{error}</p>}<div className="workflow-catalog-section workflow-topology-section"><h3>Live topology</h3>{nodes.length ? <div className="workflow-modal-topology"><TopologyGraph items={nodes} /></div> : !loading && !error && <p>This run has not instantiated any agent nodes.</p>}</div></div></DashboardModal>}</>;
+}
+function RecordCard({ view, record, onChanged, initiallyOpen = false, onDismiss }: { view: View; record: JsonRecord; onChanged(): void; initiallyOpen?: boolean; onDismiss?(): void }) {
+  if (view === "workflows") return <WorkflowRecordCard record={record} initiallyOpen={initiallyOpen} onDismiss={onDismiss} />;
+  if (view === "runs") return <RunRecordCard record={record} initiallyOpen={initiallyOpen} onDismiss={onDismiss} />;
   const id = identity(view, record); const heading = `${view}-${id}`.replace(/[^A-Za-z0-9_-]/gu, "-");
   const status = stringField(record, "status");
   return <article className={`workflow-card workflow-card-${view}`} aria-labelledby={heading}><div className="record-card-head"><div><span className="record-kind">{TITLES[view]}</span><h2 id={heading}>{id}</h2></div><StatusBadge status={status} /></div><DisplayFields view={view} record={record} />
@@ -317,23 +406,6 @@ function ModelMixSummary({ items }: { items: readonly JsonRecord[] }) {
   }
   return <section aria-label="Model mix summary" className="workflow-card"><h2>Usage by model</h2><table><thead><tr><th scope="col">Model</th><th scope="col">Provider-confirmed tokens</th><th scope="col">Estimated tokens</th><th scope="col">Usage records</th></tr></thead><tbody>{[...rows].sort(([a], [b]) => a.localeCompare(b)).map(([model, value]) => <tr key={model}><th scope="row">{model}</th><td>{value.confirmed.toLocaleString("en-US")}</td><td>{value.estimated.toLocaleString("en-US")}</td><td>{value.calls.toLocaleString("en-US")}</td></tr>)}</tbody></table></section>;
 }
-function Topology({ items }: { items: readonly JsonRecord[] }) {
-  const scope = (item: JsonRecord) => [stringField(item, "projectId"), stringField(item, "sessionId"), stringField(item, "runId")].map((value) => value ?? "").join("\0");
-  const entityKey = (item: JsonRecord, nodeId = stringField(item, "nodeId") ?? "unknown") => `${scope(item)}\0${nodeId}`;
-  const nodeItems = [...new Map(items.filter((item) => Boolean(stringField(item, "nodeId"))).map((item) => [entityKey(item), item])).values()];
-  const byParent = new Map<string, JsonRecord[]>(); const ids = new Set(nodeItems.map((item) => entityKey(item)));
-  for (const item of nodeItems) { const parent = stringField(item, "parentNodeId"); const candidate = parent ? entityKey(item, parent) : ""; const key = parent && ids.has(candidate) ? candidate : ""; byParent.set(key, [...(byParent.get(key) ?? []), item]); }
-  const rendered = new Set<string>();
-  const render = (parent: string, ancestors: ReadonlySet<string>): React.ReactNode => {
-    const children = (byParent.get(parent) ?? []).filter((item) => !rendered.has(entityKey(item)));
-    if (!children.length) return null;
-    return <ul>{children.map((item) => { const key = entityKey(item); rendered.add(key); const cyclic = ancestors.has(key); const next = new Set(ancestors); next.add(key); return <li key={key}><RecordCard view="nodes" record={item} onChanged={() => {}} />{cyclic ? null : render(key, next)}</li>; })}</ul>;
-  };
-  const roots = render("", new Set());
-  const disconnected = nodeItems.filter((item) => { const id = stringField(item, "nodeId") ?? ""; return id && !rendered.has(entityKey(item)); });
-  return <section aria-label="Topology hierarchy" className="workflow-tree">{roots}{disconnected.length ? <ul>{disconnected.map((item) => { const key = entityKey(item); if (rendered.has(key)) return null; rendered.add(key); return <li key={key}><RecordCard view="nodes" record={item} onChanged={() => {}} />{render(key, new Set([key]))}</li>; })}</ul> : null}</section>;
-}
-
 function relativeTime(value: string | undefined): string {
   if (!value) return "—";
   const elapsed = Date.now() - Date.parse(value);
@@ -358,7 +430,7 @@ function ActivityFeed({ items, compact = false }: { items: readonly JsonRecord[]
 function Kpi({ label, value, sub, tone }: { label: string; value: string; sub: string; tone?: "run" | "brand" | "done" | "warn" }) {
   return <article className={`kpi${tone ? ` kpi-${tone}` : ""}`}><div className="kpi-top"><span className="kpi-label">{label}</span><i className="kpi-signal" aria-hidden="true" /></div><div className="kpi-val">{value}</div><div className="kpi-sub">{sub}</div></article>;
 }
-function Overview({ items, onNavigate }: { items: readonly JsonRecord[]; onNavigate(view: View): void }) {
+function Overview({ items, onNavigate, onOpenWorkflow, onOpenRun }: { items: readonly JsonRecord[]; onNavigate(view: View): void; onOpenWorkflow(workflowId: string): void; onOpenRun(runId: string): void }) {
   const inView = (view: View) => items.filter((item) => item.dashboardView === view);
   const projects = inView("projects"); const workflows = inView("workflows"); const sessions = inView("sessions"); const runs = inView("runs"); const nodes = inView("nodes"); const tasks = inView("tasks"); const questions = inView("questions"); const approvals = inView("approvals"); const activity = inView("activity"); const usage = inView("usage")[0] ?? {};
   const activeRuns = runs.filter((item) => statusTone(stringField(item, "status")) === "running").length;
@@ -377,25 +449,37 @@ function Overview({ items, onNavigate }: { items: readonly JsonRecord[]; onNavig
       <Kpi label="Total cost" value={`$${confirmedCost.toFixed(4)}`} sub={latest ? `updated ${relativeTime(latest)}` : "no usage yet"} tone="brand" />
     </section>
     <section className="widgets dashboard-widgets">
-      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live run structure</span><h2 className="w-title">Run topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span><button type="button" onClick={() => onNavigate("nodes")}>Open Topology</button></div></div><div className="topology-canvas">{nodes.length ? <Topology items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No active run topology</strong><span>Selecting a workflow does not create runtime nodes. Send a message to start a run.</span></div>}</div></section>
+      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live run structure</span><h2 className="w-title">Run topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span>{nodes.length > 0 && stringField(nodes[0], "runId") && <button type="button" onClick={() => onOpenRun(stringField(nodes[0], "runId")!)}>Open run</button>}</div></div><div className="topology-canvas">{nodes.length ? <TopologyGraph items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No active run topology</strong><span>Selecting a workflow does not create runtime nodes. Send a message to start a run.</span></div>}</div></section>
       <section className="widget activity-widget"><div className="w-head"><div><span className="widget-eyebrow">Streaming</span><h2 className="w-title">Activity</h2></div><div className="w-tools"><span className="live-indicator"><i />live</span><button type="button" onClick={() => onNavigate("activity")}>View all</button></div></div>{activity.length ? <ActivityFeed items={activity} compact /> : <div className="overview-empty small"><strong>Waiting for events</strong><span>Workflow activity will appear here in real time.</span></div>}</section>
-      <section className="widget workflow-widget"><div className="w-head"><div><span className="widget-eyebrow">Catalog</span><h2 className="w-title">Workflows</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("workflows")}>Explore</button></div></div><div className="overview-workflow-list">{workflows.slice(0, 6).map((item) => <button type="button" key={`${stringField(item, "projectId") ?? "project"}:${identity("workflows", item)}`} onClick={() => onNavigate("workflows")}><span><i className={`dot ${statusTone(stringField(item, "status"))}`} />{stringField(item, "workflowId") ?? "workflow"}{stringField(item, "projectLabel") ? ` · ${stringField(item, "projectLabel")}` : ""}</span><StatusBadge status={stringField(item, "status")} /></button>)}{!workflows.length && <div className="overview-empty small"><strong>No projected workflows</strong><span>Run /hive:select inside Pi.</span></div>}</div></section>
+      <section className="widget workflow-widget"><div className="w-head"><div><span className="widget-eyebrow">Catalog</span><h2 className="w-title">Workflows</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("workflows")}>Explore</button></div></div><div className="overview-workflow-list">{workflows.slice(0, 6).map((item) => <button type="button" key={`${stringField(item, "projectId") ?? "project"}:${identity("workflows", item)}`} onClick={() => onOpenWorkflow(stringField(item, "workflowId") ?? "")}><span><i className={`dot ${statusTone(stringField(item, "status"))}`} />{stringField(item, "workflowId") ?? "workflow"}</span><StatusBadge status={stringField(item, "status")} /></button>)}{!workflows.length && <div className="overview-empty small"><strong>No cataloged workflows</strong><span>Reload the configured Pi project to refresh its workflow catalog.</span></div>}</div></section>
       <section className="widget usage-widget"><div className="w-head"><div><span className="widget-eyebrow">Precision separated</span><h2 className="w-title">Cost &amp; tokens</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("cost")}>Inspect usage</button></div></div><div className="usage-bars"><div><span>Provider confirmed</span><b>{confirmedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, confirmedTokens ? 100 : 0)}%` }} /></i></div><div><span>Estimated</span><b>{estimatedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, estimatedTokens && !confirmedTokens ? 100 : confirmedTokens ? estimatedTokens / confirmedTokens * 100 : 0)}%` }} /></i></div></div></section>
     </section>
-    {!projects.length && !workflows.length && <p className="overview-footnote">The dashboard is connected. Select a workflow in Pi to populate this project.</p>}
+    {!projects.length && !workflows.length && <p className="overview-footnote">The dashboard is connected and waiting for the configured workflow catalog.</p>}
   </>;
 }
 
 function NavIcon({ view }: { view: View }) {
   const common = { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.45, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (view === "overview") return <svg {...common}><rect x="2" y="2" width="5" height="5" rx="1.2" /><rect x="9" y="2" width="5" height="5" rx="1.2" /><rect x="2" y="9" width="5" height="5" rx="1.2" /><rect x="9" y="9" width="5" height="5" rx="1.2" /></svg>;
-  if (["projects", "workflows", "sessions", "runs"].includes(view)) return <svg {...common}><rect x="2" y="3" width="12" height="4" rx="1.5" /><rect x="2" y="10" width="12" height="3" rx="1.5" /></svg>;
-  if (["nodes", "tasks"].includes(view)) return <svg {...common}><circle cx="8" cy="3" r="1.7" /><circle cx="3.5" cy="12" r="1.7" /><circle cx="12.5" cy="12" r="1.7" /><path d="M8 4.8v2.5M3.5 10.2V8h9v2.2" /></svg>;
-  if (["activity", "history", "evidence"].includes(view)) return <svg {...common}><path d="M1.5 8h3l1.4-4 3 8 1.7-5 1.1 1H14.5" /></svg>;
-  if (["questions", "approvals", "checkpoints"].includes(view)) return <svg {...common}><path d="M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12Z" /><path d="M6.6 6.2A1.6 1.6 0 0 1 8.2 4.8c1 0 1.8.6 1.8 1.5 0 1.2-1.7 1.3-1.7 2.7M8.3 11.3h.01" /></svg>;
-  if (["knowledge-bundles", "knowledge-jobs", "knowledge-proposals", "knowledge"].includes(view)) return <svg {...common}><path d="M3 2.5h7.5A2.5 2.5 0 0 1 13 5v8.5H5A2 2 0 0 1 3 11.5v-9Z" /><path d="M5 13.5v-9h8M6.5 7h4M6.5 9.5h3" /></svg>;
-  if (["cost", "model-mix", "usage"].includes(view)) return <svg {...common}><path d="M8 1.8v12.4M11 4.2H6.6a2 2 0 1 0 0 4h2.8a2 2 0 1 1 0 4H4.7" /></svg>;
-  return <svg {...common}><path d="M3 2.5h7l3 3v8H3z" /><path d="M10 2.5v3h3M5.5 9h5M5.5 11.5h4" /></svg>;
+  if (view === "workflows") return <svg {...common}><circle cx="8" cy="3" r="1.6" /><circle cx="3.5" cy="12" r="1.6" /><circle cx="12.5" cy="12" r="1.6" /><path d="M8 4.7v2.2M3.5 10.3V8h9v2.3" /></svg>;
+  if (view === "sessions") return <svg {...common}><rect x="2" y="4" width="9" height="9" rx="1.5" /><path d="M5 4V2.5h9v9h-3" /></svg>;
+  if (view === "runs") return <svg {...common}><circle cx="8" cy="8" r="6" /><path d="m6.5 5 4.5 3-4.5 3Z" /></svg>;
+  if (view === "tasks") return <svg {...common}><rect x="2" y="2" width="12" height="12" rx="2" /><path d="m4.5 8 2 2 5-5" /></svg>;
+  if (view === "activity") return <svg {...common}><path d="M1.5 8h3l1.4-4 3 8 1.7-5 1.1 1H14.5" /></svg>;
+  if (view === "history") return <svg {...common}><circle cx="8" cy="8" r="5.7" /><path d="M8 4.5V8l2.5 1.5M3 3.5v3h3" /></svg>;
+  if (view === "artifacts") return <svg {...common}><path d="m2.5 5 5.5-3 5.5 3v6L8 14l-5.5-3Z" /><path d="m2.5 5 5.5 3 5.5-3M8 8v6" /></svg>;
+  if (view === "evidence") return <svg {...common}><path d="M8 1.8 13 4v3.6c0 3.2-2.1 5.3-5 6.6-2.9-1.3-5-3.4-5-6.6V4Z" /><path d="m5.5 8 1.6 1.6 3.5-3.5" /></svg>;
+  if (view === "checkpoints") return <svg {...common}><path d="M3 14V2M3 3h8l-1.5 2L11 7H3" /></svg>;
+  if (view === "questions") return <svg {...common}><path d="M2 3.5A2.5 2.5 0 0 1 4.5 1h7A2.5 2.5 0 0 1 14 3.5v5A2.5 2.5 0 0 1 11.5 11H7l-3.5 3v-3.2A2.5 2.5 0 0 1 2 8.5Z" /><path d="M6.4 5.2A1.7 1.7 0 0 1 8 4.2c1 0 1.8.6 1.8 1.5 0 1.1-1.8 1.3-1.8 2.4M8 9.5h.01" /></svg>;
+  if (view === "approvals") return <svg {...common}><circle cx="8" cy="8" r="6" /><path d="m4.8 8 2.1 2.1 4.3-4.3" /></svg>;
+  if (view === "knowledge-bundles") return <svg {...common}><path d="M3 2.5h7.5A2.5 2.5 0 0 1 13 5v8.5H5A2 2 0 0 1 3 11.5v-9Z" /><path d="M5 13.5v-9h8" /></svg>;
+  if (view === "knowledge-jobs") return <svg {...common}><circle cx="8" cy="8" r="2.4" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" /></svg>;
+  if (view === "knowledge-proposals") return <svg {...common}><path d="M3 2h7l3 3v9H3Z" /><path d="M10 2v3h3M8 7v4M6 9h4" /></svg>;
+  if (view === "cost") return <svg {...common}><path d="M8 1.8v12.4M11 4.2H6.6a2 2 0 1 0 0 4h2.8a2 2 0 1 1 0 4H4.7" /></svg>;
+  if (view === "model-mix") return <svg {...common}><circle cx="5" cy="5" r="3" /><circle cx="11" cy="5" r="3" /><circle cx="8" cy="11" r="3" /></svg>;
+  if (view === "usage") return <svg {...common}><path d="M2 13.5h12M3.5 11V7.5h2V11M7 11V3h2v8M10.5 11V5.5h2V11" /></svg>;
+  if (view === "nodes") return <svg {...common}><path d="M8 2v4M4 10V8h8v2" /><circle cx="8" cy="2" r="1" /><circle cx="4" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /></svg>;
+  return <svg {...common}><path d="M3 2.5h7l3 3v8H3z" /><path d="M10 2.5v3h3" /></svg>;
 }
 function HiveMark({ compact = false }: { compact?: boolean }) {
   return <span className={`hive-mark${compact ? " compact" : ""}`} aria-hidden="true"><svg width={compact ? 20 : 24} height={compact ? 20 : 24} viewBox="0 0 24 24" fill="none"><path d="m12 2.8 7.7 4.5v9L12 20.8l-7.7-4.5v-9L12 2.8Z" stroke="currentColor" strokeWidth="1.7" /><circle cx="12" cy="12" r="3.2" fill="currentColor" /><path d="M12 5.2v3.1M17.7 8.6 15 10.1M17.7 15.4 15 13.9M6.3 15.4 9 13.9M6.3 8.6 9 10.1" stroke="var(--brand-contrast)" strokeWidth="1.1" /></svg></span>;
@@ -423,6 +507,7 @@ function initialProjectScope(): string | null | undefined {
 
 export default function WorkflowDashboard({ embedded = false }: { embedded?: boolean }) {
   const [view, setView] = useState<View>("overview"); const viewRef = useRef<View>(view); viewRef.current = view;
+  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string>(); const [expandedRunId, setExpandedRunId] = useState<string>();
   const [projectScope, setProjectScope] = useState<string | null | undefined>(initialProjectScope); const [defaultProjectId, setDefaultProjectId] = useState<string>(); const [projectOptions, setProjectOptions] = useState<readonly ProjectOption[]>([]);
   const [items, setItems] = useState<readonly JsonRecord[]>([]); const [summaryItems, setSummaryItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [theme, setTheme] = useState<Theme>(initialTheme); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
@@ -470,12 +555,15 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
   }, [load]);
 
   const title = TITLES[view]; const stateText = loading ? `Loading ${title}…` : error ? `${title} unavailable.` : resync ? `Resynchronizing ${title} from API v1.` : `${items.length} ${title.toLowerCase()} loaded; stream ${streamState}.`;
-  const content = useMemo(() => view === "overview" && items.length ? <Overview items={items} onNavigate={setView} />
-    : view === "nodes" && items.length ? <Topology items={items} />
+  const openWorkflow = useCallback((workflowId: string): void => { setExpandedWorkflowId(workflowId || undefined); setView("workflows"); }, []);
+  const openRun = useCallback((runId: string): void => { setExpandedRunId(runId || undefined); setView("runs"); }, []);
+  const dismissWorkflow = useCallback(() => setExpandedWorkflowId(undefined), []); const dismissRun = useCallback(() => setExpandedRunId(undefined), []);
+  const content = useMemo(() => view === "overview" && items.length ? <Overview items={items} onNavigate={setView} onOpenWorkflow={openWorkflow} onOpenRun={openRun} />
+    : view === "nodes" && items.length ? <TopologyGraph items={items} />
       : view === "activity" || view === "history" ? items.length ? <ActivityFeed items={items} /> : null
         : view === "cost" && items[0] ? <CostSummary record={items[0]} />
           : view === "model-mix" && items.length ? <ModelMixSummary items={items} />
-            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} onChanged={() => void load(false)} />)}</section> : null, [items, load, title, view]);
+            : items.length ? <section className="workflow-grid" aria-label={title}>{items.map((item, index) => <RecordCard key={`${identity(view, item)}-${index}`} view={view} record={item} initiallyOpen={(view === "workflows" && stringField(item, "workflowId") === expandedWorkflowId) || (view === "runs" && stringField(item, "runId") === expandedRunId)} onDismiss={view === "workflows" ? dismissWorkflow : view === "runs" ? dismissRun : undefined} onChanged={() => void load(false)} />)}</section> : null, [dismissRun, dismissWorkflow, expandedRunId, expandedWorkflowId, items, load, openRun, openWorkflow, title, view]);
   const landmarkContent = <><div className="workflow-title"><div><span className="page-eyebrow">Mission control / {title}</span><h1>{title}</h1><p>{SUBTITLES[view]}</p></div><button className="refresh-button" type="button" onClick={() => void load(false)} disabled={loading}><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M13.5 5.5A5.8 5.8 0 1 0 14 9" /><path d="M13.5 2v3.5H10" /></svg>Refresh</button></div><div className="workflow-state sr-status" role="status" aria-live="polite">{stateText}</div>
     {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <div className="workflow-empty"><HiveMark compact /><strong>No {title.toLowerCase()} available</strong><span>The dashboard is connected and waiting for projected workflow state.</span></div> : content}
     {cursor && !loading && !error && <button className="load-more" type="button" disabled={loadingMore || items.length >= MAX_RENDERED_ITEMS} onClick={() => void load(true)}>{loadingMore ? "Loading…" : items.length >= MAX_RENDERED_ITEMS ? "Display limit reached" : `Load more ${title}`}</button>}</>;

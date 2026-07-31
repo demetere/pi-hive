@@ -19,7 +19,7 @@ test("mission-control overview starts on bounded workflow state and API v1", asy
 
 test("every workflow view is keyboard reachable from the restored mission-control shell", async ({ page }) => {
   await openDashboard(page);
-  for (const view of ["Overview", "Projects", "Sessions", "Runs", "Topology", "Tasks", "Artifacts", "Evidence", "Questions", "Checkpoints", "Approvals", "Knowledge bundles", "Knowledge jobs", "Knowledge proposals", "Cost", "Model mix", "Usage", "Activity", "History", "Workflows"]) {
+  for (const view of ["Overview", "Sessions", "Runs", "Tasks", "Artifacts", "Evidence", "Questions", "Checkpoints", "Approvals", "Knowledge bundles", "Knowledge jobs", "Knowledge proposals", "Cost", "Model mix", "Usage", "Activity", "History", "Workflows"]) {
     const button = page.getByRole("button", { name: view, exact: true });
     await button.focus(); await page.keyboard.press("Enter");
     await expect(page.getByRole("heading", { name: view, exact: true })).toBeVisible();
@@ -39,16 +39,30 @@ test("evidence, cost, and model mix render separated bounded telemetry", async (
   expect(mock.workflowRequests.some((request) => request.includes("GET /api/v1/history?") && request.includes("eventType=budget.model.usage.recorded"))).toBe(true);
 });
 
-test("topology uses native nested-list semantics and remains keyboard reachable", async ({ page }) => {
+test("workflow modal presents configured topology and remains keyboard accessible", async ({ page }) => {
   await openDashboard(page);
-  const button = page.getByRole("button", { name: "Topology", exact: true });
-  await button.focus(); await page.keyboard.press("Enter");
-  const topology = page.getByRole("region", { name: "Topology hierarchy" });
-  await expect(topology).toBeVisible();
-  await expect(topology.locator("[role=tree], [role=treeitem]")).toHaveCount(0);
-  await expect(topology.locator("ul")).toHaveCount(2);
-  await expect(topology.locator("li")).toHaveCount(2);
+  await page.getByRole("button", { name: "Workflows", exact: true }).click();
+  const card = page.getByRole("button", { name: "Custom Delivery", exact: true });
+  await card.focus(); await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Custom Delivery" });
+  const topology = dialog.getByRole("region", { name: "Topology hierarchy" });
+  await expect(dialog).toBeVisible();
+  await expect(topology).toHaveClass(/topology-graph/);
+  await expect(topology.locator(".graph-svg")).toBeVisible();
+  await expect(topology.locator(".g-node:not(.group-header)")).toHaveCount(2);
+  await expect(topology.locator(".g-edge")).toHaveCount(1);
+  await topology.getByRole("button", { name: "Collapse Delivery Orchestrator" }).click();
+  await expect(topology.locator(".g-node:not(.group-header)")).toHaveCount(1);
+  await topology.getByRole("button", { name: "Expand Delivery Orchestrator" }).click();
+  await expect(topology.locator(".g-node:not(.group-header)")).toHaveCount(2);
+  await expect(topology).toContainText("Delivery Orchestrator");
+  await expect(topology).toContainText("gpt-5.4");
+  await expect(topology).toContainText("HIGH");
+  await expect(dialog.getByRole("button", { name: "Fit topology to view" })).toBeVisible();
   await expectNoSeriousA11yViolations(page);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(card).toBeFocused();
 });
 
 test("typed question control carries authenticated exact CAS identity", async ({ page }) => {
@@ -87,10 +101,14 @@ test("hasMore pagination stops at the 500-row render bound", async ({ page }) =>
 
 test("workflow desktop and narrow layouts have no serious accessibility issues", async ({ page }) => {
   await openDashboard(page);
-  for (const view of ["Workflows", "Topology", "Questions", "Approvals"] as const) {
+  for (const view of ["Workflows", "Questions", "Approvals"] as const) {
     await page.getByRole("button", { name: view, exact: true }).click();
     await expectNoSeriousA11yViolations(page);
   }
+  await page.getByRole("button", { name: "Workflows", exact: true }).click();
+  await page.getByRole("button", { name: "Custom Delivery", exact: true }).click();
+  await expectNoSeriousA11yViolations(page);
+  await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("navigation", { name: "Workflow dashboard views" })).toBeVisible();
   await expectNoSeriousA11yViolations(page);
