@@ -1,0 +1,223 @@
+export const CONFIG_LIMITS = Object.freeze({
+  inputBytes: 524_288,
+  maxDepth: 64,
+  maxNodes: 20_000,
+  diagnostics: 100,
+  related: 16,
+  dependencyChain: 16,
+  messageBytes: 2_048,
+});
+
+export const CONFIG_DIAGNOSTIC_CODES = [
+  "CONFIG_INPUT_TOO_LARGE",
+  "YAML_SYNTAX",
+  "YAML_DUPLICATE_KEY",
+  "YAML_ANCHOR_FORBIDDEN",
+  "YAML_ALIAS_FORBIDDEN",
+  "YAML_MERGE_KEY_FORBIDDEN",
+  "YAML_TAG_FORBIDDEN",
+  "YAML_NON_STRING_KEY",
+  "YAML_NON_FINITE_NUMBER",
+  "YAML_MAX_DEPTH",
+  "YAML_MAX_NODES",
+  "SCHEMA_VERSION_MISSING",
+  "SCHEMA_VERSION_UNSUPPORTED",
+  "SCHEMA_INVALID",
+  "PROJECT_DISCOVERY_FAILED",
+  "PROJECT_DISCOVERY_LIMIT_EXCEEDED",
+  "MANIFEST_PATH_ESCAPE",
+  "MANIFEST_NOT_FILE",
+  "MANIFEST_READ_FAILED",
+  "CONFIG_PATH_INVALID",
+  "CONFIG_PATH_TOO_LONG",
+  "CONFIG_PATH_TOO_DEEP",
+  "RESOURCE_PATH_ESCAPE",
+  "RESOURCE_NOT_FOUND",
+  "RESOURCE_TYPE_MISMATCH",
+  "RESOURCE_ACCESS_FAILED",
+  "WORKFLOW_PATH_INVALID",
+  "REGISTRY_LIMIT_EXCEEDED",
+  "REGISTRY_DUPLICATE_TARGET",
+  "DEPENDENCY_CYCLE",
+  "DEPENDENCY_LIMIT_EXCEEDED",
+  "CATALOG_FILE_TOO_LARGE",
+  "CATALOG_AGGREGATE_TOO_LARGE",
+  "CATALOG_TEXT_INVALID_UTF8",
+  "AGENT_FRONTMATTER_MISSING",
+  "AGENT_FRONTMATTER_UNTERMINATED",
+  "AGENT_FRONTMATTER_MULTIPLE",
+  "AGENT_BODY_EMPTY",
+  "AGENT_ATTACHMENT_LIMIT_EXCEEDED",
+  "CATALOG_DEPENDENCY_MISSING",
+  "CATALOG_DEPENDENCY_FAILED",
+  "SKILL_EMPTY",
+  "SKILL_FILE_UNSUPPORTED",
+  "SKILL_CYCLE",
+  "SKILL_DUPLICATE_TARGET",
+  "SKILL_DEPTH_EXCEEDED",
+  "SKILL_FILE_LIMIT_EXCEEDED",
+  "SKILL_PATH_BYTES_EXCEEDED",
+  "KNOWLEDGE_OWNER_UNKNOWN",
+  "KNOWLEDGE_OWNER_FAILED",
+  "KNOWLEDGE_FINGERPRINT_LIMIT_EXCEEDED",
+  "KNOWLEDGE_BUNDLE_INVALID",
+  "CATALOG_SUMMARY_LIMIT_EXCEEDED",
+  "WORKFLOW_FILE_TOO_LARGE",
+  "WORKFLOW_READ_FAILED",
+  "WORKFLOW_AGENT_UNKNOWN",
+  "WORKFLOW_AGENT_FAILED",
+  "TEAM_NODE_ID_DUPLICATE",
+  "TEAM_OBJECT_REUSED",
+  "TEAM_DEPTH_EXCEEDED",
+  "TEAM_NODE_LIMIT_EXCEEDED",
+  "TEAM_METADATA_LIMIT_EXCEEDED",
+  "WORKFLOW_ATTACHMENT_CONFLICT",
+  "WORKFLOW_ATTACHMENT_UNKNOWN",
+  "WORKFLOW_ATTACHMENT_FAILED",
+  "WORKFLOW_ATTACHMENT_ADD_EXISTING",
+  "WORKFLOW_ATTACHMENT_REMOVE_MISSING",
+  "WORKFLOW_ATTACHMENT_LIMIT_EXCEEDED",
+  "WORKFLOW_BUDGET_INVALID",
+  "WORKFLOW_BUDGET_WIDENING",
+  "WORKFLOW_CAPABILITY_WIDENING",
+  "WORKFLOW_CAPABILITY_LIMIT_EXCEEDED",
+  "WORKFLOW_KNOWLEDGE_CURATOR_UNREACHABLE",
+  "ARTIFACT_PROFILE_UNKNOWN",
+  "ARTIFACT_ADAPTER_UNAVAILABLE",
+  "ARTIFACT_BINDING_INVALID",
+  "ARTIFACT_OPTIONS_UNKNOWN",
+  "ARTIFACT_ACTION_UNREACHABLE",
+  "WORKFLOW_CHECKPOINT_MISSING",
+  "WORKFLOW_CHECKPOINT_UNKNOWN",
+  "WORKFLOW_SUGGESTED_NEXT_UNKNOWN",
+  "WORKFLOW_METADATA_LIMIT_EXCEEDED",
+  "WORKFLOW_SUMMARY_LIMIT_EXCEEDED",
+  "DIAGNOSTICS_TRUNCATED",
+] as const;
+
+export type ConfigDiagnosticCode = typeof CONFIG_DIAGNOSTIC_CODES[number];
+export type DiagnosticSeverity = "error" | "warning";
+
+export interface SourcePosition {
+  /** Zero-based UTF-16 source offset. */
+  offset: number;
+  /** One-based source line. */
+  line: number;
+  /** One-based UTF-16 source column. */
+  column: number;
+}
+
+export interface SourceRange {
+  /** Half-open range start. */
+  start: SourcePosition;
+  /** Half-open range end. */
+  end: SourcePosition;
+}
+
+export interface RelatedDiagnostic {
+  message: string;
+  source: string;
+  range: SourceRange;
+}
+
+export interface ConfigDiagnostic {
+  code: ConfigDiagnosticCode;
+  severity: DiagnosticSeverity;
+  message: string;
+  source: string;
+  range: SourceRange;
+  resourceId?: string;
+  dependencyChain?: readonly string[];
+  related?: readonly RelatedDiagnostic[];
+}
+
+export interface DiagnosticResult<T> {
+  value?: T;
+  diagnostics: ConfigDiagnostic[];
+  truncated: boolean;
+}
+
+export function sourceRange(
+  startOffset: number,
+  startLine: number,
+  startColumn: number,
+  endOffset: number,
+  endLine: number,
+  endColumn: number,
+): SourceRange {
+  return {
+    start: { offset: startOffset, line: startLine, column: startColumn },
+    end: { offset: endOffset, line: endLine, column: endColumn },
+  };
+}
+
+function truncateUtf8(value: string, maximumBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  const suffix = "…";
+  const bodyLimit = maximumBytes - Buffer.byteLength(suffix, "utf8");
+  let body = "";
+  let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > bodyLimit) break;
+    body += character;
+    bytes += size;
+  }
+  return `${body}${suffix}`;
+}
+
+function boundDiagnostic(diagnostic: ConfigDiagnostic): ConfigDiagnostic {
+  return {
+    ...diagnostic,
+    message: truncateUtf8(diagnostic.message, CONFIG_LIMITS.messageBytes),
+    source: truncateUtf8(diagnostic.source, CONFIG_LIMITS.messageBytes),
+    resourceId: diagnostic.resourceId === undefined
+      ? undefined
+      : truncateUtf8(diagnostic.resourceId, CONFIG_LIMITS.messageBytes),
+    dependencyChain: diagnostic.dependencyChain
+      ?.slice(0, CONFIG_LIMITS.dependencyChain)
+      .map((entry) => truncateUtf8(entry, CONFIG_LIMITS.messageBytes)),
+    related: diagnostic.related?.slice(0, CONFIG_LIMITS.related).map((related) => ({
+      ...related,
+      message: truncateUtf8(related.message, CONFIG_LIMITS.messageBytes),
+      source: truncateUtf8(related.source, CONFIG_LIMITS.messageBytes),
+    })),
+  };
+}
+
+export interface DiagnosticCollector {
+  add(diagnostic: ConfigDiagnostic): void;
+  result<T>(value?: T): DiagnosticResult<T>;
+}
+
+export function createDiagnosticCollector(): DiagnosticCollector {
+  const diagnostics: ConfigDiagnostic[] = [];
+  let truncated = false;
+
+  return {
+    add(diagnostic) {
+      if (truncated) return;
+      const bounded = boundDiagnostic(diagnostic);
+      if (diagnostics.length < CONFIG_LIMITS.diagnostics) {
+        diagnostics.push(bounded);
+        return;
+      }
+
+      truncated = true;
+      const markerRange = diagnostics.at(-1)?.range ?? sourceRange(0, 1, 1, 0, 1, 1);
+      const markerSource = diagnostics.at(-1)?.source ?? diagnostic.source;
+      diagnostics[CONFIG_LIMITS.diagnostics - 1] = {
+        code: "DIAGNOSTICS_TRUNCATED",
+        severity: "error",
+        message: `Additional diagnostics were omitted after the ${CONFIG_LIMITS.diagnostics - 1}-item reporting limit.`,
+        source: markerSource,
+        range: markerRange,
+      };
+    },
+    result<T>(value?: T) {
+      return value === undefined
+        ? { diagnostics: [...diagnostics], truncated }
+        : { value, diagnostics: [...diagnostics], truncated };
+    },
+  };
+}

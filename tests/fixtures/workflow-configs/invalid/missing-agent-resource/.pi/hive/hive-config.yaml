@@ -1,0 +1,7 @@
+schema-version: 1
+
+agents:
+  debugger: agents/missing.md
+
+workflows:
+  debug-chat: workflows/debug-chat.yaml

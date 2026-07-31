@@ -1,0 +1,44 @@
+name: Feature Delivery
+description: Plan, implement, test, and review one feature end to end.
+use-when: The user wants one team to own the complete delivery outcome.
+tags: [planning, implementation]
+
+artifact:
+  adapter: openspec
+  profile: lifecycle
+  binding: either
+  options: {}
+
+approvals:
+  proposal: optional
+  design: optional
+  specs: optional
+  tasks: required
+  implementation: required
+  review: optional
+
+team:
+  id: root
+  agent: orchestrator
+  role: Delivery orchestrator
+  responsibilities:
+    - Own the user outcome and final synthesis.
+  members:
+    - id: planner
+      agent: planner
+      role: Planner
+    - id: builder
+      agent: coder
+      role: Implementer
+    - id: reviewer
+      agent: tester
+      role: Tester and reviewer
+
+instructions:
+  shared: |
+    Use the bound OpenSpec workspace as durable coordination state.
+  root: |
+    Decide the necessary planning, implementation, and review work from the
+    request and current workspace. Delegate only what is needed; there is no
+    mandatory harness phase order. Finish only when the requested outcome,
+    required approvals, code changes, and verification evidence are complete.

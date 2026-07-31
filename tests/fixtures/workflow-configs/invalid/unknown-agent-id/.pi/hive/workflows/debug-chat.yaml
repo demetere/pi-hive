@@ -1,0 +1,21 @@
+name: Debug Chat
+description: Investigate defects, explain findings, and fix them when authorized.
+use-when: The user wants an interactive debugging specialist.
+tags: [debugging]
+
+artifact:
+  adapter: none
+  profile: default
+  binding: none
+  options: {}
+
+team:
+  id: root
+  agent: missing-agent
+
+instructions:
+  shared: |
+    Distinguish observations from hypotheses and cite tool evidence.
+  root: |
+    Chat directly with the user, inspect only within effective capabilities,
+    and finish each resolved request with a verified summary.

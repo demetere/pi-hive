@@ -12,10 +12,12 @@ const urlHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host
 const url = `http://${urlHost}:${port}`;
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const hiveDir = join(agentDir, "hive");
-const metadataPath = join(hiveDir, "telemetry-server.json");
+const metadataPath = join(hiveDir, "workflow-daemon-v1.json");
+const legacyMetadataPath = join(hiveDir, "telemetry-server.json");
 const tokenPath = join(hiveDir, "daemon-token");
 const registryPath = resolve(process.env.HIVE_TELEMETRY_REGISTRY || join(hiveDir, "telemetry-sessions.jsonl"));
 const dbPath = resolve(process.env.HIVE_TELEMETRY_DB || join(hiveDir, "telemetry.db"));
+const workflowDbPath = resolve(process.env.HIVE_WORKFLOW_TELEMETRY_DB || join(hiveDir, "workflow-telemetry-v1.db"));
 const serverPath = join(extensionRoot, "src", "observability", "server", "index.ts");
 const protocolVersion = 1;
 const packageVersion = JSON.parse(readFileSync(join(extensionRoot, "package.json"), "utf8")).version || "unknown";
@@ -35,7 +37,7 @@ async function probe() {
     const response = await fetch(`${url}/health`, { signal: controller.signal });
     if (!response.ok) return null;
     const body = await response.json();
-    return body?.ok === true && body?.mode === "global" ? body : null;
+    return body?.ok === true && (body?.mode === "workflow" || body?.mode === "global") ? body : null;
   } catch {
     return null;
   } finally {
@@ -46,7 +48,9 @@ async function probe() {
 async function stopExistingDashboard() {
   const health = await probe();
   if (!health) return undefined;
-  if (resolve(String(health.registryPath || "")) !== registryPath || resolve(String(health.dbPath || "")) !== dbPath) {
+  const sameWorkflowStorage = health.mode === "workflow" && resolve(String(health.workflowDbPath || "")) === workflowDbPath;
+  const sameLegacyStorage = health.mode === "global" && resolve(String(health.registryPath || "")) === registryPath && resolve(String(health.dbPath || "")) === dbPath;
+  if (!sameWorkflowStorage && !sameLegacyStorage) {
     throw new Error("A dashboard using different telemetry storage is running; refusing to stop it.");
   }
   const token = readToken();
@@ -89,6 +93,7 @@ if (bun.error || bun.status !== 0) {
 
 const stoppedPid = await stopExistingDashboard();
 rmSync(metadataPath, { force: true });
+rmSync(legacyMetadataPath, { force: true });
 rmSync(tokenPath, { force: true });
 mkdirSync(hiveDir, { recursive: true, mode: 0o700 });
 chmodSync(hiveDir, 0o700);
@@ -106,6 +111,7 @@ const proc = spawn("bun", [serverPath], {
     HIVE_TELEMETRY_TOKEN: token,
     HIVE_TELEMETRY_REGISTRY: registryPath,
     HIVE_TELEMETRY_DB: dbPath,
+    HIVE_WORKFLOW_TELEMETRY_DB: workflowDbPath,
     HIVE_DAEMON_PROTOCOL_VERSION: String(protocolVersion),
     HIVE_DAEMON_PACKAGE_VERSION: packageVersion,
     HIVE_DAEMON_BUILD_HASH: buildHash,
@@ -118,12 +124,12 @@ proc.unref();
 let health = null;
 for (let i = 0; i < 70; i++) {
   const candidate = await probe();
-  if (candidate?.startupNonce === startupNonce
+  if (candidate?.mode === "workflow"
+    && candidate.startupNonce === startupNonce
     && candidate.protocolVersion === protocolVersion
     && candidate.packageVersion === packageVersion
     && candidate.buildHash === buildHash
-    && resolve(candidate.registryPath) === registryPath
-    && resolve(candidate.dbPath) === dbPath) {
+    && resolve(candidate.workflowDbPath) === workflowDbPath) {
     health = candidate;
     break;
   }
@@ -147,8 +153,8 @@ atomicPrivateWrite(metadataPath, `${JSON.stringify({
   protocolVersion,
   packageVersion,
   buildHash,
-  registryPath,
-  dbPath,
+  workflowDbPath,
+  legacyTelemetryPreserved: [dbPath, registryPath],
   startupNonce,
 }, null, 2)}\n`);
 

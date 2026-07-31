@@ -51,7 +51,6 @@ alias dtc := dashboard-test-coverage
 alias de2e := dashboard-test-e2e
 alias dv := dashboard-verify
 alias ds := dashboard-serve
-alias rb := review-build
 
 # pi-*
 alias pd := pi-dev
@@ -91,8 +90,7 @@ install:
   cd {{dashboard_dir}} && npm install
   @printf "{{GREEN}}Install complete.{{NC}}\n"
 
-# Project the dashboard points at when run standalone. Defaults to the demo
-# playground so `just run` shows the seeded OpenSpec changes out of the box.
+# Configured project whose workflow journals the standalone dashboard projects.
 project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-playground")
 
 # Run this checkout as a temporary Pi extension for manual testing.
@@ -100,10 +98,10 @@ project := env_var_or_default("PROJECT", env_var("HOME") + "/Projects/pi-hive-pl
 pi-dev:
   pi -e .
 
-# Vite proxies /api, /plans, /pl-review, /stream, … to the Bun server; edit
+# Vite proxies authenticated /api/v1 requests to the Bun server; edit
 # ui/web/src/** and see changes live (Ctrl+C stops both). Vite binds to
-# localhost/::1, not 127.0.0.1. Usage: `just run`  or  `PROJECT=/path just run`.
-# Run EVERYTHING: Bun server (API + /pl-review) + Vite HMR frontend. Open http://localhost:43192.
+# localhost/::1, not 127.0.0.1. Usage: `just run` or `PROJECT=/path just run`.
+# Run the workflow API and Vite HMR frontend. Open http://localhost:43192.
 # The server always mints/reuses a bearer credential; manual development never
 # disables mutation authentication.
 [group('dashboard')]
@@ -114,19 +112,17 @@ run:
   @printf "  frontend: http://localhost:43192  (HMR — open this)\n"
   @printf "  api:      http://{{telemetry_host}}:{{telemetry_port}} (authenticated writes)\n"
   npx concurrently --kill-others --names "api,web" --prefix-colors "blue,green" \
-    "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} HIVE_TELEMETRY_DB={{project}}/.telemetry/telemetry.db bun src/observability/server/index.ts" \
+    "HIVE_TELEMETRY_HOST={{telemetry_host}} HIVE_TELEMETRY_PORT={{telemetry_port}} HIVE_PROJECT_CWD={{project}} bun src/observability/server/index.ts" \
     "cd {{dashboard_dir}} && HIVE_TELEMETRY_PORT={{telemetry_port}} npm run dev"
 
-# Serve the dashboard standalone: ONE authenticated Bun process (API + built
-# dist/ + /pl-review), no Vite/HMR. For a quick check of the built UI.
+# Serve the workflow dashboard as one authenticated Bun process with built dist.
 [group('dashboard')]
 dashboard-serve:
   @printf "{{BLUE}}pi-hive dashboard (serve){{NC}}\n"
   @printf "  project:   %s\n" "{{project}}"
   @printf "  dashboard: http://{{telemetry_host}}:{{telemetry_port}}  (authenticated writes)\n"},{
   HIVE_TELEMETRY_HOST="{{telemetry_host}}" HIVE_TELEMETRY_PORT="{{telemetry_port}}" \
-    HIVE_PROJECT_CWD="{{project}}" HIVE_TELEMETRY_DB="{{project}}/.telemetry/telemetry.db" \
-    bun src/observability/server/index.ts
+    HIVE_PROJECT_CWD="{{project}}" bun src/observability/server/index.ts
 
 # Restart the dashboard so it serves the synced bundle; then run /reload in Pi.
 # Sync this checkout into the user extension dir + reload.
@@ -210,15 +206,15 @@ dashboard-install:
 dashboard-build:
   cd {{dashboard_dir}} && npm install && npm run build
 
-# Verify the review-only source against the pinned Plannotator package.
-[group('dashboard')]
-review-vendor-verify:
-  node scripts/check-review-vendor.mjs
+# Regenerate the committed schema-v1 editor artifacts from TypeBox.
+[group('quality')]
+config-schema-build:
+  node --import tsx scripts/generate-config-schemas.mjs
 
-# Build the committed, review-only UI and deterministic gzip artifacts.
-[group('dashboard')]
-review-build: review-vendor-verify
-  node scripts/build-review-bundle.mjs
+# Reject committed schema-v1 artifacts that drift from TypeBox.
+[group('quality')]
+config-schema-verify:
+  node --import tsx scripts/generate-config-schemas.mjs --check
 
 # Run every strict TypeScript project checker.
 [group('quality')]
@@ -271,10 +267,9 @@ dashboard-test-e2e:
 dashboard-verify:
   node scripts/check-dashboard-fresh.mjs
 
-# Rebuild every committed UI artifact and reject any uncommitted output.
+# Rebuild generated assets and verify their source hashes. CI separately rejects drift.
 [group('quality')]
-generated-verify: dashboard-build review-build
-  git diff --exit-code -- ui/web/dist ui/review/dist
+generated-verify: dashboard-build config-schema-verify dashboard-verify
 
 # Start the dashboard Vite dev server.
 [group('dashboard')]
@@ -288,33 +283,83 @@ dashboard-dev:
 # Run the Node test suite.
 [group('quality')]
 test:
-  node --import tsx --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test tests/**/*.test.ts
 
 # Exercise Bun-independent utility and state modules on every supported Node.
-# Pi itself requires Node 22+, so the Node 20 lane intentionally excludes tests
-# that import the Pi runtime peer dependency.
+# Core workflow tool contracts/handlers remain in this lane via workflow-tools;
+# only their src/integration Pi adapter test is excluded because Pi requires 22+.
 [group('quality')]
 test-node-compat:
-  node --import tsx --import ./tests/register-ts-loader.mjs --test \
-    tests/dashboard-event-ring.test.ts \
-    tests/governance.test.ts \
-    tests/limits.test.ts \
-    tests/project-identity.test.ts \
-    tests/safe-path.test.ts \
-    tests/yaml.test.ts
+  node --import tsx --import ./tests/helpers/register-ts-loader.mjs --test \
+    tests/policy/artifact-contracts.test.ts \
+    tests/artifacts/artifact-contract-harness.test.ts \
+    tests/artifacts/artifact-facade.test.ts \
+    tests/artifacts/artifact-leases-cross-process.test.ts \
+    tests/artifacts/artifact-lifecycle-integration.test.ts \
+    tests/artifacts/artifact-markdown-plan.test.ts \
+    tests/artifacts/artifact-markdown-plan-e2e.test.ts \
+    tests/artifacts/artifact-none-run.test.ts \
+    tests/artifacts/artifact-operations-fault.test.ts \
+    tests/artifacts/artifact-registry-none.test.ts \
+    tests/artifacts/artifact-run-orchestration.test.ts \
+    tests/artifacts/artifact-workspaces.test.ts \
+    tests/artifacts/artifact-w17-edge-branches.test.ts \
+    tests/capabilities/capability-filesystem-glob.test.ts \
+    tests/capabilities/capability-filesystem-policy.test.ts \
+    tests/capabilities/capability-filesystem-race.test.ts \
+    tests/capabilities/capability-command-policy.test.ts \
+    tests/capabilities/capability-network-policy.test.ts \
+    tests/capabilities/capability-process-ownership.test.ts \
+    tests/capabilities/capability-resolution.test.ts \
+    tests/capabilities/capability-tools.test.ts \
+    tests/config/config-budgets.test.ts \
+    tests/config/config-catalog-agents.test.ts \
+    tests/config/config-catalog-hash.test.ts \
+    tests/config/config-catalog-knowledge.test.ts \
+    tests/config/config-catalog-skills.test.ts \
+    tests/config/config-catalog.test.ts \
+    tests/config/config-diagnostics.test.ts \
+    tests/config/config-manifest.test.ts \
+    tests/config/config-registry-diagnostics.test.ts \
+    tests/config/config-schema-generated.test.ts \
+    tests/config/config-schema.test.ts \
+    tests/config/config-snapshot-builder.test.ts \
+    tests/config/config-snapshot-canonical.test.ts \
+    tests/config/config-snapshot-compat.test.ts \
+    tests/config/config-snapshot-model.test.ts \
+    tests/config/config-snapshot-store.test.ts \
+    tests/config/config-team.test.ts \
+    tests/config/config-workflows.test.ts \
+    tests/config/config-yaml.test.ts \
+    tests/knowledge/knowledge-search.test.ts \
+    tests/knowledge/okf-provider.test.ts \
+    tests/observability/workflow-dashboard-api.test.ts \
+    tests/observability/workflow-daemon-security.test.ts \
+    tests/observability/workflow-telemetry.test.ts \
+    tests/core/project-identity.test.ts \
+    tests/core/safe-path.test.ts \
+    tests/workflows/session-links.test.ts \
+    tests/workflows/workflow-checkpoint.test.ts \
+    tests/workflows/workflow-journal.test.ts \
+    tests/workflows/workflow-ownership.test.ts \
+    tests/workflows/workflow-navigation.test.ts \
+    tests/workflows/workflow-prompts.test.ts \
+    tests/workflows/workflow-tools.test.ts \
+    tests/workflows/workflow-selector.test.ts \
+    tests/workflows/workflow-sessions.test.ts \
 
 # Separate from `test` because db.ts uses bun:sqlite and the core must load
 # without Bun (*.spec.ts so the Node runner never picks them up).
 # Run the Bun-only test suite (SQLite layer, dashboard security).
 [group('quality')]
 test-db:
-  bun test ./tests/*.spec.ts
+  bun test ./tests/**/*.spec.ts
 
 # Generate Node coverage for the Bun-independent extension modules.
 [group('quality')]
 coverage-core:
   rm -rf coverage/core
-  npx c8 --all --check-coverage --lines=85 --branches=80 --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=json --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/*.test.ts
+  npx c8 --all --check-coverage --lines=85 --branches=80 --include='src/**/*.ts' --exclude='src/observability/db.ts' --exclude='src/observability/server/**' --reporter=text-summary --reporter=json-summary --reporter=json --reporter=lcov --reports-dir=coverage/core --temp-directory=coverage/.tmp/core node --experimental-strip-types --import ./tests/helpers/register-ts-loader.mjs --test tests/**/*.test.ts
   node scripts/check-critical-coverage.mjs
   rm -rf coverage/.tmp
 
@@ -322,7 +367,7 @@ coverage-core:
 [group('quality')]
 coverage-db:
   rm -rf coverage/bun
-  bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage/bun ./tests/*.spec.ts
+  bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage/bun ./tests/**/*.spec.ts
   node scripts/check-bun-coverage.mjs
 
 # Produce all machine-readable coverage reports consumed by CI.
@@ -330,12 +375,22 @@ coverage-db:
 coverage: coverage-core coverage-db dashboard-test-coverage
   @printf "{{GREEN}}Coverage reports generated under coverage/.{{NC}}\n"
 
+# Rebuild the committed arm64 and x64 Darwin descriptor helpers (macOS only).
+[group('build')]
+darwin-native-build:
+  node scripts/build-darwin-native.mjs
+
+# Verify committed Darwin helpers match their audited C source on every host.
+[group('quality')]
+darwin-native-verify:
+  node scripts/verify-darwin-native.mjs
+
 # Verify package manifest, required files, peer deps, and committed build stamps.
 [group('quality')]
-verify-package:
+verify-package: config-schema-verify darwin-native-verify
   node scripts/verify-package-files.mjs
 
-# Enforce packed/unpacked package and review-bundle byte budgets.
+# Enforce package-tree and committed dashboard byte budgets.
 [group('quality')]
 verify-budgets:
   node scripts/check-package-budgets.mjs
@@ -350,9 +405,14 @@ verify-licenses:
 verify-packed-install:
   node scripts/verify-packed-install.mjs
 
+# Bounded package compatibility lane: verify contents, then install and load the tarball.
+[group('package')]
+verify-node-package-compat: verify-package verify-packed-install
+  @printf "{{GREEN}}Node package compatibility passed.{{NC}}\n"
+
 # Run tests plus verification gates, without packaging dry-run.
 [group('quality')]
-verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses
+verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashboard-verify verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}All verification gates passed.{{NC}}\n"
 
 # Run all local release/CI gates, including packaging dry-run.
@@ -360,13 +420,28 @@ verify: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db dashb
 ci: typecheck lint dashboard-test-unit dashboard-test-e2e test test-db generated-verify verify-package verify-budgets verify-licenses pack-dry-run verify-packed-install
   @printf "{{GREEN}}CI gates passed.{{NC}}\n"
 
+# Enforce the exact documented root audit exception (including its expiry).
+[group('quality')]
+audit-root:
+  node scripts/check-npm-audit.mjs
+
+# Reject high-severity dashboard dependency advisories.
+[group('quality')]
+audit-dashboard:
+  npm audit --prefix ui/web --audit-level=high
+
+# Complete publish gate: coverage plus CI/package/generated checks and both audits.
+[group('quality')]
+release-gate: coverage ci audit-root audit-dashboard
+  @printf "{{GREEN}}Release gates passed.{{NC}}\n"
+
 # =============================================================================
 # PACKAGE & RELEASE
 # =============================================================================
 
 # Rebuild committed UIs and run package verification, matching package prepack.
 [group('package')]
-prepack: dashboard-build review-build verify-package verify-budgets verify-licenses
+prepack: dashboard-build verify-package verify-budgets verify-licenses
   @printf "{{GREEN}}Prepack checks passed.{{NC}}\n"
 
 # Verify that the checkout is the clean, tagged, reproducible release commit.
@@ -379,9 +454,16 @@ release-verify:
 release-artifacts:
   node scripts/generate-release-artifacts.mjs
 
-# Run publish-time checks, including checks required for direct local publish.
+# Validate release artifact identities, metadata, and checksums before publishing.
 [group('package')]
-prepublish: typecheck test test-db dashboard-verify review-vendor-verify verify-package verify-budgets verify-licenses release-verify
+release-artifacts-verify:
+  node scripts/verify-release-artifacts.mjs
+
+# Direct npm publishing cannot bypass the complete release aggregate. Tagged-state
+# verification intentionally precedes generation so release-artifacts/ does not
+# make the checkout dirty, and npm lifecycle commands are not invoked recursively.
+[group('package')]
+prepublish: release-gate release-verify release-artifacts release-artifacts-verify
   @printf "{{GREEN}}Prepublish checks passed.{{NC}}\n"
 
 # Inspect package contents. Runs the package prepack hook.

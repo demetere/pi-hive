@@ -1,0 +1,251 @@
+{
+  "$id": "urn:pi-hive:schema:hive-agent-frontmatter:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "budgets": {
+      "additionalProperties": false,
+      "properties": {
+        "active-wall-time": {
+          "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+          "type": "string"
+        },
+        "max-agent-turns": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max-tool-calls": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token-budget": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "items": {
+            "anyOf": [
+              {
+                "const": "read",
+                "type": "string"
+              },
+              {
+                "const": "write",
+                "type": "string"
+              },
+              {
+                "const": "review",
+                "type": "string"
+              }
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "external-network": {
+          "type": "boolean"
+        },
+        "filesystem": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "exclude": {
+                "items": {
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "include": {
+                "items": {
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "operations": {
+                "items": {
+                  "anyOf": [
+                    {
+                      "const": "read",
+                      "type": "string"
+                    },
+                    {
+                      "const": "create",
+                      "type": "string"
+                    },
+                    {
+                      "const": "update",
+                      "type": "string"
+                    },
+                    {
+                      "const": "delete",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "path": {
+                "pattern": "\\S",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "operations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "git": {
+          "type": "boolean"
+        },
+        "human-input": {
+          "type": "boolean"
+        },
+        "knowledge": {
+          "items": {
+            "anyOf": [
+              {
+                "const": "read",
+                "type": "string"
+              },
+              {
+                "const": "propose",
+                "type": "string"
+              },
+              {
+                "const": "curate",
+                "type": "string"
+              }
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "shell": {
+          "items": {
+            "anyOf": [
+              {
+                "const": "inspect",
+                "type": "string"
+              },
+              {
+                "const": "test",
+                "type": "string"
+              },
+              {
+                "const": "build",
+                "type": "string"
+              },
+              {
+                "const": "package",
+                "type": "string"
+              },
+              {
+                "const": "mutate",
+                "type": "string"
+              },
+              {
+                "const": "execute-code",
+                "type": "string"
+              }
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "type": "object"
+    },
+    "description": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "knowledge": {
+      "items": {
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "model": {
+      "pattern": "^(?:inherit|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)$",
+      "type": "string"
+    },
+    "name": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "skills": {
+      "items": {
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "tags": {
+      "items": {
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "thinking": {
+      "anyOf": [
+        {
+          "const": "inherit",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "type": "string"
+        },
+        {
+          "const": "minimal",
+          "type": "string"
+        },
+        {
+          "const": "low",
+          "type": "string"
+        },
+        {
+          "const": "medium",
+          "type": "string"
+        },
+        {
+          "const": "high",
+          "type": "string"
+        },
+        {
+          "const": "xhigh",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "required": [
+    "name",
+    "capabilities"
+  ],
+  "title": "pi-hive Agent Frontmatter Schema v1",
+  "type": "object"
+}

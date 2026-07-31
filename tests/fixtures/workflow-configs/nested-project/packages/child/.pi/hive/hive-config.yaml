@@ -1,0 +1,7 @@
+schema-version: 1
+
+agents:
+  child-root: agents/child-root.md
+
+workflows:
+  child-chat: workflows/child-chat.yaml

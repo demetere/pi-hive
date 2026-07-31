@@ -1,0 +1,5 @@
+schema-version: 1
+agents:
+  planner: agents/planner.md
+workflows:
+  plan-delivery: workflows/plan-delivery.yaml

@@ -5,12 +5,12 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CRITICAL_CORE_MODULES = [
-  "src/engine/dashboard.ts",
-  "src/engine/process.ts",
-  "src/engine/review.ts",
-  "src/integration/commands.ts",
-  "src/integration/hooks.ts",
-  "src/observability/agent-log.ts",
+  "src/integration/run-lifecycle.ts",
+  "src/integration/workflow-command-service.ts",
+  "src/integration/workflow-commands.ts",
+  "src/integration/workflow-tools.ts",
+  "src/workflows/runs.ts",
+  "src/workflows/tools.ts",
 ];
 
 export const CRITICAL_LINE_THRESHOLD = 90;
