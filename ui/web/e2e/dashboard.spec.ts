@@ -17,9 +17,19 @@ test("mission-control overview starts on bounded workflow state and API v1", asy
   expect(mock.workflowRequests.every((request) => request.includes("/api/v1/"))).toBe(true);
 });
 
-test("every workflow view is keyboard reachable from the restored mission-control shell", async ({ page }) => {
+test("switches to the modular terminal renderer without replacing shared views", async ({ page }) => {
   await openDashboard(page);
-  for (const view of ["Overview", "Sessions", "Runs", "Tasks", "Artifacts", "Evidence", "Questions", "Checkpoints", "Approvals", "Knowledge bundles", "Knowledge jobs", "Knowledge proposals", "Cost", "Model mix", "Usage", "Activity", "History", "Workflows"]) {
+  await page.getByRole("combobox", { name: "Dashboard theme" }).selectOption("terminal");
+  await expect(page.locator(".renderer-terminal")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workflow dashboard views" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => ({ theme: document.documentElement.dataset.theme, renderer: document.documentElement.dataset.renderer, stored: window.localStorage.getItem("hive-theme") }))).toEqual({ theme: "terminal", renderer: "terminal", stored: "terminal" });
+  await expectNoSeriousA11yViolations(page);
+});
+
+test("every shell view is keyboard reachable from the restored mission-control navigation", async ({ page }) => {
+  await openDashboard(page);
+  for (const view of ["Overview", "Sessions", "Tasks", "Artifacts", "Evidence", "Questions", "Checkpoints", "Approvals", "Knowledge bundles", "Knowledge jobs", "Knowledge proposals", "Cost", "Model mix", "Usage", "Activity", "History", "Workflows"]) {
     const button = page.getByRole("button", { name: view, exact: true });
     await button.focus(); await page.keyboard.press("Enter");
     await expect(page.getByRole("heading", { name: view, exact: true })).toBeVisible();

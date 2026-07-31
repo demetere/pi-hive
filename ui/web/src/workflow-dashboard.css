@@ -209,29 +209,18 @@
   font: 10px var(--mono);
 }
 
-.theme-switch {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  padding: 3px;
+.theme-selector { display: block; }
+
+.theme-selector select {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 28px 0 10px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--well);
-}
-
-.theme-switch button {
-  min-height: 30px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--ink-dim);
-  font: 600 11px var(--disp);
-  cursor: pointer;
-}
-
-.theme-switch button[aria-pressed="true"] {
   color: var(--ink);
-  background: var(--raise);
-  box-shadow: 0 1px 3px rgba(0,0,0,.18);
+  font: 600 10px var(--disp);
+  cursor: pointer;
 }
 
 .dashboard-main {
@@ -778,8 +767,7 @@
   .connection-card { min-height: 34px; place-items: center; padding: 0; }
   .connection-card span { display: flex; }
   .connection-card span i { display: block; }
-  .theme-switch { grid-template-columns: 1fr; }
-  .theme-switch button { font-size: 9px; }
+  .theme-selector select { padding-inline: 4px; font-size: 9px; }
   .dashboard-widgets { grid-template-columns: 1fr; }
   .dashboard-widgets .topology-widget,
   .dashboard-widgets .activity-widget { min-height: 380px; }

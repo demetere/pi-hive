@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { HiveMark } from "./dashboard/brand";
+import { NAV_GROUPS, VIEW_SUBTITLES, VIEW_TITLES, type ApiResource, type DashboardView } from "./dashboard/navigation";
+import DashboardShell, { type ProjectOption } from "./renderers/dashboard-shell";
+import { useDashboardTheme } from "./themes/use-dashboard-theme";
 import TopologyGraph from "./topology-graph";
 
 const API_VERSION = 1;
@@ -11,32 +15,14 @@ const CLAIMED_IDENTITY = "local-dashboard";
 const PROJECT_SCOPE_STORAGE_KEY = "hive-project-scope";
 
 type JsonRecord = Record<string, unknown>;
-type ApiResource = "projects" | "workflows" | "sessions" | "runs" | "nodes" | "tasks" | "artifacts" | "checkpoints" | "questions" | "approvals" | "knowledge" | "usage" | "activity" | "history";
-type View = ApiResource | "overview" | "evidence" | "cost" | "model-mix" | "knowledge-bundles" | "knowledge-jobs" | "knowledge-proposals";
-type Theme = "dark" | "light";
+type View = DashboardView;
 
 interface ResourcePage { readonly items: readonly JsonRecord[]; readonly nextCursor: string | null }
 interface Credentials { readonly token: string; readonly csrf: string; readonly projectId?: string }
-interface ProjectOption { readonly projectId: string; readonly projectLabel: string; readonly syncStatus: "live" | "historical" }
 interface SseFrame { readonly event: string; readonly data: string; readonly id?: string }
 
-const NAV_GROUPS: readonly { readonly label: string; readonly views: readonly View[] }[] = [
-  { label: "Mission control", views: ["overview", "workflows", "sessions"] },
-  { label: "Execution", views: ["tasks", "activity", "history"] },
-  { label: "Governance", views: ["artifacts", "evidence", "checkpoints", "questions", "approvals"] },
-  { label: "Knowledge", views: ["knowledge-bundles", "knowledge-jobs", "knowledge-proposals"] },
-  { label: "Insights", views: ["cost", "model-mix", "usage"] },
-];
-
-const TITLES: Readonly<Record<View, string>> = {
-  overview: "Overview", projects: "Projects", workflows: "Workflows", sessions: "Sessions", runs: "Runs", nodes: "Topology", tasks: "Tasks", artifacts: "Artifacts",
-  evidence: "Evidence", checkpoints: "Checkpoints", questions: "Questions", approvals: "Approvals", "knowledge-bundles": "Knowledge bundles",
-  "knowledge-jobs": "Knowledge jobs", "knowledge-proposals": "Knowledge proposals", knowledge: "Knowledge", cost: "Cost", "model-mix": "Model mix", usage: "Usage", activity: "Activity", history: "History",
-};
-
-const SUBTITLES: Readonly<Record<View, string>> = {
-  overview: "Live workflow health, topology, activity, and usage at a glance.", projects: "Registered live projects and retained historical project projections.", workflows: "Cataloged workflow definitions, immutable versions, and configured topology.", sessions: "Linked Pi sessions carrying workflow execution state.", runs: "Durable workflow runs and their terminal or active status.", nodes: "The live hierarchical agent topology instantiated by projected runs.", tasks: "Delegated work owned by workflow nodes.", artifacts: "Bound artifact workspaces without exposing private content.", evidence: "Verified event references projected from authoritative journals.", checkpoints: "Artifact checkpoint requests and current decisions.", questions: "Durable human questions awaiting exact typed answers.", approvals: "Human approval controls with exact request provenance.", "knowledge-bundles": "Bounded knowledge updates available to workflows.", "knowledge-jobs": "Durable enrichment work and model attribution.", "knowledge-proposals": "Human-reviewed knowledge changes awaiting decisions.", knowledge: "Projected knowledge lifecycle state.", cost: "Provider-confirmed and explicitly separated estimated spend.", "model-mix": "Token usage grouped by model and precision.", usage: "Authoritative token and cost counters by precision.", activity: "The newest projected workflow events.", history: "Bounded durable workflow event history.",
-};
+const TITLES = VIEW_TITLES;
+const SUBTITLES = VIEW_SUBTITLES;
 
 const DISPLAY_FIELDS: Readonly<Record<View, readonly string[]>> = {
   overview: [],
@@ -506,33 +492,6 @@ function Overview({ items, onNavigate, onOpenWorkflow, onOpenRun }: { items: rea
   </>;
 }
 
-function NavIcon({ view }: { view: View }) {
-  const common = { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.45, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
-  if (view === "overview") return <svg {...common}><rect x="2" y="2" width="5" height="5" rx="1.2" /><rect x="9" y="2" width="5" height="5" rx="1.2" /><rect x="2" y="9" width="5" height="5" rx="1.2" /><rect x="9" y="9" width="5" height="5" rx="1.2" /></svg>;
-  if (view === "workflows") return <svg {...common}><circle cx="8" cy="3" r="1.6" /><circle cx="3.5" cy="12" r="1.6" /><circle cx="12.5" cy="12" r="1.6" /><path d="M8 4.7v2.2M3.5 10.3V8h9v2.3" /></svg>;
-  if (view === "sessions") return <svg {...common}><rect x="2" y="4" width="9" height="9" rx="1.5" /><path d="M5 4V2.5h9v9h-3" /></svg>;
-  if (view === "runs") return <svg {...common}><circle cx="8" cy="8" r="6" /><path d="m6.5 5 4.5 3-4.5 3Z" /></svg>;
-  if (view === "tasks") return <svg {...common}><rect x="2" y="2" width="12" height="12" rx="2" /><path d="m4.5 8 2 2 5-5" /></svg>;
-  if (view === "activity") return <svg {...common}><path d="M1.5 8h3l1.4-4 3 8 1.7-5 1.1 1H14.5" /></svg>;
-  if (view === "history") return <svg {...common}><circle cx="8" cy="8" r="5.7" /><path d="M8 4.5V8l2.5 1.5M3 3.5v3h3" /></svg>;
-  if (view === "artifacts") return <svg {...common}><path d="m2.5 5 5.5-3 5.5 3v6L8 14l-5.5-3Z" /><path d="m2.5 5 5.5 3 5.5-3M8 8v6" /></svg>;
-  if (view === "evidence") return <svg {...common}><path d="M8 1.8 13 4v3.6c0 3.2-2.1 5.3-5 6.6-2.9-1.3-5-3.4-5-6.6V4Z" /><path d="m5.5 8 1.6 1.6 3.5-3.5" /></svg>;
-  if (view === "checkpoints") return <svg {...common}><path d="M3 14V2M3 3h8l-1.5 2L11 7H3" /></svg>;
-  if (view === "questions") return <svg {...common}><path d="M2 3.5A2.5 2.5 0 0 1 4.5 1h7A2.5 2.5 0 0 1 14 3.5v5A2.5 2.5 0 0 1 11.5 11H7l-3.5 3v-3.2A2.5 2.5 0 0 1 2 8.5Z" /><path d="M6.4 5.2A1.7 1.7 0 0 1 8 4.2c1 0 1.8.6 1.8 1.5 0 1.1-1.8 1.3-1.8 2.4M8 9.5h.01" /></svg>;
-  if (view === "approvals") return <svg {...common}><circle cx="8" cy="8" r="6" /><path d="m4.8 8 2.1 2.1 4.3-4.3" /></svg>;
-  if (view === "knowledge-bundles") return <svg {...common}><path d="M3 2.5h7.5A2.5 2.5 0 0 1 13 5v8.5H5A2 2 0 0 1 3 11.5v-9Z" /><path d="M5 13.5v-9h8" /></svg>;
-  if (view === "knowledge-jobs") return <svg {...common}><circle cx="8" cy="8" r="2.4" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" /></svg>;
-  if (view === "knowledge-proposals") return <svg {...common}><path d="M3 2h7l3 3v9H3Z" /><path d="M10 2v3h3M8 7v4M6 9h4" /></svg>;
-  if (view === "cost") return <svg {...common}><path d="M8 1.8v12.4M11 4.2H6.6a2 2 0 1 0 0 4h2.8a2 2 0 1 1 0 4H4.7" /></svg>;
-  if (view === "model-mix") return <svg {...common}><circle cx="5" cy="5" r="3" /><circle cx="11" cy="5" r="3" /><circle cx="8" cy="11" r="3" /></svg>;
-  if (view === "usage") return <svg {...common}><path d="M2 13.5h12M3.5 11V7.5h2V11M7 11V3h2v8M10.5 11V5.5h2V11" /></svg>;
-  if (view === "nodes") return <svg {...common}><path d="M8 2v4M4 10V8h8v2" /><circle cx="8" cy="2" r="1" /><circle cx="4" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /></svg>;
-  return <svg {...common}><path d="M3 2.5h7l3 3v8H3z" /><path d="M10 2.5v3h3" /></svg>;
-}
-function HiveMark({ compact = false }: { compact?: boolean }) {
-  return <span className={`hive-mark${compact ? " compact" : ""}`} aria-hidden="true"><svg width={compact ? 20 : 24} height={compact ? 20 : 24} viewBox="0 0 24 24" fill="none"><path d="m12 2.8 7.7 4.5v9L12 20.8l-7.7-4.5v-9L12 2.8Z" stroke="currentColor" strokeWidth="1.7" /><circle cx="12" cy="12" r="3.2" fill="currentColor" /><path d="M12 5.2v3.1M17.7 8.6 15 10.1M17.7 15.4 15 13.9M6.3 15.4 9 13.9M6.3 8.6 9 10.1" stroke="var(--brand-contrast)" strokeWidth="1.1" /></svg></span>;
-}
-
 function parseSseFrame(raw: string): SseFrame | undefined {
   let event = "message", id: string | undefined; const data: string[] = [];
   for (const line of raw.replaceAll("\r\n", "\n").split("\n")) {
@@ -544,10 +503,6 @@ function parseSseFrame(raw: string): SseFrame | undefined {
 }
 function sleep(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolve) => { const timer = setTimeout(resolve, ms); signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); }); }
 
-function initialTheme(): Theme {
-  try { return window.localStorage.getItem("hive-theme") === "light" ? "light" : "dark"; }
-  catch { return "dark"; }
-}
 interface DashboardRoute { readonly view: View; readonly itemId?: string; readonly runId?: string }
 function routeFromPath(): DashboardRoute | undefined {
   try {
@@ -579,11 +534,12 @@ function initialProjectScope(): string | null | undefined {
 
 export default function WorkflowDashboard({ embedded = false }: { embedded?: boolean }) {
   const initialRoute = embedded ? { view: "overview" as View } : routeFromPath() ?? { view: "overview" as View };
+  const { theme, themeId, setThemeId } = useDashboardTheme();
   const [view, setView] = useState<View>(initialRoute.view); const viewRef = useRef<View>(view); viewRef.current = view;
   const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | undefined>(initialRoute.view === "workflows" ? initialRoute.itemId : undefined); const [expandedSessionId, setExpandedSessionId] = useState<string | undefined>(initialRoute.view === "sessions" ? initialRoute.itemId : undefined); const [expandedRunId, setExpandedRunId] = useState<string | undefined>(initialRoute.view === "sessions" ? initialRoute.runId : undefined);
   const [projectScope, setProjectScope] = useState<string | null | undefined>(initialProjectScope); const [defaultProjectId, setDefaultProjectId] = useState<string>(); const [projectOptions, setProjectOptions] = useState<readonly ProjectOption[]>([]);
   const [items, setItems] = useState<readonly JsonRecord[]>([]); const [summaryItems, setSummaryItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
-  const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [theme, setTheme] = useState<Theme>(initialTheme); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
+  const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
   const load = useCallback(async (append = false) => {
     const requestedView = view; const currentGeneration = ++generation.current; if (append) setLoadingMore(true); else setLoading(true); setError(undefined);
     try { const page = await fetchPage(requestedView, append ? cursorRef.current ?? undefined : undefined, requestedView === "projects" ? null : projectScope); if (generation.current !== currentGeneration || viewRef.current !== requestedView) return; setItems((prior) => (append ? [...prior, ...page.items] : page.items).slice(0, MAX_RENDERED_ITEMS)); if (requestedView === "overview") setSummaryItems(page.items); cursorRef.current = page.nextCursor; setCursor(page.nextCursor); }
@@ -601,7 +557,6 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
     url.searchParams.delete("project"); url.hash = ""; url.pathname = routePath(route.view, route.itemId, route.runId); window.history.replaceState(null, "", url);
     window.addEventListener("popstate", syncRoute); return () => window.removeEventListener("popstate", syncRoute);
   }, [embedded]);
-  useEffect(() => { document.documentElement.dataset.theme = theme; try { window.localStorage.setItem("hive-theme", theme); } catch { /* storage unavailable */ } }, [theme]);
   useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 1_000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { setItems([]); cursorRef.current = null; setCursor(null); void load(false); }, [load]);
   useEffect(() => {
@@ -655,7 +610,7 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
   const landmarkContent = <><div className="workflow-title"><div><span className="page-eyebrow">Mission control / {title}</span><h1>{title}</h1><p>{SUBTITLES[view]}</p></div><button className="refresh-button" type="button" onClick={() => void load(false)} disabled={loading}><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M13.5 5.5A5.8 5.8 0 1 0 14 9" /><path d="M13.5 2v3.5H10" /></svg>Refresh</button></div><div className="workflow-state sr-status" role="status" aria-live="polite">{stateText}</div>
     {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <div className="workflow-empty"><HiveMark compact /><strong>No {title.toLowerCase()} available</strong><span>The dashboard is connected and waiting for projected workflow state.</span></div> : content}
     {cursor && !loading && !error && <button className="load-more" type="button" disabled={loadingMore || items.length >= MAX_RENDERED_ITEMS} onClick={() => void load(true)}>{loadingMore ? "Loading…" : items.length >= MAX_RENDERED_ITEMS ? "Display limit reached" : `Load more ${title}`}</button>}</>;
-  if (embedded) return <div className="workflow-dashboard workflow-dashboard-embedded"><section id="workflow-content" tabIndex={-1} aria-label="Workflow dashboard content">{landmarkContent}</section></div>;
+  if (embedded) return <div className={`workflow-dashboard workflow-dashboard-embedded renderer-${theme.renderer}`}><section id="workflow-content" tabIndex={-1} aria-label="Workflow dashboard content">{landmarkContent}</section></div>;
   const effectiveProjectScope = projectScope === undefined ? defaultProjectId : projectScope;
   const selectedProject = effectiveProjectScope ? projectOptions.find((project) => project.projectId === effectiveProjectScope) : undefined;
   const projectedProject = summaryItems.find((item) => item.dashboardView === "projects");
@@ -663,6 +618,6 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
   const changeProject = (value: string): void => {
     const next = value || null; setProjectScope(next); try { window.sessionStorage.setItem(PROJECT_SCOPE_STORAGE_KEY, next ?? "all"); } catch { /* storage unavailable */ }
   };
-  const navCount = (entry: View): number | undefined => entry === "overview" ? undefined : summaryItems.filter((item) => item.dashboardView === entry).length || undefined;
-  return <div className="workflow-dashboard dashboard-frame"><a className="skip-link" href="#workflow-content" onClick={(event) => { event.preventDefault(); document.getElementById("workflow-content")?.focus(); }}>Skip to content</a><aside className="dashboard-sidebar"><div className="sidebar-brand"><HiveMark /><div><strong>pi-hive</strong><span>Mission control</span></div></div><label className="project-scope"><i aria-hidden="true" /><span className="sr-only">Project scope</span><select aria-label="Project scope" value={effectiveProjectScope ?? ""} onChange={(event) => changeProject(event.target.value)}><option value="">All projects</option>{projectOptions.map((project) => <option key={project.projectId} value={project.projectId}>{project.projectLabel}</option>)}</select></label><nav aria-label="Workflow dashboard views">{NAV_GROUPS.map((group) => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.views.map((entry) => <button type="button" aria-label={TITLES[entry]} aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => navigate(entry)}><NavIcon view={entry} /><span>{TITLES[entry]}</span>{navCount(entry) !== undefined && <small aria-hidden="true">{navCount(entry)}</small>}</button>)}</div>)}</nav><div className="sidebar-footer"><div className="connection-card"><span><i className={streamState} aria-hidden="true" />{streamState === "live" ? "Connected" : streamState === "connecting" ? "Connecting" : "Resyncing"}</span><code>localhost:43191</code></div><div className="theme-switch" aria-label="Dashboard theme"><button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button><button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button></div></div></aside><div className="dashboard-main"><header className="dashboard-topbar"><div><span className={`topbar-live ${streamState}`}><i />{streamState}</span><span className="topbar-divider" /><span className="topbar-project">{projectLabel}</span></div><time dateTime={now.toISOString()}>{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></header><main id="workflow-content" tabIndex={-1}>{landmarkContent}</main></div></div>;
+  const navCounts = Object.fromEntries(NAV_GROUPS.flatMap((group) => group.views).filter((entry) => entry !== "overview").map((entry) => [entry, summaryItems.filter((item) => item.dashboardView === entry).length || undefined])) as Readonly<Partial<Record<View, number>>>;
+  return <DashboardShell renderer={theme.renderer} view={view} projectLabel={projectLabel} projectScope={effectiveProjectScope ?? ""} projectOptions={projectOptions} streamState={streamState} themeId={themeId} now={now} navCounts={navCounts} onNavigate={navigate} onProjectChange={changeProject} onThemeChange={setThemeId}>{landmarkContent}</DashboardShell>;
 }

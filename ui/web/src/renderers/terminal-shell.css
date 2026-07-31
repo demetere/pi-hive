@@ -1,0 +1,125 @@
+.terminal-frame {
+  min-height: 100vh;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 58px auto 30px minmax(0, 1fr);
+  overflow: hidden;
+  background-color: var(--bg);
+  background-image: radial-gradient(circle at 70% -20%, rgba(114, 255, 157, .08), transparent 38%);
+  font-family: var(--mono);
+}
+
+.terminal-header {
+  display: grid;
+  grid-template-columns: minmax(210px, auto) minmax(220px, 420px) 1fr;
+  align-items: center;
+  gap: 18px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line2);
+  background: var(--surface2);
+}
+
+.terminal-brand { display: flex; align-items: center; gap: 10px; }
+.terminal-brand .hive-mark { border-radius: 0; color: var(--brand); background: transparent; box-shadow: inset 0 0 0 1px var(--line2); }
+.terminal-brand span { display: grid; gap: 2px; }
+.terminal-brand strong { color: var(--brand); font: 500 13px/1 var(--mono); letter-spacing: .14em; }
+.terminal-brand small { color: var(--ink-dimmer); font: 500 8px/1 var(--mono); letter-spacing: .18em; }
+
+.terminal-header .project-scope { width: 100%; margin: 0; min-height: 34px; border-radius: 0; background: var(--well); }
+.terminal-header .project-scope > select { font: 500 11px var(--mono); letter-spacing: .04em; }
+
+.terminal-status { display: flex; justify-content: flex-end; align-items: center; gap: 14px; min-width: 0; }
+.terminal-status .connection-card { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.terminal-status .connection-card span { color: var(--run); font: 500 9px var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+.terminal-status time { color: var(--ink); font: 500 12px var(--mono); }
+.terminal-status .theme-selector { min-width: 175px; }
+
+.terminal-nav {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  border-bottom: 1px solid var(--line2);
+  background: var(--surface);
+  overflow-x: auto;
+}
+.terminal-nav-group { min-width: 150px; padding: 8px 10px 9px; border-right: 1px solid var(--line); }
+.terminal-nav-group > span { display: block; margin: 0 4px 6px; color: var(--ink-dimmer); font: 500 8px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.terminal-nav-group > div { display: flex; flex-wrap: wrap; gap: 3px; }
+.terminal-nav button {
+  min-height: 28px;
+  display: inline-grid;
+  grid-template-columns: 14px auto auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.terminal-nav button svg { width: 13px; height: 13px; }
+.terminal-nav button b { font: 500 9px var(--mono); text-transform: uppercase; }
+.terminal-nav button small { color: var(--ink-dimmer); font: 8px var(--mono); }
+.terminal-nav button:hover { color: var(--ink); border-color: var(--line); background: var(--raise); }
+.terminal-nav button[aria-current="page"] { color: var(--brand); border-color: var(--brand); background: var(--brand-bg); }
+
+.terminal-commandbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-dimmer);
+  background: var(--well);
+  font: 500 8px var(--mono);
+  letter-spacing: .1em;
+}
+.terminal-commandbar strong { color: var(--ink); font-weight: 500; }
+.terminal-commandbar i { color: var(--line2); font-style: normal; }
+.terminal-commandbar em { margin-left: auto; color: var(--brand); font-style: normal; }
+
+.terminal-frame > main { min-width: 0; min-height: 0; overflow: auto; padding: 22px 24px 48px; }
+.renderer-terminal .workflow-title { padding-bottom: 13px; border-bottom: 1px solid var(--line2); }
+.renderer-terminal .workflow-title h1 { padding-left: 10px; border-left: 3px solid var(--brand); color: var(--brand); font-family: var(--mono); font-size: 20px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; }
+.renderer-terminal .workflow-title p { font-family: var(--mono); font-size: 10px; }
+.renderer-terminal .page-eyebrow,
+.renderer-terminal .widget-eyebrow,
+.renderer-terminal .record-kind { font-family: var(--mono); letter-spacing: .14em; }
+.renderer-terminal .refresh-button { border-radius: 0 !important; border-color: var(--line2) !important; font-family: var(--mono) !important; text-transform: uppercase; }
+.renderer-terminal .kpi,
+.renderer-terminal .widget,
+.renderer-terminal .workflow-card,
+.renderer-terminal .workflow-empty,
+.renderer-terminal .workflow-error,
+.renderer-terminal .load-more { border-radius: 0; box-shadow: none; }
+.renderer-terminal .dashboard-kpis { gap: 1px; padding: 1px; background: var(--line); }
+.renderer-terminal .dashboard-kpis .kpi { border: 0; background: var(--surface); }
+.renderer-terminal .dashboard-kpis .kpi-value { font-family: var(--mono); font-weight: 500; }
+.renderer-terminal .dashboard-widgets { gap: 10px; }
+.renderer-terminal .widget { background: var(--surface); }
+.renderer-terminal .workflow-grid { gap: 8px; }
+.renderer-terminal .workflow-card { border-color: var(--line2); background: var(--surface); }
+.renderer-terminal .status-tag,
+.renderer-terminal button,
+.renderer-terminal input,
+.renderer-terminal select,
+.renderer-terminal textarea { border-radius: 0; }
+.renderer-terminal .topology-canvas { background-size: 24px 24px; }
+
+.renderer-terminal .theme-selector select { border-radius: 0; border-color: var(--line2); font: 500 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+
+@media (max-width: 900px) {
+  .terminal-frame { height: auto; min-height: 100vh; grid-template-rows: auto auto auto minmax(0, 1fr); overflow: visible; }
+  .terminal-header { grid-template-columns: 1fr auto; }
+  .terminal-header .project-scope { grid-column: 1 / -1; grid-row: 2; }
+  .terminal-status .connection-card { display: none; }
+  .terminal-nav { grid-template-columns: repeat(5, minmax(180px, 1fr)); }
+  .terminal-frame > main { overflow: visible; padding: 18px 14px 40px; }
+}
+
+@media (max-width: 600px) {
+  .terminal-header { gap: 8px; padding: 8px; }
+  .terminal-status time { display: none; }
+  .terminal-status .theme-selector { min-width: 145px; }
+  .terminal-commandbar em { display: none; }
+}

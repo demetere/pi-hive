@@ -25,7 +25,7 @@ const NODE_H = 92;
 const NODE_W_MIN = 188;
 const NODE_W_MAX = 340;
 const THINK_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-const COLORS = ["var(--brand)", "var(--run)", "var(--done)", "var(--warn)", "#a78bfa", "#f472b6"] as const;
+const COLORS = ["var(--brand)", "var(--run)", "var(--done)", "var(--warn)", "var(--agent-5)", "var(--agent-6)"] as const;
 
 function text(record: TopologyRecord, key: string): string | undefined {
   const value = record[key];

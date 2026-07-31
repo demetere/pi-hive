@@ -1,0 +1,30 @@
+/* Soft Signal palette family. Both variants use the shared soft-signal renderer. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #12141A; --surface: #1C1F28; --surface2: #17191F; --raise: #242833; --well: #0F1116;
+  --line: rgba(255,255,255,.07); --line2: rgba(255,255,255,.11);
+  --ink: #EAECEF; --ink-dim: #AEB4BE; --ink-dimmer: #8A919D;
+  --brand: #F4B155; --brand-bg: rgba(244,177,85,.14); --brand-contrast: #21170A;
+  --run: #4FCFE6; --done: #5FD09A; --wait: #A3ACBE; --warn: #ECD15A; --crit: #F47F78;
+  --agent-5: #A78BFA; --agent-6: #F472B6;
+  --shadow: 0 16px 40px -20px rgba(0,0,0,.8), 0 2px 8px -4px rgba(0,0,0,.5);
+  --run-soft: rgba(79,207,230,.15); --done-soft: rgba(95,208,154,.15);
+  --warn-soft: rgba(236,209,90,.15); --crit-soft: rgba(244,112,104,.15);
+  --panel-grad: linear-gradient(180deg, var(--surface), var(--surface2));
+  --graph-bg: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--run) 5%, var(--well)), var(--well));
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #EDEBE4; --surface: #FFFFFF; --surface2: #FAF8F3; --raise: #F1EEE6; --well: #F1EFE8;
+  --line: rgba(28,26,20,.09); --line2: rgba(28,26,20,.14);
+  --ink: #20242B; --ink-dim: #626873; --ink-dimmer: #6B7079;
+  --brand: #995D00; --brand-bg: rgba(153,93,0,.13); --brand-contrast: #FFFFFF;
+  --run: #087B93; --done: #247F58; --wait: #596477; --warn: #75610F; --crit: #B63F3A;
+  --agent-5: #6D4FC2; --agent-6: #A73772;
+  --shadow: 0 16px 34px -20px rgba(40,38,48,.28), 0 2px 6px -3px rgba(40,38,48,.14);
+  --run-soft: rgba(21,150,176,.14); --done-soft: rgba(46,155,108,.14);
+  --warn-soft: rgba(151,126,21,.14); --crit-soft: rgba(207,90,82,.14);
+  --panel-grad: linear-gradient(180deg, var(--surface), var(--surface2));
+  --graph-bg: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--run) 5%, var(--well)), var(--well));
+}

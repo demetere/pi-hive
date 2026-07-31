@@ -1,0 +1,16 @@
+/* Terminal Operations is intentionally not a Soft Signal recolor: square geometry,
+   phosphor accents, flat surfaces, dense rhythm, and a top-navigation renderer. */
+:root[data-theme="terminal"] {
+  color-scheme: dark;
+  --bg: #050807; --surface: #0A0F0D; --surface2: #070B09; --raise: #111A15; --well: #030604;
+  --line: rgba(139, 255, 183, .14); --line2: rgba(139, 255, 183, .27);
+  --ink: #D8FFE5; --ink-dim: #8FBA9D; --ink-dimmer: #71977D;
+  --brand: #72FF9D; --brand-bg: rgba(114,255,157,.10); --brand-contrast: #021006;
+  --run: #38E8FF; --done: #72FF9D; --wait: #789181; --warn: #FFD166; --crit: #FF5E7D;
+  --agent-5: #B68CFF; --agent-6: #FF75C3;
+  --shadow: none;
+  --run-soft: rgba(56,232,255,.11); --done-soft: rgba(114,255,157,.11);
+  --warn-soft: rgba(255,209,102,.11); --crit-soft: rgba(255,94,125,.11);
+  --panel-grad: var(--surface);
+  --graph-bg: linear-gradient(rgba(114,255,157,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(114,255,157,.035) 1px, transparent 1px), var(--well);
+}
