@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveProjectIdentity } from "../../src/shared/project-identity";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -22,8 +23,8 @@ async function ready(origin: string): Promise<Record<string, unknown>> {
 test("managed workflow daemon serializes startup, replaces incompatible identity, protects browser traffic, and preserves archives", async () => {
   const port = await freePort();
   const root = mkdtempSync(join(tmpdir(), "pi-hive-daemon-e2e-"));
-  const agentDir = join(root, "agent"); const hiveDir = join(agentDir, "hive"); const projectRoot = join(root, "project");
-  mkdirSync(hiveDir, { recursive: true, mode: 0o700 }); mkdirSync(projectRoot, { recursive: true });
+  const agentDir = join(root, "agent"); const hiveDir = join(agentDir, "hive"); const projectRoot = join(root, "project"); const secondProjectRoot = join(root, "project-two");
+  mkdirSync(hiveDir, { recursive: true, mode: 0o700 }); mkdirSync(projectRoot, { recursive: true }); mkdirSync(secondProjectRoot, { recursive: true });
   const legacyDb = join(hiveDir, "telemetry.db"); const legacyRegistry = join(hiveDir, "telemetry-sessions.jsonl");
   const dbSentinel = Buffer.from([0, 255, 17, 99, 3, 4]); const registrySentinel = Buffer.from("legacy-archive-sentinel\n");
   writeFileSync(legacyDb, dbSentinel); writeFileSync(legacyRegistry, registrySentinel);
@@ -44,16 +45,27 @@ test("managed workflow daemon serializes startup, replaces incompatible identity
   process.env.HIVE_TELEMETRY_NO_OPEN = "1";
   const service = await import(`../../src/integration/workflow-dashboard-service.ts?daemon=${Date.now()}`);
   const ctx = { cwd: projectRoot, isProjectTrusted: () => true } as never;
+  const secondCtx = { cwd: secondProjectRoot, isProjectTrusted: () => true } as never;
+  const projectUrl = `${origin}/?project=${resolveProjectIdentity(projectRoot).projectId}`;
+  const secondProjectUrl = `${origin}/?project=${resolveProjectIdentity(secondProjectRoot).projectId}`;
   try {
     const starts = await Promise.all([service.startWorkflowDashboard(ctx, false), service.startWorkflowDashboard(ctx, false)]);
-    expect(starts).toEqual([origin, origin]);
+    expect(starts).toEqual([projectUrl, projectUrl]);
     await incompatible.exited;
     const health = await ready(origin);
     expect(health.protocolVersion).not.toBe(999);
     expect(health.startupNonce).not.toBe("incompatible");
+    expect(await service.restartWorkflowDashboard(ctx, false)).toBe(projectUrl);
+    const restartedHealth = await ready(origin);
+    expect(restartedHealth.startupNonce).not.toBe(health.startupNonce);
+    expect(await service.startWorkflowDashboard(secondCtx, false)).toBe(secondProjectUrl);
     const tokenPath = join(hiveDir, "daemon-token");
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
     const token = readFileSync(tokenPath, "utf8").trim();
+    const registryResponse = await fetch(`${origin}/api/v1/project-registry`, { headers: { authorization: `Bearer ${token}`, "x-pi-hive-api-version": "1" } });
+    expect(registryResponse.status).toBe(200);
+    const registered = await registryResponse.json() as { items: Array<{ projectId: string }> };
+    expect(registered.items.map((item) => item.projectId).sort()).toEqual([resolveProjectIdentity(projectRoot).projectId, resolveProjectIdentity(secondProjectRoot).projectId].sort());
 
     const hostile = await fetch(`${origin}/health`, { headers: { host: `127.0.0.1.${port}.attacker.example` } });
     expect(hostile.status).toBe(403);

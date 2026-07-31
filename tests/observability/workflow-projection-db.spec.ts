@@ -163,14 +163,21 @@ test("configured workflow projection runtime incrementally syncs PROJECT_CWD wit
   const unconfiguredDb = join(root, "global", "absent.db");
   expect(runtimeModule.syncConfiguredWorkflowProjection({ databasePath: unconfiguredDb, projectRoots: [join(root, "unconfigured")] })).toEqual({ active: false, events: 0, streams: 0 });
   expect(existsSync(unconfiguredDb)).toBe(false);
-  mkdirSync(join(root, ".pi", "hive"), { recursive: true });
-  writeFileSync(join(root, ".pi", "hive", "hive-config.yaml"), "schema-version: 1\nagents: {}\nworkflows: {}\n");
+  const secondRoot = join(root, "second-project");
+  for (const project of [root, secondRoot]) {
+    mkdirSync(join(project, ".pi", "hive"), { recursive: true });
+    writeFileSync(join(project, ".pi", "hive", "hive-config.yaml"), "schema-version: 1\nagents: {}\nworkflows: {}\n");
+  }
   appendWorkflowEvent(root, createWorkflowEvent({ eventId: "runtime-1", projectId: "project-runtime", sessionId: "session-runtime", runId: "run-runtime", type: "run.started", producer: "runtime", payload: { formatVersion: 1, status: "running" } }));
-  expect(runtimeModule.syncConfiguredWorkflowProjection({ databasePath: dbPath, projectRoots: [root] }).events).toBe(1);
+  appendWorkflowEvent(secondRoot, createWorkflowEvent({ eventId: "runtime-second-1", projectId: "project-runtime-second", sessionId: "session-runtime-second", runId: "run-runtime-second", type: "run.started", producer: "runtime", payload: { formatVersion: 1, status: "running" } }));
+  expect(runtimeModule.syncConfiguredWorkflowProjection({ databasePath: dbPath, projectRoots: [root, secondRoot] })).toMatchObject({ events: 2, streams: 2 });
   appendWorkflowEvent(root, createWorkflowEvent({ eventId: "runtime-2", projectId: "project-runtime", sessionId: "session-runtime", runId: "run-runtime", type: "terminal.recorded", producer: "harness", payload: { formatVersion: 1, status: "completed" } }));
-  expect(runtimeModule.syncConfiguredWorkflowProjection({ databasePath: dbPath, projectRoots: [root] }).events).toBe(1);
+  expect(runtimeModule.syncConfiguredWorkflowProjection({ databasePath: dbPath, projectRoots: [root, secondRoot] })).toMatchObject({ events: 1, streams: 2 });
   const projection = module.openWorkflowProjectionDatabase({ path: dbPath });
-  try { expect(projection.current().runs[0].status).toBe("completed"); } finally { projection.close(); }
+  try {
+    expect(projection.current().runs.find((run) => run.projectId === "project-runtime")?.status).toBe("completed");
+    expect(projection.current().runs.find((run) => run.projectId === "project-runtime-second")?.status).toBe("running");
+  } finally { projection.close(); }
 });
 
 test("configured sync retains healthy rows and a stable zero-event blocked stream without rebuilding", () => {

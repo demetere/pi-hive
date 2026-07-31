@@ -35,14 +35,15 @@ function responseFor(resource: string): Json {
   return page(resource, values[resource] ?? []);
 }
 
-function installFetch(options: { apiVersion?: number | undefined; streamFrames?: string[]; questionDefinition?: Json; postFailure?: { status: number; message: string } } = {}) {
+function installFetch(options: { apiVersion?: number | undefined; projectId?: string; projectRegistry?: Json[]; streamFrames?: string[]; questionDefinition?: Json; postFailure?: { status: number; message: string } } = {}) {
   const frames = options.streamFrames ?? ["event: hello\ndata: {\"apiVersion\":1}\n\n"];
   let streamIndex = 0;
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input); calls.push({ url, init });
-    if (url === "/bootstrap.json") return new Response(JSON.stringify({ token: "token", csrfToken: "csrf" }), { status: 200 });
+    if (url === "/bootstrap.json") return new Response(JSON.stringify({ token: "token", csrfToken: "csrf", projectId: options.projectId ?? "project-1" }), { status: 200 });
     if (url.includes("/api/v1/stream")) return new Response(frames[Math.min(streamIndex++, frames.length - 1)], { status: 200, headers: { "content-type": "text/event-stream" } });
+    if (url === "/api/v1/project-registry") return new Response(JSON.stringify({ apiVersion: 1, items: options.projectRegistry ?? [{ projectId: "project-1", projectLabel: "Project One", registeredAt: "2026-01-01T00:00:00Z", syncStatus: "live" }] }), { status: 200 });
     if (init?.method === "POST") return options.postFailure
       ? new Response(JSON.stringify({ apiVersion: 1, error: { code: "CAS_CONFLICT", message: options.postFailure.message } }), { status: options.postFailure.status })
       : new Response(JSON.stringify({ apiVersion: 1, result: { ok: true } }), { status: 200 });
@@ -77,8 +78,27 @@ describe("workflow dashboard API v1 client", () => {
     expect(await screen.findByText("provider confirmed input tokens")).toBeInTheDocument();
     expect(calls.some((call) => call.url.includes("/api/v1/nodes?"))).toBe(true);
     expect(calls.some((call) => call.url.includes("/api/v1/artifacts?"))).toBe(true);
-    expect(calls.some((call) => call.url === "/api/v1/usage")).toBe(true);
+    expect(calls.some((call) => call.url === "/api/v1/usage?projectId=project-1")).toBe(true);
+    expect(calls.some((call) => call.url === "/api/v1/project-registry")).toBe(true);
     expect(calls.some((call) => call.url.includes("/api/v1/tree"))).toBe(false);
+  });
+
+  it("scopes dashboard resources to the selected project and supports all-project aggregation", async () => {
+    const calls = installFetch({ projectId: "project-1", projectRegistry: [
+      { projectId: "project-1", projectLabel: "Project One", registeredAt: "2026-01-01T00:00:00Z", syncStatus: "live" },
+      { projectId: "project-2", projectLabel: "Project Two", registeredAt: "2026-01-01T00:00:01Z", syncStatus: "live" },
+    ] });
+    const user = userEvent.setup(); render(<WorkflowDashboard />);
+    const selector = await screen.findByRole("combobox", { name: "Project scope" });
+    await waitFor(() => expect(selector).toHaveValue("project-1"));
+    const scopedCalls = calls.filter((call) => call.url.startsWith("/api/v1/") && !call.url.startsWith("/api/v1/projects?") && call.url !== "/api/v1/project-registry" && call.url !== "/api/v1/stream");
+    expect(scopedCalls.length).toBeGreaterThan(0);
+    for (const call of scopedCalls) expect(new URL(call.url, "http://local").searchParams.get("projectId")).toBe("project-1");
+
+    calls.length = 0; await user.selectOptions(selector, "project-2");
+    await waitFor(() => expect(calls.some((call) => call.url.includes("/api/v1/workflows?") && new URL(call.url, "http://local").searchParams.get("projectId") === "project-2")).toBe(true));
+    calls.length = 0; await user.selectOptions(selector, "");
+    await waitFor(() => expect(calls.some((call) => call.url.includes("/api/v1/workflows?") && !new URL(call.url, "http://local").searchParams.has("projectId"))).toBe(true));
   });
 
   it("fails closed when a JSON response omits or changes apiVersion", async () => {

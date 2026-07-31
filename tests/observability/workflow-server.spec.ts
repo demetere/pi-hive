@@ -24,6 +24,7 @@ function fixture(limits: { maxRequestsPerWindow?: number; rateWindowMs?: number;
     token,
     projection: {
       currentPage(query) { calls.push({ name: "current", value: query }); return { items: [row], hasMore: false }; },
+      registeredProjects() { return [{ projectId: "project-1", projectLabel: "Project One", registeredAt: "2026-01-01T00:00:00.000Z", syncStatus: "live" }]; },
       history(query) { calls.push({ name: "history", value: query }); return { items: [], hasMore: false }; },
       usage(query) { calls.push({ name: "usage", value: query }); return { estimated: { inputTokens: 1, outputTokens: 2, costMicroUsd: 3 }, providerConfirmed: { inputTokens: 4, outputTokens: 5, costMicroUsd: 6 } }; },
       status() { return { streams: [], diagnostics: [] }; },
@@ -75,6 +76,15 @@ describe("workflow dashboard API v1", () => {
     expect(response?.status).toBe(200);
     expect(await response!.json()).toEqual({ apiVersion: 1, resource: "runs", items: [row], hasMore: false });
     expect(calls[0].value).toMatchObject({ kind: "runs", limit: 500, projectId: "project-1", sessionId: "session-1", runId: "run-1", status: "running" });
+  });
+
+  test("serves the authenticated live project registry without filesystem roots", async () => {
+    const { api } = fixture();
+    expect((await handle(api, "/api/v1/project-registry", {}, false))?.status).toBe(401);
+    const response = await handle(api, "/api/v1/project-registry");
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toEqual({ apiVersion: 1, items: [{ projectId: "project-1", projectLabel: "Project One", registeredAt: "2026-01-01T00:00:00.000Z", syncStatus: "live" }] });
+    expect((await handle(api, "/api/v1/project-registry?projectRoot=/secret"))?.status).toBe(400);
   });
 
   test("serves an authenticated bounded workflow stream for cursor catch-up", async () => {

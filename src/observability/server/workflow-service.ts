@@ -15,6 +15,7 @@ import { QuestionService } from "../../workflows/questions";
 import { WORKFLOW_EVENT_LIMITS, verifyWorkflowEvent, type WorkflowEventEnvelope } from "../../workflows/events";
 import { listSessionLinks, type WorkflowSessionLink } from "../../workflows/sessions";
 import { withCrossProcessFileLock } from "../../core/file-lock";
+import { listRegisteredWorkflowProjects } from "../../shared/workflow-project-registry";
 import { DAEMON_TOKEN, DB_PATH, PROJECT_CWD, REGISTRY_PATH, WORKFLOW_DB_PATH } from "./config";
 import { openWorkflowProjectionDatabase, type WorkflowProjectionDatabase } from "./workflow-db";
 import { closeWorkflowSubscribers, encoder, enqueueBounded, eventFrame, invalidateWorkflowSubscribers, registerSubscriber, removeSubscriber, SSE_BUFFER_BYTES, type WorkflowStreamLimits } from "./sse";
@@ -90,6 +91,7 @@ class ProductionWorkflowProjection implements WorkflowProjectionApi {
   }
   currentPage(query: WorkflowCurrentPageQuery) { return this.db().currentPage(query); }
   resourcePage(resource: "projects" | "workflows", query: Omit<WorkflowCurrentPageQuery, "kind">) { return this.db().aggregateCurrentPage(resource, query); }
+  registeredProjects() { return listRegisteredWorkflowProjects().map(({ projectId, projectLabel, registeredAt }) => Object.freeze({ projectId, projectLabel, registeredAt, syncStatus: "live" as const })); }
   history(query: WorkflowHistoryQuery) { return this.db().history(query); }
   usage(query: WorkflowUsageQuery) { return this.db().usage(query); }
   status() {

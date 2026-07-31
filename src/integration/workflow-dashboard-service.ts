@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withCrossProcessFileLockAsync } from "../core/file-lock";
 import { DAEMON_PROTOCOL_VERSION, dashboardBuildHash, packageVersion } from "../shared/daemon-protocol";
+import { registerWorkflowProject } from "../shared/workflow-project-registry";
 
 const PORT = (() => {
   const value = Number(process.env.HIVE_TELEMETRY_PORT || "43191");
@@ -58,30 +59,50 @@ async function stopUnlocked(): Promise<boolean> {
 
 export async function workflowDashboardAvailable(): Promise<boolean> { return Boolean(await probe()); }
 
-export async function startWorkflowDashboard(ctx: ExtensionCommandContext, open = true): Promise<string> {
+async function startUnlocked(ctx: ExtensionCommandContext, open: boolean): Promise<string> {
+  const project = registerWorkflowProject(ctx.cwd);
+  const projectUrl = `${url()}/?project=${encodeURIComponent(project.projectId)}`;
+  const openProject = (): void => {
+    if (open && process.platform === "darwin" && process.env.HIVE_TELEMETRY_NO_OPEN !== "1") spawn("open", [projectUrl], { detached: true, stdio: "ignore" }).unref();
+  };
+  const current = await probe();
+  if (current && compatible(current) && token()) { openProject(); return projectUrl; }
+  if (current) await stopUnlocked();
+  const server = join(EXTENSION_ROOT, "src", "observability", "server", "index.ts");
+  if (!existsSync(server)) throw new Error("Workflow dashboard server is missing from the package");
+  const credential = (randomUUID() + randomUUID()).replaceAll("-", ""); const startupNonce = randomUUID(); const identity = expected();
+  const child = spawn("bun", [server], { cwd: ctx.cwd, detached: true, stdio: "ignore", env: { ...process.env, HIVE_TELEMETRY_HOST: HOST, HIVE_TELEMETRY_PORT: String(PORT), HIVE_TELEMETRY_TOKEN: credential, HIVE_DAEMON_PROTOCOL_VERSION: String(identity.protocolVersion), HIVE_DAEMON_PACKAGE_VERSION: identity.packageVersion, HIVE_DAEMON_BUILD_HASH: identity.buildHash, HIVE_DAEMON_STARTUP_NONCE: startupNonce, HIVE_PROJECT_CWD: ctx.cwd } });
+  child.unref();
+  const deadline = Date.now() + READY_MS; let ready: Health | undefined;
+  while (Date.now() < deadline) { ready = await probe(); if (ready?.startupNonce === startupNonce && compatible(ready)) break; await new Promise((resolve) => setTimeout(resolve, 75)); }
+  if (!ready || ready.startupNonce !== startupNonce || !compatible(ready)) throw new Error("Workflow dashboard failed identity-checked readiness");
+  privateWrite(TOKEN_PATH, `${credential}\n`); privateWrite(METADATA_PATH, `${JSON.stringify({ ...ready, url: url(), projectRoot: project.projectRoot, projectId: project.projectId })}\n`);
+  openProject();
+  return projectUrl;
+}
+
+function requireTrustedDashboardContext(ctx: ExtensionCommandContext): void {
   if (!ctx.isProjectTrusted()) throw new Error("Dashboard startup requires a trusted project");
+}
+
+export async function startWorkflowDashboard(ctx: ExtensionCommandContext, open = true): Promise<string> {
+  requireTrustedDashboardContext(ctx);
   mkdirSync(GLOBAL_DIR, { recursive: true, mode: 0o700 });
-  return withCrossProcessFileLockAsync(LOCK_PATH, async () => {
-    const current = await probe();
-    if (current && compatible(current) && token()) return url();
-    if (current) await stopUnlocked();
-    const server = join(EXTENSION_ROOT, "src", "observability", "server", "index.ts");
-    if (!existsSync(server)) throw new Error("Workflow dashboard server is missing from the package");
-    const credential = (randomUUID() + randomUUID()).replaceAll("-", ""); const startupNonce = randomUUID(); const identity = expected();
-    const child = spawn("bun", [server], { cwd: ctx.cwd, detached: true, stdio: "ignore", env: { ...process.env, HIVE_TELEMETRY_HOST: HOST, HIVE_TELEMETRY_PORT: String(PORT), HIVE_TELEMETRY_TOKEN: credential, HIVE_DAEMON_PROTOCOL_VERSION: String(identity.protocolVersion), HIVE_DAEMON_PACKAGE_VERSION: identity.packageVersion, HIVE_DAEMON_BUILD_HASH: identity.buildHash, HIVE_DAEMON_STARTUP_NONCE: startupNonce, HIVE_PROJECT_CWD: ctx.cwd } });
-    child.unref();
-    const deadline = Date.now() + READY_MS; let ready: Health | undefined;
-    while (Date.now() < deadline) { ready = await probe(); if (ready?.startupNonce === startupNonce && compatible(ready)) break; await new Promise((resolve) => setTimeout(resolve, 75)); }
-    if (!ready || ready.startupNonce !== startupNonce || !compatible(ready)) throw new Error("Workflow dashboard failed identity-checked readiness");
-    privateWrite(TOKEN_PATH, `${credential}\n`); privateWrite(METADATA_PATH, `${JSON.stringify({ ...ready, url: url(), projectRoot: ctx.cwd })}\n`);
-    if (open && process.platform === "darwin" && process.env.HIVE_TELEMETRY_NO_OPEN !== "1") spawn("open", [url()], { detached: true, stdio: "ignore" }).unref();
-    return url();
-  }, { timeoutMs: 15_000, staleMs: 30_000 });
+  return withCrossProcessFileLockAsync(LOCK_PATH, () => startUnlocked(ctx, open), { timeoutMs: 15_000, staleMs: 30_000 });
 }
 
 export async function stopWorkflowDashboard(): Promise<boolean> {
   mkdirSync(GLOBAL_DIR, { recursive: true, mode: 0o700 });
   return withCrossProcessFileLockAsync(LOCK_PATH, stopUnlocked, { timeoutMs: 15_000, staleMs: 30_000 });
+}
+
+export async function restartWorkflowDashboard(ctx: ExtensionCommandContext, open = true): Promise<string> {
+  requireTrustedDashboardContext(ctx);
+  mkdirSync(GLOBAL_DIR, { recursive: true, mode: 0o700 });
+  return withCrossProcessFileLockAsync(LOCK_PATH, async () => {
+    await stopUnlocked();
+    return startUnlocked(ctx, open);
+  }, { timeoutMs: 15_000, staleMs: 30_000 });
 }
 
 export async function pruneWorkflowProjection(cutoff: string): Promise<unknown> {

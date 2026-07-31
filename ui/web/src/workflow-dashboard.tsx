@@ -14,7 +14,8 @@ type View = ApiResource | "overview" | "evidence" | "cost" | "model-mix" | "know
 type Theme = "dark" | "light";
 
 interface ResourcePage { readonly items: readonly JsonRecord[]; readonly nextCursor: string | null }
-interface Credentials { readonly token: string; readonly csrf: string }
+interface Credentials { readonly token: string; readonly csrf: string; readonly projectId?: string }
+interface ProjectOption { readonly projectId: string; readonly projectLabel: string; readonly syncStatus: "live" | "historical" }
 interface SseFrame { readonly event: string; readonly data: string; readonly id?: string }
 
 const NAV_GROUPS: readonly { readonly label: string; readonly views: readonly View[] }[] = [
@@ -32,13 +33,13 @@ const TITLES: Readonly<Record<View, string>> = {
 };
 
 const SUBTITLES: Readonly<Record<View, string>> = {
-  overview: "Live workflow health, topology, activity, and usage at a glance.", projects: "Configured project identities visible to the workflow projection.", workflows: "Selected workflow definitions and their current state.", sessions: "Linked Pi sessions carrying workflow execution state.", runs: "Durable workflow runs and their terminal or active status.", nodes: "The current hierarchical agent topology for projected runs.", tasks: "Delegated work owned by workflow nodes.", artifacts: "Bound artifact workspaces without exposing private content.", evidence: "Verified event references projected from authoritative journals.", checkpoints: "Artifact checkpoint requests and current decisions.", questions: "Durable human questions awaiting exact typed answers.", approvals: "Human approval controls with exact request provenance.", "knowledge-bundles": "Bounded knowledge updates available to workflows.", "knowledge-jobs": "Durable enrichment work and model attribution.", "knowledge-proposals": "Human-reviewed knowledge changes awaiting decisions.", knowledge: "Projected knowledge lifecycle state.", cost: "Provider-confirmed and explicitly separated estimated spend.", "model-mix": "Token usage grouped by model and precision.", usage: "Authoritative token and cost counters by precision.", activity: "The newest projected workflow events.", history: "Bounded durable workflow event history.",
+  overview: "Live workflow health, topology, activity, and usage at a glance.", projects: "Registered live projects and retained historical project projections.", workflows: "Selected workflow definitions and their current state.", sessions: "Linked Pi sessions carrying workflow execution state.", runs: "Durable workflow runs and their terminal or active status.", nodes: "The live hierarchical agent topology instantiated by projected runs.", tasks: "Delegated work owned by workflow nodes.", artifacts: "Bound artifact workspaces without exposing private content.", evidence: "Verified event references projected from authoritative journals.", checkpoints: "Artifact checkpoint requests and current decisions.", questions: "Durable human questions awaiting exact typed answers.", approvals: "Human approval controls with exact request provenance.", "knowledge-bundles": "Bounded knowledge updates available to workflows.", "knowledge-jobs": "Durable enrichment work and model attribution.", "knowledge-proposals": "Human-reviewed knowledge changes awaiting decisions.", knowledge: "Projected knowledge lifecycle state.", cost: "Provider-confirmed and explicitly separated estimated spend.", "model-mix": "Token usage grouped by model and precision.", usage: "Authoritative token and cost counters by precision.", activity: "The newest projected workflow events.", history: "Bounded durable workflow event history.",
 };
 
 const DISPLAY_FIELDS: Readonly<Record<View, readonly string[]>> = {
   overview: [],
-  projects: ["projectId", "projectLabel", "status", "eventType", "timestamp"],
-  workflows: ["workflowId", "status", "eventType", "timestamp"],
+  projects: ["projectId", "projectLabel", "syncStatus", "status", "eventType", "timestamp"],
+  workflows: ["projectId", "projectLabel", "workflowId", "status", "eventType", "timestamp"],
   sessions: ["projectId", "sessionId", "workflowId", "status", "eventType", "timestamp"],
   runs: ["projectId", "sessionId", "workflowId", "runId", "status", "eventType", "timestamp"],
   nodes: ["nodeId", "parentNodeId", "agentId", "agentName", "status", "eventType", "timestamp"],
@@ -74,7 +75,7 @@ async function bootstrap(): Promise<Credentials> {
     if (!response.ok) throw new Error(`Dashboard bootstrap failed (${response.status})`);
     const body = await response.json() as unknown;
     if (!isRecord(body) || typeof body.token !== "string" || !body.token || typeof body.csrfToken !== "string" || !body.csrfToken) throw new Error("Dashboard bootstrap credentials are missing");
-    return { token: body.token, csrf: body.csrfToken };
+    return { token: body.token, csrf: body.csrfToken, ...(typeof body.projectId === "string" && body.projectId ? { projectId: body.projectId } : {}) };
   }).catch((error: unknown) => { bootstrapPromise = undefined; throw error; });
   return bootstrapPromise;
 }
@@ -119,10 +120,19 @@ function usageRecord(usage: JsonRecord): JsonRecord {
     providerConfirmedInputTokens: confirmed.inputTokens, providerConfirmedOutputTokens: confirmed.outputTokens, providerConfirmedCostMicroUsd: confirmed.costMicroUsd,
   };
 }
-async function fetchPage(view: View, cursor?: string): Promise<ResourcePage> {
+async function registeredProjectRecords(): Promise<readonly JsonRecord[]> {
+  const path = "/api/v1/project-registry";
+  const response = await fetch(path, { headers: await requestHeaders(), credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) throw new Error(`Project registry request failed (${response.status})`);
+  const body = requireV1(await response.json(), path);
+  if (!Array.isArray(body.items)) throw new Error("Invalid API v1 project registry response");
+  return records(body.items).filter((item) => Boolean(stringField(item, "projectId")) && Boolean(stringField(item, "projectLabel")));
+}
+
+async function fetchPage(view: View, cursor?: string, projectScope?: string | null): Promise<ResourcePage> {
   if (view === "overview") {
     const overviewViews = ["projects", "workflows", "sessions", "runs", "nodes", "tasks", "questions", "approvals", "activity", "usage"] as const;
-    const pages = await Promise.all(overviewViews.map(async (sourceView) => ({ sourceView, page: await fetchPage(sourceView) })));
+    const pages = await Promise.all(overviewViews.map(async (sourceView) => ({ sourceView, page: await fetchPage(sourceView, undefined, projectScope) })));
     return {
       items: pages.flatMap(({ sourceView, page }) => page.items.map((item) => ({ ...item, dashboardView: sourceView }))).slice(0, MAX_RENDERED_ITEMS),
       nextCursor: null,
@@ -130,13 +140,19 @@ async function fetchPage(view: View, cursor?: string): Promise<ResourcePage> {
   }
   const resource = resourceFor(view);
   const query = new URLSearchParams();
+  const credentials = await bootstrap();
+  const selectedProject = projectScope === undefined ? credentials.projectId : projectScope;
+  if (selectedProject) query.set("projectId", selectedProject);
   if (resource !== "usage") {
-    query.set("limit", String(view === "model-mix" ? MAX_RENDERED_ITEMS : PAGE_SIZE));
-    if (cursor) query.set("cursor", cursor);
+    query.set("limit", String(resource === "projects" || view === "model-mix" ? MAX_RENDERED_ITEMS : PAGE_SIZE));
+    if (cursor && resource !== "projects") query.set("cursor", cursor);
     if (view === "model-mix") query.set("eventType", "budget.model.usage.recorded");
   }
   const path = `/api/v1/${resource}${query.size ? `?${query}` : ""}`;
-  const response = await fetch(path, { headers: await requestHeaders(), credentials: "same-origin", cache: "no-store" });
+  const [response, registered] = await Promise.all([
+    fetch(path, { headers: await requestHeaders(), credentials: "same-origin", cache: "no-store" }),
+    resource === "projects" ? registeredProjectRecords() : Promise.resolve([]),
+  ]);
   if (!response.ok) throw new Error(`${TITLES[view]} request failed (${response.status})`);
   const body = requireV1(await response.json(), path);
   if (resource === "usage") {
@@ -146,10 +162,29 @@ async function fetchPage(view: View, cursor?: string): Promise<ResourcePage> {
   if (!Array.isArray(body.items) || typeof body.hasMore !== "boolean") throw new Error(`Invalid API v1 ${resource} page`);
   if (!["activity", "history"].includes(resource) && body.resource !== resource) throw new Error(`API v1 resource mismatch for ${resource}`);
   const nextCursor = body.hasMore && typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
-  const items = records(body.items)
+  let items = records(body.items)
     .map((item) => resource === "activity" || resource === "history" ? historyRecord(item) : item)
     .filter((item) => belongsToView(view, item));
+  if (resource === "projects") {
+    const live = new Map<string, JsonRecord>(registered.map((item) => [stringField(item, "projectId")!, item]));
+    const projected = new Map<string, JsonRecord>();
+    for (const item of items) { const projectId = stringField(item, "projectId"); const registration = projectId ? live.get(projectId) : undefined; if (projectId) projected.set(projectId, { ...item, ...(registration && !stringField(item, "projectLabel") ? { projectLabel: registration.projectLabel } : {}), syncStatus: registration ? "live" : "historical" }); }
+    for (const [projectId, item] of live) if ((!selectedProject || selectedProject === projectId) && !projected.has(projectId)) projected.set(projectId, {
+      projectId, projectLabel: item.projectLabel, syncStatus: "live", status: "registered", eventType: "project.registered", timestamp: item.registeredAt,
+    });
+    items = [...projected.values()].sort((left, right) => String(left.projectLabel ?? left.projectId).localeCompare(String(right.projectLabel ?? right.projectId)));
+    return { items, nextCursor: null };
+  }
   return { items, nextCursor };
+}
+
+async function fetchProjectOptions(): Promise<readonly ProjectOption[]> {
+  const page = await fetchPage("projects", undefined, null);
+  return page.items.flatMap((item) => {
+    const projectId = stringField(item, "projectId"); const projectLabel = stringField(item, "projectLabel");
+    if (!projectId || !projectLabel) return [];
+    return [{ projectId, projectLabel, syncStatus: item.syncStatus === "live" ? "live" as const : "historical" as const }];
+  });
 }
 
 function operationId(): string { return globalThis.crypto?.randomUUID?.() ?? `dashboard-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
@@ -342,9 +377,9 @@ function Overview({ items, onNavigate }: { items: readonly JsonRecord[]; onNavig
       <Kpi label="Total cost" value={`$${confirmedCost.toFixed(4)}`} sub={latest ? `updated ${relativeTime(latest)}` : "no usage yet"} tone="brand" />
     </section>
     <section className="widgets dashboard-widgets">
-      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live structure</span><h2 className="w-title">Session topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span><button type="button" onClick={() => onNavigate("nodes")}>Open Topology</button></div></div><div className="topology-canvas">{nodes.length ? <Topology items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No topology yet</strong><span>Select a workflow and send a message to start a run.</span></div>}</div></section>
+      <section className="widget topology-widget"><div className="w-head"><div><span className="widget-eyebrow">Live run structure</span><h2 className="w-title">Run topology</h2></div><div className="w-tools"><span className="legend-pill running"><i />running</span><span className="legend-pill waiting"><i />waiting</span><button type="button" onClick={() => onNavigate("nodes")}>Open Topology</button></div></div><div className="topology-canvas">{nodes.length ? <Topology items={nodes} /> : <div className="overview-empty"><HiveMark compact /><strong>No active run topology</strong><span>Selecting a workflow does not create runtime nodes. Send a message to start a run.</span></div>}</div></section>
       <section className="widget activity-widget"><div className="w-head"><div><span className="widget-eyebrow">Streaming</span><h2 className="w-title">Activity</h2></div><div className="w-tools"><span className="live-indicator"><i />live</span><button type="button" onClick={() => onNavigate("activity")}>View all</button></div></div>{activity.length ? <ActivityFeed items={activity} compact /> : <div className="overview-empty small"><strong>Waiting for events</strong><span>Workflow activity will appear here in real time.</span></div>}</section>
-      <section className="widget workflow-widget"><div className="w-head"><div><span className="widget-eyebrow">Catalog</span><h2 className="w-title">Workflows</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("workflows")}>Explore</button></div></div><div className="overview-workflow-list">{workflows.slice(0, 6).map((item) => <button type="button" key={identity("workflows", item)} onClick={() => onNavigate("workflows")}><span><i className={`dot ${statusTone(stringField(item, "status"))}`} />{stringField(item, "workflowId") ?? "workflow"}</span><StatusBadge status={stringField(item, "status")} /></button>)}{!workflows.length && <div className="overview-empty small"><strong>No projected workflows</strong><span>Run /hive:select inside Pi.</span></div>}</div></section>
+      <section className="widget workflow-widget"><div className="w-head"><div><span className="widget-eyebrow">Catalog</span><h2 className="w-title">Workflows</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("workflows")}>Explore</button></div></div><div className="overview-workflow-list">{workflows.slice(0, 6).map((item) => <button type="button" key={`${stringField(item, "projectId") ?? "project"}:${identity("workflows", item)}`} onClick={() => onNavigate("workflows")}><span><i className={`dot ${statusTone(stringField(item, "status"))}`} />{stringField(item, "workflowId") ?? "workflow"}{stringField(item, "projectLabel") ? ` · ${stringField(item, "projectLabel")}` : ""}</span><StatusBadge status={stringField(item, "status")} /></button>)}{!workflows.length && <div className="overview-empty small"><strong>No projected workflows</strong><span>Run /hive:select inside Pi.</span></div>}</div></section>
       <section className="widget usage-widget"><div className="w-head"><div><span className="widget-eyebrow">Precision separated</span><h2 className="w-title">Cost &amp; tokens</h2></div><div className="w-tools"><button type="button" onClick={() => onNavigate("cost")}>Inspect usage</button></div></div><div className="usage-bars"><div><span>Provider confirmed</span><b>{confirmedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, confirmedTokens ? 100 : 0)}%` }} /></i></div><div><span>Estimated</span><b>{estimatedTokens.toLocaleString("en-US")}</b><i><em style={{ width: `${Math.min(100, estimatedTokens && !confirmedTokens ? 100 : confirmedTokens ? estimatedTokens / confirmedTokens * 100 : 0)}%` }} /></i></div></div></section>
     </section>
     {!projects.length && !workflows.length && <p className="overview-footnote">The dashboard is connected. Select a workflow in Pi to populate this project.</p>}
@@ -381,17 +416,23 @@ function initialTheme(): Theme {
   try { return window.localStorage.getItem("hive-theme") === "light" ? "light" : "dark"; }
   catch { return "dark"; }
 }
+function initialProjectScope(): string | null | undefined {
+  try { const value = new URLSearchParams(window.location.search).get("project"); return value === "all" ? null : value || undefined; }
+  catch { return undefined; }
+}
 
 export default function WorkflowDashboard({ embedded = false }: { embedded?: boolean }) {
   const [view, setView] = useState<View>("overview"); const viewRef = useRef<View>(view); viewRef.current = view;
+  const [projectScope, setProjectScope] = useState<string | null | undefined>(initialProjectScope); const [defaultProjectId, setDefaultProjectId] = useState<string>(); const [projectOptions, setProjectOptions] = useState<readonly ProjectOption[]>([]);
   const [items, setItems] = useState<readonly JsonRecord[]>([]); const [summaryItems, setSummaryItems] = useState<readonly JsonRecord[]>([]); const [cursor, setCursor] = useState<string | null>(null); const cursorRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false); const [error, setError] = useState<string>(); const [resync, setResync] = useState(false); const [streamState, setStreamState] = useState<"connecting" | "live" | "resyncing">("connecting"); const [theme, setTheme] = useState<Theme>(initialTheme); const [now, setNow] = useState(() => new Date()); const generation = useRef(0);
   const load = useCallback(async (append = false) => {
     const requestedView = view; const currentGeneration = ++generation.current; if (append) setLoadingMore(true); else setLoading(true); setError(undefined);
-    try { const page = await fetchPage(requestedView, append ? cursorRef.current ?? undefined : undefined); if (generation.current !== currentGeneration || viewRef.current !== requestedView) return; setItems((prior) => (append ? [...prior, ...page.items] : page.items).slice(0, MAX_RENDERED_ITEMS)); if (requestedView === "overview") setSummaryItems(page.items); cursorRef.current = page.nextCursor; setCursor(page.nextCursor); }
+    try { const page = await fetchPage(requestedView, append ? cursorRef.current ?? undefined : undefined, requestedView === "projects" ? null : projectScope); if (generation.current !== currentGeneration || viewRef.current !== requestedView) return; setItems((prior) => (append ? [...prior, ...page.items] : page.items).slice(0, MAX_RENDERED_ITEMS)); if (requestedView === "overview") setSummaryItems(page.items); cursorRef.current = page.nextCursor; setCursor(page.nextCursor); }
     catch (reason) { if (generation.current === currentGeneration) setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { if (generation.current === currentGeneration) { setLoading(false); setLoadingMore(false); } }
-  }, [view]);
+  }, [projectScope, view]);
+  useEffect(() => { let active = true; void Promise.all([bootstrap(), fetchProjectOptions()]).then(([credentials, options]) => { if (!active) return; setProjectOptions(options); setDefaultProjectId(credentials.projectId); }).catch(() => { /* the main resource load presents the bounded API error */ }); return () => { active = false; }; }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; try { window.localStorage.setItem("hive-theme", theme); } catch { /* storage unavailable */ } }, [theme]);
   useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 1_000); return () => window.clearInterval(timer); }, []);
   useEffect(() => { setItems([]); cursorRef.current = null; setCursor(null); void load(false); }, [load]);
@@ -439,7 +480,14 @@ export default function WorkflowDashboard({ embedded = false }: { embedded?: boo
     {error ? <section className="workflow-error" role="alert"><p>{error}</p><button type="button" onClick={() => void load(false)}>Retry {title}</button></section> : loading && !items.length ? <div className="workflow-skeleton" aria-hidden="true"><i /><i /><i /></div> : !items.length ? <div className="workflow-empty"><HiveMark compact /><strong>No {title.toLowerCase()} available</strong><span>The dashboard is connected and waiting for projected workflow state.</span></div> : content}
     {cursor && !loading && !error && <button className="load-more" type="button" disabled={loadingMore || items.length >= MAX_RENDERED_ITEMS} onClick={() => void load(true)}>{loadingMore ? "Loading…" : items.length >= MAX_RENDERED_ITEMS ? "Display limit reached" : `Load more ${title}`}</button>}</>;
   if (embedded) return <div className="workflow-dashboard workflow-dashboard-embedded"><section id="workflow-content" tabIndex={-1} aria-label="Workflow dashboard content">{landmarkContent}</section></div>;
-  const project = summaryItems.find((item) => item.dashboardView === "projects"); const projectLabel = stringField(project ?? {}, "projectLabel") ?? stringField(project ?? {}, "projectId") ?? "Local project";
+  const effectiveProjectScope = projectScope === undefined ? defaultProjectId : projectScope;
+  const selectedProject = effectiveProjectScope ? projectOptions.find((project) => project.projectId === effectiveProjectScope) : undefined;
+  const projectedProject = summaryItems.find((item) => item.dashboardView === "projects");
+  const projectLabel = effectiveProjectScope === null ? "All projects" : selectedProject?.projectLabel ?? stringField(projectedProject ?? {}, "projectLabel") ?? stringField(projectedProject ?? {}, "projectId") ?? "Local project";
+  const projectStatus = effectiveProjectScope === null ? `${projectOptions.length} known` : selectedProject?.syncStatus ?? "loading";
+  const changeProject = (value: string): void => {
+    const next = value || null; setProjectScope(next); const url = new URL(window.location.href); url.searchParams.set("project", next ?? "all"); window.history.replaceState(null, "", url);
+  };
   const navCount = (entry: View): number | undefined => entry === "overview" ? undefined : summaryItems.filter((item) => item.dashboardView === entry).length || undefined;
-  return <div className="workflow-dashboard dashboard-frame"><a className="skip-link" href="#workflow-content">Skip to content</a><aside className="dashboard-sidebar"><div className="sidebar-brand"><HiveMark /><div><strong>pi-hive</strong><span>Mission control</span></div></div><div className="project-scope"><i aria-hidden="true" /><span>{projectLabel}</span><small>API v1</small></div><nav aria-label="Workflow dashboard views">{NAV_GROUPS.map((group) => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.views.map((entry) => <button type="button" aria-label={TITLES[entry]} aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => setView(entry)}><NavIcon view={entry} /><span>{TITLES[entry]}</span>{navCount(entry) !== undefined && <small aria-hidden="true">{navCount(entry)}</small>}</button>)}</div>)}</nav><div className="sidebar-footer"><div className="connection-card"><span><i className={streamState} aria-hidden="true" />{streamState === "live" ? "Connected" : streamState === "connecting" ? "Connecting" : "Resyncing"}</span><code>localhost:43191</code></div><div className="theme-switch" aria-label="Dashboard theme"><button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button><button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button></div></div></aside><div className="dashboard-main"><header className="dashboard-topbar"><div><span className={`topbar-live ${streamState}`}><i />{streamState}</span><span className="topbar-divider" /><span className="topbar-project">{projectLabel}</span></div><time dateTime={now.toISOString()}>{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></header><main id="workflow-content" tabIndex={-1}>{landmarkContent}</main></div></div>;
+  return <div className="workflow-dashboard dashboard-frame"><a className="skip-link" href="#workflow-content">Skip to content</a><aside className="dashboard-sidebar"><div className="sidebar-brand"><HiveMark /><div><strong>pi-hive</strong><span>Mission control</span></div></div><label className="project-scope"><i aria-hidden="true" /><span className="sr-only">Project scope</span><select aria-label="Project scope" value={effectiveProjectScope ?? ""} onChange={(event) => changeProject(event.target.value)}><option value="">All projects</option>{projectOptions.map((project) => <option key={project.projectId} value={project.projectId}>{project.projectLabel} — {project.syncStatus}</option>)}</select><small>{projectStatus}</small></label><nav aria-label="Workflow dashboard views">{NAV_GROUPS.map((group) => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.views.map((entry) => <button type="button" aria-label={TITLES[entry]} aria-current={entry === view ? "page" : undefined} key={entry} onClick={() => setView(entry)}><NavIcon view={entry} /><span>{TITLES[entry]}</span>{navCount(entry) !== undefined && <small aria-hidden="true">{navCount(entry)}</small>}</button>)}</div>)}</nav><div className="sidebar-footer"><div className="connection-card"><span><i className={streamState} aria-hidden="true" />{streamState === "live" ? "Connected" : streamState === "connecting" ? "Connecting" : "Resyncing"}</span><code>localhost:43191</code></div><div className="theme-switch" aria-label="Dashboard theme"><button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button><button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button></div></div></aside><div className="dashboard-main"><header className="dashboard-topbar"><div><span className={`topbar-live ${streamState}`}><i />{streamState}</span><span className="topbar-divider" /><span className="topbar-project">{projectLabel}</span></div><time dateTime={now.toISOString()}>{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></header><main id="workflow-content" tabIndex={-1}>{landmarkContent}</main></div></div>;
 }

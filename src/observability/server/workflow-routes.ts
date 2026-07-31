@@ -22,6 +22,7 @@ import { applyBrowserSecurityHeaders, isAuthorizedCsrf, isAuthorizedWrite, isSam
 export interface WorkflowProjectionApi {
   currentPage(query: WorkflowCurrentPageQuery): WorkflowCurrentPage;
   resourcePage?(resource: "projects" | "workflows", query: Omit<WorkflowCurrentPageQuery, "kind">): WorkflowCurrentPage;
+  registeredProjects?(): readonly Readonly<{ projectId: string; projectLabel: string; registeredAt: string; syncStatus: "live" }>[];
   history(query: WorkflowHistoryQuery): WorkflowHistoryPage;
   usage(query: WorkflowUsageQuery): WorkflowProjectionUsageTotals;
   status(): Readonly<{ streams: readonly ProjectionStreamStatus[]; diagnostics: readonly unknown[] }>;
@@ -239,6 +240,10 @@ export function createWorkflowApi(options: WorkflowApiOptions): Readonly<{ handl
           if (url.pathname === "/api/v1/projection/status") {
             queryValues(url, []);
             return response({ apiVersion: 1, ...options.projection.status() });
+          }
+          if (url.pathname === "/api/v1/project-registry") {
+            queryValues(url, []);
+            return response({ apiVersion: 1, items: options.projection.registeredProjects?.() ?? [] });
           }
           if (url.pathname === "/api/v1/stream") {
             queryValues(url, []);

@@ -2,10 +2,11 @@ import { HOST, IDLE_TIMEOUT_MS, PORT, PROJECT_CWD, WORKFLOW_DB_PATH } from "./co
 import { createDashboardHttpHandler } from "./http-handler";
 import { createConfiguredWorkflowProjectionSynchronizer } from "./workflow-runtime";
 import { broadcastPing, broadcastWorkflowEvent, closeAllSubscribers, hasLiveSubscribers } from "./sse";
+import { workflowProjectRoots } from "../../shared/workflow-project-registry";
 import { encodeWorkflowHistoryCursor } from "../projection";
 
 const projection = createConfiguredWorkflowProjectionSynchronizer({ databasePath: WORKFLOW_DB_PATH, onEvent: (event) => broadcastWorkflowEvent(event, encodeWorkflowHistoryCursor(event)) });
-const synchronize = (): void => { try { projection.sync([PROJECT_CWD]); } catch { /* diagnostics are exposed by projection status/rebuild */ } };
+const synchronize = (): void => { try { projection.sync(workflowProjectRoots(PROJECT_CWD)); } catch { /* diagnostics are exposed by projection status/rebuild */ } };
 synchronize();
 const projectionTimer = setInterval(synchronize, 1_000);
 const heartbeatTimer = setInterval(broadcastPing, 15_000);

@@ -1,6 +1,7 @@
+import { resolveProjectIdentity } from "../../shared/project-identity";
 import { applyBrowserSecurityHeaders, hasExpectedHost, writeGateResponse } from "../security";
 import { dashboardFile, dashboardHtml } from "../static";
-import { BUILD_HASH, DAEMON_TOKEN, DB_PATH, PACKAGE_VERSION, PROTOCOL_VERSION, REGISTRY_PATH, STARTUP_NONCE, WORKFLOW_DB_PATH, expectedHostHeader } from "./config";
+import { BUILD_HASH, DAEMON_TOKEN, DB_PATH, PACKAGE_VERSION, PROJECT_CWD, PROTOCOL_VERSION, REGISTRY_PATH, STARTUP_NONCE, WORKFLOW_DB_PATH, expectedHostHeader } from "./config";
 import { createWorkflowApi, type WorkflowApiOptions } from "./workflow-routes";
 import { createProductionWorkflowApiOptions } from "./workflow-service";
 
@@ -28,7 +29,10 @@ export function createDashboardHttpHandler(options: DashboardHttpHandlerOptions 
       workflowApi.dispose(); options.scheduleServerStop?.(); return json({ ok: true, pid: process.pid, startupNonce: STARTUP_NONCE }, 202);
     }
     if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/health") return json({ ok: true, mode: "workflow", pid: process.pid, protocolVersion: PROTOCOL_VERSION, packageVersion: PACKAGE_VERSION, buildHash: BUILD_HASH, startupNonce: STARTUP_NONCE, workflowDbPath: WORKFLOW_DB_PATH, legacyTelemetryPreserved: [DB_PATH, REGISTRY_PATH] });
-    if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/bootstrap.json") return json({ token: DAEMON_TOKEN, csrfToken: DAEMON_TOKEN });
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/bootstrap.json") {
+      const project = resolveProjectIdentity(PROJECT_CWD);
+      return json({ token: DAEMON_TOKEN, csrfToken: DAEMON_TOKEN, projectId: project.projectId, projectLabel: project.displayLabel });
+    }
     if (request.method === "GET" && url.pathname === "/") return dashboardHtml();
     if (request.method === "GET" && (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/fonts/") || url.pathname === "/favicon.ico")) return dashboardFile(url.pathname) ?? json({ error: "not found" }, 404);
     if (request.method === "GET" && request.headers.get("accept")?.includes("text/html")) return dashboardHtml();

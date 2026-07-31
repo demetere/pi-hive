@@ -11,4 +11,5 @@ export interface WorkflowDashboardHistoryPage { readonly apiVersion: 1; readonly
 export interface WorkflowDashboardCurrentResponse { readonly apiVersion: 1; readonly current: WorkflowProjectionCurrent; readonly streams: readonly ProjectionStreamStatus[] }
 export interface WorkflowDashboardCurrentPage { readonly apiVersion: 1; readonly kind: keyof WorkflowProjectionCurrent; readonly items: readonly WorkflowProjectionCurrentRow[]; readonly nextCursor?: string; readonly hasMore: boolean }
 export interface WorkflowDashboardUsageResponse { readonly apiVersion: 1; readonly usage: WorkflowProjectionUsageTotals }
+export interface WorkflowDashboardProjectRegistryResponse { readonly apiVersion: 1; readonly items: readonly Readonly<{ projectId: string; projectLabel: string; registeredAt: string; syncStatus: "live" }>[] }
 export interface WorkflowDashboardProjectionMaintenance { readonly apiVersion: 1; readonly operation: "rebuild" | "prune"; readonly events: number; readonly streams: number; readonly completedAt: string }
