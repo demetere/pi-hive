@@ -345,6 +345,34 @@ function eventStatus(eventType: string, payload: RecordValue, operation: string 
   return undefined;
 }
 
+function workflowCatalogMetadata(payload: RecordValue): JsonValue | undefined {
+  if (typeof payload.workflowId !== "string" || typeof payload.name !== "string" || typeof payload.description !== "string"
+    || typeof payload.definitionHash !== "string" || !SHA256.test(payload.definitionHash)
+    || !Number.isSafeInteger(payload.definitionVersion) || Number(payload.definitionVersion) < 1
+    || (payload.status !== "available" && payload.status !== "invalid" && payload.status !== "retired")) return undefined;
+  const topology = Array.isArray(payload.topology) ? payload.topology.flatMap((value) => {
+    const node = record(value);
+    if (!node || typeof node.nodeId !== "string" || typeof node.agentId !== "string") return [];
+    return [{ nodeId: node.nodeId, agentId: node.agentId,
+      ...(typeof node.parentNodeId === "string" && node.parentNodeId ? { parentNodeId: node.parentNodeId } : {}),
+      ...(typeof node.agentName === "string" && node.agentName ? { agentName: node.agentName } : {}),
+      ...(typeof node.role === "string" && node.role ? { role: node.role } : {}),
+      ...(typeof node.model === "string" && node.model ? { model: node.model } : {}),
+      ...(typeof node.thinking === "string" && node.thinking ? { thinking: node.thinking } : {}) }];
+  }) : [];
+  return {
+    workflowId: payload.workflowId,
+    name: payload.name,
+    description: payload.description,
+    definitionHash: payload.definitionHash,
+    definitionVersion: Number(payload.definitionVersion),
+    status: payload.status,
+    topology,
+    topologyTruncated: payload.topologyTruncated === true,
+    diagnosticCodes: Array.isArray(payload.diagnosticCodes) ? payload.diagnosticCodes.filter((value): value is string => typeof value === "string") : [],
+  };
+}
+
 export function toWorkflowTelemetryEvent(source: WorkflowEventEnvelope, context: WorkflowTelemetryContext = {}): WorkflowTelemetryEvent {
   verifyWorkflowEvent(source);
   const payload = record(source.payload) ?? {};
@@ -360,7 +388,8 @@ export function toWorkflowTelemetryEvent(source: WorkflowEventEnvelope, context:
     ...(stringValue(payload, ["terminalEventHash"]) ? { terminalEventHash: stringValue(payload, ["terminalEventHash"]) } : {}),
     refs: eventRefs,
   }) : undefined;
-  const metadata = redactProjectionValue({ formatVersion: payload.formatVersion, operation, status }, redaction);
+  const catalog = source.type === "workflow.cataloged" || source.type === "workflow.retired" ? workflowCatalogMetadata(payload) : undefined;
+  const metadata = redactProjectionValue({ formatVersion: payload.formatVersion, operation, status, ...(catalog ? { catalog } : {}) }, redaction);
   const identity: Omit<WorkflowTelemetryEvent, "eventHash"> = {
     schemaVersion: WORKFLOW_TELEMETRY_SCHEMA_VERSION,
     streamId: workflowTelemetryStreamId(source.projectId, source.sessionId),

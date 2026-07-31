@@ -7,6 +7,8 @@ export const WORKFLOW_EVENT_FORMAT_VERSION = 1 as const;
 export const WORKFLOW_EVENT_LIMITS = Object.freeze({ payloadBytes: 262_144, eventBytes: 524_288, idBytes: 256, diagnosticsBytes: 4_096 });
 export type WorkflowEventProducer = "runtime" | "dashboard" | "recovery" | "harness";
 export type WorkflowEventType =
+  | "workflow.cataloged"
+  | "workflow.retired"
   | "session.created"
   | "session.linked"
   | "session.selected"
@@ -59,6 +61,7 @@ export type WorkflowEventType =
   | "knowledge.transition"
   | "terminal.recorded";
 const EVENT_TYPES = new Set<WorkflowEventType>([
+  "workflow.cataloged", "workflow.retired",
   "session.created", "session.linked", "session.selected", "session.orphaned", "session.recovery.blocked", "session.recovery.prepared", "session.recovered", "control.requested",
   "run.started", "run.input.recorded", "run.input.delivery.prepared", "run.input.delivered",
   "run.transition", "run.cancel.requested", "run.cancel.settlement.failed", "run.pause.release.confirmed", "run.terminal.prepared",

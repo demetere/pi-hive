@@ -168,7 +168,7 @@ test("atomic projection replacement hides partial rows from concurrent readers a
   reader.close(); writer.close();
 });
 
-test("aggregate project and workflow rows choose the deterministic latest authoritative session", () => {
+test("aggregate projects use sessions while workflows use catalog definitions", () => {
   const path = join(mkdtempSync(join(tmpdir(), "pi-hive-workflow-aggregate-latest-")), "workflow.db");
   const database = openWorkflowProjectionDatabase({ path });
   const event = (sessionId: string, eventId: string, timestamp: string, status: string) => toWorkflowTelemetryEvent(sealWorkflowEvent(createWorkflowEvent({
@@ -177,14 +177,19 @@ test("aggregate project and workflow rows choose the deterministic latest author
   }), 1, null), { projectRoot: "/project", workflowId: "delivery" });
   const oldest = event("session-a", "aggregate-old", "2026-01-01T00:00:01.000Z", "running");
   const newest = event("session-z", "aggregate-new", "2026-01-01T00:00:09.000Z", "completed");
+  const cataloged = toWorkflowTelemetryEvent(sealWorkflowEvent(createWorkflowEvent({
+    eventId: "cataloged-delivery", projectId: "project-aggregate", sessionId: "workflow-catalog", type: "workflow.cataloged", producer: "runtime", timestamp: "2026-01-01T00:00:02.000Z",
+    payload: { formatVersion: 1, workflowId: "delivery", name: "Delivery", description: "Deliver work", definitionHash: "a".repeat(64), definitionVersion: 1, workflowConfigHash: "a".repeat(64), workflowConfigVersion: "1", status: "available", topology: [], topologyTruncated: false, diagnosticCodes: [] },
+  }), 1, null), { projectRoot: "/project" });
   database.ingest(oldest);
   database.ingest(newest);
+  database.ingest(cataloged);
   expect(database.aggregateCurrentPage("projects", { limit: 10 }).items.map((row) => row.eventId)).toEqual([newest.eventId]);
-  expect(database.aggregateCurrentPage("workflows", { limit: 10 }).items.map((row) => row.eventId)).toEqual([newest.eventId]);
+  expect(database.aggregateCurrentPage("workflows", { limit: 10 }).items.map((row) => row.eventId)).toEqual([cataloged.eventId]);
   expect(database.aggregateCurrentPage("projects", { limit: 10, status: "running" }).items).toEqual([]);
   expect(database.aggregateCurrentPage("workflows", { limit: 10, status: "running" }).items).toEqual([]);
   expect(database.aggregateCurrentPage("projects", { limit: 10, status: "completed" }).items.map((row) => row.eventId)).toEqual([newest.eventId]);
-  expect(database.aggregateCurrentPage("workflows", { limit: 10, status: "completed" }).items.map((row) => row.eventId)).toEqual([newest.eventId]);
+  expect(database.aggregateCurrentPage("workflows", { limit: 10, status: "available" }).items.map((row) => row.eventId)).toEqual([cataloged.eventId]);
   database.close();
 });
 

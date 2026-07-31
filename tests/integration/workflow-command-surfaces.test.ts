@@ -284,7 +284,8 @@ test("real index wiring executes select, status, checkpoints, answer, cancel, ex
   initializeNormalParent({ configured: true, projectRoot, projectId, piSessionId: "normal", piSessionFile: sessionFile, model: "provider/model", thinking: "medium", activeTools: [] });
   await registerLinkedWorkflowCommandSurfaces(pi, projectRoot, projectId, undefined, undefined, "linux");
   assert.deepEqual([...commands.keys()].sort(), ["hive:answer", "hive:cancel", "hive:checkpoints", "hive:dashboard", "hive:dashboard-prune", "hive:dashboard-restart", "hive:dashboard-stop", "hive:doctor", "hive:exit", "hive:handoff-clear", "hive:recover", "hive:reload", "hive:select", "hive:status"].sort());
-  const services = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, createPiWorkflowRuntimeCommandAuthority(), undefined, "linux");
+  const productionAuthority = createPiWorkflowRuntimeCommandAuthority();
+  const services = createLinkedWorkflowCommandServices(pi, projectRoot, projectId, Object.freeze({ ...productionAuthority, dashboardAvailable: async () => false }), undefined, "linux");
   await commands.get("hive:status").handler("", ctx);
   const normalStatus = notices.at(-1)?.[0] ?? "";
   assert.match(normalStatus, /^Normal chat normal/u);

@@ -15,7 +15,7 @@ Pi supplies the peer dependencies. pi-hive supports Linux and macOS; npm rejects
 ## Quick start
 
 1. Copy the full contents of `examples/combined-openspec-delivery`, `examples/split-openspec-handoff`, `examples/markdown-plan-lifecycle`, or `examples/artifact-free-debug` into a project, including hidden files.
-2. Restart Pi in that project.
+2. Restart Pi in that project. The configured extension scans the workflow registry and appends only new or changed semantic definition versions to the local dashboard catalog; unchanged definitions reuse their existing content hash and version.
 3. Run `/hive:doctor`, then `/hive:select`.
 4. Select a workflow. Selection creates or resumes a linked session but does not start work. `model: inherit` starts from Pi's current model; activation freezes a model-specific static, dynamic-page, output, and safety budget. Oversized dynamic context is durably paginated, while Pi compaction remains responsible only for older conversation history. If the minimum exact envelope cannot fit, the TUI offers authenticated compatible models before switching. The confirmed model and thinking level remain frozen for the selected workflow session.
 5. Send an ordinary chat message. The first message starts a run; later messages steer the same open run.
@@ -142,7 +142,7 @@ Routing is advisory and deterministic. Delegation is persisted and direct-member
 
 Attached local OKF bundles support bounded deterministic search. Agent-owned bundles default to automatic updates, shared bundles to reviewed updates, and read-only bundles never mutate. Enrichment is durable, idle, bounded, preemptible, and provenance-backed.
 
-Authoritative workflow journals remain under `.pi/hive/sessions/`. Each project that starts or reuses the shared daemon is added to the bounded private registry at `~/.pi/agent/hive/workflow-projects-v1.json`; the daemon continuously projects every registered configured root into the rebuildable SQLite database under `~/.pi/agent/hive/`. The top-left dashboard selector filters one project or aggregates all projects without changing ingestion. The dashboard binds to `127.0.0.1:43191`, authenticates writes, checks origin and CSRF, and sends no third-party telemetry. Historical pre-1.0 telemetry files are preserved but are not imported or displayed.
+Authoritative workflow journals remain under `.pi/hive/sessions/`. The reserved `workflow-catalog` stream records bounded public workflow metadata, semantic definition hashes, immutable versions, retirement state, and configured node topology without prompts or private content. Catalog scans run at configured extension load and session start; they are serialized across processes, append nothing when the resolved definition is unchanged, and do not install a filesystem watcher. Each project that starts or reuses the shared daemon is added to the bounded private registry at `~/.pi/agent/hive/workflow-projects-v1.json`; the daemon continuously projects every registered configured root into the rebuildable SQLite database under `~/.pi/agent/hive/`. The top-left dashboard selector filters one project or aggregates all projects without changing ingestion. The dashboard binds to `127.0.0.1:43191`, authenticates writes, checks origin and CSRF, and sends no third-party telemetry. Historical pre-1.0 telemetry files are preserved but are not imported or displayed.
 
 ## Manual migration from pre-1.0
 

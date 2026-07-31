@@ -220,7 +220,7 @@ export interface WorkflowOperationRuntime {
 type EffectiveWorkflowOperationReceiptLimits = Required<WorkflowOperationReceiptLimits>;
 
 type CurrentKind = keyof WorkflowProjectionCurrent;
-const CURRENT_KINDS: readonly CurrentKind[] = ["sessions", "runs", "nodes", "tasks", "workspaces", "questions", "approvals", "knowledge"];
+const CURRENT_KINDS: readonly CurrentKind[] = ["workflows", "sessions", "runs", "nodes", "tasks", "workspaces", "questions", "approvals", "knowledge"];
 
 function parseEvent(value: string): WorkflowTelemetryEvent {
   try { return restoreWorkflowTelemetryEvent(JSON.parse(value)); }
@@ -241,9 +241,10 @@ function derivedStatus(event: WorkflowTelemetryEvent): string | undefined {
 }
 function currentRow(event: WorkflowTelemetryEvent, existing?: WorkflowProjectionCurrentRow, includeStatus = true): WorkflowProjectionCurrentRow {
   const status = includeStatus ? derivedStatus(event) : undefined;
-  return { ...(existing ?? {}), ...event.dimensions, eventId: event.eventId, eventType: event.eventType, timestamp: event.timestamp, sequence: event.sequence, ...(status ? { status } : {}), ...(event.operation ? { operation: event.operation } : {}) };
+  return { ...(existing ?? {}), ...event.dimensions, eventId: event.eventId, eventType: event.eventType, timestamp: event.timestamp, sequence: event.sequence, ...(status ? { status } : {}), ...(event.operation ? { operation: event.operation } : {}), ...(event.eventType.startsWith("workflow.") ? { metadata: event.metadata } : {}) };
 }
 function authoritativeFor(kind: CurrentKind, event: WorkflowTelemetryEvent): boolean {
+  if (kind === "workflows") return event.eventType === "workflow.cataloged" || event.eventType === "workflow.retired";
   if (kind === "sessions") return event.eventType.startsWith("session.") || event.eventType === "run.started";
   if (kind === "runs") return event.eventType.startsWith("run.") || event.eventType === "terminal.recorded";
   if (kind === "nodes") return event.eventType === "run.started" || event.eventType.startsWith("task.");
@@ -841,6 +842,7 @@ export class WorkflowProjectionDatabase {
 
   aggregateCurrentPage(resource: "projects" | "workflows", query: Omit<WorkflowCurrentPageQuery, "kind">): WorkflowCurrentPage {
     if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > WORKFLOW_PROJECTION_PAGE_LIMIT) throw new Error("Workflow aggregate page query is invalid");
+    if (resource === "workflows") return this.currentPage({ ...query, kind: "workflows" });
     const values = [query.cursor, query.projectId, query.sessionId, query.workflowId, query.status].filter((value): value is string => value !== undefined);
     if (values.some((value) => Buffer.byteLength(value) > WORKFLOW_PROJECTION_VALUE_BYTES) || values.reduce((sum, value) => sum + Buffer.byteLength(value), 0) > WORKFLOW_PROJECTION_QUERY_BYTES) throw new Error("Workflow aggregate query exceeds its byte limit");
     let cursorProject = "", cursorWorkflow = "";
@@ -856,9 +858,8 @@ export class WorkflowProjectionDatabase {
     const parameters: Record<string, string | number> = { $limit: query.limit + 1 };
     const filters = [["project_id", "$project", query.projectId], ["session_id", "$session", query.sessionId], ["workflow_id", "$workflow", query.workflowId]] as const;
     for (const [column, parameter, value] of filters) if (value) { where.push(`${column} = ${parameter}`); parameters[parameter] = value; }
-    if (resource === "workflows") where.push("workflow_id IS NOT NULL");
     if (query.status) parameters.$status = query.status;
-    const workflowExpression = resource === "workflows" ? "workflow_id" : "''";
+    const workflowExpression = "''";
     if (query.cursor) {
       where.push(`(project_id > $cursor_project OR (project_id = $cursor_project AND ${workflowExpression} > $cursor_workflow))`);
       parameters.$cursor_project = cursorProject; parameters.$cursor_workflow = cursorWorkflow;

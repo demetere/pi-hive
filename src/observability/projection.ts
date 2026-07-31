@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readWorkflowJournal } from "../workflows/journal";
 import { toWorkflowTelemetryEvent, verifyWorkflowTelemetryEvent, type WorkflowTelemetryContext, type WorkflowTelemetryDimensions, type WorkflowTelemetryEvent, type WorkflowTelemetryUsage } from "./events";
+import type { JsonValue } from "../config/types";
 
 export const WORKFLOW_PROJECTION_SCHEMA_VERSION = 1 as const;
 export const WORKFLOW_PROJECTION_PAGE_LIMIT = 500;
@@ -24,9 +25,11 @@ export interface WorkflowProjectionCurrentRow extends WorkflowTelemetryDimension
   readonly sequence: number;
   readonly status?: string;
   readonly operation?: string;
+  readonly metadata?: JsonValue;
 }
 
 export interface WorkflowProjectionCurrent {
+  readonly workflows: readonly WorkflowProjectionCurrentRow[];
   readonly sessions: readonly WorkflowProjectionCurrentRow[];
   readonly runs: readonly WorkflowProjectionCurrentRow[];
   readonly nodes: readonly WorkflowProjectionCurrentRow[];
@@ -189,10 +192,12 @@ function row(event: WorkflowTelemetryEvent, existing?: WorkflowProjectionCurrent
     sequence: event.sequence,
     ...(status ? { status } : {}),
     ...(event.operation ? { operation: event.operation } : {}),
+    ...(event.eventType.startsWith("workflow.") ? { metadata: event.metadata } : {}),
   });
 }
 
 function authoritativeFor(kind: CurrentKind, event: WorkflowTelemetryEvent): boolean {
+  if (kind === "workflows") return event.eventType === "workflow.cataloged" || event.eventType === "workflow.retired";
   if (kind === "sessions") return event.eventType.startsWith("session.") || event.eventType === "run.started";
   if (kind === "runs") return event.eventType.startsWith("run.") || event.eventType === "terminal.recorded";
   if (kind === "nodes") return event.eventType === "run.started" || event.eventType.startsWith("task.");
@@ -222,6 +227,7 @@ function framedEntityKey(parts: readonly string[]): string {
 export function workflowProjectionCurrentKey(kind: CurrentKind, event: WorkflowTelemetryEvent): string | undefined {
   const d = event.dimensions;
   switch (kind) {
+    case "workflows": return d.workflowId ? framedEntityKey([d.projectId, d.workflowId]) : undefined;
     case "sessions": return event.streamId;
     case "runs": return d.runId ? framedEntityKey([event.streamId, d.runId]) : undefined;
     case "nodes": return d.nodeId ? framedEntityKey([event.streamId, d.runId ?? "", d.nodeId]) : undefined;
@@ -256,7 +262,7 @@ export class WorkflowTelemetryProjection {
   private readonly eventHashes = new Map<string, string>();
   private readonly streams = new Map<string, MutableStream>();
   private readonly materialized: Record<CurrentKind, Map<string, WorkflowProjectionCurrentRow>> = {
-    sessions: new Map(), runs: new Map(), nodes: new Map(), tasks: new Map(), workspaces: new Map(),
+    workflows: new Map(), sessions: new Map(), runs: new Map(), nodes: new Map(), tasks: new Map(), workspaces: new Map(),
     questions: new Map(), approvals: new Map(), knowledge: new Map(),
   };
   private readonly totals: WorkflowProjectionUsageTotals = {

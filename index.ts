@@ -16,6 +16,7 @@ import { publishSessionContext } from "./src/integration/session-context";
 import { WorkflowProductionRuntimeRegistry, type SelectedProductionWorkflowRuntime } from "./src/integration/workflow-production-runtime";
 import { clearWorkflowStatusUi, restoreWorkflowStatusSummary, updateWorkflowStatusUi } from "./src/ui/tui/workflow-widget";
 import { initializeNormalParent, listSessionLinks, workflowLinkGenerationHash, type NormalSessionLink, type WorkflowSessionLink } from "./src/workflows/sessions";
+import { syncWorkflowCatalog } from "./src/workflows/catalog";
 
 export const WORKFLOW_UI_REFRESH_BOUNDARIES = Object.freeze(["session_start", "input", "message_end", "turn_end", "command-settled"] as const);
 
@@ -82,6 +83,7 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
   if (configured.status === "invalid") throw configurationFailure(configured);
 
   const project = resolveProjectIdentity(configured.projectRoot);
+  syncWorkflowCatalog(configured.projectRoot, project.projectId);
   const runtimePlatform = dependencies.runtimePlatform ?? process.platform;
   const runtimes = new WorkflowProductionRuntimeRegistry(configured.projectRoot, project.projectId, undefined, runtimeOwnerNonce);
   const dashboardStart = createWorkflowDashboardStartLifecycle<ExtensionContext>(
@@ -144,6 +146,8 @@ export default async function hiveExtension(pi: ExtensionAPI, dependencies: Hive
   // This handler is registered before lifecycle hooks so session restoration has
   // selected the exact linked authority before resume/input callbacks run.
   pi.on("session_start", async (_event, ctx) => {
+    try { syncWorkflowCatalog(configured.projectRoot, project.projectId); }
+    catch (error) { if (ctx.hasUI) ctx.ui.notify(`Workflow catalog refresh failed: ${String(error instanceof Error ? error.message : error)}`, "warning"); }
     observeSessionReplacementStart(configured.projectRoot, project.projectId, ctx);
     publishSessionContext(ctx);
     let sessionFile = ctx.sessionManager.getSessionFile();
